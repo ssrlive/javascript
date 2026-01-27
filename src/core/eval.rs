@@ -1,6 +1,7 @@
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::js_array::{create_array, handle_array_static_method, is_array, set_array_length};
 use crate::js_bigint::bigint_constructor;
+use crate::js_class::prepare_call_env_with_this;
 use crate::js_date::{handle_date_method, handle_date_static_method, is_date_object};
 use crate::js_function::handle_function_prototype_method;
 use crate::js_json::handle_json_method;
@@ -1458,7 +1459,7 @@ pub fn evaluate_statements_with_labels<'gc>(
 
                     // DEBUG: Check constructor name
                     // In real code we wouldn't do this, but for debugging why assert.throws fails:
-                    // log::error!("Throwing Strict Violation Error: {:?}", err_obj);
+                    // log::trace!("Throwing Strict Violation Error: {:?}", err_obj);
 
                     return Err(EvalError::Throw(err_obj, None, None));
                 }
@@ -4342,11 +4343,7 @@ fn evaluate_expr_assign<'gc>(
                 value_expr,
                 crate::core::Expr::ArrowFunction(..) | crate::core::Expr::AsyncArrowFunction(..)
             ) || format!("{:?}", value_expr).contains("ArrowFunction");
-            log::error!(
-                "NamedEvaluation: force_set_for_arrow = {} value_expr={:?}",
-                force_set_for_arrow,
-                value_expr
-            );
+            log::trace!("NamedEvaluation: force_set_for_arrow = {force_set_for_arrow} value_expr={value_expr:?}",);
             if force_set_for_arrow {
                 should_set = true;
             } else if let Some(name_rc) = object_get_key_value(obj, "name") {
@@ -4478,7 +4475,7 @@ fn evaluate_expr_assign<'gc>(
                 Expr::AsyncArrowFunction(_, _) => "AsyncArrowFunction",
                 _ => "Other",
             };
-            log::error!("Unsupported assignment target reached in evaluate_expr_assign: {}", variant);
+            log::trace!("Unsupported assignment target reached in evaluate_expr_assign: {variant}");
             Err(EvalError::Js(raise_eval_error!("Assignment target not supported")))
         }
     }
@@ -5602,6 +5599,12 @@ pub fn evaluate_call_dispatch<'gc>(
     this_val: Option<Value<'gc>>,
     eval_args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    log::debug!(
+        "evaluate_call_dispatch: func_val={:?} this={:?} args_len={}",
+        func_val,
+        this_val,
+        eval_args.len()
+    );
     match func_val {
         Value::Closure(cl) => call_closure(mc, &cl, this_val.clone(), &eval_args, env, None),
         Value::GeneratorFunction(_, cl) => match crate::js_generator::handle_generator_function_call(mc, &cl, &eval_args) {
@@ -6029,7 +6032,7 @@ pub fn evaluate_call_dispatch<'gc>(
                     Err(EvalError::Js(raise_eval_error!(format!("Unknown Function method: {}", name))))
                 }
             } else {
-                let call_env = crate::js_class::prepare_call_env_with_this(mc, Some(env), this_val.clone(), None, &[], None, Some(env))?;
+                let call_env = prepare_call_env_with_this(mc, Some(env), this_val.clone(), None, &[], None, Some(env), None)?;
                 Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?)
             }
         }
@@ -6269,6 +6272,7 @@ fn evaluate_expr_call<'gc>(
                                     &[],
                                     None,
                                     Some(env),
+                                    None,
                                 )?;
                                 evaluate_call_dispatch(mc, &call_env, Value::Function(name.clone()), Some(Value::Object(obj)), vec![])?
                             }
@@ -6292,6 +6296,7 @@ fn evaluate_expr_call<'gc>(
                                                 &[],
                                                 None,
                                                 Some(env),
+                                                None,
                                             )?;
                                             evaluate_call_dispatch(
                                                 mc,
@@ -7098,6 +7103,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 is_arrow: true,
                 is_strict,
                 enforce_strictness_inheritance: true,
+                home_object: env.borrow().get_home_object(),
                 ..ClosureData::default()
             };
             let closure_val = Value::Closure(Gc::new(mc, closure_data));
@@ -7489,8 +7495,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     let f_val = if let Value::Object(obj) = &obj_val {
                         if let Some(val) = object_get_key_value(obj, key) {
                             val.borrow().clone()
-                        } else if key.as_str() == "call" && object_get_key_value(obj, "__closure__").is_some() {
-                            Value::Function("call".to_string())
+                        } else if (key.as_str() == "call" || key.as_str() == "apply") && object_get_key_value(obj, "__closure__").is_some()
+                        {
+                            Value::Function(key.to_string())
                         } else {
                             Value::Undefined
                         }
@@ -7509,7 +7516,19 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     };
 
                     match f_val {
-                        Value::Function(name) => crate::js_function::handle_global_function(mc, &name, &eval_args, &env.clone()),
+                        Value::Function(name) => {
+                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                mc,
+                                Some(env),
+                                Some(obj_val.clone()),
+                                None,
+                                &[],
+                                None,
+                                Some(env),
+                                None,
+                            )?;
+                            crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)
+                        }
                         Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None),
                         _ => Err(EvalError::Js(crate::raise_type_error!("OptionalCall target is not a function"))),
                     }
@@ -7552,7 +7571,19 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     };
 
                     match f_val {
-                        Value::Function(name) => Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &env.clone())?),
+                        Value::Function(name) => {
+                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                mc,
+                                Some(env),
+                                Some(obj_val.clone()),
+                                None,
+                                &[],
+                                None,
+                                Some(env),
+                                None,
+                            )?;
+                            Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?)
+                        }
                         Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None),
                         _ => Err(EvalError::Js(crate::raise_type_error!("OptionalCall target is not a function"))),
                     }
@@ -7571,7 +7602,17 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 }
                                 match left_val {
                                     Value::Function(name) => {
-                                        Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &env.clone())?)
+                                        let call_env = crate::js_class::prepare_call_env_with_this(
+                                            mc,
+                                            Some(env),
+                                            None,
+                                            None,
+                                            &[],
+                                            None,
+                                            Some(env),
+                                            None,
+                                        )?;
+                                        Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?)
                                     }
                                     Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None),
                                     _ => Err(EvalError::Js(crate::raise_type_error!("OptionalCall target is not a function"))),
@@ -8785,9 +8826,22 @@ pub fn call_closure<'gc>(
         return Err(EvalError::Js(crate::raise_type_error!(msg)));
     }
 
-    let call_env = crate::core::new_js_object_data(mc);
-    call_env.borrow_mut(mc).prototype = cl.env;
-    call_env.borrow_mut(mc).is_function_scope = true;
+    // Create param/var environments per spec if parameter initializers exist.
+    let has_param_expressions = cl.params.iter().any(|p| matches!(p, DestructuringElement::Variable(_, Some(_))));
+    let (param_env, var_env) = if has_param_expressions {
+        let p = crate::core::new_js_object_data(mc);
+        p.borrow_mut(mc).prototype = cl.env;
+        p.borrow_mut(mc).is_function_scope = true;
+        let v = crate::core::new_js_object_data(mc);
+        v.borrow_mut(mc).prototype = Some(p);
+        v.borrow_mut(mc).is_function_scope = true;
+        (p, v)
+    } else {
+        let e = crate::core::new_js_object_data(mc);
+        e.borrow_mut(mc).prototype = cl.env;
+        e.borrow_mut(mc).is_function_scope = true;
+        (e, e)
+    };
 
     // Determine whether this function is strict (either via its own 'use strict'
     // directive at creation time or because its lexical environment is marked strict).
@@ -8806,20 +8860,20 @@ pub fn call_closure<'gc>(
 
     let fn_is_strict = cl.is_strict || env_strict_ancestor;
     // Explicitly set to false to shadow any potential strict ancestor (e.g. if we suppressed inheritance)
-    env_set_strictness(mc, &call_env, fn_is_strict)?;
+    env_set_strictness(mc, &var_env, fn_is_strict)?;
 
     // If this is a Named Function Expression and the function object has a
     // `name` property, bind that name in the function's call environment so the
     // function can reference itself by name (e.g., `fac` inside `function fac ...`).
     if let Some(fn_obj_ptr) = fn_obj {
         if let Some(name) = fn_obj_ptr.borrow().get_property("name") {
-            crate::core::env_set(mc, &call_env, &name, Value::Object(fn_obj_ptr))?;
+            crate::core::env_set(mc, &var_env, &name, Value::Object(fn_obj_ptr))?;
             // Also set a frame name on the call environment so thrown errors can
             // indicate which function they occurred in (used in stack traces).
-            object_set_key_value(mc, &call_env, "__frame", Value::String(utf8_to_utf16(&name)))?;
+            object_set_key_value(mc, &var_env, "__frame", Value::String(utf8_to_utf16(&name)))?;
         }
         // Link caller environment so stacks can be assembled by walking __caller
-        object_set_key_value(mc, &call_env, "__caller", Value::Object(*env))?;
+        object_set_key_value(mc, &var_env, "__caller", Value::Object(*env))?;
     }
 
     // Determine the [[This]] binding for the call.
@@ -8846,24 +8900,32 @@ pub fn call_closure<'gc>(
         }
     };
 
-    // Always place a 'this' binding in the call environment (may be undefined)
+    // Bind 'this' into the var_env (function body environment) so the body can access it.
     if let Some(tv) = effective_this {
-        object_set_key_value(mc, &call_env, "this", tv.clone())?;
+        object_set_key_value(mc, &var_env, "this", tv.clone())?;
+        if cl.is_arrow && matches!(tv, Value::Uninitialized) {
+            // If it's an arrow function capturing an uninitialized 'this' (e.g. in derived constructor before super()),
+            // we should also mark the call environment as uninitialized.
+            crate::core::object_set_key_value(mc, &var_env, "__this_initialized", Value::Boolean(false))?;
+        } else {
+            crate::core::object_set_key_value(mc, &var_env, "__this_initialized", Value::Boolean(true))?;
+        }
     }
+    log::debug!("call_closure: is_arrow={} returning env_ptr={:p}", cl.is_arrow, var_env.as_ptr());
 
     // If the function was stored as an object with a home object, propagate
-    // that into the call environment (this covers methods defined in object-literals).
+    // that into the function body environment (this covers methods defined in object-literals).
     if let Some(fn_obj_ptr) = fn_obj
         && let Some(home_obj) = fn_obj_ptr.borrow().get_home_object()
     {
-        call_env.borrow_mut(mc).set_home_object(Some(home_obj));
+        var_env.borrow_mut(mc).set_home_object(Some(home_obj));
     }
 
-    // FIX: propagate [[HomeObject]] into call_env so `super` resolves parent prototype and avoids recursive lookup
-    // Propagate home object into the call environment so `super.*` can resolve
+    // FIX: propagate [[HomeObject]] into var_env so `super` resolves parent prototype and avoids recursive lookup
+    // Propagate home object into the function body environment so `super.*` can resolve
     // the proper parent prototype during method calls.
     if let Some(home_obj) = &cl.home_object {
-        call_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
+        var_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
     }
 
     if !cl.is_arrow {
@@ -8926,7 +8988,8 @@ pub fn call_closure<'gc>(
         // }
 
         let callee_val = fn_obj.map(Value::Object);
-        crate::js_class::create_arguments_object(mc, &call_env, args, callee_val)?;
+        // Place the arguments object into the var_env (the function body env)
+        crate::js_class::create_arguments_object(mc, &var_env, args, callee_val)?;
 
         // env_set(mc, &call_env, "arguments", Value::Object(args_obj))?;
     }
@@ -8938,9 +9001,9 @@ pub fn call_closure<'gc>(
                 if matches!(arg_val, Value::Undefined)
                     && let Some(default_expr) = default_expr_opt
                 {
-                    arg_val = evaluate_expr(mc, &call_env, default_expr)?;
+                    arg_val = evaluate_expr(mc, &param_env, default_expr)?;
                 }
-                crate::core::env_set(mc, &call_env, name, arg_val)?;
+                crate::core::env_set(mc, &param_env, name, arg_val)?;
             }
             DestructuringElement::Rest(name) => {
                 let rest_args = if i < args.len() { args[i..].to_vec() } else { Vec::new() };
@@ -8949,20 +9012,20 @@ pub fn call_closure<'gc>(
                     object_set_key_value(mc, &array_obj, j, val.clone())?;
                 }
                 crate::js_array::set_array_length(mc, &array_obj, rest_args.len())?;
-                crate::core::env_set(mc, &call_env, name, Value::Object(array_obj))?;
+                crate::core::env_set(mc, &param_env, name, Value::Object(array_obj))?;
             }
             DestructuringElement::NestedArray(inner_pattern) => {
                 let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
                 if let Value::Object(obj) = &arg_val
                     && is_array(mc, obj)
                 {
-                    bind_array_inner_for_letconst(mc, &call_env, inner_pattern, obj, false)?;
+                    bind_array_inner_for_letconst(mc, &param_env, inner_pattern, obj, false)?;
                 }
             }
             DestructuringElement::NestedObject(inner_pattern) => {
                 let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
                 if let Value::Object(obj) = &arg_val {
-                    bind_object_inner_for_letconst(mc, &call_env, inner_pattern, obj, false)?;
+                    bind_object_inner_for_letconst(mc, &param_env, inner_pattern, obj, false)?;
                 }
             }
             _ => {}
@@ -8970,7 +9033,7 @@ pub fn call_closure<'gc>(
     }
     let body_clone = cl.body.clone();
     // Use the lower-level evaluator to distinguish an explicit `return`
-    match evaluate_statements_with_labels(mc, &call_env, &body_clone, &[], &[])? {
+    match evaluate_statements_with_labels(mc, &var_env, &body_clone, &[], &[])? {
         ControlFlow::Return(val) => Ok(val),
         ControlFlow::Normal(_) => Ok(Value::Undefined),
         ControlFlow::Throw(v, line, column) => Err(EvalError::Throw(v, line, column)),
@@ -9291,6 +9354,7 @@ fn evaluate_expr_new<'gc>(
                                     &[],
                                     None,
                                     Some(env),
+                                    None,
                                 )?;
                                 crate::core::evaluate_call_dispatch(
                                     mc,
@@ -9318,6 +9382,7 @@ fn evaluate_expr_new<'gc>(
                                                 &[],
                                                 None,
                                                 Some(env),
+                                                None,
                                             )?;
                                             crate::core::evaluate_call_dispatch(
                                                 mc,
@@ -9790,6 +9855,7 @@ fn evaluate_expr_array<'gc>(
                                         &[],
                                         None,
                                         Some(env),
+                                        None,
                                     )?;
                                     crate::core::evaluate_call_dispatch(
                                         mc,
@@ -9819,6 +9885,7 @@ fn evaluate_expr_array<'gc>(
                                                     &[],
                                                     None,
                                                     Some(env),
+                                                    None,
                                                 )?;
                                                 crate::core::evaluate_call_dispatch(
                                                     mc,

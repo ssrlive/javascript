@@ -38,6 +38,30 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     Ok(())
 }
 
+pub fn boolean_prototype_to_string<'gc>(
+    _mc: &MutationContext<'gc>,
+    _args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if let Some(this_rc) = crate::core::env_get(env, "this") {
+        let this_val = this_rc.borrow().clone();
+        return handle_boolean_prototype_method(this_val, "toString");
+    }
+    Err(crate::raise_eval_error!("Boolean.prototype.toString called without this"))
+}
+
+pub fn boolean_prototype_value_of<'gc>(
+    _mc: &MutationContext<'gc>,
+    _args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if let Some(this_rc) = crate::core::env_get(env, "this") {
+        let this_val = this_rc.borrow().clone();
+        return handle_boolean_prototype_method(this_val, "valueOf");
+    }
+    Err(crate::raise_eval_error!("Boolean.prototype.valueOf called without this"))
+}
+
 pub fn to_boolean(val: &Value<'_>) -> bool {
     match val {
         Value::Undefined | Value::Null => false,

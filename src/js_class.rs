@@ -98,6 +98,36 @@ pub(crate) fn evaluate_this<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataP
     Ok(Value::Object(last_seen))
 }
 
+fn find_binding<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<Value<'gc>> {
+    let mut current = *env;
+    loop {
+        if let Some(val) = object_get_key_value(&current, name) {
+            return Some(val.borrow().clone());
+        }
+        if let Some(proto) = current.borrow().prototype {
+            current = proto;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+fn find_binding_env<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<JSObjectDataPtr<'gc>> {
+    let mut current = *env;
+    loop {
+        if object_get_key_value(&current, name).is_some() {
+            return Some(current);
+        }
+        if let Some(proto) = current.borrow().prototype {
+            current = proto;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
 pub fn create_arguments_object<'gc>(
     mc: &MutationContext<'gc>,
     func_env: &JSObjectDataPtr<'gc>,
@@ -199,7 +229,6 @@ pub(crate) fn evaluate_new<'gc>(
 
     match constructor_val {
         Value::Object(class_obj) => {
-            log::debug!("evaluate_new - constructor is Value::Object ptr={:p}", Gc::as_ptr(class_obj));
             if class_obj.borrow().class_def.is_some() {
                 log::debug!("evaluate_new - constructor has internal class_def slot");
             } else {
@@ -245,24 +274,52 @@ pub(crate) fn evaluate_new<'gc>(
                         }
                     }
 
-                    // Prepare function environment with 'this' bound to the instance
+                    // Prepare function environment with 'this' bound to the instance.
+                    // For derived classes, per the spec, `this` should initially be Uninitialized
+                    // until super() is invoked.
+                    let is_derived = class_obj
+                        .borrow()
+                        .class_def
+                        .as_ref()
+                        .map(|c| {
+                            let extends_some = c.borrow().extends.is_some();
+                            log::trace!("evaluate_new: extends.is_some() = {}", extends_some);
+                            extends_some
+                        })
+                        .unwrap_or(false);
+                    log::trace!("evaluate_new: is_derived = {}", is_derived);
+                    let this_arg = if is_derived {
+                        Some(Value::Uninitialized)
+                    } else {
+                        Some(Value::Object(instance))
+                    };
+
+                    log::trace!(
+                        "evaluate_new: calling prepare_call_env_with_this with instance = {:?}",
+                        instance.as_ptr()
+                    );
                     let func_env = prepare_call_env_with_this(
                         mc,
                         captured_env.as_ref(),
-                        Some(Value::Object(instance)),
+                        this_arg,
                         Some(params),
                         evaluated_args,
-                        None,
+                        Some(instance),
                         Some(env),
-                    )
-                    .map_err(EvalError::Js)?;
+                        Some(class_obj),
+                    )?;
+                    log::trace!("evaluate_new: called prepare_call_env_with_this");
 
                     // Create the arguments object
-                    create_arguments_object(mc, &func_env, evaluated_args, None).map_err(EvalError::Js)?;
+                    create_arguments_object(mc, &func_env, evaluated_args, None)?;
 
                     // Execute constructor body
                     evaluate_statements(mc, &func_env, body)?;
 
+                    log::trace!(
+                        "evaluate_new: constructor body executed; returning instance ptr={:p}",
+                        Gc::as_ptr(instance)
+                    );
                     return Ok(Value::Object(instance));
                 }
             }
@@ -287,18 +344,17 @@ pub(crate) fn evaluate_new<'gc>(
                 return Ok(handle_typedarray_constructor(mc, &class_obj, evaluated_args, env)?);
             }
 
-            // Check if this is ArrayBuffer constructor
-            // if get_own_property(&class_obj, &"__arraybuffer".into()).is_some() {
-            //     return crate::js_typedarray::handle_arraybuffer_constructor(args, env);
-            // }
-
-            // Check if this is DataView constructor
-            // if get_own_property(&class_obj, &"__dataview".into()).is_some() {
-            //     return crate::js_typedarray::handle_dataview_constructor(args, env);
-            // }
-
             // Check if this is a class object (inspect internal slot `class_def`)
             if let Some(class_def_ptr) = &class_obj.borrow().class_def {
+                // Get the definition environment for constructor execution
+                let captured_env = if let Some(def_env_val) = object_get_key_value(&class_obj, "__definition_env")
+                    && let Value::Object(def_env_obj) = &*def_env_val.borrow()
+                {
+                    Some(*def_env_obj)
+                } else {
+                    None
+                };
+
                 log::debug!(
                     "evaluate_new - class constructor matched internal class_def name={} class_obj ptr={:p} extends={:?} members_len={}",
                     class_def_ptr.borrow().name,
@@ -333,21 +389,30 @@ pub(crate) fn evaluate_new<'gc>(
                 }
 
                 // Call constructor if it exists
-                let mut constructor_found = false;
                 for member in &class_def_ptr.borrow().members {
                     if let ClassMember::Constructor(params, body) = member {
-                        constructor_found = true;
                         // Use pre-evaluated args
+                        // For derived classes the `this` binding should start as Uninitialized
+                        let this_arg = if class_def_ptr.borrow().extends.is_some() {
+                            Some(Value::Uninitialized)
+                        } else {
+                            Some(Value::Object(instance))
+                        };
+
                         let func_env = prepare_call_env_with_this(
                             mc,
-                            None,
-                            Some(Value::Object(instance)),
+                            captured_env.as_ref(),
+                            this_arg,
                             Some(params),
                             evaluated_args,
-                            None,
+                            if class_def_ptr.borrow().extends.is_some() {
+                                Some(instance)
+                            } else {
+                                None
+                            },
                             Some(env),
-                        )
-                        .map_err(EvalError::Js)?;
+                            Some(class_obj),
+                        )?;
 
                         // Execute constructor body
                         let result = crate::core::evaluate_statements_with_context(mc, &func_env, body, &[])?;
@@ -365,11 +430,19 @@ pub(crate) fn evaluate_new<'gc>(
                                 return Ok(Value::Object(*final_instance));
                             }
                         }
-                        break;
+                        // Default: if constructor did not explicitly return an object and did not
+                        // set `this` (shouldn't usually happen), return the created instance per spec.
+                        return Ok(Value::Object(instance));
                     }
                 }
 
-                if !constructor_found {
+                // No explicit constructor member found; handle default constructor cases
+                if !class_def_ptr
+                    .borrow()
+                    .members
+                    .iter()
+                    .any(|m| matches!(m, ClassMember::Constructor(_, _)))
+                {
                     if class_def_ptr.borrow().extends.is_some() {
                         // Derived class default constructor: constructor(...args) { super(...args); }
                         // Delegate to parent constructor
@@ -418,9 +491,6 @@ pub(crate) fn evaluate_new<'gc>(
             if get_own_property(&class_obj, &"__is_date_constructor".into()).is_some() {
                 return crate::js_date::handle_date_constructor(mc, evaluated_args, env);
             }
-            // if get_own_property(&class_obj, &"__is_function_constructor".into()).is_some() {
-            //     return crate::js_function::handle_global_function("Function", args, env);
-            // }
             // Error-like constructors (Error) created via ensure_constructor_object
             if get_own_property(&class_obj, &"__is_error_constructor".into()).is_some() {
                 log::debug!(
@@ -578,6 +648,7 @@ pub(crate) fn evaluate_new<'gc>(
                 evaluated_args,
                 None,
                 Some(env),
+                None,
             )?;
 
             create_arguments_object(mc, &func_env, evaluated_args, None)?;
@@ -609,40 +680,8 @@ pub(crate) fn evaluate_new<'gc>(
                     return handle_boolean_constructor(mc, evaluated_args, env);
                 }
                 "String" => {
-                    return handle_string_constructor(mc, evaluated_args, env);
+                    return crate::js_string::string_constructor(mc, evaluated_args, env);
                 }
-                // "Promise" => {
-                //     return crate::js_promise::handle_promise_constructor(args, env);
-                // }
-                // "Map" => return crate::js_map::handle_map_constructor(args, env),
-                // "Set" => return crate::js_set::handle_set_constructor(args, env),
-                // "Proxy" => return crate::js_proxy::handle_proxy_constructor(args, env),
-                // "WeakMap" => return crate::js_weakmap::handle_weakmap_constructor(args, env),
-                // "WeakSet" => return crate::js_weakset::handle_weakset_constructor(args, env),
-                // "MockIntlConstructor" => {
-                //     // Handle mock Intl constructor for testing
-                //     let locale_arg = if !evaluated_args.is_empty() {
-                //         match evaluated_args[0].clone() {
-                //             // Accept either a single string or an array containing a string
-                //             Value::String(s) => Some(crate::unicode::utf16_to_utf8(&s)),
-                //             Value::Object(arr_obj) if is_array(mc, &arr_obj) => {
-                //                 // Try to read index 0 from the array
-                //                 if let Some(first_rc) = object_get_key_value(&arr_obj, &"0".into()) {
-                //                     match &*first_rc.borrow() {
-                //                         Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
-                //                         _ => None,
-                //                     }
-                //                 } else {
-                //                     None
-                //                 }
-                //             }
-                //             _ => None,
-                //         }
-                //     } else {
-                //         None
-                //     };
-                //     return crate::js_testintl::create_mock_intl_instance(locale_arg, env);
-                // }
                 _ => {
                     log::warn!("evaluate_new - constructor is not an object or closure: Function({func_name})",);
                 }
@@ -653,6 +692,7 @@ pub(crate) fn evaluate_new<'gc>(
         }
     }
 
+    log::trace!("evaluate_new: constructor is not callable - falling through to error path");
     Err(EvalError::Js(raise_type_error!("Constructor is not callable")))
 }
 
@@ -756,9 +796,8 @@ pub(crate) fn create_class_object<'gc>(
     let class_def_ptr = Gc::new(mc, GcCell::new(class_def));
     class_obj.borrow_mut(mc).class_def = Some(class_def_ptr);
 
-    // NOTE: We intentionally do NOT create an own property named "__class_def__" on the
-    // constructor because that would appear in Object.getOwnPropertyNames output and
-    // violate Test262 expectations about property ordering/contents.
+    // Store the definition environment for constructor execution
+    object_set_key_value(mc, &class_obj, "__definition_env", Value::Object(*env))?;
 
     // Add methods to prototype
     for member in members {
@@ -1093,7 +1132,6 @@ pub(crate) fn create_class_object<'gc>(
                 object_set_key_value(mc, &class_obj, pk.clone(), method_closure)?;
                 // Computed static keys are also non-enumerable
                 class_obj.borrow_mut(mc).set_non_enumerable(pk);
-                // Also support computed generator variant
             }
             ClassMember::StaticMethodComputedGenerator(key_expr, params, body) => {
                 let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -1339,18 +1377,19 @@ pub(crate) fn call_static_method<'gc>(
             Value::Closure(data) | Value::AsyncClosure(data) => {
                 let params = &data.params;
                 let body = &data.body;
-                let _captured_env = &data.env;
+                let captured_env = &data.env;
                 // Collect all arguments, expanding spreads
 
                 // Create function environment with 'this' bound to the class object and bind params
                 let func_env = prepare_call_env_with_this(
                     mc,
-                    None,
+                    captured_env.as_ref(),
                     Some(Value::Object(*class_obj)),
                     Some(params),
                     evaluated_args,
                     None,
                     Some(env),
+                    None,
                 )?;
 
                 // Execute method body
@@ -1393,6 +1432,7 @@ pub(crate) fn call_class_method<'gc>(
                     evaluated_args,
                     None,
                     Some(env),
+                    Some(proto_obj), // Using proto_obj for home object purposes (this is approximate)
                 )?;
 
                 if let Some(home_object) = &data.home_object {
@@ -1483,91 +1523,124 @@ pub(crate) fn evaluate_super_call<'gc>(
     env: &JSObjectDataPtr<'gc>,
     evaluated_args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
-    // super() calls the parent constructor
-    if let Some(this_val) = object_get_key_value(env, "this")
-        && let Value::Object(instance) = &*this_val.borrow()
-        && let Some(proto_val) = object_get_key_value(instance, "__proto__")
-        && let Value::Object(proto_obj) = &*proto_val.borrow()
-    {
-        // Get the parent prototype
-        if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__")
-            && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
-        {
-            // First, if the parent prototype has a class definition attached in its internal slot, use it
-            if let Some(parent_class_def_ptr) = &parent_proto_obj.borrow().class_def {
-                for member in &parent_class_def_ptr.borrow().members {
-                    if let ClassMember::Constructor(params, body) = member {
-                        let func_env = prepare_call_env_with_this(
-                            mc,
-                            None,
-                            Some(Value::Object(*instance)),
-                            Some(params),
-                            evaluated_args,
-                            None,
-                            Some(env),
-                        )?;
-                        return Ok(evaluate_statements(mc, &func_env, body)?);
-                    }
-                }
-                return Ok(Value::Undefined);
-            }
+    log::debug!("evaluate_super_call start");
+    // Find the lexical environment that has __instance
+    let lexical_env = find_binding_env(env, "__instance").ok_or_else(|| raise_type_error!("super() called in invalid context"))?;
 
-            // Next, if the parent constructor object has an internal class_def slot, use that
-            if let Some(parent_ctor_val) = object_get_key_value(parent_proto_obj, "constructor")
-                && let Value::Object(parent_ctor_obj) = &*parent_ctor_val.borrow()
-                && let Some(parent_class_def_ptr) = &parent_ctor_obj.borrow().class_def
+    // Find the instance from lexical environment
+    let instance_val = find_binding(env, "__instance");
+    let instance = if let Some(Value::Object(inst)) = instance_val {
+        inst
+    } else {
+        return Err(raise_type_error!("super() called in invalid context"));
+    };
+
+    // Get this initialization status from lexical environment
+    let this_initialized = object_get_key_value(&lexical_env, "__this_initialized")
+        .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+        .unwrap_or(false);
+    log::debug!("evaluate_super_call: this_initialized = {}", this_initialized);
+
+    // Check if this is super() call and this is already initialized
+    // NOTE: don't return early here — per spec the SuperCall will still call
+    // the parent constructor (so side-effects happen) and only after that the
+    // runtime should throw if `this` was already initialized.
+    let already_initialized = this_initialized;
+
+    // Find the current constructor function to get its prototype (the parent class)
+    let current_function = find_binding(env, "__function").ok_or_else(|| raise_type_error!("super() called in invalid context"))?;
+
+    let parent_class = if let Value::Object(func_obj) = current_function {
+        if let Some(proto_val) = object_get_key_value(&func_obj, "__proto__") {
+            proto_val.borrow().clone()
+        } else {
+            Value::Undefined
+        }
+    } else {
+        Value::Undefined
+    };
+
+    log::debug!("evaluate_super_call: parent_class = {:?}", parent_class);
+
+    // Initialize this in the lexical environment
+    crate::core::object_set_key_value(mc, &lexical_env, "this", Value::Object(instance))?;
+    // Mark this as initialized
+    crate::core::object_set_key_value(mc, &lexical_env, "__this_initialized", Value::Boolean(true))?;
+
+    // Update ALL environments between current env and lexical_env to have initialized status
+    let mut cur = Some(*env);
+    while let Some(env_ptr) = cur {
+        log::debug!("evaluate_super_call: updating env={:p}", env_ptr.as_ptr());
+        crate::core::object_set_key_value(mc, &env_ptr, "__this_initialized", Value::Boolean(true))?;
+        crate::core::object_set_key_value(mc, &env_ptr, "this", Value::Object(instance))?;
+        if Gc::ptr_eq(env_ptr, lexical_env) {
+            break;
+        }
+        cur = env_ptr.borrow().prototype;
+    }
+
+    if let Value::Object(parent_class_obj) = parent_class {
+        // If parent class has an internal class_def slot, use it
+        if let Some(parent_class_def_ptr) = &parent_class_obj.borrow().class_def {
+            // Get the parent constructor's definition environment
+            let parent_captured_env = if let Some(def_env_val) = object_get_key_value(&parent_class_obj, "__definition_env")
+                && let Value::Object(def_env_obj) = &*def_env_val.borrow()
             {
-                for member in &parent_class_def_ptr.borrow().members {
-                    if let ClassMember::Constructor(params, body) = member {
-                        let func_env = prepare_call_env_with_this(
-                            mc,
-                            None,
-                            Some(Value::Object(*instance)),
-                            Some(params),
-                            evaluated_args,
-                            None,
-                            Some(env),
-                        )?;
-                        return Ok(evaluate_statements(mc, &func_env, body)?);
-                    }
-                }
-                return Ok(Value::Undefined);
-            }
-
-            // Finally, fall back to calling the parent constructor directly (host constructors like Error)
-            let parent_ctor_val = if let Some(ctor) = object_get_key_value(parent_proto_obj, "constructor") {
-                ctor.borrow().clone()
+                Some(*def_env_obj)
             } else {
-                Value::Undefined
+                None
             };
 
-            if let Value::Object(parent_ctor_obj) = parent_ctor_val {
-                let new_instance_val = evaluate_new(mc, env, Value::Object(parent_ctor_obj), evaluated_args)?;
-
-                if let Value::Object(new_instance) = new_instance_val {
-                    // Fix up the prototype chain:
-                    // The new instance has Parent.prototype.
-                    // We want it to have the original instance's prototype (CurrentClass.prototype).
-                    if let Some(original_proto) = object_get_key_value(instance, "__proto__") {
-                        object_set_key_value(mc, &new_instance, "__proto__", original_proto.borrow().clone())?;
-                        if let Value::Object(proto_obj) = &*original_proto.borrow() {
-                            new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                        }
+            for member in &parent_class_def_ptr.borrow().members {
+                if let ClassMember::Constructor(params, body) = member {
+                    let func_env = prepare_call_env_with_this(
+                        mc,
+                        parent_captured_env.as_ref(),
+                        Some(Value::Object(instance)),
+                        Some(params),
+                        evaluated_args,
+                        None,
+                        Some(env),
+                        Some(parent_class_obj),
+                    )?;
+                    // Set __super for the parent constructor (should be undefined for base classes)
+                    crate::core::object_set_key_value(mc, &func_env, "__super", Value::Undefined)?;
+                    // Create the arguments object
+                    create_arguments_object(mc, &func_env, evaluated_args, None)?;
+                    let _ = evaluate_statements(mc, &func_env, body)?;
+                    if already_initialized {
+                        return Err(raise_reference_error!("super() called after this is initialized"));
                     }
-
-                    // Update 'this' in the current environment to point to the new instance
-                    object_set_key_value(mc, env, "this", Value::Object(new_instance))?;
-
-                    return Ok(Value::Object(new_instance));
+                    log::debug!("evaluate_super_call: returning instance object from parent constructor");
+                    return Ok(Value::Object(instance));
                 }
-                return Ok(new_instance_val);
             }
 
-            // If we can't find a constructor, we can't call super().
-            return Err(raise_type_error!("super() failed: parent constructor not found"));
+            return Ok(Value::Object(instance));
+        }
+
+        // Handle native constructors (like Array, Object, etc.)
+        if let Some(native_ctor_name_rc) = object_get_key_value(&parent_class_obj, "__native_ctor") {
+            if let Value::String(_) = &*native_ctor_name_rc.borrow() {
+                // Call native constructor
+                let res = crate::core::evaluate_call_dispatch(mc, env, Value::Object(parent_class_obj), None, evaluated_args.to_vec())?;
+                if let Value::Object(new_instance) = res {
+                    // Update this binding
+                    crate::core::object_set_key_value(mc, &lexical_env, "this", Value::Object(new_instance))?;
+                    if already_initialized {
+                        return Err(raise_reference_error!("super() called after this is initialized"));
+                    }
+                    return Ok(Value::Object(new_instance));
+                }
+                if already_initialized {
+                    return Err(raise_reference_error!("super() called after this is initialized"));
+                }
+                return Ok(Value::Object(instance));
+            }
         }
     }
-    Err(raise_eval_error!("super() can only be called in class constructors"))
+
+    Err(raise_type_error!("super() failed: parent constructor not found"))
 }
 
 pub(crate) fn evaluate_super_property<'gc>(
@@ -1665,7 +1738,7 @@ pub(crate) fn evaluate_super_property<'gc>(
         }
     }
 
-    // Fallback for legacy class implementation (if any)
+    // Fallback for legacy class implementation
     if let Some(this_val) = object_get_key_value(env, "this") {
         if let Value::Object(instance) = &*this_val.borrow() {
             if let Some(proto_val) = object_get_key_value(instance, "__proto__") {
@@ -1800,8 +1873,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                             let captured_env = &data.env;
                             let home_obj_opt = data.home_object.clone();
 
-                            // Collect all arguments, expanding spreads
-
                             // Create function environment and bind params/this
                             let func_env = prepare_call_env_with_this(
                                 mc,
@@ -1811,6 +1882,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                                 evaluated_args,
                                 None,
                                 Some(env),
+                                None,
                             )?;
 
                             if let Some(home_object) = home_obj_opt {
@@ -1843,8 +1915,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                                         let captured_env = &data.env;
                                         let home_obj_opt = data.home_object.clone();
 
-                                        // Collect all arguments, expanding spreads
-
                                         // Create function environment and bind params/this
                                         let func_env = prepare_call_env_with_this(
                                             mc,
@@ -1854,6 +1924,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                                             evaluated_args,
                                             None,
                                             Some(env),
+                                            Some(*func_obj),
                                         )?;
 
                                         if let Some(home_object) = home_obj_opt {
@@ -1874,7 +1945,7 @@ pub(crate) fn evaluate_super_method<'gc>(
         }
     }
 
-    // Fallback for legacy class implementation (if any)
+    // Fallback for legacy class implementation
     if let Some(this_val) = object_get_key_value(env, "this")
         && let Value::Object(instance) = &*this_val.borrow()
         && let Some(proto_val) = object_get_key_value(instance, "__proto__")
@@ -1892,8 +1963,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                         let body = &data.body;
                         let captured_env = &data.env;
 
-                        // Collect all arguments, expanding spreads
-
                         // Create function environment with 'this' bound to the instance and bind params
                         let func_env = prepare_call_env_with_this(
                             mc,
@@ -1903,6 +1972,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                             evaluated_args,
                             None,
                             Some(env),
+                            Some(*parent_proto_obj),
                         )?;
 
                         // Execute method body
@@ -1941,57 +2011,41 @@ pub(crate) fn handle_object_constructor<'gc>(
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object")?;
             Ok(Value::Object(obj))
         }
-        Value::Object(obj) => {
-            // Object(object) returns the object itself
-            Ok(Value::Object(obj))
-        }
+        Value::Object(obj) => Ok(Value::Object(obj)),
         Value::Number(n) => {
-            // Object(number) creates Number object
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "valueOf", Value::Function("Number_valueOf".to_string()))?;
             object_set_key_value(mc, &obj, "toString", Value::Function("Number_toString".to_string()))?;
             object_set_key_value(mc, &obj, "__value__", Value::Number(n))?;
-            // Set internal prototype to Number.prototype if available
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number")?;
             Ok(Value::Object(obj))
         }
         Value::Boolean(b) => {
-            // Object(boolean) creates Boolean object
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
             object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string()))?;
             object_set_key_value(mc, &obj, "__value__", Value::Boolean(b))?;
-            // Set internal prototype to Boolean.prototype if available
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
             Ok(Value::Object(obj))
         }
         Value::String(s) => {
-            // Object(string) creates String object
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "valueOf", Value::Function("String_valueOf".to_string()))?;
             object_set_key_value(mc, &obj, "toString", Value::Function("String_toString".to_string()))?;
             object_set_key_value(mc, &obj, "length", Value::Number(s.len() as f64))?;
             object_set_key_value(mc, &obj, "__value__", Value::String(s))?;
-            // Set internal prototype to String.prototype if available
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String")?;
             Ok(Value::Object(obj))
         }
         Value::BigInt(h) => {
-            // Object(bigint) creates a boxed BigInt-like object
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "__value__", Value::BigInt(h.clone()))?;
-            // Set internal prototype and __proto__ own property to BigInt.prototype if available
             let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
-
             Ok(Value::Object(obj))
         }
-
         Value::Symbol(sd) => {
-            // Object(symbol) creates Symbol object
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "__value__", Value::Symbol(sd))?;
-
-            // Manually set internal prototype to Symbol.prototype
             if let Some(sym) = object_get_key_value(env, "Symbol") {
                 if let Value::Object(ctor_obj) = &*sym.borrow() {
                     if let Some(proto) = object_get_key_value(ctor_obj, "prototype") {
@@ -2003,18 +2057,14 @@ pub(crate) fn handle_object_constructor<'gc>(
             }
             Ok(Value::Object(obj))
         }
-
         _ => {
-            // For other types, return empty object
             let obj = new_js_object_data(mc);
-            // Set prototype to Object.prototype
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object")?;
             Ok(Value::Object(obj))
         }
     }
 }
 
-/// Handle Number constructor calls
 pub(crate) fn handle_number_constructor<'gc>(
     mc: &MutationContext<'gc>,
     evaluated_args: &[Value<'gc>],
@@ -2044,28 +2094,22 @@ pub(crate) fn handle_number_constructor<'gc>(
             _ => f64::NAN,
         }
     };
-
-    // Create Number object
     let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "valueOf", Value::Function("Number_valueOf".to_string()))?;
     object_set_key_value(mc, &obj, "toString", Value::Function("Number_toString".to_string()))?;
     object_set_key_value(mc, &obj, "__value__", Value::Number(num_val))?;
-    // Set internal prototype to Number.prototype if available
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number")?;
     Ok(Value::Object(obj))
 }
 
-/// Handle Boolean constructor calls
 pub(crate) fn handle_boolean_constructor<'gc>(
     mc: &MutationContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let bool_val = if evaluated_args.is_empty() {
-        // Boolean() - returns false
         false
     } else {
-        // Boolean(value) - convert value to boolean
         let arg_val = evaluated_args[0].clone();
         match arg_val {
             Value::Boolean(b) => b,
@@ -2076,138 +2120,94 @@ pub(crate) fn handle_boolean_constructor<'gc>(
             _ => false,
         }
     };
-
-    // Create Boolean object
     let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string())).map_err(EvalError::Js)?;
     object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string())).map_err(EvalError::Js)?;
     object_set_key_value(mc, &obj, "__value__", Value::Boolean(bool_val)).map_err(EvalError::Js)?;
-    // Set internal prototype to Boolean.prototype if available
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean").map_err(EvalError::Js)?;
     Ok(Value::Object(obj))
 }
 
-#[allow(dead_code)]
-pub(crate) fn boolean_prototype_to_string<'gc>(
-    mc: &MutationContext<'gc>,
-    _args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    let this_val = evaluate_this(mc, env)?;
-    match this_val {
-        Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-        Value::Object(obj) => {
-            if let Some(val) = object_get_key_value(&obj, "__value__") {
-                if let Value::Boolean(b) = *val.borrow() {
-                    return Ok(Value::String(utf8_to_utf16(&b.to_string())));
-                }
-            }
-            Err(raise_type_error!("Boolean.prototype.toString requires that 'this' be a Boolean"))
-        }
-        _ => Err(raise_type_error!("Boolean.prototype.toString requires that 'this' be a Boolean")),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn boolean_prototype_value_of<'gc>(
-    mc: &MutationContext<'gc>,
-    _args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    let this_val = evaluate_this(mc, env)?;
-    match this_val {
-        Value::Boolean(b) => Ok(Value::Boolean(b)),
-        Value::Object(obj) => {
-            if let Some(val) = object_get_key_value(&obj, "__value__") {
-                if let Value::Boolean(b) = *val.borrow() {
-                    return Ok(Value::Boolean(b));
-                }
-            }
-            Err(raise_type_error!("Boolean.prototype.valueOf requires that 'this' be a Boolean"))
-        }
-        _ => Err(raise_type_error!("Boolean.prototype.valueOf requires that 'this' be a Boolean")),
-    }
-}
-
-/// Handle String constructor calls
-pub(crate) fn handle_string_constructor<'gc>(
-    mc: &MutationContext<'gc>,
-    evaluated_args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    let str_val = if evaluated_args.is_empty() {
-        // String() - returns empty string
-        Vec::new()
-    } else {
-        // String(value) - convert value to string
-        let arg_val = evaluated_args[0].clone();
-        match arg_val {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => utf8_to_utf16(&n.to_string()),
-            Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
-            Value::Undefined => utf8_to_utf16("undefined"),
-            Value::Null => utf8_to_utf16("null"),
-            Value::Object(_) => utf8_to_utf16("[object Object]"),
-            Value::Function(name) => utf8_to_utf16(&format!("[Function: {}]", name)),
-            Value::Closure(..) | Value::AsyncClosure(..) => utf8_to_utf16("[Function]"),
-            Value::ClassDefinition(_) => utf8_to_utf16("[Class]"),
-            Value::Getter(..) => utf8_to_utf16("[Getter]"),
-            Value::Setter(..) => utf8_to_utf16("[Setter]"),
-            Value::Property { .. } => utf8_to_utf16("[Property]"),
-            Value::Promise(_) => utf8_to_utf16("[object Promise]"),
-            Value::Symbol(_) => utf8_to_utf16("[object Symbol]"),
-            Value::BigInt(s) => utf8_to_utf16(&s.to_string()),
-            Value::Map(_) => utf8_to_utf16("[object Map]"),
-            Value::Set(_) => utf8_to_utf16("[object Set]"),
-            Value::WeakMap(_) => utf8_to_utf16("[object WeakMap]"),
-            Value::WeakSet(_) => utf8_to_utf16("[object WeakSet]"),
-            Value::GeneratorFunction(..) => utf8_to_utf16("[GeneratorFunction]"),
-            Value::Generator(_) => utf8_to_utf16("[object Generator]"),
-            Value::Proxy(_) => utf8_to_utf16("[object Proxy]"),
-            Value::ArrayBuffer(_) => utf8_to_utf16("[object ArrayBuffer]"),
-            Value::DataView(_) => utf8_to_utf16("[object DataView]"),
-            Value::TypedArray(_) => utf8_to_utf16("[object TypedArray]"),
-            Value::Uninitialized => utf8_to_utf16("undefined"),
-        }
-    };
-
-    // Create String object
-    let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "valueOf", Value::Function("String_valueOf".to_string()))?;
-    object_set_key_value(mc, &obj, "toString", Value::Function("String_toString".to_string()))?;
-    object_set_key_value(mc, &obj, "length", Value::Number(str_val.len() as f64))?;
-    object_set_key_value(mc, &obj, "__value__", Value::String(str_val))?;
-    // Set internal prototype to String.prototype if available
-    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String")?;
-    Ok(Value::Object(obj))
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_call_env_with_this<'gc>(
     mc: &MutationContext<'gc>,
     captured_env: Option<&JSObjectDataPtr<'gc>>,
     this_val: Option<Value<'gc>>,
     params: Option<&[DestructuringElement]>,
     args: &[Value<'gc>],
-    _unused: Option<()>,
+    instance: Option<JSObjectDataPtr<'gc>>,
     scope: Option<&JSObjectDataPtr<'gc>>,
+    fn_obj: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let new_env = crate::core::new_js_object_data(mc);
     new_env.borrow_mut(mc).is_function_scope = true;
 
-    // Prototype chain (scope) -- prioritizing scope or captured?
-    // usually: new_env -> captured -> global
     if let Some(c) = captured_env {
         new_env.borrow_mut(mc).prototype = Some(*c);
     } else if let Some(s) = scope {
         new_env.borrow_mut(mc).prototype = Some(*s);
     }
 
-    // Bind 'this'
-    if let Some(t) = this_val {
-        crate::core::object_set_key_value(mc, &new_env, "this", t)?;
+    if let Some(ref t) = this_val {
+        crate::core::object_set_key_value(mc, &new_env, "this", t.clone())?;
+        if matches!(t, Value::Uninitialized) {
+            crate::core::object_set_key_value(mc, &new_env, "__this_initialized", Value::Boolean(false))?;
+        } else {
+            crate::core::object_set_key_value(mc, &new_env, "__this_initialized", Value::Boolean(true))?;
+        }
+    } else {
+        // If this_val is None (e.g. arrow function captured its outer environment's this binding),
+        // we must explicitly inherit the initialization status from the outer environment
+        // so that `super()` calls in immediately-invoked arrow functions work.
+        let mut status_found = false;
+        if let Some(c) = captured_env {
+            let mut cur = Some(*c);
+            while let Some(env_ptr) = cur {
+                if let Some(status) = crate::core::object_get_key_value(&env_ptr, "__this_initialized") {
+                    crate::core::object_set_key_value(mc, &new_env, "__this_initialized", status.borrow().clone())?;
+                    status_found = true;
+                    break;
+                }
+                cur = env_ptr.borrow().prototype;
+            }
+        }
+        if !status_found {
+            if let Some(s) = scope {
+                let mut cur = Some(*s);
+                while let Some(env_ptr) = cur {
+                    if let Some(status) = crate::core::object_get_key_value(&env_ptr, "__this_initialized") {
+                        crate::core::object_set_key_value(mc, &new_env, "__this_initialized", status.borrow().clone())?;
+                        break;
+                    }
+                    cur = env_ptr.borrow().prototype;
+                }
+            }
+        }
     }
 
-    // Bind params
+    if instance.is_some() && this_val.is_none() {
+        // Only set to false if not already set by this_val or inherited status above
+        if crate::core::object_get_key_value(&new_env, "__this_initialized").is_none() {
+            crate::core::object_set_key_value(mc, &new_env, "__this_initialized", Value::Boolean(false))?;
+        }
+    }
+
+    if let Some(inst) = instance {
+        crate::core::object_set_key_value(mc, &new_env, "__instance", Value::Object(inst))?;
+    }
+
+    if let Some(f_obj) = fn_obj {
+        crate::core::object_set_key_value(mc, &new_env, "__function", Value::Object(f_obj))?;
+    } else if let Some(c) = captured_env {
+        if let Some(f) = crate::core::object_get_key_value(c, "__function") {
+            crate::core::object_set_key_value(mc, &new_env, "__function", f.borrow().clone())?;
+        }
+    } else if let Some(s) = scope {
+        if let Some(f) = crate::core::object_get_key_value(s, "__function") {
+            crate::core::object_set_key_value(mc, &new_env, "__function", f.borrow().clone())?;
+        }
+    }
+
     if let Some(ps) = params {
         for (i, p) in ps.iter().enumerate() {
             match p {
@@ -2217,18 +2217,12 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
                 }
                 DestructuringElement::Rest(name) => {
                     let rest_args = if i < args.len() { args[i..].to_vec() } else { Vec::new() };
-
-                    let target_env = scope.or(captured_env);
-                    if let Some(env_ptr) = target_env {
-                        let array_obj = crate::js_array::create_array(mc, env_ptr)?;
-                        for (j, val) in rest_args.iter().enumerate() {
-                            object_set_key_value(mc, &array_obj, j, val.clone())?;
-                        }
-                        object_set_key_value(mc, &array_obj, "length", Value::Number(rest_args.len() as f64))?;
-                        crate::core::env_set(mc, &new_env, name, Value::Object(array_obj))?;
-                    } else {
-                        crate::core::env_set(mc, &new_env, name, Value::Undefined)?;
+                    let array_obj = crate::js_array::create_array(mc, &new_env)?;
+                    for (j, val) in rest_args.iter().enumerate() {
+                        object_set_key_value(mc, &array_obj, j, val.clone())?;
                     }
+                    object_set_key_value(mc, &array_obj, "length", Value::Number(rest_args.len() as f64))?;
+                    crate::core::env_set(mc, &new_env, name, Value::Object(array_obj))?;
                 }
                 _ => {}
             }

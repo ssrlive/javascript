@@ -10,10 +10,9 @@ function assert(condition, message) {
     console.log("=== Date Tests ===");
 
     const bigDay = new Date(2019, 6, 19);
-    console.log(bigDay.toLocaleDateString());
-    if (bigDay.getTime() < Date.now()) {
-        console.log("Once upon a time...");
-    }
+    let v_date = bigDay.toLocaleDateString();
+    assert(v_date === "7/19/2019" || v_date === "19/7/2019" || v_date === "Fri Jul 19 2019", "bigDay should be July 19, 2019");
+    assert(bigDay.getTime() < Date.now(), "bigDay should be in the past");
 }
 
 {
@@ -68,8 +67,6 @@ function assert(condition, message) {
 
     assert(myInstance.getPrivateField() === "private bar", "Private field should be accessible via public method");
     assert(myInstance.callPrivateMethod() === "private method result", "Private method should be accessible via public method");
-
-    console.log("Class test passed");
 }
 
 {
@@ -99,8 +96,6 @@ function assert(condition, message) {
     assert(MyClass.myStaticField === "bar", "Transpiled: Static field should be accessible");
     assert(MyClass.myStaticMethod() === "static method result", "Transpiled: Static method should return correct value");
     assert(MyClass.staticBlockRan === true, "Transpiled: Static block should have run");
-
-    console.log("Transpiled Class test passed");
 }
 
 {
@@ -109,9 +104,9 @@ function assert(condition, message) {
         let tmp =new MyClass(); // ReferenceError: Cannot access 'MyClass' before initialization
         assert(false, "TDZ test failed: No error thrown");
     } catch (e) {
-        console.log("Caught expected error:", e.message);
+        // console.log("Caught expected error:", e.message);
         assert(e instanceof ReferenceError, "Expected a ReferenceError");
-        console.log("PASS for TDZ test");
+        // console.log("PASS for TDZ test");
     }
 
     class MyClass {}
@@ -123,13 +118,16 @@ function assert(condition, message) {
     class MyClass {
         myField = "foo";
         myMethod() {
-            console.log("myMethod called");
+            // console.log("myMethod called");
+            this.myField = "bar";
         }
     }
 
     const myInstance = new MyClass();
-    console.log(myInstance.myField); // 'foo'
+    // console.log(myInstance.myField); // 'foo'
+    assert(myInstance.myField === "foo", "Instance field should be accessible");
     myInstance.myMethod();
+    assert(myInstance.myField === "bar", "Instance method should modify field");
 
     // Typical function constructors can both be constructed with new and called without new.
     // However, attempting to "call" a class without new will result in an error.
@@ -137,9 +135,9 @@ function assert(condition, message) {
         let tmp = MyClass();
         assert(false, "FAIL: Class constructor called without new should throw");
     } catch (e) {
-        console.log("Caught expected error for class call without new:", e.message);
+        // console.log("Caught expected error for class call without new:", e.message);
         assert(e instanceof TypeError, "Expected a TypeError");
-        console.log("PASS: Class constructor cannot be invoked without 'new'");
+        // console.log("PASS: Class constructor cannot be invoked without 'new'");
     }
 }
 
@@ -152,16 +150,18 @@ function assert(condition, message) {
     try {
         let tmp = new MyClassLongerName(); // ReferenceError: MyClassLongerName is not defined
     } catch (e) {
-        console.log("Caught expected error for class expression name not in scope:", e.message);
+        // console.log("Caught expected error for class expression name not in scope:", e.message);
         assert(e instanceof ReferenceError, "Expected a ReferenceError");
 
         let tmp = new MyClass(); // This should work
         assert(tmp instanceof MyClass, "Instance should be of type MyClass");
-        console.log("PASS: Class expression name is not in scope outside the class");
+        // console.log("PASS: Class expression name is not in scope outside the class");
     }
 }
 
 {
+    console.log("=== Testing class constructor with rest parameters... ===");
+
     // class Color {
     //     constructor(r, g, b) {
     //         // Assign the RGB values as a property of `this`.
@@ -176,7 +176,8 @@ function assert(condition, message) {
     }
 
     const red = new Color(255, 0, 0);
-    console.log(red);
+    // console.log(String(red));
+    assert(Array.isArray(red.values), "red.values should be an array");
 
     const anotherRed = new Color(255, 0, 0);
     assert(red !== anotherRed, "Different instances should not be strictly equal");
@@ -193,7 +194,7 @@ function assert(condition, message) {
         }
     }
 
-    console.log(new MyClass().myField); // undefined
+    // console.log(new MyClass().myField); // undefined
     assert(new MyClass().myField === undefined, "Constructor returning a different object should override 'this'");
 }
 
@@ -229,7 +230,8 @@ function assert(condition, message) {
         }
     }
 
-    console.log(new Color(255, 0, 0).getRed);
+    // console.log(typeof new Color(255, 0, 0).getRed);
+    assert(typeof new Color(255, 0, 0).getRed === "function", "getRed should be a function");
     assert(new Color().getRed !== new Color().getRed, "Instance method references should not be equal");
     assert(new Color().getGreen === new Color().getGreen, "Prototype method references should be equal");
 
@@ -316,9 +318,9 @@ function assert(condition, message) {
         eval(script);
         assert(false, "Accessing private field should throw");
     } catch (e) {
-        console.log("Caught expected error for private field access:", e.message);
+        // console.log("Caught expected error for private field access:", e.message);
         assert(e instanceof SyntaxError, "Expected a SyntaxError");
-        console.log("PASS: Private field cannot be accessed outside the class");
+        // console.log("PASS: Private field cannot be accessed outside the class");
     }
 
     red.setRed(0);
@@ -329,9 +331,9 @@ function assert(condition, message) {
         red.setRed(300);
         assert(false, "Setting invalid red value should throw");
     } catch (e) {
-        console.log("Caught expected error for invalid red value:", e.message);
+        // console.log("Caught expected error for invalid red value:", e.message);
         assert(e instanceof RangeError, "Expected a RangeError");
-        console.log("PASS: setRed throws on invalid value");
+        // console.log("PASS: setRed throws on invalid value");
     }
 
     const red2 = new Color(255, 0, 0);
@@ -345,7 +347,7 @@ function assert(condition, message) {
     try {
         eval("class BadIdeas { #firstName; #firstName; }");
     } catch (e) {
-        console.log("Caught expected error for duplicate private field declaration:", e.message);
+        // console.log("Caught expected error for duplicate private field declaration:", e.message);
         assert(e instanceof SyntaxError, "Expected a SyntaxError");
     }
 
@@ -359,9 +361,9 @@ function assert(condition, message) {
         }`;
         eval(scritpt);
     } catch (e) {
-        console.log("Caught expected error for bad private field usage:", e.message);
+        // console.log("Caught expected error for bad private field usage:", e.message);
         assert(e instanceof SyntaxError, "Expected a SyntaxError");
-        console.log("PASS: Bad private field usages throw errors");
+        // console.log("PASS: Bad private field usages throw errors");
     }
 }
 
@@ -403,7 +405,7 @@ function assert(condition, message) {
         red.red = 0; // This should throw an error
         assert(false, "Setting read-only property 'red' should have thrown an error");
     } catch (e) {
-        console.log("Caught expected error when trying to set read-only property 'red':", e.message);
+        // console.log("Caught expected error when trying to set read-only property 'red':", e.message);
         assert(e instanceof TypeError, "Caught exception should be a TypeError");
     }
     assert(red.red === 255, "Red value should remain 255");
@@ -431,8 +433,9 @@ function assert(condition, message) {
     class MyClass {
         luckyNumber = Math.random();
     }
-    console.log(new MyClass().luckyNumber);
-    console.log(new MyClass().luckyNumber);
+    // console.log(new MyClass().luckyNumber);
+    // console.log(new MyClass().luckyNumber);
+    assert(new MyClass().luckyNumber < 1, "luckyNumber should be less than 1");
 }
 
 {
@@ -442,8 +445,9 @@ function assert(condition, message) {
             this.luckyNumber = Math.random();
         }
     }
-    console.log(new MyClass().luckyNumber);
-    console.log(new MyClass().luckyNumber);
+    // console.log(new MyClass().luckyNumber);
+    // console.log(new MyClass().luckyNumber);
+    assert(new MyClass().luckyNumber < 1, "luckyNumber should be less than 1");
 }
 
 {
@@ -502,7 +506,8 @@ function assert(condition, message) {
     assert(color.red === 255, "Red value should be 255");
     assert(color.alpha === 0.5, "Alpha value should be 0.5");
 
-    console.log(color.toString()); // [object Object]
+    // console.log(color.toString()); // [object Object]
+    assert(color.toString() === "[object Object]", "toString should return '[object Object]'");
 }
 
 {
@@ -567,7 +572,7 @@ function assert(condition, message) {
         counter.onclick();
         assert(counter.textContent === '3', "Counter should be '3' after three clicks");
 
-        console.log('PASS: Counter private fields and event binding behave as expected');
+        // console.log('PASS: Counter private fields and event binding behave as expected');
     }
 }
 
@@ -591,7 +596,7 @@ function assert(condition, message) {
         }
     }
 
-    console.log(new Color(255, 0, 0).toString()); // '255, 0, 0'
+    // console.log(new Color(255, 0, 0).toString()); // '255, 0, 0'
     assert(new Color(255, 0, 0).toString() === "255, 0, 0", "toString should return '255, 0, 0'");
 
     class ColorWithAlpha extends Color {
@@ -625,21 +630,84 @@ function assert(condition, message) {
         }
     }
 
-    console.log(new ColorWithAlpha(255, 0, 0, 0.5).toString()); // '255, 0, 0, 0.5'
+    // console.log(new ColorWithAlpha(255, 0, 0, 0.5).toString()); // '255, 0, 0, 0.5'
     assert(new ColorWithAlpha(255, 0, 0, 0.5).toString() === "255, 0, 0, 0.5", "toString should return '255, 0, 0, 0.5'");
 
     let tmp = new ColorWithAlpha(255, 0, 0, 0.5);
     try {
         tmp.log(); // SyntaxError: Private field '#values' must be declared in an enclosing class
     } catch (e) {
-        console.log("Caught expected error for private field access in subclass:", e.message);
+        // console.log("Caught expected error for private field access in subclass:", e.message);
         assert(e instanceof SyntaxError, "Expected a SyntaxError");
-        console.log("PASS: Subclass cannot access superclass private field");
+        // console.log("PASS: Subclass cannot access superclass private field");
     }
 
     const color = new ColorWithAlpha(255, 0, 0, 0.5);
-    console.log(color instanceof Color); // true
+    // console.log(color instanceof Color); // true
     assert(color instanceof Color, "color should be instance of Color");
-    console.log(color instanceof ColorWithAlpha); // true
+    // console.log(color instanceof ColorWithAlpha); // true
     assert(color instanceof ColorWithAlpha, "color should be instance of ColorWithAlpha");
+}
+
+{
+    console.log("=== Testing super call in arrow function within constructor... ===");
+
+    var count_12_3_5_1 = 0;
+
+    class A_12_3_5_1 {
+        constructor() {
+            count_12_3_5_1++;
+        }
+    }
+
+    class B_12_3_5_1 extends A_12_3_5_1 {
+        constructor() {
+            super();
+            // envRec.[[thisBindingStatus]] is "initialized"
+            this.af = _ => super();
+        }
+    }
+
+    var b_12_3_5_1 = new B_12_3_5_1();
+    try {
+        b_12_3_5_1.af();
+        assert(false, "FAIL: super call in arrow function should throw");
+    } catch (e) {
+        // console.log("Caught expected error for super call in arrow function:", e.message);
+        assert(e instanceof ReferenceError, "Expected a ReferenceError");
+    }
+
+    // console.log(count_12_3_5_1);
+    assert(count_12_3_5_1 === 2, "The value of `count_12_3_5_1` is `2`, because S7 of `SuperCall : super Arguments` will call the super constructor.");
+}
+
+{
+    console.log("=== Testing super call in immediately invoked arrow function within constructor... ===");
+    var count_14_2_16 = 0;
+
+    class A_14_2_16 {
+        constructor() {
+            count_14_2_16++;
+        }
+    }
+
+    class B_14_2_16 extends A_14_2_16 {
+        constructor() {
+            (_ => super())();
+        }
+    }
+
+    var bar_14_2_16 = new B_14_2_16();
+
+    assert(count_14_2_16 === 1, "The value of `count_14_2_16` is `1`, because S7 of `SuperCall : super Arguments` will call the super constructor.");
+}
+
+{
+    console.log("=== Testing super call in immediately invoked arrow function within constructor (strict mode)... ===");
+    var count_side = 0;
+    class A_side { constructor() { count_side++; } }
+    class B_side extends A_side { constructor() { (_ => super())(); } }
+    new B_side();
+    // console.log("count=", count_side);
+    assert(count_side === 1, "The value of `count_side` is `1`, because S7 of `SuperCall : super Arguments` will call the super constructor.");
 }

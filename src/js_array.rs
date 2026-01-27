@@ -246,6 +246,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                     &[],
                                                     None,
                                                     Some(env),
+                                                    None,
                                                 )?;
                                                 crate::core::evaluate_call_dispatch(
                                                     mc,
@@ -279,6 +280,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                                     &[],
                                                                     None,
                                                                     Some(env),
+                                                                    None,
                                                                 )?;
                                                                 crate::core::evaluate_call_dispatch(
                                                                     mc,

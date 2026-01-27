@@ -187,6 +187,7 @@ where
     arena.mutate(|mc, root| {
         initialize_global_constructors(mc, &root.global_env)?;
         env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env))?;
+        object_set_key_value(mc, &root.global_env, "this", Value::Object(root.global_env))?;
 
         // Bind promise runtime lifecycle to this JsArena by resetting global
         // promise state so tests / repeated evaluate_script runs are isolated.

@@ -54,6 +54,39 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("parseFloat"));
     number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("parseInt"));
 
+    // Per ECMAScript spec, the numeric constants on Number are non-writable and non-configurable
+    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("MAX_VALUE"));
+    number_obj.borrow_mut(mc).set_non_configurable(PropertyKey::from("MAX_VALUE"));
+
+    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("MIN_VALUE"));
+    number_obj.borrow_mut(mc).set_non_configurable(PropertyKey::from("MIN_VALUE"));
+
+    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("NaN"));
+    number_obj.borrow_mut(mc).set_non_configurable(PropertyKey::from("NaN"));
+
+    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("POSITIVE_INFINITY"));
+    number_obj
+        .borrow_mut(mc)
+        .set_non_configurable(PropertyKey::from("POSITIVE_INFINITY"));
+
+    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("NEGATIVE_INFINITY"));
+    number_obj
+        .borrow_mut(mc)
+        .set_non_configurable(PropertyKey::from("NEGATIVE_INFINITY"));
+
+    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("EPSILON"));
+    number_obj.borrow_mut(mc).set_non_configurable(PropertyKey::from("EPSILON"));
+
+    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("MAX_SAFE_INTEGER"));
+    number_obj
+        .borrow_mut(mc)
+        .set_non_configurable(PropertyKey::from("MAX_SAFE_INTEGER"));
+
+    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("MIN_SAFE_INTEGER"));
+    number_obj
+        .borrow_mut(mc)
+        .set_non_configurable(PropertyKey::from("MIN_SAFE_INTEGER"));
+
     // Internal markers and prototype should not be enumerable
     number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__is_constructor"));
     number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__native_ctor"));

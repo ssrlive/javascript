@@ -1091,6 +1091,11 @@ fn parse_var_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         *index = idx;
         if *index < t.len() && matches!(t[*index].token, Token::Assign) {
             *index += 1;
+            log::trace!(
+                "parse_var_statement: parsing initializer at index={} token={:?}",
+                *index,
+                t.get(*index)
+            );
             let init = parse_assignment(t, index)?;
             if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
                 *index += 1;
@@ -1602,7 +1607,6 @@ pub fn parse_statement(t: &mut [TokenData]) -> Result<Statement, JSError> {
     parse_statement_item(t, &mut index)
 }
 
-#[allow(dead_code)]
 pub fn parse_full_expression(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
     // Allow line terminators inside expressions (e.g., after a binary operator
     // at the end of a line). Tokenizer emits `LineTerminator` for newlines —
@@ -1615,6 +1619,69 @@ pub fn parse_full_expression(tokens: &[TokenData], index: &mut usize) -> Result<
         "parse_full_expression: tokens after initial skip (first 8): {:?}",
         tokens.iter().take(8).collect::<Vec<_>>()
     );
+
+    // Pre-check for parenthesized arrow form `( ... ) =>` to correctly parse arrow functions
+    // before falling back to normal assignment parsing which may misinterpret `()` as grouping.
+    if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+        // Find matching closing paren
+        let mut depth = 1usize;
+        let mut j = *index + 1;
+        while j < tokens.len() && depth > 0 {
+            match tokens[j].token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                j += 1;
+            }
+        }
+        if depth == 0 {
+            let mut next = j + 1;
+            while next < tokens.len() && matches!(tokens[next].token, Token::LineTerminator) {
+                next += 1;
+            }
+            if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
+                // Debug: show j/next and surrounding tokens
+                log::trace!(
+                    "parse_full_expr paren-scan: index={}, j={} token_j={:?} next={} token_next={:?}",
+                    *index,
+                    j,
+                    tokens.get(j),
+                    next,
+                    tokens.get(next)
+                );
+                // Attempt to parse params between '(' and matching ')'
+                let mut t = *index + 1;
+                log::trace!(
+                    "parse_full_expr: calling parse_parameters with t={} token_at_t={:?}",
+                    t,
+                    tokens.get(t)
+                );
+                match parse_parameters(tokens, &mut t) {
+                    Ok(params) => {
+                        log::trace!("parse_full_expr: parse_parameters returned params={:?} t_after={}", params, t);
+                        if t == j + 1 {
+                            *index = next + 1; // consume past '=>'
+                            let body = parse_arrow_body(tokens, index)?;
+                            log::trace!("constructing arrow (full-expression precheck) params={:?}", params);
+                            return Ok(Expr::ArrowFunction(params, body));
+                        } else {
+                            log::trace!(
+                                "parse_full_expr: t_after ({}) != j+1 ({}), not treating as arrow parameter list",
+                                t,
+                                j + 1
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::trace!("parse_full_expr: parse_parameters failed at t={} err={:?}", t, e);
+                    }
+                }
+            }
+        }
+    }
+
     let left = parse_assignment(tokens, index)?;
     Ok(left)
 }
@@ -1655,6 +1722,7 @@ fn flatten_commas(expr: Expr) -> Vec<Expr> {
 
 pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<DestructuringElement>, JSError> {
     let mut params = Vec::new();
+    log::trace!("parse_parameters called with index={}", *index);
     log::trace!(
         "parse_parameters: starting tokens (first 16): {:?}",
         tokens.iter().take(16).collect::<Vec<_>>()
@@ -1666,10 +1734,15 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 *index += 1; // consume ...
                 if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                     *index += 1;
+                    log::trace!("parse_parameters: found rest parameter name={}", name);
                     params.push(DestructuringElement::Rest(name));
 
                     if *index >= tokens.len() {
                         return Err(raise_parse_error!("Unexpected end of parameters after rest"));
+                    }
+                    // Skip optional line terminators after rest identifier
+                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                        *index += 1;
                     }
                     // Rest parameter must be the last one
                     if !matches!(tokens[*index].token, Token::RParen) {
@@ -1710,6 +1783,14 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 return Err(raise_parse_error_with_token!(tokens[*index], "Expected ',' in parameter list"));
             }
             *index += 1; // consume ,
+            // Allow trailing comma before ')' and optional line terminators after the comma
+            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
+                // Trailing comma present before the closing paren
+                break;
+            }
         }
     }
     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
@@ -1720,6 +1801,7 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
         "parse_parameters: consumed ')', remaining tokens (first 16): {:?}",
         tokens.iter().take(16).collect::<Vec<_>>()
     );
+    log::trace!("parse_parameters: final params={:?}", params);
     Ok(params)
 }
 
@@ -1740,10 +1822,11 @@ pub fn parse_expression(tokens: &[TokenData], index: &mut usize) -> Result<Expr,
     while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
         *index += 1;
     }
-    let mut left = parse_assignment(tokens, index)?;
+    log::trace!("parse_expression: entry index={} token_at_index={:?}", *index, tokens.get(*index));
+    let mut left = parse_full_expression(tokens, index)?;
     while *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
         *index += 1; // consume ,
-        let right = parse_assignment(tokens, index)?;
+        let right = parse_full_expression(tokens, index)?;
         left = Expr::Comma(Box::new(left), Box::new(right));
     }
     Ok(left)
@@ -1802,6 +1885,7 @@ fn contains_optional_chain(e: &Expr) -> bool {
 }
 
 pub fn parse_assignment(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    log::trace!("parse_assignment: entry index={} token={:?}", *index, tokens.get(*index));
     let left = parse_conditional(tokens, index)?;
     if *index >= tokens.len() {
         return Ok(left);
@@ -3435,29 +3519,65 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             }
         }
         Token::LParen => {
+            // Trace entry into LParen primary branch
+            log::trace!(
+                "parse_primary: entered LParen branch at idx {} tokens={:?}",
+                *index,
+                tokens.iter().skip(*index).take(8).collect::<Vec<_>>()
+            );
+            // Handle case when current index points at a closing paren (')') because '(' was consumed earlier.
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
+                let prev = if *index >= 1 { Some(&tokens[*index - 1]) } else { None };
+                log::trace!("paren-rcase: idx={} prev={:?} token_at_idx={:?}", *index, prev, tokens.get(*index));
+                if let Some(prev_td) = prev
+                    && matches!(prev_td.token, Token::LParen)
+                {
+                    let mut next = *index + 1;
+                    while next < tokens.len() && matches!(tokens[next].token, Token::LineTerminator) {
+                        next += 1;
+                    }
+                    log::trace!("paren-rcase: next={} token_next={:?}", next, tokens.get(next));
+                    if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
+                        *index = next + 1; // consume past '=>'
+                        let body = parse_arrow_body(tokens, index)?;
+                        log::trace!("constructing arrow (empty paren via rcase) params=Vec::new()");
+                        return Ok(Expr::ArrowFunction(Vec::new(), body));
+                    } else {
+                        log::trace!("paren-rcase: not arrow; token_next={:?}", tokens.get(next));
+                    }
+                }
+            }
+
             // Fast-path: detect simple single-identifier arrow `(x) =>` allowing optional line terminators
             {
-                let mut j = *index + 1;
-                while j < tokens.len() && matches!(tokens[j].token, Token::LineTerminator) {
-                    j += 1;
-                }
-                if j < tokens.len() && matches!(tokens[j].token, Token::Identifier(_)) {
-                    let mut k = j + 1;
-                    while k < tokens.len() && matches!(tokens[k].token, Token::LineTerminator) {
-                        k += 1;
+                // Only use fast-path if the first token inside parens is not Spread (to avoid rest params)
+                if *index < tokens.len() && !matches!(tokens[*index].token, Token::Spread) {
+                    let mut j = *index + 1;
+                    while j < tokens.len() && matches!(tokens[j].token, Token::LineTerminator) {
+                        j += 1;
                     }
-                    if k < tokens.len() && matches!(tokens[k].token, Token::RParen) {
-                        let mut m = k + 1;
-                        while m < tokens.len() && matches!(tokens[m].token, Token::LineTerminator) {
-                            m += 1;
+                    if j < tokens.len() && matches!(tokens[j].token, Token::Identifier(_)) {
+                        let mut k = j + 1;
+                        while k < tokens.len() && matches!(tokens[k].token, Token::LineTerminator) {
+                            k += 1;
                         }
-                        if m < tokens.len()
-                            && matches!(tokens[m].token, Token::Arrow)
-                            && let Token::Identifier(name) = &tokens[j].token
-                        {
-                            *index = m + 1; // consume up to after '=>'
-                            let body = parse_arrow_body(tokens, index)?;
-                            return Ok(Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body));
+                        if k < tokens.len() && matches!(tokens[k].token, Token::RParen) {
+                            let mut m = k + 1;
+                            while m < tokens.len() && matches!(tokens[m].token, Token::LineTerminator) {
+                                m += 1;
+                            }
+                            if m < tokens.len()
+                                && matches!(tokens[m].token, Token::Arrow)
+                                && let Token::Identifier(name) = &tokens[j].token
+                            {
+                                *index = m + 1; // consume up to after '=>'
+                                let body = parse_arrow_body(tokens, index)?;
+                                log::trace!(
+                                    "constructing arrow (single-id fast-path) params={:?}",
+                                    vec![DestructuringElement::Variable(name.clone(), None)]
+                                );
+                                return Ok(Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body));
+                            }
                         }
                     }
                 }
@@ -3465,10 +3585,42 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
 
             // Check if this is an arrow function: (params) => ...
             {
+                // Fast-path: immediate empty parameter list `()` followed by `=>` (allowing line terminators)
+                {
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
+                        let mut next = *index + 1;
+                        while next < tokens.len() && matches!(tokens[next].token, Token::LineTerminator) {
+                            next += 1;
+                        }
+                        log::trace!(
+                            "empty-paren-fastpath: index={} token_at_index={:?} next={} token_next={:?}",
+                            *index,
+                            tokens.get(*index),
+                            next,
+                            tokens.get(next)
+                        );
+                        if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
+                            // Empty parameter arrow detected
+                            *index = next + 1; // consume past '=>'
+                            let body = parse_arrow_body(tokens, index)?;
+                            log::trace!("constructing arrow (empty paren) params=Vec::new()");
+                            return Ok(Expr::ArrowFunction(Vec::new(), body));
+                        } else {
+                            log::trace!("empty-paren-fastpath: not arrow, skipped (token_next={:?})", tokens.get(next));
+                        }
+                    } else {
+                        log::trace!(
+                            "empty-paren-fastpath: index did not point to RParen (token={:?})",
+                            tokens.get(*index)
+                        );
+                    }
+                }
+
                 // Find the matching closing paren for this '(' before considering it as an arrow parameter list.
                 // This avoids misinterpreting inner parentheses as the parameter list (e.g., `("prop_" + (() => 42)())`).
                 let mut depth = 1usize;
-                let mut j = *index;
+                // Start scanning *after* the opening '(' so the depth accounting is correct
+                let mut j = *index + 1;
                 while j < tokens.len() && depth > 0 {
                     match tokens[j].token {
                         Token::LParen => depth += 1,
@@ -3486,14 +3638,32 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         next += 1;
                     }
                     if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
+                        // Debug/tracing: record indices and tokens to help diagnose arrow param parsing
+                        log::trace!(
+                            "paren-arrow-check: index={}, j={}, next={} token_at_index={:?} token_at_j={:?}",
+                            *index,
+                            j,
+                            next,
+                            tokens.get(*index),
+                            tokens.get(j)
+                        );
                         // Attempt to parse the parameters precisely between `*index` and `j`.
+                        // parse_parameters expects the index to point at the first token AFTER '('.
                         let mut t = *index;
+                        log::trace!(
+                            "paren-arrow: index={} t={} token_at_t={:?} token_at_j_plus_one={:?}",
+                            *index,
+                            t,
+                            tokens.get(t),
+                            tokens.get(j + 1)
+                        );
                         if let Ok(params) = parse_parameters(tokens, &mut t) {
                             // Ensure parse_parameters consumed exactly up to the matching paren we found.
                             if t == j + 1 {
                                 // It's a valid arrow parameter list matching the paren we found.
                                 *index = next + 1; // set index to token after '=>'
                                 let body = parse_arrow_body(tokens, index)?;
+                                log::trace!("constructing arrow (paren params) params={:?}", params);
                                 return Ok(Expr::ArrowFunction(params, body));
                             }
                         }
@@ -3796,6 +3966,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
 }
 
 fn parse_arrow_body(tokens: &[TokenData], index: &mut usize) -> Result<Vec<Statement>, JSError> {
+    // Skip optional line terminators between `=>` and the body
+    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
     if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
         *index += 1;
         let body = parse_statements(tokens, index)?;

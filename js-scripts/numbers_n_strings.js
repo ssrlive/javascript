@@ -268,5 +268,15 @@ assertEq(num4.toPrecision(5), "0.00012300"); // or 1.2300e-4
 
 assertEq((1234.5).toPrecision(2), "1.2e3"); // Rust {:g} does this
 
-console.log("All Number tests passed!");
 }
+
+try {
+    Number.MAX_VALUE = 42;
+    throw new Error("Expected TypeError when assigning to Number.MAX_VALUE");
+} catch (e) {
+    if (!(e instanceof TypeError)) {
+        throw new Error("Expected TypeError when assigning to Number.MAX_VALUE but got " + typeof e);
+    }
+}
+
+console.log("All Number tests passed!");

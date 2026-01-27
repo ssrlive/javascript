@@ -103,18 +103,14 @@ pub fn handle_global_function<'gc>(
                 let this_val = this_rc.borrow().clone();
                 return crate::js_object::handle_value_of_method(mc, &this_val, args, env);
             }
-            return Err(EvalError::Js(crate::raise_eval_error!(
-                "Object.prototype.valueOf called without this"
-            )));
+            return Err(raise_eval_error!("Object.prototype.valueOf called without this").into());
         }
         "Object.prototype.toString" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 return Ok(crate::core::handle_object_prototype_to_string(mc, &this_val, env));
             }
-            return Err(EvalError::Js(crate::raise_eval_error!(
-                "Object.prototype.toString called without this"
-            )));
+            return Err(raise_eval_error!("Object.prototype.toString called without this").into());
         }
         "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(args, env),
         "Object.prototype.propertyIsEnumerable" => return handle_object_property_is_enumerable(args, env),
@@ -124,12 +120,10 @@ pub fn handle_global_function<'gc>(
                 if let Value::Object(obj) = this_val {
                     return crate::js_regexp::handle_regexp_method(mc, &obj, "exec", args, env);
                 } else {
-                    return Err(EvalError::Js(raise_type_error!(
-                        "RegExp.prototype.exec called on non-object receiver"
-                    )));
+                    return Err(raise_type_error!("RegExp.prototype.exec called on non-object receiver").into());
                 }
             }
-            return Err(EvalError::Js(raise_eval_error!("RegExp.prototype.exec called without this")));
+            return Err(raise_eval_error!("RegExp.prototype.exec called without this").into());
         }
         "RegExp.prototype.test" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
@@ -137,12 +131,10 @@ pub fn handle_global_function<'gc>(
                 if let Value::Object(obj) = this_val {
                     return crate::js_regexp::handle_regexp_method(mc, &obj, "test", args, env);
                 } else {
-                    return Err(EvalError::Js(raise_type_error!(
-                        "RegExp.prototype.test called on non-object receiver"
-                    )));
+                    return Err(raise_type_error!("RegExp.prototype.test called on non-object receiver").into());
                 }
             }
-            return Err(EvalError::Js(raise_eval_error!("RegExp.prototype.test called without this")));
+            return Err(raise_eval_error!("RegExp.prototype.test called without this").into());
         }
         "RegExp.prototype.toString" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
@@ -150,12 +142,10 @@ pub fn handle_global_function<'gc>(
                 if let Value::Object(obj) = this_val {
                     return crate::js_regexp::handle_regexp_method(mc, &obj, "toString", args, env);
                 } else {
-                    return Err(EvalError::Js(raise_type_error!(
-                        "RegExp.prototype.toString called on non-object receiver"
-                    )));
+                    return Err(raise_type_error!("RegExp.prototype.toString called on non-object receiver").into());
                 }
             }
-            return Err(EvalError::Js(raise_eval_error!("RegExp.prototype.toString called without this")));
+            return Err(raise_eval_error!("RegExp.prototype.toString called without this").into());
         }
         "parseInt" => return parse_int_function(args),
         "parseFloat" => return parse_float_function(args),
@@ -193,8 +183,8 @@ pub fn handle_global_function<'gc>(
             }
             return Ok(Value::Undefined);
         }
-        "Boolean_toString" => return Ok(crate::js_class::boolean_prototype_to_string(mc, args, env)?),
-        "Boolean_valueOf" => return Ok(crate::js_class::boolean_prototype_value_of(mc, args, env)?),
+        "Boolean_toString" => return Ok(crate::js_boolean::boolean_prototype_to_string(mc, args, env)?),
+        "Boolean_valueOf" => return Ok(crate::js_boolean::boolean_prototype_value_of(mc, args, env)?),
         "Symbol" => return symbol_constructor(mc, args),
         "Symbol_valueOf" => return symbol_prototype_value_of(mc, args, env),
         "Symbol_toString" => return symbol_prototype_to_string(mc, args, env),
@@ -214,9 +204,7 @@ pub fn handle_global_function<'gc>(
                     return crate::js_array::handle_array_iterator_next(mc, &obj, env);
                 }
             }
-            return Err(EvalError::Js(raise_eval_error!(
-                "ArrayIterator.prototype.next called on non-object"
-            )));
+            return Err(raise_eval_error!("ArrayIterator.prototype.next called on non-object").into());
         }
         // "__internal_resolve_promise" => return internal_resolve_promise(mc, args, env),
         // "__internal_reject_promise" => return internal_reject_promise(mc, args, env),
@@ -247,11 +235,11 @@ pub fn handle_global_function<'gc>(
 
         "__internal_allsettled_state_record_fulfilled_env" => {
             if args.len() < 3 {
-                return Err(EvalError::Js(raise_eval_error!("internal function called with insufficient args")));
+                return Err(raise_eval_error!("internal function called with insufficient args").into());
             }
             let idx = match args[1] {
                 Value::Number(n) => n,
-                _ => return Err(EvalError::Js(raise_eval_error!("internal function expected number"))),
+                _ => return Err(raise_eval_error!("internal function expected number").into()),
             };
             return Ok(
                 crate::js_promise::__internal_allsettled_state_record_fulfilled_env(mc, args[0].clone(), idx, args[2].clone(), env)
@@ -260,11 +248,11 @@ pub fn handle_global_function<'gc>(
         }
         "__internal_allsettled_state_record_rejected_env" => {
             if args.len() < 3 {
-                return Err(EvalError::Js(raise_eval_error!("internal function called with insufficient args")));
+                return Err(raise_eval_error!("internal function called with insufficient args").into());
             }
             let idx = match args[1] {
                 Value::Number(n) => n,
-                _ => return Err(EvalError::Js(raise_eval_error!("internal function expected number"))),
+                _ => return Err(raise_eval_error!("internal function expected number").into()),
             };
             return Ok(
                 crate::js_promise::__internal_allsettled_state_record_rejected_env(mc, args[0].clone(), idx, args[2].clone(), env)
@@ -289,9 +277,7 @@ pub fn handle_global_function<'gc>(
                     return Ok(crate::js_promise::handle_promise_prototype_method(mc, &obj, method, args, env)?);
                 }
             }
-            return Err(EvalError::Js(crate::raise_type_error!(
-                "Promise prototype method called without object this"
-            )));
+            return Err(raise_type_error!("Promise prototype method called without object this").into());
         }
 
         /*
@@ -303,7 +289,7 @@ pub fn handle_global_function<'gc>(
                     todo!()
                 }
             }
-            return Err(EvalError::Js(raise_eval_error!("Promise.prototype.then called without a promise receiver")));
+            return Err(raise_eval_error!("Promise.prototype.then called without a promise receiver").into());
         }
         "Promise.prototype.catch" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
@@ -313,7 +299,7 @@ pub fn handle_global_function<'gc>(
                     todo!()
                 }
             }
-            return Err(EvalError::Js(raise_eval_error!("Promise.prototype.catch called without a promise receiver")));
+            return Err(raise_eval_error!("Promise.prototype.catch called without a promise receiver").into());
         }
         "Promise.prototype.finally" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
@@ -323,7 +309,7 @@ pub fn handle_global_function<'gc>(
                     todo!()
                 }
             }
-            return Err(EvalError::Js(raise_eval_error!("Promise.prototype.finally called without a promise receiver")));
+            return Err(raise_eval_error!("Promise.prototype.finally called without a promise receiver").into());
         }
         // */
         "setTimeout" => return Ok(crate::js_promise::handle_set_timeout_val(mc, args, env)?),
@@ -338,22 +324,19 @@ pub fn handle_global_function<'gc>(
                     Value::Function(func_name) => {
                         if func_name.starts_with("Object.prototype.") || func_name.starts_with("Array.prototype.") {
                             if args.is_empty() {
-                                return Err(EvalError::Js(raise_eval_error!("call requires a receiver")));
+                                return Err(raise_eval_error!("call requires a receiver").into());
                             }
                             let receiver_val = args[0].clone();
                             let forwarded_args = args[1..].to_vec();
                             println!("DEBUG Function.prototype.call forwarded args: {:?}", forwarded_args);
-                            let call_env = prepare_call_env_with_this(mc, Some(env), Some(receiver_val), None, &[], None, Some(env))?;
+                            let call_env = prepare_call_env_with_this(mc, Some(env), Some(receiver_val), None, &[], None, Some(env), None)?;
                             return handle_global_function(mc, &func_name, &forwarded_args, &call_env);
                         }
-                        return Err(EvalError::Js(raise_eval_error!(format!(
-                            "Function.prototype.call target not supported: {}",
-                            func_name
-                        ))));
+                        return Err(raise_eval_error!(format!("Function.prototype.call target not supported: {}", func_name)).into());
                     }
                     Value::Closure(data) => {
                         if args.is_empty() {
-                            return Err(EvalError::Js(raise_eval_error!("call requires a receiver")));
+                            return Err(raise_eval_error!("call requires a receiver").into());
                         }
                         let receiver_val = args[0].clone();
                         let forwarded = args[1..].to_vec();
@@ -389,7 +372,7 @@ pub fn handle_global_function<'gc>(
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
-                                return Err(EvalError::Js(raise_eval_error!("call requires a receiver")));
+                                return Err(raise_eval_error!("call requires a receiver").into());
                             }
                             log::trace!("Function.prototype.call calling closure with callee={:?}", callee_for_arguments);
                             let receiver_val = args[0].clone();
@@ -414,12 +397,12 @@ pub fn handle_global_function<'gc>(
 
                             return crate::core::evaluate_statements(mc, &func_env, body);
                         }
-                        return Err(EvalError::Js(raise_eval_error!("Function.prototype.call called on non-callable")));
+                        return Err(raise_eval_error!("Function.prototype.call called on non-callable").into());
                     }
-                    _ => return Err(EvalError::Js(raise_eval_error!("Function.prototype.call called on non-callable"))),
+                    _ => return Err(raise_eval_error!("Function.prototype.call called on non-callable").into()),
                 }
             } else {
-                return Err(EvalError::Js(raise_eval_error!("Function.prototype.call called without this")));
+                return Err(raise_eval_error!("Function.prototype.call called without this").into());
             }
         }
 
@@ -431,7 +414,7 @@ pub fn handle_global_function<'gc>(
                     Value::Function(func_name) => {
                         if func_name.starts_with("Object.prototype.") || func_name.starts_with("Array.prototype.") {
                             if args.is_empty() {
-                                return Err(EvalError::Js(raise_eval_error!("apply requires a receiver")));
+                                return Err(raise_eval_error!("apply requires a receiver").into());
                             }
                             let receiver_val = args[0].clone();
                             let mut forwarded_args: Vec<Value> = Vec::new();
@@ -452,17 +435,14 @@ pub fn handle_global_function<'gc>(
                                     _ => {}
                                 }
                             }
-                            let call_env = prepare_call_env_with_this(mc, Some(env), Some(receiver_val), None, &[], None, Some(env))?;
+                            let call_env = prepare_call_env_with_this(mc, Some(env), Some(receiver_val), None, &[], None, Some(env), None)?;
                             return handle_global_function(mc, &func_name, &forwarded_args, &call_env);
                         }
-                        return Err(EvalError::Js(raise_eval_error!(format!(
-                            "Function.prototype.apply target not supported: {}",
-                            func_name
-                        ))));
+                        return Err(raise_eval_error!(format!("Function.prototype.apply target not supported: {}", func_name)).into());
                     }
                     Value::Closure(data) => {
                         if args.is_empty() {
-                            return Err(EvalError::Js(raise_eval_error!("apply requires a receiver")));
+                            return Err(raise_eval_error!("apply requires a receiver").into());
                         }
                         let receiver_val = args[0].clone();
                         let mut evaluated_args: Vec<Value> = Vec::new();
@@ -507,7 +487,7 @@ pub fn handle_global_function<'gc>(
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
-                                return Err(EvalError::Js(raise_eval_error!("apply requires a receiver")));
+                                return Err(raise_eval_error!("apply requires a receiver").into());
                             }
                             let receiver_val = args[0].clone();
                             let mut evaluated_args: Vec<Value> = Vec::new();
@@ -547,16 +527,16 @@ pub fn handle_global_function<'gc>(
 
                             return crate::core::evaluate_statements(mc, &func_env, body);
                         }
-                        return Err(EvalError::Js(raise_eval_error!("Function.prototype.apply called on non-callable")));
+                        return Err(raise_eval_error!("Function.prototype.apply called on non-callable").into());
                     }
-                    _ => return Err(EvalError::Js(raise_eval_error!("Function.prototype.apply called on non-callable"))),
+                    _ => return Err(raise_eval_error!("Function.prototype.apply called on non-callable").into()),
                 }
             } else {
-                return Err(EvalError::Js(raise_eval_error!("Function.prototype.apply called without this")));
+                return Err(raise_eval_error!("Function.prototype.apply called without this").into());
             }
         }
         "Function.prototype.restrictedThrow" => {
-            return Err(EvalError::Js(raise_type_error!("Access to 'caller' or 'arguments' is restricted")));
+            return Err(raise_type_error!("Access to 'caller' or 'arguments' is restricted").into());
         }
         _ => {}
     }
@@ -588,13 +568,11 @@ pub fn handle_global_function<'gc>(
                         return crate::js_array::handle_array_instance_method(mc, &str_obj, method, args, env);
                     }
                     _ => {
-                        return Err(EvalError::Js(raise_type_error!(
-                            "Array.prototype method called on incompatible receiver"
-                        )));
+                        return Err(raise_type_error!("Array.prototype method called on incompatible receiver").into());
                     }
                 }
             }
-            Err(EvalError::Js(raise_type_error!("Array.prototype method called without this")))
+            Err(raise_type_error!("Array.prototype method called without this").into())
         }
 
         "IteratorSelf" => {
@@ -618,11 +596,9 @@ pub fn handle_global_function<'gc>(
                         }
                     };
                 }
-                return Err(EvalError::Js(raise_type_error!(
-                    "ArrayIterator.prototype.next called on non-object"
-                )));
+                return Err(raise_type_error!("ArrayIterator.prototype.next called on non-object").into());
             }
-            Err(EvalError::Js(raise_type_error!("ArrayIterator.prototype.next called without this")))
+            Err(raise_type_error!("ArrayIterator.prototype.next called without this").into())
         }
 
         "StringIterator.prototype.next" => {
@@ -631,13 +607,9 @@ pub fn handle_global_function<'gc>(
                 if let Value::Object(obj) = this_val {
                     return crate::js_string::handle_string_iterator_next(mc, &obj);
                 }
-                return Err(EvalError::Js(raise_type_error!(
-                    "StringIterator.prototype.next called on non-object"
-                )));
+                return Err(raise_type_error!("StringIterator.prototype.next called on non-object").into());
             }
-            Err(EvalError::Js(raise_type_error!(
-                "StringIterator.prototype.next called without this"
-            )))
+            Err(raise_type_error!("StringIterator.prototype.next called without this").into())
         }
 
         "SetIterator.prototype.next" => {
@@ -646,9 +618,9 @@ pub fn handle_global_function<'gc>(
                 if let Value::Object(obj) = this_val {
                     return Ok(crate::js_set::handle_set_iterator_next(mc, &obj, env)?);
                 }
-                return Err(EvalError::Js(raise_type_error!("SetIterator.prototype.next called on non-object")));
+                return Err(raise_type_error!("SetIterator.prototype.next called on non-object").into());
             }
-            Err(EvalError::Js(raise_type_error!("SetIterator.prototype.next called without this")))
+            Err(raise_type_error!("SetIterator.prototype.next called without this").into())
         }
 
         "MapIterator.prototype.next" => {
@@ -657,9 +629,9 @@ pub fn handle_global_function<'gc>(
                 if let Value::Object(obj) = this_val {
                     return Ok(crate::js_map::handle_map_iterator_next(mc, &obj, env)?);
                 }
-                return Err(EvalError::Js(raise_type_error!("MapIterator.prototype.next called on non-object")));
+                return Err(raise_type_error!("MapIterator.prototype.next called on non-object").into());
             }
-            Err(EvalError::Js(raise_type_error!("MapIterator.prototype.next called without this")))
+            Err(raise_type_error!("MapIterator.prototype.next called without this").into())
         }
 
         _ => {
@@ -667,7 +639,7 @@ pub fn handle_global_function<'gc>(
                 let method = &func_name["Object.".len()..];
                 return Ok(crate::js_object::handle_object_method(mc, method, args, env)?);
             }
-            Err(EvalError::Js(raise_eval_error!(format!("Global function {} not found", func_name))))
+            Err(raise_eval_error!(format!("Global function {} not found", func_name)).into())
         }
     }
 }
@@ -675,12 +647,12 @@ pub fn handle_global_function<'gc>(
 fn dynamic_import_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     // Dynamic import() function
     if args.len() != 1 {
-        return Err(EvalError::Js(raise_type_error!("import() requires exactly one argument")));
+        return Err(raise_type_error!("import() requires exactly one argument").into());
     }
     let module_specifier = args[0].clone();
     let module_name = match module_specifier {
         Value::String(s) => utf16_to_utf8(&s),
-        _ => return Err(EvalError::Js(raise_type_error!("import() argument must be a string"))),
+        _ => return Err(raise_type_error!("import() argument must be a string").into()),
     };
 
     // Load the module dynamically
@@ -719,7 +691,7 @@ fn object_prototype_value_of<'gc>(
         let this_val = this_rc.borrow().clone();
         return crate::js_object::handle_value_of_method(mc, &this_val, args, env);
     }
-    Err(EvalError::Js(raise_eval_error!("Object.prototype.valueOf called without this")))
+    Err(raise_eval_error!("Object.prototype.valueOf called without this").into())
 }
 
 #[allow(dead_code)]
@@ -748,7 +720,7 @@ fn object_prototype_to_string<'gc>(
             _ => return crate::js_object::handle_to_string_method(mc, &this_val, args, env),
         }
     }
-    Err(EvalError::Js(raise_eval_error!("Object.prototype.toString called without this")))
+    Err(raise_eval_error!("Object.prototype.toString called without this").into())
 }
 
 fn parse_int_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1053,10 +1025,10 @@ fn function_constructor<'gc>(
             closure_data.enforce_strictness_inheritance = false;
             Ok(Value::Closure(Gc::new(mc, closure_data)))
         } else {
-            Err(EvalError::Js(raise_type_error!("Failed to parse function body")))
+            Err(raise_type_error!("Failed to parse function body").into())
         }
     } else {
-        Err(EvalError::Js(raise_type_error!("Failed to parse function body")))
+        Err(raise_type_error!("Failed to parse function body").into())
     }
 }
 
@@ -1138,13 +1110,9 @@ fn symbol_prototype_value_of<'gc>(
             {
                 return Ok(Value::Symbol(*s));
             }
-            Err(EvalError::Js(raise_type_error!(
-                "Symbol.prototype.valueOf requires that 'this' be a Symbol"
-            )))
+            Err(raise_type_error!("Symbol.prototype.valueOf requires that 'this' be a Symbol").into())
         }
-        _ => Err(EvalError::Js(raise_type_error!(
-            "Symbol.prototype.valueOf requires that 'this' be a Symbol"
-        ))),
+        _ => Err(raise_type_error!("Symbol.prototype.valueOf requires that 'this' be a Symbol").into()),
     }
 }
 
@@ -1161,20 +1129,14 @@ fn symbol_prototype_to_string<'gc>(
                 if let Value::Symbol(s) = &*val.borrow() {
                     *s
                 } else {
-                    return Err(EvalError::Js(raise_type_error!(
-                        "Symbol.prototype.toString requires that 'this' be a Symbol"
-                    )));
+                    return Err(raise_type_error!("Symbol.prototype.toString requires that 'this' be a Symbol").into());
                 }
             } else {
-                return Err(EvalError::Js(raise_type_error!(
-                    "Symbol.prototype.toString requires that 'this' be a Symbol"
-                )));
+                return Err(raise_type_error!("Symbol.prototype.toString requires that 'this' be a Symbol").into());
             }
         }
         _ => {
-            return Err(EvalError::Js(raise_type_error!(
-                "Symbol.prototype.toString requires that 'this' be a Symbol"
-            )));
+            return Err(raise_type_error!("Symbol.prototype.toString requires that 'this' be a Symbol").into());
         }
     };
 
@@ -1207,7 +1169,7 @@ fn evaluate_new_expression<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Handle new expressions: new Constructor(args)
     // Deprecated: new logic is handled via Expr::New in eval.rs
-    Err(EvalError::Js(raise_eval_error!("Invalid new expression")))
+    Err(raise_eval_error!("Invalid new expression").into())
 }
 
 fn evalute_eval_function<'gc>(
@@ -1402,7 +1364,7 @@ fn internal_resolve_promise<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function to resolve a promise - requires 2 args: (promise, value)
-    validate_internal_args(args, 2).map_err(EvalError::Js)?;
+    validate_internal_args(args, 2)?;
     log::trace!("__internal_resolve_promise called with value: {:?}", args[1]);
 
     match &args[0] {
@@ -1410,7 +1372,7 @@ fn internal_resolve_promise<'gc>(
             crate::js_promise::resolve_promise(_mc, promise, args[1].clone(), env);
             Ok(Value::Undefined)
         }
-        _ => Err(EvalError::Js(raise_type_error!("First argument must be a promise"))),
+        _ => Err(raise_type_error!("First argument must be a promise").into()),
     }
 }
 
@@ -1421,7 +1383,7 @@ fn internal_reject_promise<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function to reject a promise - requires 2 args: (promise, reason)
-    validate_internal_args(args, 2).map_err(EvalError::Js)?;
+    validate_internal_args(args, 2)?;
     log::trace!("__internal_reject_promise called with reason: {:?}", args[1]);
 
     match &args[0] {
@@ -1429,7 +1391,7 @@ fn internal_reject_promise<'gc>(
             crate::js_promise::reject_promise(mc, promise, args[1].clone(), env);
             Ok(Value::Undefined)
         }
-        _ => Err(EvalError::Js(raise_type_error!("First argument must be a promise"))),
+        _ => Err(raise_type_error!("First argument must be a promise").into()),
     }
 }
 
@@ -1508,14 +1470,14 @@ fn internal_promise_any_resolve<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for Promise.any resolve - requires 2 args: (value, result_promise)
-    validate_internal_args(args, 2).map_err(EvalError::Js)?;
+    validate_internal_args(args, 2)?;
     match &args[1] {
         Value::Promise(_result_promise) => {
             // crate::js_promise::__internal_promise_any_resolve(mc, args[0].clone(), result_promise.clone());
             // Ok(Value::Undefined)
             todo!()
         }
-        _ => Err(EvalError::Js(raise_type_error!("Second argument must be a promise"))),
+        _ => Err(raise_type_error!("Second argument must be a promise").into()),
     }
 }
 
@@ -1528,9 +1490,7 @@ fn internal_promise_any_reject<'gc>(
     // Internal function for Promise.any reject - requires 6 args: (idx, reason, rejections, rejected_count, total, result_promise)
     // Note: This function has complex Rc<RefCell<>> parameters that cannot be easily reconstructed from JS values
     // It should only be called from within closures, not directly
-    Err(EvalError::Js(raise_type_error!(
-        "__internal_promise_any_reject cannot be called directly - use Promise.any instead"
-    )))
+    Err(raise_type_error!("__internal_promise_any_reject cannot be called directly - use Promise.any instead").into())
 }
 
 #[allow(dead_code)]
@@ -1540,14 +1500,14 @@ fn internal_promise_race_resolve<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for Promise.race resolve - requires 2 args: (value, result_promise)
-    validate_internal_args(args, 2).map_err(EvalError::Js)?;
+    validate_internal_args(args, 2)?;
     match &args[1] {
         Value::Promise(_result_promise) => {
             // crate::js_promise::__internal_promise_race_resolve(mc, args[0].clone(), result_promise.clone());
             // Ok(Value::Undefined)
             todo!()
         }
-        _ => Err(EvalError::Js(raise_type_error!("Second argument must be a promise"))),
+        _ => Err(raise_type_error!("Second argument must be a promise").into()),
     }
 }
 
@@ -1558,8 +1518,8 @@ fn internal_promise_all_resolve<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for Promise.all resolve - requires 3 args: (idx, value, state)
-    validate_internal_args(args, 3).map_err(EvalError::Js)?;
-    let numbers = validate_number_args(args, 1).map_err(EvalError::Js)?;
+    validate_internal_args(args, 3)?;
+    let numbers = validate_number_args(args, 1)?;
     let idx = numbers[0] as usize;
     let value = args[1].clone();
     if let Value::Object(state_obj) = args[2].clone() {
@@ -1654,7 +1614,7 @@ fn test_with_intl_constructors<'gc>(
 fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // hasOwnProperty should inspect the bound `this` and take one argument
     if args.len() != 1 {
-        return Err(EvalError::Js(raise_eval_error!("hasOwnProperty requires one argument")));
+        return Err(raise_eval_error!("hasOwnProperty requires one argument").into());
     }
     let key_val = args[0].clone();
     if let Some(this_rc) = crate::core::env_get(env, "this") {
@@ -1685,17 +1645,17 @@ fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPt
             _ => Ok(Value::Boolean(false)),
         }
     } else {
-        Err(EvalError::Js(raise_eval_error!("hasOwnProperty called without this")))
+        Err(raise_eval_error!("hasOwnProperty called without this").into())
     }
 }
 
 fn handle_object_property_is_enumerable<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() != 1 {
-        return Err(EvalError::Js(raise_eval_error!("propertyIsEnumerable requires one argument")));
+        return Err(raise_eval_error!("propertyIsEnumerable requires one argument").into());
     }
     let key_val = args[0].clone();
     let Some(this_rc) = crate::core::env_get(env, "this") else {
-        return Err(EvalError::Js(raise_eval_error!("propertyIsEnumerable called without this")));
+        return Err(raise_eval_error!("propertyIsEnumerable called without this").into());
     };
     let this_val = this_rc.borrow().clone();
     match this_val {
@@ -1845,9 +1805,7 @@ pub fn handle_function_prototype_method<'gc>(
                     };
                     return Ok(Value::Closure(Gc::new(mc, new_closure_data)));
                 }
-                Err(EvalError::Js(crate::raise_type_error!(
-                    "Function.prototype.bind called on non-function"
-                )))
+                Err(crate::raise_type_error!("Function.prototype.bind called on non-function").into())
             } else if let Value::Function(name) = this_value {
                 let effective_bound_this = Some(this_arg);
                 let new_closure_data = ClosureData {
@@ -1859,13 +1817,9 @@ pub fn handle_function_prototype_method<'gc>(
                 };
                 Ok(Value::Closure(Gc::new(mc, new_closure_data)))
             } else {
-                Err(EvalError::Js(crate::raise_type_error!(
-                    "Function.prototype.bind called on non-function"
-                )))
+                Err(crate::raise_type_error!("Function.prototype.bind called on non-function").into())
             }
         }
-        _ => Err(EvalError::Js(crate::raise_type_error!(format!(
-            "Unknown Function.prototype method: {method}"
-        )))),
+        _ => Err(crate::raise_type_error!(format!("Unknown Function.prototype method: {method}")).into()),
     }
 }

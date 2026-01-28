@@ -1537,50 +1537,84 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
             *index += 1;
         }
 
-        if let Token::Identifier(name) = &t[*index].token {
-            let name = name.clone();
-            *index += 1;
-            // Allow line terminators between the identifier and an optional initializer
-            while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        // Accept plain identifier names (including contextual keywords like `await` and `async`)
+        match &t[*index].token {
+            Token::Identifier(name) => {
+                let name = name.clone();
                 *index += 1;
+                // Allow line terminators between the identifier and an optional initializer
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                    *index += 1;
+                    Some(parse_assignment(t, index)?)
+                } else {
+                    None
+                };
+                decls.push((name, init));
+                // Skip line terminators before checking for a comma separating declarations
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
             }
-            let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+            Token::Await => {
+                // Treat `await` as an IdentifierName in declaration positions for non-module/script parsing
+                let name = "await".to_string();
                 *index += 1;
-                Some(parse_assignment(t, index)?)
-            } else {
-                None
-            };
-            decls.push((name, init));
-            // Skip line terminators before checking for a comma separating declarations
-            while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
-                *index += 1;
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                    *index += 1;
+                    Some(parse_assignment(t, index)?)
+                } else {
+                    None
+                };
+                decls.push((name, init));
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
             }
-        } else if matches!(t[*index].token, Token::Static) {
-            // Accept 'static' as an identifier name (e.g., `var static;`) in contexts
-            // where an IdentifierName is expected.
-            let name = "static".to_string();
-            *index += 1;
-            let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+            Token::Async => {
+                // Accept 'async' as an identifier name in variable declarations
+                // when it is not acting as the async keyword (e.g., `var async = 1;`).
+                let name = "async".to_string();
                 *index += 1;
-                Some(parse_assignment(t, index)?)
-            } else {
-                None
-            };
-            decls.push((name, init));
-        } else if matches!(t[*index].token, Token::Async) {
-            // Accept 'async' as an identifier name in variable declarations
-            // when it is not acting as the async keyword (e.g., `var async = 1;`).
-            let name = "async".to_string();
-            *index += 1;
-            let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                    *index += 1;
+                    Some(parse_assignment(t, index)?)
+                } else {
+                    None
+                };
+                decls.push((name, init));
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+            }
+            _ if matches!(t[*index].token, Token::Static) => {
+                // Accept 'static' as an identifier name (e.g., `var static;`) in contexts
+                // where an IdentifierName is expected.
+                let name = "static".to_string();
                 *index += 1;
-                Some(parse_assignment(t, index)?)
-            } else {
-                None
-            };
-            decls.push((name, init));
-        } else {
-            return Err(raise_parse_error_at!(t.get(*index)));
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                    *index += 1;
+                    Some(parse_assignment(t, index)?)
+                } else {
+                    None
+                };
+                decls.push((name, init));
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+            }
+            _ => break,
         }
 
         if *index < t.len() && matches!(t[*index].token, Token::Comma) {
@@ -2641,8 +2675,15 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             Expr::Void(Box::new(inner))
         }
         Token::Await => {
-            let inner = parse_primary(tokens, index, true)?;
-            Expr::Await(Box::new(inner))
+            // In some contexts `await` may be used as an identifier (e.g., `var await = 0; await = 1;`).
+            // If the next token is an assignment operator, treat this as an Identifier reference
+            // so the assignment parser can handle it. Otherwise parse an await expression.
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
+            } else {
+                let inner = parse_primary(tokens, index, true)?;
+                Expr::Await(Box::new(inner))
+            }
         }
         Token::Yield => {
             // yield can be followed by an optional expression

@@ -4594,6 +4594,7 @@ fn evaluate_expr_assign<'gc>(
                 Precomputed::Property(obj_val, PropertyKey::from(key.to_string()))
             }
         }
+        Expr::SuperProperty(key) => Precomputed::SuperProperty(PropertyKey::from(key.to_string())),
         Expr::Index(obj_expr, key_expr) => {
             // If this is `super[... ]`, evaluate the raw key expression but defer
             // resolving `super` until PutValue.

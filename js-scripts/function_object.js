@@ -21,11 +21,6 @@ try {
   assert(e.toString() === 'MyError: dbg-test', `Expected thrown error's toString() to be 'MyError: dbg-test' but got '${e.toString()}'`);
 }
 
-(function(){
-    console.log('msg', "OK");
-})()
-
-
 {
   function Person(name){ this.name = name; }
   Person.prototype.greet = function(){ return `hi ${this.name}`; };
@@ -76,4 +71,41 @@ try {
   }
 
   assert(o.bar === "unwritable", `Expected o.bar to be 'unwritable' but got '${o.bar}'`);
+}
+
+{
+    console.log('=== 13.15.2 - SuperProperty Assignments on classes with null prototype ===');
+    var count_13_15_2 = 0;
+    class C_13_15_2 {
+        static m() {
+            super.x = count_13_15_2 += 1;
+        }
+    }
+    Object.setPrototypeOf(C_13_15_2, null);
+    try {
+        C_13_15_2.m();
+        throw new Error('Expected to throw, but no exception was thrown');
+    } catch (e) {
+        if (!(e instanceof TypeError)) {
+            console.log(e);
+            throw new Error('Expected TypeError to be thrown but got ' + typeof e);
+        }
+    }
+    assert(count_13_15_2 === 1, 'The value of count_13_15_2 is expected to be 1');
+}
+
+{
+    console.log('=== identifierreference await ===');
+    try {
+        var await = 0;
+        await = 199;
+
+        var async = 30;
+        async = 256;
+    } catch (e) {
+        (function(){
+            console.log('msg', "Somehow caught an exception:", e);
+        })();
+        throw e;
+    }
 }

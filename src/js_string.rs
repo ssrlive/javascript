@@ -434,7 +434,7 @@ fn string_replace_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'g
         if let Value::Object(object) = search_val {
             if is_regex_object(&object) {
                 // get flags
-                let flags = match get_own_property(&object, &"__flags".into()) {
+                let flags = match get_own_property(&object, "__flags") {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
@@ -657,7 +657,7 @@ fn string_split_method<'gc>(
             // Separator is a RegExp-like object
             let pattern_u16 = internal_get_regex_pattern(&object)?;
 
-            let flags_opt = get_own_property(&object, &"__flags".into());
+            let flags_opt = get_own_property(&object, "__flags");
             let flags = match flags_opt {
                 Some(val_rc) => match &*val_rc.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
@@ -794,7 +794,7 @@ fn string_match_method<'gc>(
     };
 
     // Determine flags
-    let flags = match get_own_property(&regexp_obj, &"__flags".into()) {
+    let flags = match get_own_property(&regexp_obj, "__flags") {
         Some(val) => match &*val.borrow() {
             Value::String(s) => utf16_to_utf8(s),
             _ => String::new(),
@@ -810,7 +810,7 @@ fn string_match_method<'gc>(
 
     if global {
         // Save lastIndex (prefer user-visible `lastIndex`)
-        let prev_last_index = get_own_property(&regexp_obj, &"lastIndex".into());
+        let prev_last_index = get_own_property(&regexp_obj, "lastIndex");
         // Reset lastIndex to 0 for global matching
         object_set_key_value(mc, &regexp_obj, "lastIndex", Value::Number(0.0))?;
 
@@ -1167,7 +1167,7 @@ fn string_search_method<'gc>(
         match arg {
             Value::Object(obj) if is_regex_object(&obj) => {
                 let _p = internal_get_regex_pattern(&obj)?;
-                let f = match get_own_property(&obj, &"__flags".into()) {
+                let f = match get_own_property(&obj, "__flags") {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => String::new(),
@@ -1207,7 +1207,7 @@ fn string_search_method<'gc>(
     };
 
     let pattern = internal_get_regex_pattern(&regexp_obj)?;
-    let flags_str = match get_own_property(&regexp_obj, &"__flags".into()) {
+    let flags_str = match get_own_property(&regexp_obj, "__flags") {
         Some(val) => match &*val.borrow() {
             Value::String(s) => utf16_to_utf8(s),
             _ => String::new(),
@@ -1250,7 +1250,7 @@ fn string_match_all_method<'gc>(
         let arg = args[0].clone();
         match arg {
             Value::Object(obj) if is_regex_object(&obj) => {
-                let f = match get_own_property(&obj, &"__flags".into()) {
+                let f = match get_own_property(&obj, "__flags") {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => String::new(),
@@ -1403,7 +1403,7 @@ fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
         if let Value::Object(object) = search_val {
             if is_regex_object(&object) {
                 // get flags
-                let flags = match get_own_property(&object, &"__flags".into()) {
+                let flags = match get_own_property(&object, "__flags") {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),

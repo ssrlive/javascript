@@ -82,7 +82,7 @@ pub fn is_date_object(obj: &JSObjectDataPtr) -> bool {
 }
 
 pub(crate) fn internal_get_time_stamp_value<'gc>(date_obj: &JSObjectDataPtr<'gc>) -> Option<GcPtr<'gc, Value<'gc>>> {
-    get_own_property(date_obj, &"__timestamp".into())
+    get_own_property(date_obj, "__timestamp")
 }
 
 fn get_time_stamp_value(date_obj: &JSObjectDataPtr) -> Result<f64, JSError> {

@@ -52,6 +52,23 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_length_non_writable() {
+        let script = r#"
+            "use strict";
+            (function() {
+                try {
+                    Function.length = 42;
+                    return 'NO THROW';
+                } catch (e) {
+                    return 'THROW ' + (e.name || e);
+                }
+            })();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"THROW TypeError\"");
+    }
+
+    #[test]
     fn test_arrow_named_evaluation_sets_name_flags() {
         let script = r#"
             var arrow;

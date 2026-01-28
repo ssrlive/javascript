@@ -1910,7 +1910,7 @@ fn flatten_single_value<'gc>(
 
 /// Check if an object is an Array
 pub(crate) fn is_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
-    if let Some(val) = get_own_property(obj, &"__is_array".into())
+    if let Some(val) = get_own_property(obj, "__is_array")
         && let Value::Boolean(b) = *val.borrow()
     {
         return b;

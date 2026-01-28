@@ -62,3 +62,18 @@ try {
   assert(d.enumerable === false, `Expected descriptor enumerable to be false but got '${d.enumerable}'`);
   assert(d.configurable === true, `Expected descriptor configurable to be true but got '${d.configurable}'`);
 }
+
+{
+  function foo() {};
+  Object.defineProperty(foo.prototype, "bar", {value: "unwritable"}); 
+
+  var o = new foo();
+  try {
+    o.bar = "overridden";
+    assert(false, "Expected assignment to throw TypeError but no exception was thrown");
+  } catch (e) {
+    assert(e instanceof TypeError, `Expected thrown error to be TypeError but got ${e}`);
+  }
+
+  assert(o.bar === "unwritable", `Expected o.bar to be 'unwritable' but got '${o.bar}'`);
+}

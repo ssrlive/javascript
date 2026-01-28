@@ -12,8 +12,8 @@ use crate::{
     core::{
         BinaryOp, ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, ImportSpecifier, JSObjectDataPtr,
         ObjectDestructuringElement, PromiseState, Statement, StatementKind, create_error, env_get, env_get_own, env_get_strictness,
-        env_set, env_set_recursive, env_set_strictness, is_error, new_js_object_data, object_get_key_value, object_get_length,
-        object_set_key_value, object_set_length, value_to_string,
+        env_set, env_set_recursive, env_set_strictness, get_own_property, is_error, new_js_object_data, object_get_key_value,
+        object_get_length, object_set_key_value, object_set_length, value_to_string,
     },
     js_math::handle_math_call,
     raise_eval_error, raise_reference_error,
@@ -1028,7 +1028,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                     // CreateGlobalFunctionBinding semantics when executing in the global environment
                     let key = crate::core::PropertyKey::String(name.clone());
                     if env.borrow().prototype.is_none() {
-                        let existing = crate::core::get_own_property(env, &key);
+                        let existing = get_own_property(env, &key);
                         log::trace!(
                             "hoist_declarations: creating global function binding for '{}' existing={:?} is_configurable={}",
                             name,
@@ -1036,7 +1036,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                             env.borrow().is_configurable(&key)
                         );
                         if existing.is_none() || env.borrow().is_configurable(&key) {
-                            let desc_obj = crate::core::new_js_object_data(mc);
+                            let desc_obj = new_js_object_data(mc);
                             object_set_key_value(mc, &desc_obj, "value", Value::Object(*func_obj))?;
                             object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(true))?;
                             object_set_key_value(mc, &desc_obj, "enumerable", Value::Boolean(true))?;
@@ -4287,37 +4287,422 @@ fn evaluate_expr_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
+    // Per ECMAScript semantics, evaluate the left-hand side (target) first and
+    // then evaluate the right-hand side. This ensures side-effects and throws
+    // on the left occur before the RHS is evaluated.
 
-    // NamedEvaluation: if RHS is an anonymous function definition, set the function's name appropriately
+    // Candidate name for NamedEvaluation (set if RHS is an anonymous function)
     let mut maybe_name_to_set: Option<String> = None;
+    // Helper to produce the candidate name for NamedEvaluation. If the LHS
+    // is a parenthesized identifier (CoverParenthesizedExpression) we should
+    // use the empty string. We can heuristically detect parentheses by looking
+    // at the source file stored in env.__filepath and examining the character
+    // before the identifier token position.
+    fn candidate_name_from_target<'gc>(env: &JSObjectDataPtr<'gc>, target: &Expr) -> String {
+        if let Expr::Var(n, maybe_line, maybe_col) = target {
+            if let (Some(line), Some(col)) = (maybe_line, maybe_col)
+                && let Some(val_ptr) = object_get_key_value(env, "__filepath")
+                && let Value::String(s) = &*val_ptr.borrow()
+            {
+                let path = utf16_to_utf8(s);
+                if let Ok(txt) = std::fs::read_to_string(path)
+                    && let Some(l) = txt.lines().nth(*line - 1)
+                {
+                    // Find the last non-whitespace char before the
+                    // identifier column (columns are 1-indexed)
+                    let upto = (*col).saturating_sub(2);
+                    #[allow(clippy::skip_while_next)]
+                    if let Some(prev_slice) = l.get(0..=upto)
+                        && prev_slice.chars().rev().skip_while(|c| c.is_whitespace()).next() == Some('(')
+                    {
+                        return String::new();
+                    }
+                }
+            }
+            return n.clone();
+        }
+        String::new()
+    }
+
     match value_expr {
         crate::core::Expr::Function(name_opt, ..) if name_opt.is_none() => {
-            maybe_name_to_set = Some(match target {
-                crate::core::Expr::Var(n, _, _) => n.clone(),
-                _ => String::new(),
-            });
+            maybe_name_to_set = Some(candidate_name_from_target(env, target));
         }
         crate::core::Expr::ArrowFunction(..) | crate::core::Expr::AsyncArrowFunction(..) => {
-            maybe_name_to_set = Some(match target {
-                crate::core::Expr::Var(n, _, _) => n.clone(),
-                _ => String::new(),
-            });
+            maybe_name_to_set = Some(candidate_name_from_target(env, target));
         }
         crate::core::Expr::GeneratorFunction(name_opt, ..) if name_opt.is_none() => {
-            maybe_name_to_set = Some(match target {
-                crate::core::Expr::Var(n, _, _) => n.clone(),
-                _ => String::new(),
-            });
+            maybe_name_to_set = Some(candidate_name_from_target(env, target));
         }
         crate::core::Expr::AsyncFunction(name_opt, ..) if name_opt.is_none() => {
-            maybe_name_to_set = Some(match target {
-                crate::core::Expr::Var(n, _, _) => n.clone(),
-                _ => String::new(),
-            });
+            maybe_name_to_set = Some(candidate_name_from_target(env, target));
         }
         _ => {}
     }
+
+    // Support destructuring assignment targets (array/object patterns).
+    // Per spec, evaluate the RHS value first, then evaluate property names and
+    // evaluate assignment targets in the required order while honoring
+    // IteratorClose semantics on abrupt completions.
+    if let Expr::Array(elements) = target {
+        // Evaluate RHS first
+        let rhs = evaluate_expr(mc, env, value_expr)?;
+
+        // Obtain iterator if available
+        let mut iterator: Option<crate::core::JSObjectDataPtr<'gc>> = None;
+        if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+            && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+            && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+            && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+        {
+            let method = if let Value::Object(obj) = &rhs {
+                if let Some(c) = object_get_key_value(obj, iter_sym_data) {
+                    c.borrow().clone()
+                } else {
+                    Value::Undefined
+                }
+            } else {
+                get_primitive_prototype_property(mc, env, &rhs, &PropertyKey::Symbol(*iter_sym_data))?
+            };
+
+            if !matches!(method, Value::Undefined | Value::Null) {
+                let res = evaluate_call_dispatch(mc, env, method, Some(rhs.clone()), vec![])?;
+                if let Value::Object(iter_obj) = res {
+                    iterator = Some(iter_obj);
+                }
+            }
+        }
+
+        if let Some(iter_obj) = iterator {
+            // Iterate and assign
+            for elem_opt in elements.iter() {
+                // Get next
+                let next_method = object_get_key_value(&iter_obj, "next")
+                    .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
+                    .borrow()
+                    .clone();
+                let next_res_val = match evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // On abrupt completion during iteration, close iterator and return the propagated error
+                        let closed = iterator_close_on_error(mc, env, &iter_obj, e);
+                        return Err(closed);
+                    }
+                };
+
+                let done = if let Value::Object(next_res) = &next_res_val {
+                    if let Some(done_val) = object_get_key_value(next_res, "done") {
+                        match &*done_val.borrow() {
+                            Value::Boolean(b) => *b,
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    return Err(EvalError::Js(raise_type_error!("Iterator result is not an object")));
+                };
+
+                if done {
+                    break;
+                }
+
+                let value = if let Value::Object(next_res) = &next_res_val {
+                    if let Some(val_rc) = object_get_key_value(next_res, "value") {
+                        val_rc.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    }
+                } else {
+                    Value::Undefined
+                };
+
+                // Handle element assignment
+                if let Some(elem_expr) = elem_opt {
+                    // Support simple patterns: Var or Assign(Var, default)
+                    match elem_expr {
+                        Expr::Assign(boxed_lhs, boxed_default) => {
+                            // Evaluate default only if value is undefined
+                            if matches!(value, Value::Undefined) {
+                                match evaluate_expr(mc, env, boxed_default) {
+                                    Ok(dv) => {
+                                        // assign dv into lhs
+                                        if let Err(e) = evaluate_assign_target_with_value(mc, env, boxed_lhs, dv.clone()) {
+                                            let closed = iterator_close_on_error(mc, env, &iter_obj, e);
+                                            return Err(closed);
+                                        };
+                                    }
+                                    Err(e) => {
+                                        // Close iterator and propagate appropriate error
+                                        let closed = iterator_close_on_error(mc, env, &iter_obj, e);
+                                        return Err(closed);
+                                    }
+                                }
+                            } else if let Err(e) = evaluate_assign_target_with_value(mc, env, boxed_lhs, value.clone()) {
+                                let closed = iterator_close_on_error(mc, env, &iter_obj, e);
+                                return Err(closed);
+                            }
+                        }
+                        Expr::Var(name, _, _) => {
+                            env_set_recursive(mc, env, name, value.clone())?;
+                        }
+                        other => {
+                            // For now, support only basic patterns required by tests
+                            if let Err(e) = evaluate_assign_target_with_value(mc, env, other, value.clone()) {
+                                let closed = iterator_close_on_error(mc, env, &iter_obj, e);
+                                return Err(closed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return Ok(rhs);
+        }
+
+        // If not iterator: assume array-like object
+        if let Value::Object(obj) = rhs {
+            // simple index-based extraction
+            for (i, elem_opt) in elements.iter().enumerate() {
+                let val_at = if let Some(cell) = object_get_key_value(&obj, i.to_string()) {
+                    cell.borrow().clone()
+                } else {
+                    Value::Undefined
+                };
+
+                if let Some(elem_expr) = elem_opt {
+                    match elem_expr {
+                        Expr::Assign(boxed_lhs, boxed_default) => {
+                            let mut final_val = val_at.clone();
+                            if matches!(final_val, Value::Undefined) {
+                                final_val = evaluate_expr(mc, env, boxed_default)?;
+                            }
+                            evaluate_assign_target_with_value(mc, env, boxed_lhs, final_val)?;
+                        }
+                        Expr::Var(name, _, _) => {
+                            env_set_recursive(mc, env, name, val_at.clone())?;
+                        }
+                        other => {
+                            evaluate_assign_target_with_value(mc, env, other, val_at.clone())?;
+                        }
+                    }
+                }
+            }
+            return Ok(Value::Object(obj));
+        }
+    }
+
+    if let Expr::Object(properties) = target {
+        // Evaluate RHS first
+        let rhs = evaluate_expr(mc, env, value_expr)?;
+
+        for (key_expr, target_expr, _flag) in properties.iter() {
+            // Evaluate property name and convert to PropertyKey now (source key)
+            let name_val = evaluate_expr(mc, env, key_expr)?;
+            let source_key = match name_val {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(n.to_string()),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                _ => PropertyKey::from(value_to_string(&name_val)),
+            };
+
+            // Evaluate target expression partially (base and raw key if computed) but
+            // defer ToPropertyKey conversion of the target key until after retrieving
+            // the rhs value (so target key's toString happens after rhs property Get).
+            enum TargetTemp<'gc> {
+                Var(String),
+                PropBase(JSObjectDataPtr<'gc>, String),      // base object and static key
+                IndexBase(JSObjectDataPtr<'gc>, Value<'gc>), // base obj and raw key value
+            }
+
+            let temp_target = match target_expr {
+                Expr::Var(name, _, _) => TargetTemp::Var(name.clone()),
+                Expr::Property(obj_expr, key_str) => {
+                    let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                    if let Value::Object(obj) = obj_val {
+                        TargetTemp::PropBase(obj, key_str.clone())
+                    } else {
+                        return Err(raise_eval_error!("Cannot assign to property of non-object").into());
+                    }
+                }
+                Expr::Index(obj_expr, key_expr2) => {
+                    let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                    let raw_key = evaluate_expr(mc, env, key_expr2)?; // raw key evaluated now, ToPropertyKey deferred
+                    if let Value::Object(obj) = obj_val {
+                        TargetTemp::IndexBase(obj, raw_key)
+                    } else {
+                        return Err(raise_eval_error!("Cannot assign to property of non-object").into());
+                    }
+                }
+                _ => {
+                    // For now, do not support other forms in keyed destructuring
+                    return Err(raise_eval_error!("Assignment target not supported for keyed destructuring").into());
+                }
+            };
+
+            // Now get value from RHS: v = ? GetV(rhs, propertyName)
+            let rhs_value = match &rhs {
+                Value::Object(obj) => get_property_with_accessors(mc, env, obj, &source_key)?,
+                _ => get_primitive_prototype_property(mc, env, &rhs, &source_key)?,
+            };
+
+            // Convert target raw key (if any) now and perform PutValue
+            match temp_target {
+                TargetTemp::Var(name) => {
+                    env_set_recursive(mc, env, &name, rhs_value.clone())?;
+                }
+                TargetTemp::PropBase(obj, static_key) => {
+                    set_property_with_accessors(mc, env, &obj, &PropertyKey::from(static_key.as_str()), rhs_value.clone())?;
+                }
+                TargetTemp::IndexBase(obj, raw_key_val) => {
+                    let key = match raw_key_val {
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                        Value::Number(n) => PropertyKey::String(n.to_string()),
+                        Value::Symbol(s) => PropertyKey::Symbol(s),
+                        _ => PropertyKey::from(value_to_string(&raw_key_val)),
+                    };
+                    set_property_with_accessors(mc, env, &obj, &key, rhs_value.clone())?;
+                }
+            }
+        }
+
+        return Ok(rhs);
+    }
+
+    // Pre-evaluate target components (base object and property key) so that any
+    // side-effects or throws from LHS occur before RHS evaluation.
+    // Keep raw values for base/keys so we do NOT perform ToPropertyKey or ToObject
+    // conversions until after the RHS is evaluated (per spec requirements).
+    enum Precomputed<'gc> {
+        Var(String),
+        Property(Value<'gc>, crate::core::PropertyKey<'gc>), // base value (may be null/primitive), static key
+        Index(Value<'gc>, Value<'gc>),                       // base value, raw key value (ToPropertyKey deferred)
+        SuperProperty(crate::core::PropertyKey<'gc>),        // super.prop (defer super base resolution)
+        SuperIndex(Value<'gc>),                              // super[raw_key]
+    }
+
+    let pre = match target {
+        Expr::Var(name, _, _) => Precomputed::Var(name.clone()),
+        Expr::Property(obj_expr, key) => {
+            // If this is a `super.prop` form, do not resolve `super` yet; defer
+            // until PutValue. Otherwise evaluate base now.
+            if let Expr::Super = &**obj_expr {
+                Precomputed::SuperProperty(PropertyKey::from(key.to_string()))
+            } else {
+                let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                // Do not error yet on null/undefined; defer ToObject until PutValue
+                Precomputed::Property(obj_val, PropertyKey::from(key.to_string()))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            // If this is `super[... ]`, evaluate the raw key expression but defer
+            // resolving `super` until PutValue.
+            if let Expr::Super = &**obj_expr {
+                let raw_key = evaluate_expr(mc, env, key_expr)?; // raw value; ToPropertyKey deferred
+                Precomputed::SuperIndex(raw_key)
+            } else {
+                let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                let key_val_res = evaluate_expr(mc, env, key_expr)?;
+                // Defer ToPropertyKey conversion until after RHS evaluation
+                Precomputed::Index(obj_val, key_val_res)
+            }
+        }
+        _ => {
+            // Unsupported assignment target
+            let variant = match target {
+                Expr::Var(_, _, _) => "Var",
+                Expr::Property(_, _) => "Property",
+                Expr::Index(_, _) => "Index",
+                Expr::Array(_) => "Array",
+                Expr::Object(_) => "Object",
+                Expr::Spread(_) => "Spread",
+                Expr::Call(_, _) => "Call",
+                Expr::New(_, _) => "New",
+                Expr::Function(_, _, _) => "Function",
+                Expr::ArrowFunction(_, _) => "ArrowFunction",
+                Expr::Assign(_, _) => "Assign",
+                Expr::Comma(_, _) => "Comma",
+                Expr::OptionalProperty(_, _) => "OptionalProperty",
+                Expr::OptionalIndex(_, _) => "OptionalIndex",
+                Expr::OptionalCall(_, _) => "OptionalCall",
+                Expr::TaggedTemplate(_, _, _) => "TaggedTemplate",
+                Expr::TemplateString(_) => "TemplateString",
+                Expr::GeneratorFunction(_, _, _) => "GeneratorFunction",
+                Expr::AsyncFunction(_, _, _) => "AsyncFunction",
+                Expr::AsyncArrowFunction(_, _) => "AsyncArrowFunction",
+                _ => "Other",
+            };
+            log::trace!("Unsupported assignment target reached in evaluate_expr_assign: {variant}");
+            return Err(EvalError::Js(raise_eval_error!("Assignment target not supported")));
+        }
+    };
+
+    // Helper: perform IteratorClose semantics used by destructuring when an abrupt
+    // completion occurs while an iterator is in use. Returns the completion to
+    // be propagated (either the original completion or an inner completion).
+    fn iterator_close_on_error<'gc>(
+        mc: &MutationContext<'gc>,
+        env: &JSObjectDataPtr<'gc>,
+        iter_obj: &crate::core::JSObjectDataPtr<'gc>,
+        orig_err: EvalError<'gc>,
+    ) -> EvalError<'gc> {
+        // Attempt to get the 'return' property (using accessors so getters execute)
+        let return_val_res = match get_property_with_accessors(mc, env, iter_obj, &PropertyKey::from("return")) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // If original is a throw completion, prefer the original
+                match &orig_err {
+                    EvalError::Throw(_, _, _) => return orig_err,
+                    _ => return e,
+                }
+            }
+        };
+
+        let return_val = match return_val_res {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+        // If return is undefined or null, just return original completion
+        if matches!(return_val, Value::Undefined) || matches!(return_val, Value::Null) {
+            return orig_err;
+        }
+
+        // If not callable, create a TypeError; but if orig_err is throw, prefer orig_err
+        let is_callable = matches!(return_val, Value::Function(_) | Value::Closure(_) | Value::Object(_));
+        if !is_callable {
+            let err = EvalError::Js(raise_type_error!("Iterator return property is not callable"));
+            match &orig_err {
+                EvalError::Throw(_, _, _) => return orig_err,
+                _ => return err,
+            }
+        }
+
+        // Call the return method with iterator as this
+        let call_res = evaluate_call_dispatch(mc, env, return_val, Some(Value::Object(*iter_obj)), vec![]);
+        match call_res {
+            Ok(val) => {
+                // If result is not an object, produce TypeError unless orig_err is throw
+                if !matches!(val, Value::Object(_)) {
+                    let err = EvalError::Js(raise_type_error!("Iterator return did not return an object"));
+                    match &orig_err {
+                        EvalError::Throw(_, _, _) => return orig_err,
+                        _ => return err,
+                    }
+                }
+                orig_err
+            }
+            Err(e) => match &orig_err {
+                EvalError::Throw(_, _, _) => orig_err,
+                _ => e,
+            },
+        }
+    }
+
+    // Now evaluate RHS
+    let val = evaluate_expr(mc, env, value_expr)?;
+
+    // NamedEvaluation: after RHS evaluated, set function 'name' if appropriate
     if let Some(nm) = maybe_name_to_set.clone() {
         log::debug!(
             "NamedEvaluation: maybe_name_to_set={:?} value_expr={:?} val={:?}",
@@ -4327,14 +4712,6 @@ fn evaluate_expr_assign<'gc>(
         );
         log::debug!("NamedEvaluation: candidate name='{}' val={:?}", nm, val);
         if let Value::Object(obj) = &val {
-            log::debug!(
-                "NamedEvaluation: value is object, will check existing name property obj_ptr={:p} own_has_name={} keys={:?}",
-                obj.as_ptr(),
-                obj.borrow()
-                    .properties
-                    .contains_key(&crate::core::PropertyKey::String("name".to_string())),
-                obj.borrow().properties.keys().collect::<Vec<_>>()
-            );
             // If the function is an arrow function, prefer to set the name (arrow functions are anonymous and
             // should receive the assignment target name). For other anonymous functions, only set if the
             // existing name is absent or empty.
@@ -4370,30 +4747,11 @@ fn evaluate_expr_assign<'gc>(
                 object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(false))?;
                 object_set_key_value(mc, &desc_obj, "enumerable", Value::Boolean(false))?;
                 object_set_key_value(mc, &desc_obj, "configurable", Value::Boolean(true))?;
-                // DEBUG: Show raw descriptor content before calling define_property_internal
-                log::debug!(
-                    "NamedEvaluation: desc writable raw = {:?}",
-                    object_get_key_value(&desc_obj, "writable").map(|rc| rc.borrow().clone())
-                );
                 crate::js_object::define_property_internal(mc, obj, &crate::core::PropertyKey::String("name".to_string()), &desc_obj)?;
-                // Defensive: ensure name property is marked non-writable and non-enumerable
                 obj.borrow_mut(mc)
                     .set_non_writable(crate::core::PropertyKey::String("name".to_string()));
                 obj.borrow_mut(mc)
                     .set_non_enumerable(crate::core::PropertyKey::String("name".to_string()));
-                // DEBUG: confirm flags on object after defensive setting
-                log::debug!(
-                    "NamedEvaluation: post-set flags for obj_ptr={:p} name_non_writable={} name_non_enumerable={} non_writable_list={:?} non_enumerable_list={:?}",
-                    obj.as_ptr(),
-                    obj.borrow()
-                        .non_writable
-                        .contains(&crate::core::PropertyKey::String("name".to_string())),
-                    obj.borrow()
-                        .non_enumerable
-                        .contains(&crate::core::PropertyKey::String("name".to_string())),
-                    obj.borrow().non_writable.iter().collect::<Vec<_>>(),
-                    obj.borrow().non_enumerable.iter().collect::<Vec<_>>()
-                );
                 log::debug!("NamedEvaluation: set name='{}' on object", nm);
             } else {
                 log::debug!("NamedEvaluation: did not set name for object");
@@ -4401,8 +4759,9 @@ fn evaluate_expr_assign<'gc>(
         }
     }
 
-    match target {
-        Expr::Var(name, _, _) => {
+    // Perform the actual assignment using precomputed LHS components
+    match pre {
+        Precomputed::Var(name) => {
             // Disallow assignment to the special 'arguments' binding in strict-function scope
             if name == "arguments" {
                 let caller_is_strict = env_get_strictness(env);
@@ -4418,65 +4777,139 @@ fn evaluate_expr_assign<'gc>(
                     )));
                 }
             }
-
-            env_set_recursive(mc, env, name, val.clone())?;
+            env_set_recursive(mc, env, &name, val.clone())?;
             Ok(val)
         }
-        Expr::Property(obj_expr, key) => {
-            let obj_val = evaluate_expr(mc, env, obj_expr)?;
-            if let Value::Object(obj) = obj_val {
-                let key_val = PropertyKey::from(key.to_string());
-                set_property_with_accessors(mc, env, &obj, &key_val, val.clone())?;
-                Ok(val)
-            } else {
-                Err(EvalError::Js(raise_eval_error!("Cannot assign to property of non-object")))
-            }
+        Precomputed::Property(base_val, key) => {
+            // ToObject semantics: throw on null/undefined, box primitives, or use object directly.
+            let obj = match base_val {
+                Value::Object(o) => o,
+                Value::Undefined | Value::Null => return Err(EvalError::Js(raise_type_error!("Cannot assign to property of non-object"))),
+                Value::Number(n) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", Value::Function("Number_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", Value::Function("Number_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "__value__", Value::Number(n))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number");
+                    obj
+                }
+                Value::Boolean(b) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "__value__", Value::Boolean(b))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean");
+                    obj
+                }
+                Value::String(s) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", Value::Function("String_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", Value::Function("String_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "length", Value::Number(s.len() as f64))?;
+                    object_set_key_value(mc, &obj, "__value__", Value::String(s.clone()))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String");
+                    obj
+                }
+                Value::BigInt(h) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "__value__", Value::BigInt(h.clone()))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
+                    obj
+                }
+                Value::Symbol(sym_rc) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "__value__", Value::Symbol(sym_rc))?;
+                    obj
+                }
+                _ => return Err(EvalError::Js(raise_eval_error!("Cannot assign to property of non-object"))),
+            };
+            set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
+            Ok(val)
         }
-        Expr::Index(obj_expr, key_expr) => {
-            let obj_val = evaluate_expr(mc, env, obj_expr)?;
-            let key_val_res = evaluate_expr(mc, env, key_expr)?;
-
-            let key = match key_val_res {
+        Precomputed::Index(base_val, raw_key) => {
+            // Convert raw_key to PropertyKey now (ToPropertyKey may throw)
+            let key = match raw_key {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(n.to_string()),
                 Value::Symbol(s) => PropertyKey::Symbol(s),
-                _ => PropertyKey::from(value_to_string(&key_val_res)),
+                _ => PropertyKey::from(value_to_string(&raw_key)),
             };
 
-            if let Value::Object(obj) = obj_val {
-                set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
-                Ok(val)
+            let obj = match base_val {
+                Value::Object(o) => o,
+                Value::Undefined | Value::Null => return Err(EvalError::Js(raise_type_error!("Cannot assign to property of non-object"))),
+                Value::Number(n) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", Value::Function("Number_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", Value::Function("Number_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "__value__", Value::Number(n))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number");
+                    obj
+                }
+                Value::Boolean(b) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "__value__", Value::Boolean(b))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean");
+                    obj
+                }
+                Value::String(s) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", Value::Function("String_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", Value::Function("String_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "length", Value::Number(s.len() as f64))?;
+                    object_set_key_value(mc, &obj, "__value__", Value::String(s.clone()))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String");
+                    obj
+                }
+                Value::BigInt(h) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "__value__", Value::BigInt(h.clone()))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
+                    obj
+                }
+                Value::Symbol(sym_rc) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "__value__", Value::Symbol(sym_rc))?;
+                    obj
+                }
+                _ => return Err(EvalError::Js(raise_eval_error!("Cannot assign to property of non-object"))),
+            };
+
+            set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
+            Ok(val)
+        }
+        Precomputed::SuperProperty(key) => {
+            // Resolve home object and its prototype now and throw if super is invalid
+            if let Some(home_obj) = env.borrow().get_home_object() {
+                if let Some(super_obj) = home_obj.borrow().borrow().prototype {
+                    set_property_with_accessors(mc, env, &super_obj, &key, val.clone())?;
+                    Ok(val)
+                } else {
+                    Err(raise_type_error!("Cannot assign to property of non-object").into())
+                }
             } else {
-                Err(EvalError::Js(raise_eval_error!("Cannot assign to property of non-object")))
+                Err(raise_reference_error!("super is not available").into())
             }
         }
-        _ => {
-            // Diagnostic: report the specific Expr variant of the unsupported assignment target
-            let variant = match target {
-                Expr::Var(_, _, _) => "Var",
-                Expr::Property(_, _) => "Property",
-                Expr::Index(_, _) => "Index",
-                Expr::Array(_) => "Array",
-                Expr::Object(_) => "Object",
-                Expr::Spread(_) => "Spread",
-                Expr::Call(_, _) => "Call",
-                Expr::New(_, _) => "New",
-                Expr::Function(_, _, _) => "Function",
-                Expr::ArrowFunction(_, _) => "ArrowFunction",
-                Expr::Assign(_, _) => "Assign",
-                Expr::Comma(_, _) => "Comma",
-                Expr::OptionalProperty(_, _) => "OptionalProperty",
-                Expr::OptionalIndex(_, _) => "OptionalIndex",
-                Expr::OptionalCall(_, _) => "OptionalCall",
-                Expr::TaggedTemplate(_, _, _) => "TaggedTemplate",
-                Expr::TemplateString(_) => "TemplateString",
-                Expr::GeneratorFunction(_, _, _) => "GeneratorFunction",
-                Expr::AsyncFunction(_, _, _) => "AsyncFunction",
-                Expr::AsyncArrowFunction(_, _) => "AsyncArrowFunction",
-                _ => "Other",
+        Precomputed::SuperIndex(raw_key) => {
+            let key = match raw_key {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(n.to_string()),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                _ => PropertyKey::from(value_to_string(&raw_key)),
             };
-            log::trace!("Unsupported assignment target reached in evaluate_expr_assign: {variant}");
-            Err(EvalError::Js(raise_eval_error!("Assignment target not supported")))
+            if let Some(home_obj) = env.borrow().get_home_object() {
+                if let Some(super_obj) = home_obj.borrow().borrow().prototype {
+                    set_property_with_accessors(mc, env, &super_obj, &key, val.clone())?;
+                    Ok(val)
+                } else {
+                    Err(raise_type_error!("Cannot assign to property of non-object").into())
+                }
+            } else {
+                Err(raise_reference_error!("super is not available").into())
+            }
         }
     }
 }
@@ -5467,7 +5900,7 @@ fn check_global_declarations<'gc>(env: &JSObjectDataPtr<'gc>, statements: &[Stat
     // Check in reverse order as per spec semantics
     for name in fn_names.iter().rev() {
         let key = crate::core::PropertyKey::String(name.clone());
-        if let Some(existing_rc) = crate::core::get_own_property(env, &key) {
+        if let Some(existing_rc) = get_own_property(env, &key) {
             // If it's configurable we can replace it freely
             if env.borrow().is_configurable(&key) {
                 continue;
@@ -6557,7 +6990,7 @@ fn evaluate_expr_binary<'gc>(
                     _ => value_to_string(&l_val),
                 };
                 // Handle Proxy's has trap if present
-                if let Some(proxy_ptr) = crate::core::get_own_property(&obj, &"__proxy__".into())
+                if let Some(proxy_ptr) = get_own_property(&obj, "__proxy__")
                     && let Value::Proxy(p) = &*proxy_ptr.borrow()
                 {
                     let present = crate::js_proxy::_proxy_has_property(mc, p, &PropertyKey::from(key.clone()))?;
@@ -7640,7 +8073,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 if let Value::Object(obj) = obj_val {
                     let key_val = PropertyKey::from(key.to_string());
                     // Proxy wrapper: delegate to deleteProperty trap
-                    if let Some(proxy_ptr) = crate::core::get_own_property(&obj, &"__proxy__".into())
+                    if let Some(proxy_ptr) = get_own_property(&obj, "__proxy__")
                         && let Value::Proxy(p) = &*proxy_ptr.borrow()
                     {
                         let deleted = crate::js_proxy::proxy_delete_property(mc, p, &key_val)?;
@@ -7888,6 +8321,7 @@ fn evaluate_var<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name
     // via DefinePropertyOrThrow, unwrap the stored value. For accessor descriptors, call accessor.
     if let Some(val_ptr) = env_get(env, name) {
         let val = val_ptr.borrow().clone();
+        log::debug!("evaluate_var: name='{}' raw_value={:?}", name, val);
         if let Value::Uninitialized = val {
             return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", name)));
         }
@@ -8050,7 +8484,7 @@ pub(crate) fn get_property_with_accessors<'gc>(
     key: &PropertyKey<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // If this object is a Proxy wrapper, delegate to proxy hooks
-    if let Some(proxy_ptr) = crate::core::get_own_property(obj, &"__proxy__".into())
+    if let Some(proxy_ptr) = get_own_property(obj, "__proxy__")
         && let Value::Proxy(p) = &*proxy_ptr.borrow()
     {
         let res_opt = crate::js_proxy::proxy_get_property(mc, p, key)?;
@@ -8089,6 +8523,34 @@ fn set_property_with_accessors<'gc>(
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
     log::debug!("DBG set_property_with_accessors: obj={:p} key={:?}", Gc::as_ptr(*obj), key);
+    // Diagnostic: locate owner (object on prototype chain that actually has the property)
+    let mut owner_opt: Option<crate::core::JSObjectDataPtr> = None;
+    {
+        let mut cur = Some(*obj);
+        while let Some(c) = cur {
+            // Use `get_own_property` here so we detect the object which actually
+            // *owns* the property, rather than `object_get_key_value` which
+            // searches the prototype chain and can incorrectly return true for
+            // the receiver when the property is inherited.
+            if get_own_property(&c, key).is_some() {
+                owner_opt = Some(c);
+                break;
+            }
+            cur = c.borrow().prototype;
+        }
+    }
+    let owner_ptr = owner_opt.map(Gc::as_ptr);
+    log::debug!(
+        "DBG set_property_with_accessors: owner_ptr={:?} receiver_ptr={:p} key={:?}",
+        owner_ptr,
+        Gc::as_ptr(*obj),
+        key
+    );
+    log::debug!(
+        "DBG set_property_with_accessors: env_ptr={:p} strictness={}",
+        Gc::as_ptr(*_env),
+        crate::core::env_get_strictness(_env)
+    );
     // Special-case assignment to `__proto__` to update the internal prototype pointer
     if let PropertyKey::String(s) = key
         && s == "__proto__"
@@ -8152,7 +8614,7 @@ fn set_property_with_accessors<'gc>(
     }
 
     // If this object is a Proxy wrapper, delegate to its set trap
-    if let Some(proxy_ptr) = crate::core::get_own_property(obj, &"__proxy__".into())
+    if let Some(proxy_ptr) = get_own_property(obj, "__proxy__")
         && let Value::Proxy(p) = &*proxy_ptr.borrow()
     {
         // Proxy#set returns boolean; ignore the boolean here but propagate errors
@@ -8160,61 +8622,225 @@ fn set_property_with_accessors<'gc>(
         return Ok(());
     }
 
-    if let Some(prop_ptr) = object_get_key_value(obj, key) {
-        let prop = prop_ptr.borrow().clone();
-        log::debug!("DBG set_property: existing prop for key={:?} -> {:?}", key, prop);
-        match prop {
-            Value::Property { setter, getter, .. } => {
-                if let Some(s) = setter {
-                    // Diagnostic: log whether the stored setter has a home object
-                    if let Value::Setter(_, _, _, home_opt) = &*s {
-                        if let Some(home_ptr) = home_opt {
-                            log::debug!(
-                                "DBG set_property: stored Property descriptor has setter with home_obj={:p}",
-                                Gc::as_ptr(*home_ptr.borrow())
-                            );
-                        } else {
-                            log::debug!("DBG set_property: stored Property descriptor has setter with no home_obj");
-                        }
-                    } else {
-                        log::debug!("DBG set_property: stored Property descriptor setter is not a Setter variant");
+    // Pre-check prototypes: if an inherited data property exists and is non-writable,
+    // the assignment should throw in strict mode (or be a no-op in non-strict).
+    // If an inherited setter exists, call it with receiver = obj.
+    let mut proto_check = obj.borrow().prototype;
+    while let Some(proto_obj) = proto_check {
+        // Diagnostic: print prototype object pointer, whether it owns the key,
+        // and its writability for the key. This helps verify that the pre-check
+        // sees the same non-writable marker that `define_property_internal` set.
+        log::debug!(
+            "DBG proto_check: proto_ptr={:p} owns_key={} is_writable={}",
+            Gc::as_ptr(proto_obj),
+            get_own_property(&proto_obj, key).is_some(),
+            proto_obj.borrow().is_writable(key)
+        );
+
+        if let Some(inherited_ptr) = object_get_key_value(&proto_obj, key) {
+            let inherited = inherited_ptr.borrow().clone();
+            match inherited {
+                Value::Property { setter, getter, .. } => {
+                    if let Some(s) = setter {
+                        return call_setter(mc, obj, &s, val);
                     }
-                    return call_setter(mc, obj, &s, val);
+                    if getter.is_some() {
+                        return Err(EvalError::Js(crate::raise_type_error!(
+                            "Cannot set property which has only a getter"
+                        )));
+                    }
+                    if !proto_obj.borrow().is_writable(key) {
+                        let strict = crate::core::env_get_strictness(_env);
+                        log::warn!(
+                            "DBG proto_check: inherited non-writable on proto={:p} key={:?} strictness={} env_ptr={:p}",
+                            Gc::as_ptr(proto_obj),
+                            key,
+                            strict,
+                            Gc::as_ptr(*_env)
+                        );
+                        if !strict {
+                            // Dump parent env chain and whether any ancestor has the __is_strict marker
+                            let mut p = Some(*_env);
+                            while let Some(cur) = p {
+                                let has_marker = get_own_property(&cur, "__is_strict").is_some();
+                                log::warn!("DBG env_chain: env_ptr={:p} has__is_strict={}", Gc::as_ptr(cur), has_marker);
+                                p = cur.borrow().prototype;
+                            }
+                        }
+                        if strict {
+                            return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    // writable on prototype -> assignment will create an own property; allow it
+                    break;
                 }
-                if getter.is_some() {
+                Value::Setter(params, body, captured_env, home_opt) => {
+                    return call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val);
+                }
+                Value::Getter(..) => {
                     return Err(EvalError::Js(crate::raise_type_error!(
                         "Cannot set property which has only a getter"
                     )));
                 }
-                // If the existing property is non-writable, TypeError should be thrown
-                if !obj.borrow().is_writable(key) {
-                    return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                _ => {
+                    // Plain inherited value: treat as data property
+                    if !proto_obj.borrow().is_writable(key) {
+                        let strict = crate::core::env_get_strictness(_env);
+                        log::warn!(
+                            "DBG proto_check: inherited non-writable on proto={:p} key={:?} strictness={} env_ptr={:p}",
+                            Gc::as_ptr(proto_obj),
+                            key,
+                            strict,
+                            Gc::as_ptr(*_env)
+                        );
+                        if !strict {
+                            // Dump parent env chain and whether any ancestor has the __is_strict marker
+                            let mut p = Some(*_env);
+                            while let Some(cur) = p {
+                                let has_marker = get_own_property(&cur, "__is_strict").is_some();
+                                log::warn!("DBG env_chain: env_ptr={:p} has__is_strict={}", Gc::as_ptr(cur), has_marker);
+                                p = cur.borrow().prototype;
+                            }
+                        }
+                        if strict {
+                            return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    break;
                 }
-                object_set_key_value(mc, obj, key, val)?;
-                Ok(())
             }
-            Value::Setter(params, body, captured_env, home_opt) => {
-                // Log whether the setter carries a home object for diagnostics
-                if let Some(hb) = &home_opt {
-                    log::debug!("DBG set_property: calling setter with home_obj={:p}", Gc::as_ptr(*hb.borrow()));
-                } else {
-                    log::debug!("DBG set_property: calling setter with no home_obj");
-                }
-                call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val)
+        }
+        proto_check = proto_obj.borrow().prototype;
+    }
+
+    // First, locate owner (object on the prototype chain that actually has the property)
+    let mut owner_opt: Option<crate::core::JSObjectDataPtr> = None;
+    {
+        let mut cur = Some(*obj);
+        while let Some(c) = cur {
+            // Use `get_own_property` to ensure we only detect the object that actually
+            // owns the property (not one that only has it via the prototype chain).
+            if get_own_property(&c, key).is_some() {
+                owner_opt = Some(c);
+                break;
             }
-            Value::Getter(..) => Err(EvalError::Js(crate::raise_type_error!(
-                "Cannot set property which has only a getter"
-            ))),
-            _ => {
-                // For plain existing properties, respect writability
-                if !obj.borrow().is_writable(key) {
-                    return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+            cur = c.borrow().prototype;
+        }
+    }
+
+    if let Some(owner_obj) = owner_opt {
+        // Found an owner in the chain
+        if Gc::ptr_eq(owner_obj, *obj) {
+            // Owner is the receiver (own property)
+            let prop_ptr = object_get_key_value(obj, key).unwrap();
+            let prop = prop_ptr.borrow().clone();
+            log::debug!("DBG set_property: existing prop for key={:?} -> {:?}", key, prop);
+            log::debug!(
+                "DBG set_property: receiver_ptr={:p} non_writable_contains={} properties={:?}",
+                Gc::as_ptr(*obj),
+                obj.borrow().non_writable.contains(key),
+                obj.borrow().properties.keys().collect::<Vec<_>>()
+            );
+            match prop {
+                Value::Property { setter, getter, .. } => {
+                    if let Some(s) = setter {
+                        if let Value::Setter(_, _, _, home_opt) = &*s {
+                            if let Some(home_ptr) = home_opt {
+                                log::debug!(
+                                    "DBG set_property: stored Property descriptor has setter with home_obj={:p}",
+                                    Gc::as_ptr(*home_ptr.borrow())
+                                );
+                            } else {
+                                log::debug!("DBG set_property: stored Property descriptor has setter with no home_obj");
+                            }
+                        } else {
+                            log::debug!("DBG set_property: stored Property descriptor setter is not a Setter variant");
+                        }
+                        return call_setter(mc, obj, &s, val);
+                    }
+                    if getter.is_some() {
+                        return Err(EvalError::Js(crate::raise_type_error!(
+                            "Cannot set property which has only a getter"
+                        )));
+                    }
+                    // If the existing property is non-writable, TypeError should be thrown
+                    if !obj.borrow().is_writable(key) {
+                        return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                    }
+                    object_set_key_value(mc, obj, key, val)?;
+                    Ok(())
                 }
-                object_set_key_value(mc, obj, key, val)?;
-                Ok(())
+                Value::Setter(params, body, captured_env, home_opt) => {
+                    if let Some(hb) = &home_opt {
+                        log::debug!("DBG set_property: calling setter with home_obj={:p}", Gc::as_ptr(*hb.borrow()));
+                    } else {
+                        log::debug!("DBG set_property: calling setter with no home_obj");
+                    }
+                    call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val)
+                }
+                Value::Getter(..) => Err(EvalError::Js(crate::raise_type_error!(
+                    "Cannot set property which has only a getter"
+                ))),
+                _ => {
+                    // For plain existing properties, respect writability
+                    if !obj.borrow().is_writable(key) {
+                        return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                    }
+                    object_set_key_value(mc, obj, key, val)?;
+                    Ok(())
+                }
+            }
+        } else {
+            // Owner is on the prototype chain (inherited property)
+            let proto_obj = owner_obj;
+            let inherited_ptr = object_get_key_value(&proto_obj, key).unwrap();
+            let inherited = inherited_ptr.borrow().clone();
+            match inherited {
+                Value::Property { setter, getter, .. } => {
+                    if let Some(s) = setter {
+                        return call_setter(mc, obj, &s, val);
+                    }
+                    if getter.is_some() {
+                        return Err(EvalError::Js(crate::raise_type_error!(
+                            "Cannot set property which has only a getter"
+                        )));
+                    }
+                    // Inherited data property on prototype: respect prototype's writability
+                    if !proto_obj.borrow().is_writable(key) {
+                        if crate::core::env_get_strictness(_env) {
+                            return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    // Writable on prototype -> create own property on receiver
+                    object_set_key_value(mc, obj, key, val)?;
+                    Ok(())
+                }
+                Value::Setter(params, body, captured_env, home_opt) => {
+                    call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val)
+                }
+                Value::Getter(..) => Err(crate::raise_type_error!("Cannot set property which has only a getter").into()),
+                _ => {
+                    // Plain inherited value: treat as data property; use prototype writability
+                    if !proto_obj.borrow().is_writable(key) {
+                        if crate::core::env_get_strictness(_env) {
+                            return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    object_set_key_value(mc, obj, key, val)?;
+                    Ok(())
+                }
             }
         }
     } else {
+        // No owner found in chain: create own property
         object_set_key_value(mc, obj, key, val)?;
         Ok(())
     }
@@ -8745,41 +9371,38 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         _ => ("Error", full_msg.clone()),
     };
 
-    // Prefer global (root) constructors so created Error objects have the same
-    // constructor identity as user-visible global constructors (avoids mismatches
-    // when errors are created in nested or eval environments).
-    let mut root_env = *env;
-    while let Some(proto) = root_env.borrow().prototype {
-        root_env = proto;
+    // Prefer global constructors by searching the lexical environment chain
+    // upwards for a constructor with the given name. Avoid climbing the object
+    // prototype chain which may bypass the lexical/global environment.
+    let mut found_proto: Option<JSObjectDataPtr<'gc>> = None;
+    let mut search_env: Option<JSObjectDataPtr<'gc>> = Some(*env);
+    while let Some(cur) = search_env {
+        if let Some(err_ctor_val) = object_get_key_value(&cur, name)
+            && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            found_proto = Some(*proto);
+            break;
+        }
+        search_env = cur.borrow().prototype;
     }
 
-    let error_proto = if let Some(err_ctor_val) = object_get_key_value(&root_env, name)
-        && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-        && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
-        && let Value::Object(proto) = &*proto_val.borrow()
-    {
-        Some(*proto)
-    } else if let Some(err_ctor_val) = object_get_key_value(&root_env, "Error")
-        && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-        && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
-        && let Value::Object(proto) = &*proto_val.borrow()
-    {
-        Some(*proto)
-    } else if let Some(err_ctor_val) = object_get_key_value(env, name)
-        && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-        && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
-        && let Value::Object(proto) = &*proto_val.borrow()
-    {
-        Some(*proto)
-    } else if let Some(err_ctor_val) = object_get_key_value(env, "Error")
-        && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-        && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
-        && let Value::Object(proto) = &*proto_val.borrow()
-    {
-        Some(*proto)
-    } else {
-        None
-    };
+    // If not found in lexical chain, fallback to Error constructor's prototype via env or root
+    if found_proto.is_none() {
+        // try env's Error
+        if let Some(err_ctor_val) = object_get_key_value(env, "Error")
+            && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            found_proto = Some(*proto);
+        } else {
+            found_proto = None;
+        }
+    }
+
+    let error_proto = found_proto;
 
     let err_val = create_error(mc, error_proto, (&raw_msg).into()).unwrap_or(Value::Undefined);
 
@@ -9438,6 +10061,15 @@ fn evaluate_expr_new<'gc>(
     }
 
     // Resolve constructor value now (GetValue(ref)) after arguments are evaluated
+    // Diagnostic: show how constructor was referenced when parsed
+    if let Some(ct_ref) = ctor_ref.as_ref() {
+        match ct_ref {
+            CtorRef::Var(n) => log::debug!("evaluate_expr_new: ctor_ref = Var({})", n),
+            CtorRef::Property(_, k) => log::debug!("evaluate_expr_new: ctor_ref = Property({:?})", k),
+            CtorRef::Index(_, kv) => log::debug!("evaluate_expr_new: ctor_ref = Index({:?})", kv),
+            CtorRef::Other(v) => log::debug!("evaluate_expr_new: ctor_ref = Other({:?})", v),
+        }
+    }
     let func_val = match ctor_ref.take().expect("ctor_ref must be set") {
         CtorRef::Var(name) => evaluate_var(mc, env, name)?,
         CtorRef::Property(base, key) => match base {

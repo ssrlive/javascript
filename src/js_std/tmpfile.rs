@@ -63,16 +63,10 @@ pub(crate) fn create_tmpfile<'gc>(mc: &MutationContext<'gc>) -> Result<Value<'gc
 /// Handle file object method calls
 pub(crate) fn handle_file_method<'gc>(object: &JSObjectDataPtr<'gc>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
-    if get_own_property(object, &"__file_id".into()).is_some() {
-        let file_id_val = get_own_property(object, &"__file_id".into())
-            .ok_or(raise_eval_error!("Invalid file object"))?
-            .borrow()
-            .clone();
-        let file_id = match file_id_val {
+    if let Some(file_id_val) = get_own_property(object, "__file_id") {
+        let file_id = match *file_id_val.borrow() {
             Value::Number(n) => n as u64,
-            _ => {
-                return Err(raise_eval_error!("Invalid file object"));
-            }
+            _ => return Err(raise_eval_error!("Invalid file object")),
         };
 
         let mut file_store = FILE_STORE.lock().unwrap();

@@ -335,12 +335,12 @@ pub(crate) fn evaluate_new<'gc>(
             }
 
             // Check if this is Array constructor
-            if get_own_property(&class_obj, &"__is_array_constructor".into()).is_some() {
+            if get_own_property(&class_obj, "__is_array_constructor").is_some() {
                 return crate::js_array::handle_array_constructor(mc, evaluated_args, env);
             }
 
             // Check if this is a TypedArray constructor
-            if get_own_property(&class_obj, &"__kind".into()).is_some() {
+            if get_own_property(&class_obj, "__kind").is_some() {
                 return Ok(handle_typedarray_constructor(mc, &class_obj, evaluated_args, env)?);
             }
 
@@ -482,17 +482,17 @@ pub(crate) fn evaluate_new<'gc>(
                 return Ok(crate::js_number::number_constructor(mc, evaluated_args, env)?);
             }
             // Check for constructor-like singleton objects created by the evaluator
-            if get_own_property(&class_obj, &"__is_string_constructor".into()).is_some() {
+            if get_own_property(&class_obj, "__is_string_constructor").is_some() {
                 return crate::js_string::string_constructor(mc, evaluated_args, env);
             }
-            if get_own_property(&class_obj, &"__is_boolean_constructor".into()).is_some() {
+            if get_own_property(&class_obj, "__is_boolean_constructor").is_some() {
                 return handle_boolean_constructor(mc, evaluated_args, env);
             }
-            if get_own_property(&class_obj, &"__is_date_constructor".into()).is_some() {
+            if get_own_property(&class_obj, "__is_date_constructor").is_some() {
                 return crate::js_date::handle_date_constructor(mc, evaluated_args, env);
             }
             // Error-like constructors (Error) created via ensure_constructor_object
-            if get_own_property(&class_obj, &"__is_error_constructor".into()).is_some() {
+            if get_own_property(&class_obj, "__is_error_constructor").is_some() {
                 log::debug!(
                     "DBG evaluate_new - entered error-like constructor branch, args.len={} class_obj ptr={:p}",
                     evaluated_args.len(),
@@ -560,7 +560,7 @@ pub(crate) fn evaluate_new<'gc>(
                 // Ensure prototype.constructor points back to the canonical constructor
                 if let Some(prototype_val) = object_get_key_value(&canonical_ctor, "prototype") {
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
-                        match crate::core::get_own_property(proto_obj, &"constructor".into()) {
+                        match get_own_property(proto_obj, "constructor") {
                             Some(existing_rc) => {
                                 if let Value::Object(existing_ctor_obj) = &*existing_rc.borrow() {
                                     if !Gc::ptr_eq(*existing_ctor_obj, canonical_ctor) {
@@ -579,7 +579,7 @@ pub(crate) fn evaluate_new<'gc>(
 
                 // Ensure constructor.name exists
                 let ctor_name = "Error";
-                match crate::core::get_own_property(&canonical_ctor, &"name".into()) {
+                match get_own_property(&canonical_ctor, "name") {
                     Some(name_rc) => {
                         if let Value::Undefined = &*name_rc.borrow() {
                             object_set_key_value(mc, &canonical_ctor, "name", Value::String(utf8_to_utf16(ctor_name)))?;
@@ -599,7 +599,7 @@ pub(crate) fn evaluate_new<'gc>(
                 // reasonable default for Error instances created via `new Error()`.
                 let mut stack_lines: Vec<String> = Vec::new();
                 // First line: Error: <message>
-                let message_text = match crate::core::get_own_property(&instance, &"message".into()) {
+                let message_text = match get_own_property(&instance, "message") {
                     Some(mrc) => match &*mrc.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         other => crate::core::value_to_string(other),
@@ -862,7 +862,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::Getter(getter_name, body) => {
                 // Merge getter into existing property descriptor if present
-                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &getter_name.into()) {
+                if let Some(existing_rc) = get_own_property(&prototype_obj, getter_name) {
                     match &*existing_rc.borrow() {
                         Value::Property {
                             value,
@@ -915,7 +915,7 @@ pub(crate) fn create_class_object<'gc>(
                     key_val.clone()
                 };
                 let pk = crate::core::PropertyKey::from(&key_prim);
-                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &pk) {
+                if let Some(existing_rc) = get_own_property(&prototype_obj, pk.clone()) {
                     match &*existing_rc.borrow() {
                         Value::Property {
                             value,
@@ -957,7 +957,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::Setter(setter_name, param, body) => {
                 // Merge setter into existing property descriptor if present
-                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &setter_name.into()) {
+                if let Some(existing_rc) = get_own_property(&prototype_obj, setter_name) {
                     match &*existing_rc.borrow() {
                         Value::Property {
                             value,
@@ -1027,7 +1027,7 @@ pub(crate) fn create_class_object<'gc>(
                     key_val.clone()
                 };
                 let pk = crate::core::PropertyKey::from(&key_prim);
-                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &pk) {
+                if let Some(existing_rc) = get_own_property(&prototype_obj, pk.clone()) {
                     match &*existing_rc.borrow() {
                         Value::Property {
                             value,
@@ -1237,7 +1237,7 @@ pub(crate) fn create_class_object<'gc>(
             ClassMember::PrivateGetter(getter_name, body) => {
                 let key = format!("#{}", getter_name);
                 // Merge into existing property descriptor if present
-                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &key.clone().into()) {
+                if let Some(existing_rc) = get_own_property(&prototype_obj, &key) {
                     match &*existing_rc.borrow() {
                         Value::Property {
                             value,
@@ -1271,7 +1271,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::PrivateSetter(setter_name, param, body) => {
                 let key = format!("#{}", setter_name);
-                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &key.clone().into()) {
+                if let Some(existing_rc) = get_own_property(&prototype_obj, &key) {
                     match &*existing_rc.borrow() {
                         Value::Property {
                             value,

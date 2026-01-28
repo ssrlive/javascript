@@ -2307,17 +2307,41 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         if let Some(Token::Identifier(kw)) = t.get(*index).map(|d| &d.token)
             && (kw == "get" || kw == "set")
         {
+            // Diagnostic trace for accessor detection
+            if let Some(next_tok) = t.get(*index + 1) {
+                log::trace!(
+                    "parse_primary: accessor candidate at idx={} kw={:?} next={:?} next.as_ident={:?}",
+                    *index,
+                    kw,
+                    next_tok.token,
+                    next_tok.token.as_identifier_string()
+                );
+            } else {
+                log::trace!("parse_primary: accessor candidate at idx={} kw={:?} but no next token", *index, kw);
+            }
+
             // Check if it is used as keyword or name
             // get x() {} -> keyword
             // get() {} -> method name 'get'
             // Also allow computed accessor: get [expr]() {}
-            if let Some(next) = t.get(*index + 1)
-                && (matches!(next.token, Token::Identifier(_))
+            if let Some(next) = t.get(*index + 1) {
+                // Allow identifiers, private identifiers and computed keys immediately
+                if matches!(next.token, Token::Identifier(_))
                     || matches!(next.token, Token::PrivateIdentifier(_))
-                    || matches!(next.token, Token::LBracket))
-            {
-                is_accessor = true;
-                is_getter = kw == "get";
+                    || matches!(next.token, Token::LBracket)
+                {
+                    is_accessor = true;
+                    is_getter = kw == "get";
+                    log::trace!("parse_primary: accessor recognized (kw={}) at idx={}", kw, *index);
+                } else {
+                    // Also accept keywords as property names when used with get/set (e.g., `get return() {}`)
+                    // but avoid misclassifying standalone 'get() {}' as accessor keyword usage.
+                    if !matches!(next.token, Token::LParen) && next.token.as_identifier_string().is_some() {
+                        is_accessor = true;
+                        is_getter = kw == "get";
+                        log::trace!("parse_primary: accessor recognized for keyword-name (kw={}) at idx={}", kw, *index);
+                    }
+                }
             }
         }
 
@@ -2959,9 +2983,17 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         // regular property named 'get'/'set' (e.g. `set: function(...)`) with
                         // the getter/setter syntax.
                         // Recognize getter/setter signatures including computed keys
+                        log::trace!(
+                            "parse_primary: object literal accessor check at idx {} tok={:?} next={:?}",
+                            *index,
+                            tokens.get(*index).map(|t| &t.token),
+                            tokens.get(*index + 1).map(|t| &t.token)
+                        );
                         let is_getter =
                             if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get") {
-                                if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
+                                if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_))
+                                    || tokens[*index + 1].token.as_identifier_string().is_some()
+                                {
                                     tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
                                 } else if matches!(tokens[*index + 1].token, Token::LBracket) {
                                     // find matching RBracket and ensure '(' follows
@@ -2994,7 +3026,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
 
                         let is_setter =
                             if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set") {
-                                if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
+                                if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_))
+                                    || tokens[*index + 1].token.as_identifier_string().is_some()
+                                {
                                     tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
                                 } else if matches!(tokens[*index + 1].token, Token::LBracket) {
                                     let mut depth = 0i32;
@@ -3099,10 +3133,29 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
                             *index += 1;
                             Expr::StringLit(s)
-                        } else if let Some(Token::Default) = tokens.get(*index).map(|t| t.token.clone()) {
-                            // allow the reserved word `default` as an object property key
-                            *index += 1;
-                            Expr::StringLit(crate::unicode::utf8_to_utf16("default"))
+                        } else if let Some(tok) = tokens.get(*index).map(|t| t.token.clone()) {
+                            // Allow other keywords (e.g., `return`, `export`, `import`, etc.) as
+                            // property names. Token::as_identifier_string maps those tokens to
+                            // their identifier string when appropriate.
+                            if let Some(id) = tok.as_identifier_string() {
+                                *index += 1;
+                                Expr::StringLit(crate::unicode::utf8_to_utf16(&id))
+                            } else if let Some(Token::Default) = tokens.get(*index).map(|t| t.token.clone()) {
+                                // allow the reserved word `default` as an object property key
+                                *index += 1;
+                                Expr::StringLit(crate::unicode::utf8_to_utf16("default"))
+                            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                                // Computed key (e.g., get [Symbol.toPrimitive]())
+                                *index += 1; // consume [
+                                let expr = parse_assignment(tokens, index)?;
+                                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
+                                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                                }
+                                *index += 1; // consume ]
+                                expr
+                            } else {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
                         } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                             // Computed key (e.g., get [Symbol.toPrimitive]())
                             *index += 1; // consume [

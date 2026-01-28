@@ -122,7 +122,7 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: &Value<'gc>)
                 log::debug!("js_value_to_json_value: array with properties.len() = {}", len);
                 let mut arr = Vec::new();
                 for i in 0..len {
-                    let val_opt = get_own_property(obj, &i.to_string().into());
+                    let val_opt = get_own_property(obj, i);
                     if let Some(val_rc) = &val_opt {
                         if let Some(json_val) = js_value_to_json_value(mc, &val_rc.borrow()) {
                             arr.push(json_val);
@@ -201,8 +201,7 @@ fn inner<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>, depth: usize) -> Option
                 let len = get_array_length(mc, obj).unwrap_or(obj.borrow().properties.len());
                 let mut parts = Vec::with_capacity(len);
                 for i in 0..len {
-                    let key = i.to_string();
-                    if let Some(val_rc) = get_own_property(obj, &key.into()) {
+                    if let Some(val_rc) = get_own_property(obj, i) {
                         if let Some(item_str) = inner(mc, &val_rc.borrow(), depth + 1) {
                             parts.push(item_str);
                         } else {

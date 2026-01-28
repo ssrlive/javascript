@@ -203,15 +203,61 @@ pub(crate) fn define_property_internal<'gc>(
         }
     }
 
+    // If descriptor is a property descriptor (has value/get/set), unspecified attributes default to false
+    let is_property_desc = object_get_key_value(desc_obj, "value").is_some()
+        || object_get_key_value(desc_obj, "get").is_some()
+        || object_get_key_value(desc_obj, "set").is_some();
+    if is_property_desc {
+        // Default missing 'writable' to false
+        if object_get_key_value(desc_obj, "writable").is_none() {
+            log::trace!(
+                "define_property_internal: writable absent -> default false; setting non-writable for {:?} on obj_ptr={:p}",
+                prop_key,
+                target_obj.as_ptr()
+            );
+            target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
+        }
+        // Default missing 'enumerable' to false
+        if object_get_key_value(desc_obj, "enumerable").is_none() {
+            log::trace!(
+                "define_property_internal: enumerable absent -> default false; setting non-enumerable for {:?} on obj_ptr={:p}",
+                prop_key,
+                target_obj.as_ptr()
+            );
+            target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
+        }
+        // Default missing 'configurable' to false
+        if object_get_key_value(desc_obj, "configurable").is_none() {
+            log::trace!(
+                "define_property_internal: configurable absent -> default false; setting non-configurable for {:?} on obj_ptr={:p}",
+                prop_key,
+                target_obj.as_ptr()
+            );
+            target_obj.borrow_mut(mc).set_non_configurable(prop_key.clone());
+        }
+    }
+
     // Only update writable/enumerable if property is configurable or does not exist
-    let is_configurable = target_obj.borrow().is_configurable(prop_key);
+    let existed = object_get_key_value(target_obj, prop_key).is_some();
+    let is_configurable = existed || target_obj.borrow().is_configurable(prop_key);
     log::debug!(
-        "define_property_internal: is_configurable={} for {:?} on obj_ptr={:p}",
+        "define_property_internal: existed={} is_configurable={} for {:?} on obj_ptr={:p}",
+        existed,
         is_configurable,
         prop_key,
         target_obj.as_ptr()
     );
-    if is_configurable {
+    if is_configurable || !existed {
+        if let PropertyKey::String(s) = prop_key
+            && s == "length"
+        {
+            log::debug!(
+                "define_property_internal: defining 'length' desc fields: writable_present={} configurable_present={} enumerable_present={}",
+                object_get_key_value(desc_obj, "writable").is_some(),
+                object_get_key_value(desc_obj, "configurable").is_some(),
+                object_get_key_value(desc_obj, "enumerable").is_some()
+            );
+        }
         // If writable flag explicitly set to false, mark property as non-writable
         if let Some(wrc) = object_get_key_value(desc_obj, "writable")
             && let Value::Boolean(is_writable) = &*wrc.borrow()

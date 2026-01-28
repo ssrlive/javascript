@@ -71,7 +71,7 @@ pub(crate) fn handle_os_method<'gc>(
     };
 
     // If this object looks like the `os` module (we used 'open' as marker)
-    if get_own_property(&object, &"open".into()).is_some() {
+    if get_own_property(&object, "open").is_some() {
         match method {
             "open" => {
                 if let Some(filename_val) = args.first() {
@@ -316,7 +316,7 @@ pub(crate) fn handle_os_method<'gc>(
     }
 
     // If this object looks like the `os.path` module
-    if get_own_property(&object, &"join".into()).is_some() {
+    if get_own_property(&object, "join").is_some() {
         match method {
             "join" | "path.join" => {
                 let mut result = String::new();

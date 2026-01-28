@@ -900,8 +900,10 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
     out.extend(symbol_keys);
     out
 }
-pub fn get_own_property<'gc>(obj: &JSObjectDataPtr<'gc>, key: &PropertyKey<'gc>) -> Option<GcPtr<'gc, Value<'gc>>> {
-    obj.borrow().properties.get(key).cloned()
+
+pub fn get_own_property<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<PropertyKey<'gc>>) -> Option<GcPtr<'gc, Value<'gc>>> {
+    let key = key.into();
+    obj.borrow().properties.get(&key).cloned()
 }
 
 pub fn object_set_key_value<'gc>(
@@ -982,10 +984,18 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
 }
 
 pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
-    if let Some(is_strict_cell) = get_own_property(env, &PropertyKey::String("__is_strict".to_string()))
-        && let crate::core::Value::Boolean(is_strict) = *is_strict_cell.borrow()
-    {
-        return is_strict;
+    // Walk the environment's prototype chain looking for an own `__is_strict` marker.
+    // Some environments are created transiently (e.g., call frames) and may not
+    // directly own the marker; strictness should be inherited from an ancestor
+    // so check prototypes as well.
+    let mut cur = Some(*env);
+    while let Some(c) = cur {
+        if let Some(is_strict_cell) = get_own_property(&c, "__is_strict")
+            && let Value::Boolean(is_strict) = *is_strict_cell.borrow()
+        {
+            return is_strict;
+        }
+        cur = c.borrow().prototype;
     }
     false
 }
@@ -993,7 +1003,7 @@ pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
 pub fn env_set_strictness<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
     let val = Value::Boolean(is_strict);
     let val_ptr = new_gc_cell_ptr(mc, val);
-    env.borrow_mut(mc).insert(PropertyKey::String("__is_strict".to_string()), val_ptr);
+    env.borrow_mut(mc).insert("__is_strict".into(), val_ptr);
     Ok(())
 }
 
@@ -1004,15 +1014,15 @@ pub fn env_set_strictness<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 // Returns true if an own property exists.
 pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'gc>) -> bool {
     match key_val {
-        Value::String(s) => get_own_property(obj, &utf16_to_utf8(s).into()).is_some(),
-        Value::Number(n) => get_own_property(obj, &value_to_string(&Value::Number(*n)).into()).is_some(),
-        Value::Boolean(b) => get_own_property(obj, &b.to_string().into()).is_some(),
-        Value::Undefined => get_own_property(obj, &"undefined".into()).is_some(),
+        Value::String(s) => get_own_property(obj, utf16_to_utf8(s)).is_some(),
+        Value::Number(n) => get_own_property(obj, value_to_string(&Value::Number(*n))).is_some(),
+        Value::Boolean(b) => get_own_property(obj, b.to_string()).is_some(),
+        Value::Undefined => get_own_property(obj, "undefined").is_some(),
         Value::Symbol(sd) => {
             let sym_key = PropertyKey::Symbol(*sd);
             get_own_property(obj, &sym_key).is_some()
         }
-        other => get_own_property(obj, &value_to_string(other).into()).is_some(),
+        other => get_own_property(obj, value_to_string(other)).is_some(),
     }
 }
 

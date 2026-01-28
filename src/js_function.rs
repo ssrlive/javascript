@@ -1,5 +1,5 @@
 use crate::core::{
-    ClosureData, EvalError, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr,
+    ClosureData, EvalError, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr, get_own_property,
     has_own_property_value, new_js_object_data, prepare_function_call_env,
 };
 use crate::core::{PropertyKey, object_get_key_value, object_set_key_value};
@@ -424,7 +424,7 @@ pub fn handle_global_function<'gc>(
                                         let mut i = 0usize;
                                         loop {
                                             let key = i.to_string();
-                                            if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
+                                            if let Some(val_rc) = get_own_property(&arr_obj, &key) {
                                                 forwarded_args.push(val_rc.borrow().clone());
                                             } else {
                                                 break;
@@ -452,7 +452,7 @@ pub fn handle_global_function<'gc>(
                                     let mut i = 0usize;
                                     loop {
                                         let key = i.to_string();
-                                        if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
+                                        if let Some(val_rc) = get_own_property(&arr_obj, &key) {
                                             evaluated_args.push(val_rc.borrow().clone());
                                         } else {
                                             break;
@@ -497,7 +497,7 @@ pub fn handle_global_function<'gc>(
                                         let mut i = 0usize;
                                         loop {
                                             let key = i.to_string();
-                                            if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
+                                            if let Some(val_rc) = get_own_property(&arr_obj, &key) {
                                                 evaluated_args.push(val_rc.borrow().clone());
                                             } else {
                                                 break;
@@ -1674,6 +1674,7 @@ fn handle_object_property_is_enumerable<'gc>(args: &[Value<'gc>], env: &JSObject
 }
 
 pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    log::debug!("initialize_function: starting initialization of Function constructor");
     let func_ctor = new_js_object_data(mc);
     object_set_key_value(mc, &func_ctor, "name", Value::String(utf8_to_utf16("Function")))?;
     object_set_key_value(mc, &func_ctor, "__is_constructor", Value::Boolean(true))?;
@@ -1732,6 +1733,33 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
         &crate::core::PropertyKey::String("arguments".to_string()),
         &restricted_desc,
     )?;
+
+    // Define Function.length as non-writable to match spec so assignments to it
+    // in strict mode throw a TypeError.
+    let desc_len = crate::core::new_js_object_data(mc);
+    object_set_key_value(mc, &desc_len, "value", Value::Number(1.0))?;
+    object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
+    object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
+    object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(false))?;
+    if let Some(wrc) = crate::core::object_get_key_value(&desc_len, "writable") {
+        log::debug!("initialize_function: desc_len writable raw = {:?}", wrc.borrow());
+    } else {
+        log::debug!("initialize_function: desc_len writable raw = <absent>");
+    }
+    log::debug!(
+        "initialize_function: before define exists={} func_ctor_ptr={:p}",
+        object_get_key_value(&func_ctor, "length").is_some(),
+        &func_ctor
+    );
+    crate::js_object::define_property_internal(mc, &func_ctor, &crate::core::PropertyKey::String("length".to_string()), &desc_len)?;
+
+    log::debug!(
+        "Function ctor non_writable after define = {:?}",
+        func_ctor.borrow().non_writable.iter().collect::<Vec<_>>()
+    );
+
+    // NOTE: explicit fallback for setting flags on `length` removed — rely on define_property_internal
+    // to correctly apply non-writable/non-enumerable/non-configurable flags for the `length` property.
 
     crate::core::env_set(mc, env, "Function", Value::Object(func_ctor))?;
 

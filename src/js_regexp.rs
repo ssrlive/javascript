@@ -47,7 +47,7 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 }
 
 pub fn internal_get_regex_pattern(obj: &JSObjectDataPtr) -> Result<Vec<u16>, JSError> {
-    match get_own_property(obj, &"__regex".into()) {
+    match get_own_property(obj, "__regex") {
         Some(val) => match &*val.borrow() {
             Value::String(s) => Ok(s.clone()),
             _ => Err(raise_type_error!("Invalid regex pattern")),
@@ -75,7 +75,7 @@ pub fn get_regex_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
 
 pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
     let pat = get_regex_pattern(obj)?;
-    let flags = match get_own_property(obj, &"__flags".into()) {
+    let flags = match get_own_property(obj, "__flags") {
         Some(val) => match &*val.borrow() {
             Value::String(s) => utf16_to_utf8(s),
             _ => String::new(),
@@ -277,7 +277,7 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             // Get regex pattern and flags
             let pattern_u16 = internal_get_regex_pattern(object)?;
-            let flags = match get_own_property(object, &"__flags".into()) {
+            let flags = match get_own_property(object, "__flags") {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -324,7 +324,7 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             let mut last_index = 0;
             if use_last
-                && let Some(last_index_val) = get_own_property(object, &"lastIndex".into())
+                && let Some(last_index_val) = get_own_property(object, "lastIndex")
                 && let Value::Number(n) = &*last_index_val.borrow()
             {
                 last_index = (*n as isize).max(0) as usize;
@@ -431,7 +431,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             };
 
             let pattern_u16 = internal_get_regex_pattern(object)?;
-            let flags = match get_own_property(object, &"__flags".into()) {
+            let flags = match get_own_property(object, "__flags") {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -465,7 +465,7 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             let mut last_index = 0;
             if use_last
-                && let Some(last_index_val) = get_own_property(object, &"lastIndex".into())
+                && let Some(last_index_val) = get_own_property(object, "lastIndex")
                 && let Value::Number(n) = &*last_index_val.borrow()
             {
                 last_index = (*n as isize).max(0) as usize;
@@ -494,7 +494,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             // Get pattern and flags (two-step get to avoid long-lived borrows)
             let pattern = utf16_to_utf8(&internal_get_regex_pattern(object).unwrap_or_default());
 
-            let flags = match get_own_property(object, &"__flags".into()) {
+            let flags = match get_own_property(object, "__flags") {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),

@@ -189,8 +189,10 @@ pub(crate) fn define_property_internal<'gc>(
     // If descriptor is a property descriptor (has value/get/set), unspecified attributes default to false
     let is_property_desc = pd.value.is_some() || pd.get.is_some() || pd.set.is_some();
     if is_property_desc {
-        // Default missing 'writable' to false
-        if pd.writable.is_none() {
+        // Only default missing 'writable' to false for data descriptors (value or writable present).
+        // For accessor descriptors (get/set) the 'writable' attribute does not apply and
+        // must not be defaulted to false here.
+        if (pd.value.is_some() || pd.writable.is_some()) && pd.writable.is_none() {
             log::trace!(
                 "define_property_internal: writable absent -> default false; setting non-writable for {:?} on obj_ptr={:p}",
                 prop_key,

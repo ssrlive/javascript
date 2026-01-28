@@ -8495,6 +8495,10 @@ fn set_property_with_accessors<'gc>(
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
     log::debug!("DBG set_property_with_accessors: obj={:p} key={:?}", Gc::as_ptr(*obj), key);
+    log::debug!(
+        "DBG set_property_with_accessors: receiver_has_own={}",
+        get_own_property(obj, key).is_some()
+    );
     // Diagnostic: locate owner (object on prototype chain that actually has the property)
     let mut owner_opt: Option<crate::core::JSObjectDataPtr> = None;
     {
@@ -8594,99 +8598,107 @@ fn set_property_with_accessors<'gc>(
         return Ok(());
     }
 
-    // Pre-check prototypes: if an inherited data property exists and is non-writable,
-    // the assignment should throw in strict mode (or be a no-op in non-strict).
-    // If an inherited setter exists, call it with receiver = obj.
-    let mut proto_check = obj.borrow().prototype;
-    while let Some(proto_obj) = proto_check {
-        // Diagnostic: print prototype object pointer, whether it owns the key,
-        // and its writability for the key. This helps verify that the pre-check
-        // sees the same non-writable marker that `define_property_internal` set.
-        log::debug!(
-            "DBG proto_check: proto_ptr={:p} owns_key={} is_writable={}",
-            Gc::as_ptr(proto_obj),
-            get_own_property(&proto_obj, key).is_some(),
-            proto_obj.borrow().is_writable(key)
-        );
+    // Pre-check prototypes only if the receiver does NOT already have an own property for the key.
+    // If the receiver owns the property, the semantics of assignment must first honor the
+    // receiver's own property (data or accessor). Only when there is no own property should we
+    // consult the prototype chain for inherited setters or non-writable inherited properties.
+    log::debug!(
+        "DBG precheck: properties_keys={:?} contains_key={}",
+        obj.borrow().properties.keys().collect::<Vec<_>>(),
+        obj.borrow().properties.contains_key(key)
+    );
+    if get_own_property(obj, key).is_none() {
+        let mut proto_check = obj.borrow().prototype;
+        while let Some(proto_obj) = proto_check {
+            // Diagnostic: print prototype object pointer, whether it owns the key,
+            // and its writability for the key. This helps verify that the pre-check
+            // sees the same non-writable marker that `define_property_internal` set.
+            log::debug!(
+                "DBG proto_check: proto_ptr={:p} owns_key={} is_writable={}",
+                Gc::as_ptr(proto_obj),
+                get_own_property(&proto_obj, key).is_some(),
+                proto_obj.borrow().is_writable(key)
+            );
 
-        if let Some(inherited_ptr) = object_get_key_value(&proto_obj, key) {
-            let inherited = inherited_ptr.borrow().clone();
-            match inherited {
-                Value::Property { setter, getter, .. } => {
-                    if let Some(s) = setter {
-                        return call_setter(mc, obj, &s, val);
+            if let Some(inherited_ptr) = object_get_key_value(&proto_obj, key) {
+                let inherited = inherited_ptr.borrow().clone();
+                match inherited {
+                    Value::Property { setter, getter, .. } => {
+                        if let Some(s) = setter {
+                            return call_setter(mc, obj, &s, val);
+                        }
+                        if getter.is_some() {
+                            return Err(EvalError::Js(crate::raise_type_error!(
+                                "Cannot set property which has only a getter"
+                            )));
+                        }
+                        if !proto_obj.borrow().is_writable(key) {
+                            let strict = crate::core::env_get_strictness(_env);
+                            log::warn!(
+                                "DBG proto_check: inherited non-writable on proto={:p} key={:?} strictness={} env_ptr={:p}",
+                                Gc::as_ptr(proto_obj),
+                                key,
+                                strict,
+                                Gc::as_ptr(*_env)
+                            );
+                            if !strict {
+                                // Dump parent env chain and whether any ancestor has the __is_strict marker
+                                let mut p = Some(*_env);
+                                while let Some(cur) = p {
+                                    let has_marker = get_own_property(&cur, "__is_strict").is_some();
+                                    log::warn!("DBG env_chain: env_ptr={:p} has__is_strict={}", Gc::as_ptr(cur), has_marker);
+                                    p = cur.borrow().prototype;
+                                }
+                            }
+                            if strict {
+                                return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                            } else {
+                                return Ok(());
+                            }
+                        }
+                        // writable on prototype -> assignment will create an own property; allow it
+                        break;
                     }
-                    if getter.is_some() {
+                    Value::Setter(params, body, captured_env, home_opt) => {
+                        return call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val);
+                    }
+                    Value::Getter(..) => {
                         return Err(EvalError::Js(crate::raise_type_error!(
                             "Cannot set property which has only a getter"
                         )));
                     }
-                    if !proto_obj.borrow().is_writable(key) {
-                        let strict = crate::core::env_get_strictness(_env);
-                        log::warn!(
-                            "DBG proto_check: inherited non-writable on proto={:p} key={:?} strictness={} env_ptr={:p}",
-                            Gc::as_ptr(proto_obj),
-                            key,
-                            strict,
-                            Gc::as_ptr(*_env)
-                        );
-                        if !strict {
-                            // Dump parent env chain and whether any ancestor has the __is_strict marker
-                            let mut p = Some(*_env);
-                            while let Some(cur) = p {
-                                let has_marker = get_own_property(&cur, "__is_strict").is_some();
-                                log::warn!("DBG env_chain: env_ptr={:p} has__is_strict={}", Gc::as_ptr(cur), has_marker);
-                                p = cur.borrow().prototype;
+                    _ => {
+                        // Plain inherited value: treat as data property
+                        if !proto_obj.borrow().is_writable(key) {
+                            let strict = crate::core::env_get_strictness(_env);
+                            log::warn!(
+                                "DBG proto_check: inherited non-writable on proto={:p} key={:?} strictness={} env_ptr={:p}",
+                                Gc::as_ptr(proto_obj),
+                                key,
+                                strict,
+                                Gc::as_ptr(*_env)
+                            );
+                            if !strict {
+                                // Dump parent env chain and whether any ancestor has the __is_strict marker
+                                let mut p = Some(*_env);
+                                while let Some(cur) = p {
+                                    let has_marker = get_own_property(&cur, "__is_strict").is_some();
+                                    log::warn!("DBG env_chain: env_ptr={:p} has__is_strict={}", Gc::as_ptr(cur), has_marker);
+                                    p = cur.borrow().prototype;
+                                }
+                            }
+                            if strict {
+                                return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                            } else {
+                                return Ok(());
                             }
                         }
-                        if strict {
-                            return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
-                        } else {
-                            return Ok(());
-                        }
+                        break;
                     }
-                    // writable on prototype -> assignment will create an own property; allow it
-                    break;
-                }
-                Value::Setter(params, body, captured_env, home_opt) => {
-                    return call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val);
-                }
-                Value::Getter(..) => {
-                    return Err(EvalError::Js(crate::raise_type_error!(
-                        "Cannot set property which has only a getter"
-                    )));
-                }
-                _ => {
-                    // Plain inherited value: treat as data property
-                    if !proto_obj.borrow().is_writable(key) {
-                        let strict = crate::core::env_get_strictness(_env);
-                        log::warn!(
-                            "DBG proto_check: inherited non-writable on proto={:p} key={:?} strictness={} env_ptr={:p}",
-                            Gc::as_ptr(proto_obj),
-                            key,
-                            strict,
-                            Gc::as_ptr(*_env)
-                        );
-                        if !strict {
-                            // Dump parent env chain and whether any ancestor has the __is_strict marker
-                            let mut p = Some(*_env);
-                            while let Some(cur) = p {
-                                let has_marker = get_own_property(&cur, "__is_strict").is_some();
-                                log::warn!("DBG env_chain: env_ptr={:p} has__is_strict={}", Gc::as_ptr(cur), has_marker);
-                                p = cur.borrow().prototype;
-                            }
-                        }
-                        if strict {
-                            return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
-                        } else {
-                            return Ok(());
-                        }
-                    }
-                    break;
                 }
             }
+            proto_check = proto_obj.borrow().prototype;
         }
-        proto_check = proto_obj.borrow().prototype;
     }
 
     // First, locate owner (object on the prototype chain that actually has the property)

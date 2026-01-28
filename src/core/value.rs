@@ -139,6 +139,9 @@ pub struct JSObjectData<'gc> {
     pub extensible: bool,
     // Optional internal class definition slot (not exposed as an own property)
     pub class_def: Option<GcPtr<'gc, ClassDefinition>>,
+    /// Internal slot holding the environment where the class was defined. This SHOULD NOT be
+    /// exposed as an own property (avoid inserting a visible "__definition_env" property).
+    pub definition_env: Option<JSObjectDataPtr<'gc>>,
     pub home_object: Option<GcCell<JSObjectDataPtr<'gc>>>,
     /// Internal executable closure for function objects (previously stored as an internal property)
     closure: Option<GcPtr<'gc, Value<'gc>>>,
@@ -165,6 +168,9 @@ unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
         if let Some(cd) = &self.class_def {
             cd.trace(cc);
         }
+        if let Some(def_env) = &self.definition_env {
+            def_env.trace(cc);
+        }
         if let Some(cl) = &self.closure {
             cl.trace(cc);
         }
@@ -180,6 +186,9 @@ impl<'gc> JSObjectData<'gc> {
         }
     }
     pub fn insert(&mut self, key: PropertyKey<'gc>, val: GcPtr<'gc, Value<'gc>>) {
+        // Normal insertion into the object's property map. Avoid panicking here -
+        // higher-level helpers (e.g., `set_property` and `object_set_key_value`) are
+        // responsible for treating implementation-internal keys specially.
         self.properties.insert(key, val);
     }
     pub fn set_const(&mut self, key: String) {
@@ -210,8 +219,25 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_property(&mut self, mc: &MutationContext<'gc>, key: impl Into<PropertyKey<'gc>>, val: Value<'gc>) {
+        let pk = key.into();
+        // Intercept internal-only key "__definition_env" to store it in an internal slot
+        // instead of creating a visible own property.
+        if let PropertyKey::String(s) = &pk
+            && s == "__definition_env"
+        {
+            if let Value::Object(env_obj) = val {
+                self.definition_env = Some(env_obj);
+                log::debug!("set_property: stored internal definition_env on obj={:p}", self as *const _);
+                return;
+            } else {
+                log::warn!(
+                    "set_property: attempted to set '__definition_env' with non-object value on obj={:p}",
+                    self as *const _
+                );
+            }
+        }
         let val_ptr = new_gc_cell_ptr(mc, val);
-        self.insert(key.into(), val_ptr);
+        self.insert(pk, val_ptr);
     }
 
     pub fn get_property(&self, key: impl Into<PropertyKey<'gc>>) -> Option<String> {
@@ -898,6 +924,11 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
                 if typed_indices.contains(s) {
                     continue;
                 }
+
+                // Debug: log if key contains the word 'definition' (helps diagnose odd keys)
+                if s.contains("definition") {
+                    log::debug!("ordinary_own_property_keys: encountered key with definition substring: '{}'", s);
+                }
                 // Check canonical numeric index: no leading + or spaces; must roundtrip to same string
                 if let Ok(parsed) = s.parse::<u64>() {
                     // canonical representation check (no leading zeros except "0")
@@ -949,6 +980,23 @@ pub fn object_set_key_value<'gc>(
         exists,
         obj.borrow().is_extensible()
     );
+
+    // Intercept attempts to set the implementation-only key '__definition_env' and
+    // store it in the object's internal slot instead of creating a visible property.
+    if key_desc == "__definition_env" {
+        if let Value::Object(env_obj) = val {
+            obj.borrow_mut(mc).definition_env = Some(env_obj);
+            log::debug!("object_set_key_value: stored internal definition_env on obj={}", obj_addr);
+            return Ok(());
+        } else {
+            log::warn!(
+                "object_set_key_value: attempted to set '__definition_env' with non-object value on obj={}",
+                obj_addr
+            );
+            // Ignore non-object assignments to the internal slot.
+            return Ok(());
+        }
+    }
 
     // Disallow creating new own properties on non-extensible objects
     if !exists && !obj.borrow().is_extensible() {

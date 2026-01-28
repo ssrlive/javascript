@@ -447,4 +447,22 @@ function assert(condition, message) {
   assert(anotherFruit.name === "grape", 'anotherFruit.name should be "grape"');
 }
 
+{
+  console.log("=== Testing that definition environment does not leak into static class methods ===");
+
+  class C_definition_env_hidden {
+    static a() {}
+    static [1]() {}
+    static c() {}
+    static [2]() {}
+  }
+
+  if (Object.getOwnPropertyNames(C_definition_env_hidden).indexOf("__definition_env") !== -1) {
+    throw new Error("__definition_env leaked into getOwnPropertyNames");
+  }
+  if (Object.keys(C_definition_env_hidden).indexOf("__definition_env") !== -1) {
+    throw new Error("__definition_env leaked into Object.keys");
+  }
+}
+
 true;

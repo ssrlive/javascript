@@ -346,14 +346,8 @@ pub(crate) fn evaluate_new<'gc>(
 
             // Check if this is a class object (inspect internal slot `class_def`)
             if let Some(class_def_ptr) = &class_obj.borrow().class_def {
-                // Get the definition environment for constructor execution
-                let captured_env = if let Some(def_env_val) = object_get_key_value(&class_obj, "__definition_env")
-                    && let Value::Object(def_env_obj) = &*def_env_val.borrow()
-                {
-                    Some(*def_env_obj)
-                } else {
-                    None
-                };
+                // Get the definition environment for constructor execution (internal slot)
+                let captured_env = class_obj.borrow().definition_env;
 
                 log::debug!(
                     "evaluate_new - class constructor matched internal class_def name={} class_obj ptr={:p} extends={:?} members_len={}",
@@ -796,8 +790,9 @@ pub(crate) fn create_class_object<'gc>(
     let class_def_ptr = new_gc_cell_ptr(mc, class_def);
     class_obj.borrow_mut(mc).class_def = Some(class_def_ptr);
 
-    // Store the definition environment for constructor execution
-    object_set_key_value(mc, &class_obj, "__definition_env", Value::Object(*env))?;
+    // Store the definition environment for constructor execution in an internal slot
+    // (do NOT create a visible own property such as "__definition_env").
+    class_obj.borrow_mut(mc).definition_env = Some(*env);
 
     // Add methods to prototype
     for member in members {
@@ -1582,14 +1577,8 @@ pub(crate) fn evaluate_super_call<'gc>(
     if let Value::Object(parent_class_obj) = parent_class {
         // If parent class has an internal class_def slot, use it
         if let Some(parent_class_def_ptr) = &parent_class_obj.borrow().class_def {
-            // Get the parent constructor's definition environment
-            let parent_captured_env = if let Some(def_env_val) = object_get_key_value(&parent_class_obj, "__definition_env")
-                && let Value::Object(def_env_obj) = &*def_env_val.borrow()
-            {
-                Some(*def_env_obj)
-            } else {
-                None
-            };
+            // Get the parent constructor's definition environment (internal slot)
+            let parent_captured_env = parent_class_obj.borrow().definition_env;
 
             for member in &parent_class_def_ptr.borrow().members {
                 if let ClassMember::Constructor(params, body) = member {

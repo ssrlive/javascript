@@ -187,6 +187,28 @@ JS
         fi
         rm -f "$probe" /tmp/feat_probe_out || true
         ;;
+      async-iteration)
+        probe=$(mktemp /tmp/feat_probe.XXXXXX.js)
+        cat > "$probe" <<'JS'
+try {
+  // Parse-only check: async generator declaration should parse if async-iteration is supported
+  async function* f() {}
+  console.log('OK');
+} catch (e) {
+  console.log('NO');
+}
+JS
+        if timeout 2s $RUN_CMD "$probe" > /tmp/feat_probe_out 2>&1; then
+          if grep -q "OK" /tmp/feat_probe_out; then
+            FEATURE_SUPPORTED[$feat]=true
+          else
+            FEATURE_SUPPORTED[$feat]=false
+          fi
+        else
+          FEATURE_SUPPORTED[$feat]=false
+        fi
+        rm -f "$probe" /tmp/feat_probe_out || true
+        ;;
       *)
         # Unknown feature: conservatively assume unsupported
         FEATURE_SUPPORTED[$feat]=false

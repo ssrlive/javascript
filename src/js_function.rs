@@ -1721,18 +1721,8 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     object_set_key_value(mc, &restricted_desc, "set", val)?;
 
     object_set_key_value(mc, &restricted_desc, "configurable", Value::Boolean(true))?;
-    crate::js_object::define_property_internal(
-        mc,
-        &func_proto,
-        &crate::core::PropertyKey::String("caller".to_string()),
-        &restricted_desc,
-    )?;
-    crate::js_object::define_property_internal(
-        mc,
-        &func_proto,
-        &crate::core::PropertyKey::String("arguments".to_string()),
-        &restricted_desc,
-    )?;
+    crate::js_object::define_property_internal(mc, &func_proto, "caller", &restricted_desc)?;
+    crate::js_object::define_property_internal(mc, &func_proto, "arguments", &restricted_desc)?;
 
     // Define Function.length as non-writable to match spec so assignments to it
     // in strict mode throw a TypeError.
@@ -1751,7 +1741,7 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
         object_get_key_value(&func_ctor, "length").is_some(),
         &func_ctor
     );
-    crate::js_object::define_property_internal(mc, &func_ctor, &crate::core::PropertyKey::String("length".to_string()), &desc_len)?;
+    crate::js_object::define_property_internal(mc, &func_ctor, "length", &desc_len)?;
 
     log::debug!(
         "Function ctor non_writable after define = {:?}",

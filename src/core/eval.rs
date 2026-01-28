@@ -746,13 +746,12 @@ fn hoist_name<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: 
             } else {
                 false
             };
-            let key = PropertyKey::String(name.to_string());
             let desc_obj = crate::core::new_js_object_data(mc);
             object_set_key_value(mc, &desc_obj, "value", Value::Undefined)?;
             object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(true))?;
             object_set_key_value(mc, &desc_obj, "enumerable", Value::Boolean(true))?;
             object_set_key_value(mc, &desc_obj, "configurable", Value::Boolean(deletable))?;
-            crate::js_object::define_property_internal(mc, &target_env, &key, &desc_obj)?;
+            crate::js_object::define_property_internal(mc, &target_env, name, &desc_obj)?;
         } else {
             env_set(mc, &target_env, name, Value::Undefined)?;
         }
@@ -946,12 +945,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
                 object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
                 object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
-                crate::js_object::define_property_internal(
-                    mc,
-                    &func_obj,
-                    &crate::core::PropertyKey::String("length".to_string()),
-                    &desc_len,
-                )?;
+                crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
 
                 // Create prototype object
                 let proto_obj = crate::core::new_js_object_data(mc);
@@ -1014,12 +1008,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
                 object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
                 object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
-                crate::js_object::define_property_internal(
-                    mc,
-                    &func_obj,
-                    &crate::core::PropertyKey::String("length".to_string()),
-                    &desc_len,
-                )?;
+                crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
                 env_set(mc, env, name, Value::Object(func_obj))?;
             } else {
                 let func = evaluate_function_expression(mc, env, None, params, &mut body_clone)?;
@@ -4748,7 +4737,7 @@ fn evaluate_expr_assign<'gc>(
                 object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(false))?;
                 object_set_key_value(mc, &desc_obj, "enumerable", Value::Boolean(false))?;
                 object_set_key_value(mc, &desc_obj, "configurable", Value::Boolean(true))?;
-                crate::js_object::define_property_internal(mc, obj, &crate::core::PropertyKey::String("name".to_string()), &desc_obj)?;
+                crate::js_object::define_property_internal(mc, obj, "name", &desc_obj)?;
                 obj.borrow_mut(mc)
                     .set_non_writable(crate::core::PropertyKey::String("name".to_string()));
                 obj.borrow_mut(mc)
@@ -7472,12 +7461,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     object_set_key_value(mc, &desc_name, "writable", Value::Boolean(false))?;
                     object_set_key_value(mc, &desc_name, "enumerable", Value::Boolean(false))?;
                     object_set_key_value(mc, &desc_name, "configurable", Value::Boolean(true))?;
-                    crate::js_object::define_property_internal(
-                        mc,
-                        &func_obj,
-                        &crate::core::PropertyKey::String("name".to_string()),
-                        &desc_name,
-                    )?;
+                    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc_name)?;
                 }
             }
             // Set 'length' property for async functions
@@ -7503,7 +7487,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
             object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
             object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
-            crate::js_object::define_property_internal(mc, &func_obj, &crate::core::PropertyKey::String("length".to_string()), &desc_len)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
 
             Ok(Value::Object(func_obj))
         }
@@ -7566,7 +7550,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
             object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
             object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
-            crate::js_object::define_property_internal(mc, &func_obj, &crate::core::PropertyKey::String("length".to_string()), &desc_len)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
 
             // By default, anonymous arrow functions expose an own `name` property with the empty string
             let desc_name = crate::core::new_js_object_data(mc);
@@ -7574,7 +7558,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             object_set_key_value(mc, &desc_name, "writable", Value::Boolean(false))?;
             object_set_key_value(mc, &desc_name, "enumerable", Value::Boolean(false))?;
             object_set_key_value(mc, &desc_name, "configurable", Value::Boolean(true))?;
-            crate::js_object::define_property_internal(mc, &func_obj, &crate::core::PropertyKey::String("name".to_string()), &desc_name)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "name", &desc_name)?;
 
             // Arrow functions do not have a 'prototype' property (not constructible)
 
@@ -8310,6 +8294,46 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
 
+            // Anonymous async arrow functions should expose an own 'name' property
+            // with the empty string as its value and the standard attributes: writable:false,
+            // enumerable:false, configurable:true (per Test262 expectations).
+            object_set_key_value(mc, &func_obj, "name", Value::String(crate::unicode::utf8_to_utf16("")))?;
+            func_obj
+                .borrow_mut(mc)
+                .set_non_writable(crate::core::PropertyKey::String("name".to_string()));
+            func_obj
+                .borrow_mut(mc)
+                .set_non_enumerable(crate::core::PropertyKey::String("name".to_string()));
+            // Mark configurable=true explicitly
+            func_obj
+                .borrow_mut(mc)
+                .set_configurable(crate::core::PropertyKey::String("name".to_string()));
+
+            // Set 'length' for async arrow functions (number of positional params before first default/rest)
+            let mut fn_length = 0_usize;
+            for p in params.iter() {
+                match p {
+                    crate::core::DestructuringElement::Variable(_, default_opt) => {
+                        if default_opt.is_some() {
+                            break;
+                        }
+                        fn_length += 1;
+                    }
+                    crate::core::DestructuringElement::Rest(_) => break,
+                    crate::core::DestructuringElement::NestedArray(_) | crate::core::DestructuringElement::NestedObject(_) => {
+                        fn_length += 1;
+                    }
+                    crate::core::DestructuringElement::Empty => {}
+                    _ => {}
+                }
+            }
+            let desc_len = crate::core::new_js_object_data(mc);
+            object_set_key_value(mc, &desc_len, "value", Value::Number(fn_length as f64))?;
+            object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
+            object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
+            object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
+            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
+
             Ok(Value::Object(func_obj))
         }
         Expr::ValuePlaceholder => Ok(Value::Undefined),
@@ -8457,7 +8481,7 @@ fn evaluate_function_expression<'gc>(
     object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
     object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
     object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
-    crate::js_object::define_property_internal(mc, &func_obj, &crate::core::PropertyKey::String("length".to_string()), &desc_len)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
 
     // Create prototype object
     let proto_obj = crate::core::new_js_object_data(mc);

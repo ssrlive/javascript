@@ -428,6 +428,41 @@ JS
     fi
   fi
 
+  # If the test uses the async flag, ensure we prepend Test262's async harness files
+  # Use harness/doneprintHandle.js (defines $DONE) and harness/asyncHelpers.js (defines asyncTest/assert.throwsAsync)
+  if echo "$meta" | grep -Eq 'flags:\s*\[.*async.*\]'; then
+    done_path="${HARNESS_INDEX['doneprintHandle.js']:-}"
+    async_helpers_path="${HARNESS_INDEX['asyncHelpers.js']:-}"
+
+    # Prepend doneprintHandle.js (defines $DONE) if available and not already present
+    if [[ -n "$done_path" ]]; then
+      already=false
+      for p in "${PREPEND_FILES[@]:-}"; do
+        if [[ "$(basename "$p")" == "$(basename "$done_path")" ]]; then
+          already=true; break
+        fi
+      done
+      if ! $already; then
+        PREPEND_FILES=("$done_path" "${PREPEND_FILES[@]:-}")
+        NEED_PREPEND=true
+      fi
+    fi
+
+    # Prepend asyncHelpers.js (defines asyncTest/assert.throwsAsync) if available and not already present
+    if [[ -n "$async_helpers_path" ]]; then
+      already=false
+      for p in "${PREPEND_FILES[@]:-}"; do
+        if [[ "$(basename "$p")" == "$(basename "$async_helpers_path")" ]]; then
+          already=true; break
+        fi
+      done
+      if ! $already; then
+        PREPEND_FILES=("$async_helpers_path" "${PREPEND_FILES[@]:-}")
+        NEED_PREPEND=true
+      fi
+    fi
+  fi
+
   # If we deferred any prepends or strict wrapping, compose a single temporary test file now
   if [[ "${NEED_PREPEND:-false}" == "true" || "${NEED_STRICT:-false}" == "true" ]]; then
     TMP_TEST_FILE=$(mktemp /tmp/test262.XXXXXX.js)

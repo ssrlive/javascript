@@ -78,9 +78,10 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 pub(crate) fn define_property_internal<'gc>(
     mc: &MutationContext<'gc>,
     target_obj: &JSObjectDataPtr<'gc>,
-    prop_key: &PropertyKey<'gc>,
+    prop_key: impl Into<PropertyKey<'gc>>,
     desc_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
+    let prop_key = &prop_key.into();
     // Extract descriptor fields
     let value_rc_opt = object_get_key_value(desc_obj, "value");
 

@@ -3499,23 +3499,49 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             }
         }
         Token::Async => {
-            // Check if followed by function or arrow function parameters
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::Function) {
-                *index += 1; // consume function
+            // Use lookahead from the current index so we don't mutate *index until we've
+            // determined which production this is.
+            // Note: parse_primary increments *index after reading token_data, so
+            // *index currently points to the token AFTER the matched token. Compute
+            // `start` as the matched token index and `next` as the following token.
+            let start = *index - 1;
+            let next = *index;
+            // Trace entry for Async token (use start/next to avoid mutated *index impacting lookups)
+            log::trace!(
+                "parse_primary: Token::Async start={} *index={} tokens_slice={:?}",
+                start,
+                *index,
+                tokens.iter().skip(start).take(4).collect::<Vec<_>>()
+            );
+            // Async functions cannot be generators (async function* is invalid); mark false
+            let is_generator = false;
+
+            // Async function expression: async function [name] ( ... ) { ... }
+            if next < tokens.len() && matches!(tokens[next].token, Token::Function) {
+                log::trace!("parse_primary (async): detected 'async function' at start={} next={}", start, next);
+                // Advance index to point after the 'function' token
+                *index = next + 1; // position after 'function'
                 // Optional name for async function expressions (same rules as normal functions)
                 let name = if *index < tokens.len() {
                     if let Token::Identifier(n) = &tokens[*index].token {
                         // Look ahead for next non-LineTerminator token
-                        let mut idx = 1usize;
+                        let mut idx = *index + 1;
                         while idx < tokens.len() && matches!(tokens[idx].token, Token::LineTerminator) {
                             idx += 1;
                         }
+                        log::trace!(
+                            "parse_primary (async): potential name='{}' idx={} token_after_name={:?}",
+                            n,
+                            *index,
+                            tokens.get(idx)
+                        );
                         if idx < tokens.len() && matches!(tokens[idx].token, Token::LParen) {
                             let name = n.clone();
                             log::trace!("parse_primary: treating '{}' as async function name", name);
                             *index += 1;
                             Some(name)
                         } else {
+                            log::trace!("parse_primary (async): identifier not a name (no '(' after) at idx {}", idx);
                             None
                         }
                     } else {
@@ -3526,9 +3552,15 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 };
 
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                    log::trace!("parse_primary (async): parsing parameters at idx {}", *index);
                     *index += 1; // consume "("
                     let params = parse_parameters(tokens, index)?;
                     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                        log::trace!(
+                            "parse_primary (async): expected '{{' after params but found {:?} at idx {}",
+                            tokens.get(*index),
+                            *index
+                        );
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     }
                     *index += 1; // consume {
@@ -3537,12 +3569,24 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     }
                     *index += 1; // consume }
-                    Expr::AsyncFunction(name, params, body)
+                    if is_generator {
+                        log::trace!("parse_primary: constructed GeneratorFunction name={:?} params={:?}", name, params);
+                        Expr::GeneratorFunction(name, params, body)
+                    } else {
+                        log::trace!("parse_primary: constructed AsyncFunction name={:?} params={:?}", name, params);
+                        Expr::AsyncFunction(name, params, body)
+                    }
                 } else {
+                    log::trace!(
+                        "parse_primary (async): missing '(' after 'function' at idx {} token={:?}",
+                        *index,
+                        tokens.get(*index)
+                    );
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                 // Async arrow function
+                log::trace!("parse_primary (async): detected '(' => possible async arrow at idx {}", *index);
                 *index += 1; // consume (
                 let mut params: Vec<DestructuringElement> = Vec::new();
                 let mut is_arrow = false;
@@ -3599,6 +3643,34 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 } else {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::Identifier(_)) {
+                // Handle `async <identifier> =>` form (async binding identifier arrow)
+                // Look ahead to see if the identifier is followed (optionally separated by LineTerminator) by an Arrow token
+                if let Token::Identifier(name) = &tokens[*index].token {
+                    let ident_name = name.clone();
+                    let mut j = *index + 1;
+                    while j < tokens.len() && matches!(tokens[j].token, Token::LineTerminator) {
+                        j += 1;
+                    }
+                    if j < tokens.len() && matches!(tokens[j].token, Token::Arrow) {
+                        // consume identifier and arrow
+                        *index = j + 1;
+                        return Ok(Expr::AsyncArrowFunction(
+                            vec![DestructuringElement::Variable(ident_name, None)],
+                            parse_arrow_body(tokens, index)?,
+                        ));
+                    }
+                }
+                // Fall back to treating `async` as an identifier name when not followed by function/arrow
+                let line = token_data.line;
+                let column = token_data.column;
+                let mut expr = Expr::Var("async".to_string(), Some(line), Some(column));
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                    *index += 1;
+                    let body = parse_arrow_body(tokens, index)?;
+                    expr = Expr::ArrowFunction(vec![DestructuringElement::Variable("async".to_string(), None)], body);
+                }
+                expr
             } else {
                 // Treat bare 'async' as an identifier name when not followed by function/arrow
                 let line = token_data.line;
@@ -4377,6 +4449,36 @@ mod tests {
                 }
                 _ => panic!("expected binary add expression"),
             },
+            _ => panic!("expected expression statement"),
+        }
+    }
+
+    #[test]
+    fn test_async_function_expression_is_primary() {
+        let src = "(async function foo() { }.prototype)";
+        let mut tokens = tokenize(src).unwrap();
+        if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
+            tokens.pop();
+        }
+        let mut index = 0usize;
+        let stmts = parse_statements(&tokens, &mut index).unwrap();
+        assert!(!stmts.is_empty(), "expected at least one statement");
+
+        match &*stmts[0].kind {
+            StatementKind::Expr(expr) => {
+                if let Expr::Property(base, prop) = expr {
+                    // Ensure the property name is 'prototype'
+                    assert_eq!(prop, "prototype");
+                    match &**base {
+                        Expr::AsyncFunction(Some(name), _params, _body) | Expr::Function(Some(name), _params, _body) => {
+                            assert_eq!(name, "foo");
+                        }
+                        other => panic!("expected async or function expression as base, got: {:?}", other),
+                    }
+                } else {
+                    panic!("expected property expression");
+                }
+            }
             _ => panic!("expected expression statement"),
         }
     }

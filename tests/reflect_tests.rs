@@ -56,3 +56,84 @@ fn test_reflect_get_prototype_of() {
     let result = evaluate_script("typeof Reflect.getPrototypeOf({})", None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"object\"");
 }
+#[test]
+fn test_object_define_property_defaults() {
+    let script = r#"
+            var o = {};
+            Object.defineProperty(o, 'a', { value: 1 });
+            var d = Object.getOwnPropertyDescriptor(o, 'a');
+            [d.value === 1, d.writable, d.enumerable, d.configurable].toString();
+        "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"true,false,false,false\"");
+}
+
+#[test]
+fn test_object_define_property_accessor() {
+    let script = r#"
+            var o = {};
+            Object.defineProperty(o, 'a', { get: function(){ return 7; }, enumerable: true });
+            var d = Object.getOwnPropertyDescriptor(o, 'a');
+            [typeof d.get === 'function', d.enumerable, d.configurable].toString();
+        "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"true,true,false\"");
+}
+
+#[test]
+fn test_reflect_get_own_property_descriptor() {
+    let script = r#"
+            var o = {};
+            Object.defineProperty(o, 'a', { get: function(){ return 7; }, enumerable: true });
+            var d = Reflect.getOwnPropertyDescriptor(o, 'a');
+            [typeof d.get === 'function', d.enumerable, d.configurable].toString();
+        "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"true,true,false\"");
+}
+
+#[test]
+fn test_object_define_properties_invalid_getter_throws() {
+    let script = r#"
+            var o = {};
+            try {
+                Object.defineProperties(o, { a: { get: 5 } });
+                'NO THROW';
+            } catch (e) { 'THROW ' + (e.name || e); }
+        "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"THROW TypeError\"");
+}
+
+#[test]
+fn test_reflect_define_property_invalid_getter_returns_false() {
+    let script = r#"
+            var o = {};
+            Reflect.defineProperty(o, 'a', { get: 5 });
+        "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "false");
+}
+
+#[test]
+fn test_object_define_property_mixed_descriptor_throws() {
+    let script = r#"
+            var o = {};
+            try {
+                Object.defineProperty(o, 'a', { get: function() {}, value: 1 });
+                'NO THROW';
+            } catch (e) { 'THROW ' + (e.name || e); }
+        "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"THROW TypeError\"");
+}
+
+#[test]
+fn test_reflect_define_property_mixed_descriptor_returns_false() {
+    let script = r#"
+            var o = {};
+            Reflect.defineProperty(o, 'a', { get: function() {}, value: 1 });
+        "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "false");
+}

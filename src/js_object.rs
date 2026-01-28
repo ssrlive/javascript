@@ -1,6 +1,6 @@
 use crate::core::{
-    ClosureData, EvalError, JSObjectDataPtr, PropertyKey, Value, evaluate_call_dispatch, new_js_object_data, object_get_key_value,
-    object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    ClosureData, EvalError, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, evaluate_call_dispatch, new_js_object_data,
+    object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -82,26 +82,22 @@ pub(crate) fn define_property_internal<'gc>(
     desc_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
     let prop_key = &prop_key.into();
-    // Extract descriptor fields
-    let value_rc_opt = object_get_key_value(desc_obj, "value");
+    // Parse descriptor into typed PropertyDescriptor
+    let pd = PropertyDescriptor::from_object(desc_obj)?;
 
     // If the property exists and is non-configurable on the target, apply ECMAScript-compatible checks
     if let Some(existing_rc) = object_get_key_value(target_obj, prop_key)
         && !target_obj.borrow().is_configurable(prop_key)
     {
         // If descriptor explicitly sets configurable true -> throw
-        if let Some(cfg_rc) = object_get_key_value(desc_obj, "configurable")
-            && let Value::Boolean(true) = &*cfg_rc.borrow()
-        {
+        if pd.configurable == Some(true) {
             return Err(raise_type_error!("Cannot make non-configurable property configurable"));
         }
 
         // If descriptor explicitly sets enumerable and it's different -> throw
-        if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
-            && let Value::Boolean(new_enum) = &*enum_rc.borrow()
-        {
+        if let Some(new_enum) = pd.enumerable {
             let existing_enum = target_obj.borrow().is_enumerable(prop_key);
-            if *new_enum != existing_enum {
+            if new_enum != existing_enum {
                 return Err(raise_type_error!("Cannot change enumerability of non-configurable property"));
             }
         }
@@ -116,41 +112,37 @@ pub(crate) fn define_property_internal<'gc>(
         // If existing is data property
         if !existing_is_accessor {
             // Disallow converting to accessor
-            if object_get_key_value(desc_obj, "get").is_some() || object_get_key_value(desc_obj, "set").is_some() {
+            if pd.get.is_some() || pd.set.is_some() {
                 return Err(raise_type_error!("Cannot convert non-configurable data property to an accessor"));
             }
 
             // If writable is being set from false -> true, disallow
-            if let Some(wrc) = object_get_key_value(desc_obj, "writable")
-                && let Value::Boolean(new_writable) = &*wrc.borrow()
-                && *new_writable
-                && !target_obj.borrow().is_writable(prop_key)
-            {
+            if pd.writable == Some(true) && !target_obj.borrow().is_writable(prop_key) {
                 return Err(raise_type_error!("Cannot make non-writable property writable"));
             }
 
             // If attempting to change value while not writable and values differ -> throw
-            if let Some(new_val_rc) = value_rc_opt.as_ref()
-                && !target_obj.borrow().is_writable(prop_key)
+            if !target_obj.borrow().is_writable(prop_key)
+                && let Some(pd_value) = &pd.value
             {
                 // get existing value for comparison
                 let existing_val = match &*existing_rc.borrow() {
                     Value::Property { value: Some(v), .. } => v.borrow().clone(),
                     other => other.clone(),
                 };
-                if !crate::core::values_equal(mc, &existing_val, &new_val_rc.borrow().clone()) {
+                if !crate::core::values_equal(mc, &existing_val, pd_value) {
                     return Err(raise_type_error!("Cannot change value of non-writable, non-configurable property"));
                 }
             }
         } else {
             // existing is accessor
             // Disallow converting to data property
-            if value_rc_opt.is_some() || object_get_key_value(desc_obj, "writable").is_some() {
+            if pd.value.is_some() || pd.writable.is_some() {
                 return Err(raise_type_error!("Cannot convert non-configurable accessor to a data property"));
             }
 
             // Disallow changing getter/setter functions on non-configurable accessor
-            if object_get_key_value(desc_obj, "get").is_some() || object_get_key_value(desc_obj, "set").is_some() {
+            if pd.get.is_some() || pd.set.is_some() {
                 return Err(raise_type_error!(
                     "Cannot change getter/setter of non-configurable accessor property"
                 ));
@@ -159,43 +151,33 @@ pub(crate) fn define_property_internal<'gc>(
     }
 
     let mut getter_opt: Option<Box<Value>> = None;
-    if let Some(get_rc) = object_get_key_value(desc_obj, "get") {
-        let get_val = get_rc.borrow();
-        if !matches!(&*get_val, Value::Undefined) {
-            getter_opt = Some(Box::new(get_val.clone()));
-        }
+    if pd.get.is_some()
+        && let Some(get_val) = pd.get.clone()
+        && !matches!(get_val, Value::Undefined)
+    {
+        getter_opt = Some(Box::new(get_val));
     }
 
     let mut setter_opt: Option<Box<Value>> = None;
-    if let Some(set_rc) = object_get_key_value(desc_obj, "set") {
-        let set_val = set_rc.borrow();
-        if !matches!(&*set_val, Value::Undefined) {
-            setter_opt = Some(Box::new(set_val.clone()));
-        }
+    if pd.set.is_some()
+        && let Some(set_val) = pd.set.clone()
+        && !matches!(set_val, Value::Undefined)
+    {
+        setter_opt = Some(Box::new(set_val));
     }
 
     // Create property descriptor value
     let prop_descriptor = Value::Property {
-        value: value_rc_opt,
+        value: pd.value.clone().map(|v| new_gc_cell_ptr(mc, v)),
         getter: getter_opt,
         setter: setter_opt,
     };
 
     // DEBUG: Log raw descriptor fields for troubleshooting
-    if let Some(wrc) = object_get_key_value(desc_obj, "writable") {
-        log::debug!("define_property_internal: descriptor writable raw = {:?}", wrc.borrow());
-    } else {
-        log::debug!("define_property_internal: descriptor writable raw = <absent>");
-    }
-    if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable") {
-        log::debug!("define_property_internal: descriptor enumerable raw = {:?}", enum_rc.borrow());
-    } else {
-        log::debug!("define_property_internal: descriptor enumerable raw = <absent>");
-    }
-    if let Some(cfg_rc) = object_get_key_value(desc_obj, "configurable")
-        && let Value::Boolean(is_cfg) = &*cfg_rc.borrow()
-    {
-        if *is_cfg {
+    log::debug!("define_property_internal: descriptor writable raw = {:?}", pd.writable);
+    log::debug!("define_property_internal: descriptor enumerable raw = {:?}", pd.enumerable);
+    if let Some(is_cfg) = pd.configurable {
+        if is_cfg {
             log::trace!("define_property_internal: setting configurable=true for {:?}", prop_key);
             target_obj.borrow_mut(mc).set_configurable(prop_key.clone());
         } else {
@@ -205,12 +187,10 @@ pub(crate) fn define_property_internal<'gc>(
     }
 
     // If descriptor is a property descriptor (has value/get/set), unspecified attributes default to false
-    let is_property_desc = object_get_key_value(desc_obj, "value").is_some()
-        || object_get_key_value(desc_obj, "get").is_some()
-        || object_get_key_value(desc_obj, "set").is_some();
+    let is_property_desc = pd.value.is_some() || pd.get.is_some() || pd.set.is_some();
     if is_property_desc {
         // Default missing 'writable' to false
-        if object_get_key_value(desc_obj, "writable").is_none() {
+        if pd.writable.is_none() {
             log::trace!(
                 "define_property_internal: writable absent -> default false; setting non-writable for {:?} on obj_ptr={:p}",
                 prop_key,
@@ -219,7 +199,7 @@ pub(crate) fn define_property_internal<'gc>(
             target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
         }
         // Default missing 'enumerable' to false
-        if object_get_key_value(desc_obj, "enumerable").is_none() {
+        if pd.enumerable.is_none() {
             log::trace!(
                 "define_property_internal: enumerable absent -> default false; setting non-enumerable for {:?} on obj_ptr={:p}",
                 prop_key,
@@ -228,7 +208,7 @@ pub(crate) fn define_property_internal<'gc>(
             target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
         }
         // Default missing 'configurable' to false
-        if object_get_key_value(desc_obj, "configurable").is_none() {
+        if pd.configurable.is_none() {
             log::trace!(
                 "define_property_internal: configurable absent -> default false; setting non-configurable for {:?} on obj_ptr={:p}",
                 prop_key,
@@ -254,16 +234,13 @@ pub(crate) fn define_property_internal<'gc>(
         {
             log::debug!(
                 "define_property_internal: defining 'length' desc fields: writable_present={} configurable_present={} enumerable_present={}",
-                object_get_key_value(desc_obj, "writable").is_some(),
-                object_get_key_value(desc_obj, "configurable").is_some(),
-                object_get_key_value(desc_obj, "enumerable").is_some()
+                pd.writable.is_some(),
+                pd.configurable.is_some(),
+                pd.enumerable.is_some()
             );
         }
         // If writable flag explicitly set to false, mark property as non-writable
-        if let Some(wrc) = object_get_key_value(desc_obj, "writable")
-            && let Value::Boolean(is_writable) = &*wrc.borrow()
-            && !*is_writable
-        {
+        if pd.writable == Some(false) {
             log::trace!(
                 "define_property_internal: setting non-writable for {:?} on obj_ptr={:p}",
                 prop_key,
@@ -286,10 +263,7 @@ pub(crate) fn define_property_internal<'gc>(
             );
         }
         // If writable flag explicitly set to true, clear non-writable
-        if let Some(wrc) = object_get_key_value(desc_obj, "writable")
-            && let Value::Boolean(is_writable) = &*wrc.borrow()
-            && *is_writable
-        {
+        if pd.writable == Some(true) {
             log::trace!(
                 "define_property_internal: setting writable=true for {:?} on obj_ptr={:p}",
                 prop_key,
@@ -299,10 +273,7 @@ pub(crate) fn define_property_internal<'gc>(
         }
 
         // If enumerable flag explicitly set to false, mark property as non-enumerable
-        if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
-            && let Value::Boolean(is_enum) = &*enum_rc.borrow()
-            && !*is_enum
-        {
+        if pd.enumerable == Some(false) {
             log::trace!(
                 "define_property_internal: setting non-enumerable for {:?} on obj_ptr={:p}",
                 prop_key,
@@ -311,10 +282,7 @@ pub(crate) fn define_property_internal<'gc>(
             target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
         }
         // If enumerable flag explicitly set to true, clear non-enumerable
-        if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
-            && let Value::Boolean(is_enum) = &*enum_rc.borrow()
-            && *is_enum
-        {
+        if pd.enumerable == Some(true) {
             target_obj.borrow_mut(mc).set_enumerable(prop_key.clone());
         }
     }
@@ -706,129 +674,14 @@ pub fn handle_object_method<'gc>(
                 val => PropertyKey::String(value_to_string(&val)),
             };
 
-            if let Some(val_rc) = object_get_key_value(&obj, &key) {
-                let desc_obj = new_js_object_data(mc);
-                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
-
-                match &*val_rc.borrow() {
-                    Value::Property { value, getter, setter } => {
-                        if let Some(v) = value {
-                            object_set_key_value(mc, &desc_obj, "value", v.borrow().clone())?;
-                            // Use the object's actual writable flag rather than assuming true
-                            let writable = obj.borrow().is_writable(&key);
-                            let non_writable_contains = obj.borrow().non_writable.contains(&key);
-                            let non_writable_list: Vec<String> = obj
-                                .borrow()
-                                .non_writable
-                                .iter()
-                                .map(|k| match k {
-                                    PropertyKey::String(s) => s.clone(),
-                                    PropertyKey::Symbol(_) => "<symbol>".to_string(),
-                                })
-                                .collect();
-                            log::debug!(
-                                "getOwnPropertyDescriptor: obj_ptr={:p} key={:?} is_writable={} non_writable_contains={} non_writable_list={:?}",
-                                obj.as_ptr(),
-                                key,
-                                writable,
-                                non_writable_contains,
-                                non_writable_list
-                            );
-                            let writable_flag = Value::Boolean(writable);
-                            object_set_key_value(mc, &desc_obj, "writable", writable_flag)?;
-                        }
-                        if let Some(g) = getter {
-                            match &*g.clone() {
-                                Value::Getter(body, captured_env, _home) => {
-                                    let func_obj = crate::core::new_js_object_data(mc);
-                                    let closure_data = crate::core::ClosureData {
-                                        body: body.clone(),
-                                        env: Some(*captured_env),
-                                        enforce_strictness_inheritance: true,
-                                        ..ClosureData::default()
-                                    };
-                                    let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                                    object_set_key_value(mc, &desc_obj, "get", Value::Object(func_obj))?;
-                                }
-                                other => {
-                                    object_set_key_value(mc, &desc_obj, "get", other.clone())?;
-                                }
-                            }
-                        }
-                        if let Some(s) = setter {
-                            match &*s.clone() {
-                                Value::Setter(params, body, captured_env, _home) => {
-                                    let func_obj = crate::core::new_js_object_data(mc);
-                                    let closure_data = ClosureData {
-                                        params: params.clone(),
-                                        body: body.clone(),
-                                        env: Some(*captured_env),
-                                        enforce_strictness_inheritance: true,
-                                        ..ClosureData::default()
-                                    };
-                                    let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                                    object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
-                                }
-                                other => {
-                                    object_set_key_value(mc, &desc_obj, "set", other.clone())?;
-                                }
-                            }
-                        }
-
-                        let enum_flag = Value::Boolean(obj.borrow().is_enumerable(&key));
-                        object_set_key_value(mc, &desc_obj, "enumerable", enum_flag)?;
-                        let config_flag = Value::Boolean(obj.borrow().is_configurable(&key));
-                        object_set_key_value(mc, &desc_obj, "configurable", config_flag)?;
-                    }
-                    Value::Getter(body, captured_env, _home_opt) => {
-                        let func_obj = crate::core::new_js_object_data(mc);
-                        let closure_data = ClosureData {
-                            body: body.clone(),
-                            env: Some(*captured_env),
-                            enforce_strictness_inheritance: true,
-                            ..ClosureData::default()
-                        };
-                        let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                        func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                        object_set_key_value(mc, &desc_obj, "get", Value::Object(func_obj))?;
-
-                        let enum_flag = Value::Boolean(obj.borrow().is_enumerable(&key));
-                        object_set_key_value(mc, &desc_obj, "enumerable", enum_flag)?;
-                        let config_flag = Value::Boolean(obj.borrow().is_configurable(&key));
-                        object_set_key_value(mc, &desc_obj, "configurable", config_flag)?;
-                    }
-                    Value::Setter(params, body, captured_env, _home_opt) => {
-                        let func_obj = crate::core::new_js_object_data(mc);
-                        let closure_data = ClosureData {
-                            params: params.clone(),
-                            body: body.clone(),
-                            env: Some(*captured_env),
-                            enforce_strictness_inheritance: true,
-                            ..ClosureData::default()
-                        };
-                        let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                        func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                        object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
-
-                        let enum_flag = Value::Boolean(obj.borrow().is_enumerable(&key));
-                        object_set_key_value(mc, &desc_obj, "enumerable", enum_flag)?;
-                        let config_flag = Value::Boolean(obj.borrow().is_configurable(&key));
-                        object_set_key_value(mc, &desc_obj, "configurable", config_flag)?;
-                    }
-                    other => {
-                        object_set_key_value(mc, &desc_obj, "value", other.clone())?;
-                        let writable_flag = Value::Boolean(obj.borrow().is_writable(&key));
-                        object_set_key_value(mc, &desc_obj, "writable", writable_flag)?;
-                        let enum_flag = Value::Boolean(obj.borrow().is_enumerable(&key));
-                        object_set_key_value(mc, &desc_obj, "enumerable", enum_flag)?;
-                        let config_flag = Value::Boolean(obj.borrow().is_configurable(&key));
-                        object_set_key_value(mc, &desc_obj, "configurable", config_flag)?;
-                    }
+            if let Some(_val_rc) = object_get_key_value(&obj, &key) {
+                if let Some(pd) = crate::core::build_property_descriptor(mc, &obj, &key) {
+                    let desc_obj = pd.to_object(mc)?;
+                    crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                    Ok(Value::Object(desc_obj))
+                } else {
+                    Ok(Value::Undefined)
                 }
-
-                Ok(Value::Object(desc_obj))
             } else {
                 Ok(Value::Undefined)
             }
@@ -844,127 +697,8 @@ pub fn handle_object_method<'gc>(
 
                     let ordered = crate::core::ordinary_own_property_keys(obj);
                     for key in &ordered {
-                        // iterate own properties in spec order
-                        if let Some(val_rc) = object_get_key_value(obj, key) {
-                            let desc_obj = new_js_object_data(mc);
-
-                            match &*val_rc.borrow() {
-                                Value::Property { value, getter, setter } => {
-                                    // Data value
-                                    if let Some(v) = value {
-                                        object_set_key_value(mc, &desc_obj, "value", v.borrow().clone())?;
-                                        // writable: treat as true by default for data properties (simplification)
-                                        // Real implementation tracks writable separate from Value::Property in Value::Property?
-                                        // Current Value::Property struct doesn't have 'writable' field!
-                                        // It assumes checking 'setter' existence calls for writable? No.
-                                        // This engine seems to use Value::Property only for Accessors or special internal slots,
-                                        // but regular properties are just values.
-                                        // If we are here, it's likely an accessor.
-                                        // But if it has 'value', it's data?
-                                        // The Value::Property variant in core/value.rs has: value, getter, setter. Make sense.
-
-                                        let writable_flag = Value::Boolean(obj.borrow().is_writable(key));
-                                        object_set_key_value(mc, &desc_obj, "writable", writable_flag)?;
-                                    }
-                                    // Accessor
-                                    if let Some(g) = getter {
-                                        match &*g.clone() {
-                                            Value::Getter(body, captured_env, _home) => {
-                                                let func_obj = crate::core::new_js_object_data(mc);
-                                                let closure_data = ClosureData {
-                                                    body: body.clone(),
-                                                    env: Some(*captured_env),
-                                                    enforce_strictness_inheritance: true,
-                                                    ..ClosureData::default()
-                                                };
-                                                let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                                                object_set_key_value(mc, &desc_obj, "get", Value::Object(func_obj))?;
-                                            }
-                                            other => {
-                                                object_set_key_value(mc, &desc_obj, "get", other.clone())?;
-                                            }
-                                        }
-                                    }
-                                    if let Some(s) = setter {
-                                        match &*s.clone() {
-                                            Value::Setter(params, body, captured_env, _home) => {
-                                                let func_obj = crate::core::new_js_object_data(mc);
-                                                let closure_data = ClosureData {
-                                                    params: params.clone(),
-                                                    body: body.clone(),
-                                                    env: Some(*captured_env),
-                                                    enforce_strictness_inheritance: true,
-                                                    ..ClosureData::default()
-                                                };
-                                                let closure_val = Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                                                object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
-                                            }
-                                            other => {
-                                                object_set_key_value(mc, &desc_obj, "set", other.clone())?;
-                                            }
-                                        }
-                                    }
-                                    // flags: enumerable depends on object's non-enumerable set
-                                    let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
-                                    object_set_key_value(mc, &desc_obj, "enumerable", enum_flag)?;
-                                    let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
-                                    object_set_key_value(mc, &desc_obj, "configurable", config_flag)?;
-                                }
-                                // Handle raw Getter/Setter values stored directly on objects (from object literal shorthand)
-                                Value::Getter(body, captured_env, _home_opt) => {
-                                    // Create a function object to expose as the 'get' value on the descriptor
-                                    let func_obj = crate::core::new_js_object_data(mc);
-                                    let closure_data = ClosureData {
-                                        body: body.clone(),
-                                        env: Some(*captured_env),
-                                        enforce_strictness_inheritance: true,
-                                        ..ClosureData::default()
-                                    };
-                                    let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                                    object_set_key_value(mc, &desc_obj, "get", Value::Object(func_obj))?;
-
-                                    let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
-                                    object_set_key_value(mc, &desc_obj, "enumerable", enum_flag)?;
-                                    let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
-                                    object_set_key_value(mc, &desc_obj, "configurable", config_flag)?;
-                                }
-                                Value::Setter(params, body, captured_env, _home_opt) => {
-                                    // Create a function object to expose as the 'set' value on the descriptor
-                                    let func_obj = crate::core::new_js_object_data(mc);
-                                    let closure_data = ClosureData {
-                                        params: params.clone(),
-                                        body: body.clone(),
-                                        env: Some(*captured_env),
-                                        enforce_strictness_inheritance: true,
-                                        ..ClosureData::default()
-                                    };
-                                    let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                                    object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
-
-                                    let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
-                                    object_set_key_value(mc, &desc_obj, "enumerable", enum_flag)?;
-                                    let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
-                                    object_set_key_value(mc, &desc_obj, "configurable", config_flag)?;
-                                }
-                                other => {
-                                    // plain value stored directly
-                                    object_set_key_value(mc, &desc_obj, "value", other.clone())?;
-                                    let writable_flag = Value::Boolean(obj.borrow().is_writable(key));
-                                    object_set_key_value(mc, &desc_obj, "writable", writable_flag)?;
-                                    let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
-                                    object_set_key_value(mc, &desc_obj, "enumerable", enum_flag)?;
-                                    let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
-                                    object_set_key_value(mc, &desc_obj, "configurable", config_flag)?;
-                                }
-                            }
-
-                            // debug dump
-                            log::trace!("descriptor for key={} created: {:?}", key, desc_obj.borrow().properties);
-                            // Put descriptor onto result using the original key (string or symbol)
+                        if let Some(pd) = crate::core::build_property_descriptor(mc, obj, key) {
+                            let desc_obj = pd.to_object(mc)?; // Put descriptor onto result using the original key (string or symbol)
                             match key {
                                 PropertyKey::String(s) => {
                                     object_set_key_value(mc, &result_obj, s, Value::Object(desc_obj))?;
@@ -1088,6 +822,8 @@ pub fn handle_object_method<'gc>(
                 _ => return Err(raise_type_error!("Property descriptor must be an object")),
             };
 
+            let pd = PropertyDescriptor::from_object(&desc_obj)?;
+            crate::core::validate_descriptor_for_define(mc, &pd)?;
             define_property_internal(mc, &target_obj, &prop_key, &desc_obj)?;
             Ok(Value::Object(target_obj))
         }
@@ -1122,6 +858,9 @@ pub fn handle_object_method<'gc>(
                     Value::Object(o) => o,
                     _ => return Err(raise_type_error!("Property descriptor must be an object")),
                 };
+
+                let pd = PropertyDescriptor::from_object(&desc_obj)?;
+                crate::core::validate_descriptor_for_define(mc, &pd)?;
 
                 define_property_internal(mc, &target_obj, key, &desc_obj)?;
             }

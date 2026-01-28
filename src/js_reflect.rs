@@ -1,6 +1,7 @@
 use crate::core::MutationContext;
 use crate::core::{
-    JSObjectDataPtr, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env,
+    JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value,
+    prepare_function_call_env,
 };
 use crate::js_array::{get_array_length, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -206,19 +207,24 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    // For now, just set the property with the value from attributes
-                    // This is a simplified implementation
                     if let Value::Object(attr_obj) = &attributes {
-                        if let Some(value_rc) = object_get_key_value(attr_obj, "value") {
-                            let prop_key = match property_key {
-                                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                                Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                                _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
-                            };
-                            object_set_key_value(mc, &obj, &prop_key, value_rc.borrow().clone())?;
-                            Ok(Value::Boolean(true))
-                        } else {
-                            Ok(Value::Boolean(false))
+                        let prop_key = match property_key {
+                            Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                            Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                            _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
+                        };
+                        match PropertyDescriptor::from_object(attr_obj) {
+                            Ok(pd) => {
+                                if crate::core::validate_descriptor_for_define(mc, &pd).is_err() {
+                                    return Ok(Value::Boolean(false));
+                                }
+                            }
+                            Err(_) => return Ok(Value::Boolean(false)),
+                        }
+
+                        match crate::js_object::define_property_internal(mc, &obj, &prop_key, attr_obj) {
+                            Ok(()) => Ok(Value::Boolean(true)),
+                            Err(_e) => Ok(Value::Boolean(false)),
                         }
                     } else {
                         Ok(Value::Boolean(false))
@@ -288,14 +294,14 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
                     };
-                    if let Some(value_rc) = object_get_key_value(&obj, &prop_key) {
-                        // Create a descriptor object
-                        let descriptor = new_js_object_data(mc);
-                        object_set_key_value(mc, &descriptor, "value", value_rc.borrow().clone())?;
-                        object_set_key_value(mc, &descriptor, "writable", Value::Boolean(true))?;
-                        object_set_key_value(mc, &descriptor, "enumerable", Value::Boolean(true))?;
-                        object_set_key_value(mc, &descriptor, "configurable", Value::Boolean(true))?;
-                        Ok(Value::Object(descriptor))
+                    if let Some(_value_rc) = object_get_key_value(&obj, &prop_key) {
+                        if let Some(pd) = crate::core::build_property_descriptor(mc, &obj, &prop_key) {
+                            let desc_obj = pd.to_object(mc)?;
+                            crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                            Ok(Value::Object(desc_obj))
+                        } else {
+                            Ok(Value::Undefined)
+                        }
                     } else {
                         Ok(Value::Undefined)
                     }

@@ -9,15 +9,18 @@ SKIP_FEATURES="${SKIP_FEATURES:-Intl}"
 CAP_MULTIPLIER="${CAP_MULTIPLIER:-5}"
 # Focus (comma-separated) e.g., language,built-ins,intl - can be set via env or CLI
 FOCUS="${FOCUS:-}"
+# Per-test timeout in seconds (can be overridden via --timeout or TEST_TIMEOUT env variable)
+TIMEOUT_SECS="${TEST_TIMEOUT:-10}"
 
 usage() {
   cat <<EOF
-Usage: $0 [--limit N] [--fail-on-failure] [--cap-multiplier N] [--focus name]
+Usage: $0 [--limit N] [--fail-on-failure] [--cap-multiplier N] [--focus name] [--timeout N]
 
 --limit N            Run at most N tests (default: 100)
 --fail-on-failure    Exit non-zero if any test fails (default: false)
 --cap-multiplier N   Cap multiplier used when collecting candidates (search cap = LIMIT * CAP_MULTIPLIER). Can also set env CAP_MULTIPLIER (default: 5)
 --focus name         Comma-separated focus areas (language,built-ins,intl) or subdirs under test/; can also set env FOCUS
+--timeout N          Per-test timeout in seconds (default: 10). Can also set TEST_TIMEOUT env var.
 EOF
 } 
 
@@ -31,6 +34,8 @@ while [[ $# -gt 0 ]]; do
       CAP_MULTIPLIER="$2"; shift 2;;
     --focus)
       FOCUS="$2"; shift 2;;
+    --timeout)
+      TIMEOUT_SECS="$2"; shift 2;;
     --help)
       usage; exit 0;;
     *)
@@ -491,8 +496,8 @@ JS
   fi
 
   echo "RUN $f"
-  # run with timeout to avoid hangs
-  if timeout 10s $RUN_CMD "$test_to_run" > /tmp/test262_run_out 2>&1; then
+  # run with timeout to avoid hangs (per-test timeout configurable via TEST_TIMEOUT or --timeout)
+  if timeout ${TIMEOUT_SECS}s $RUN_CMD "$test_to_run" > /tmp/test262_run_out 2>&1; then
     echo "PASS $f" | tee -a "$RESULTS_FILE"
     pass=$((pass+1))
   else

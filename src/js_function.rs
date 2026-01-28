@@ -1726,11 +1726,7 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
     // Define Function.length as non-writable to match spec so assignments to it
     // in strict mode throw a TypeError.
-    let desc_len = crate::core::new_js_object_data(mc);
-    object_set_key_value(mc, &desc_len, "value", Value::Number(1.0))?;
-    object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
-    object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
-    object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(false))?;
+    let desc_len = crate::core::create_descriptor_object(mc, Value::Number(1.0), false, false, false)?;
     if let Some(wrc) = crate::core::object_get_key_value(&desc_len, "writable") {
         log::debug!("initialize_function: desc_len writable raw = {:?}", wrc.borrow());
     } else {

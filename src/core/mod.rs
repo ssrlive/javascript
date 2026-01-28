@@ -34,6 +34,9 @@ mod gc;
 mod value;
 pub use value::*;
 
+mod descriptor;
+pub use descriptor::*;
+
 mod property_key;
 pub use property_key::*;
 

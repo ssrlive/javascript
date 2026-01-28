@@ -127,6 +127,9 @@ pub fn new_js_object_data<'gc>(mc: &MutationContext<'gc>) -> JSObjectDataPtr<'gc
 pub struct JSObjectData<'gc> {
     pub properties: indexmap::IndexMap<PropertyKey<'gc>, GcPtr<'gc, Value<'gc>>>,
     pub constants: std::collections::HashSet<String>,
+    /// Internal attribute sets used by the engine to represent property attributes.
+    /// These are implementation-level fast-paths for `enumerable`, `writable` and `configurable`.
+    /// They are not directly accessible from JS; use descriptor objects for JS-facing APIs.
     pub non_enumerable: std::collections::HashSet<PropertyKey<'gc>>,
     pub non_writable: std::collections::HashSet<PropertyKey<'gc>>,
     pub non_configurable: std::collections::HashSet<PropertyKey<'gc>>,
@@ -214,16 +217,30 @@ impl<'gc> JSObjectData<'gc> {
     pub fn get_property(&self, key: impl Into<PropertyKey<'gc>>) -> Option<String> {
         let key = key.into();
         if let Some(val_ptr) = self.properties.get(&key) {
-            if let Value::String(s) = &*val_ptr.borrow() {
-                return Some(utf16_to_utf8(s));
+            match &*val_ptr.borrow() {
+                Value::String(s) => return Some(utf16_to_utf8(s)),
+                Value::Property { value: Some(v), .. } => {
+                    if let Value::String(s2) = &*v.borrow() {
+                        return Some(utf16_to_utf8(s2));
+                    }
+                    return None;
+                }
+                _ => return None,
             }
-            return None;
         }
         if let Some(proto) = &self.prototype
             && let Some(val_ptr) = object_get_key_value(proto, key)
-            && let Value::String(s) = &*val_ptr.borrow()
         {
-            return Some(utf16_to_utf8(s));
+            match &*val_ptr.borrow() {
+                Value::String(s) => return Some(utf16_to_utf8(s)),
+                Value::Property { value: Some(v), .. } => {
+                    if let Value::String(s2) = &*v.borrow() {
+                        return Some(utf16_to_utf8(s2));
+                    }
+                    return None;
+                }
+                _ => return None,
+            }
         }
         None
     }
@@ -452,6 +469,10 @@ pub enum Value<'gc> {
     DataView(Gc<'gc, JSDataView<'gc>>),
     TypedArray(Gc<'gc, JSTypedArray<'gc>>),
 
+    /// Internal property representation stored in an object's `properties` map.
+    /// Contains either a concrete `value` or accessor `getter`/`setter` functions.
+    /// Note: a `Value::Property` is not the same as a JS descriptor object
+    /// (which is a `JSObjectDataPtr` containing keys like `value`, `writable`, etc.).
     Property {
         value: Option<GcPtr<'gc, Value<'gc>>>,
         getter: Option<Box<Value<'gc>>>,

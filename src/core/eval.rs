@@ -100,14 +100,14 @@ fn loose_equal<'gc>(
         (Value::BigInt(l), Value::String(r)) => {
             let s = utf16_to_utf8(&r);
             match crate::js_bigint::parse_bigint_string(&s) {
-                Ok(bn) => Ok(l == bn),
+                Ok(bn) => Ok(*l == bn),
                 Err(_) => Ok(false),
             }
         }
         (Value::String(l), Value::BigInt(r)) => {
             let s = utf16_to_utf8(&l);
             match crate::js_bigint::parse_bigint_string(&s) {
-                Ok(bn) => Ok(bn == r),
+                Ok(bn) => Ok(bn == *r),
                 Err(_) => Ok(false),
             }
         }
@@ -128,7 +128,7 @@ fn loose_equal<'gc>(
             if !r.is_finite() || r.is_nan() || r.fract() != 0.0 {
                 Ok(false)
             } else {
-                Ok(BigInt::from_f64(r).map(|rb| l == rb).unwrap_or(false))
+                Ok(BigInt::from_f64(r).map(|rb| *l == rb).unwrap_or(false))
             }
         }
 
@@ -4975,7 +4975,7 @@ fn evaluate_expr_add_assign<'gc>(
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
             let new_val = match (current, val) {
-                (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(ln + rn),
+                (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln + *rn)),
                 (Value::BigInt(_), other) | (other, Value::BigInt(_)) => {
                     if matches!(other, Value::String(_)) {
                         return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types in +=")));
@@ -5009,7 +5009,7 @@ fn evaluate_expr_add_assign<'gc>(
                 let key_val = PropertyKey::from(key.to_string());
                 let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
                 let new_val = match (current, val) {
-                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(ln + rn),
+                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln + *rn)),
                     (Value::BigInt(_), other) | (other, Value::BigInt(_)) => {
                         if matches!(other, Value::String(_)) {
                             return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types in +=")));
@@ -5048,7 +5048,7 @@ fn evaluate_expr_add_assign<'gc>(
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
                 let new_val = match (current, val) {
-                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(ln + rn),
+                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln + *rn)),
                     (Value::BigInt(_), other) | (other, Value::BigInt(_)) => {
                         if matches!(other, Value::String(_)) {
                             return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types in +=")));
@@ -5097,7 +5097,7 @@ fn evaluate_expr_bitand_assign<'gc>(
             let current = evaluate_var(mc, env, name)?;
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
-                    let new_val = Value::BigInt(ln & rn);
+                    let new_val = Value::BigInt(Box::new(*ln & *rn));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -5120,7 +5120,7 @@ fn evaluate_expr_bitand_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
-                        let new_val = Value::BigInt(ln & rn);
+                        let new_val = Value::BigInt(Box::new(*ln & *rn));
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5148,7 +5148,7 @@ fn evaluate_expr_bitand_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
-                        let new_val = Value::BigInt(ln & rn);
+                        let new_val = Value::BigInt(Box::new(*ln & *rn));
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5185,7 +5185,7 @@ fn evaluate_expr_bitor_assign<'gc>(
             let current = evaluate_var(mc, env, name)?;
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
-                    let new_val = Value::BigInt(ln | rn);
+                    let new_val = Value::BigInt(Box::new(*ln | *rn));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -5208,7 +5208,7 @@ fn evaluate_expr_bitor_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
-                        let new_val = Value::BigInt(ln | rn);
+                        let new_val = Value::BigInt(Box::new(*ln | *rn));
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5236,7 +5236,7 @@ fn evaluate_expr_bitor_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
-                        let new_val = Value::BigInt(ln | rn);
+                        let new_val = Value::BigInt(Box::new(*ln | *rn));
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5273,7 +5273,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
             let current = evaluate_var(mc, env, name)?;
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
-                    let new_val = Value::BigInt(ln ^ rn);
+                    let new_val = Value::BigInt(Box::new(*ln ^ *rn));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -5296,7 +5296,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
-                        let new_val = Value::BigInt(ln ^ rn);
+                        let new_val = Value::BigInt(Box::new(*ln ^ *rn));
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5324,7 +5324,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
-                        let new_val = Value::BigInt(ln ^ rn);
+                        let new_val = Value::BigInt(Box::new(*ln ^ *rn));
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5362,7 +5362,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let shift = bigint_shift_count(&rn)?;
-                    let new_val = Value::BigInt(ln << shift);
+                    let new_val = Value::BigInt(Box::new(*ln << shift));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -5386,7 +5386,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
-                        let new_val = Value::BigInt(ln << shift);
+                        let new_val = Value::BigInt(Box::new(*ln << shift));
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5415,7 +5415,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
-                        let new_val = Value::BigInt(ln << shift);
+                        let new_val = Value::BigInt(Box::new(*ln << shift));
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5453,7 +5453,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let shift = bigint_shift_count(&rn)?;
-                    let new_val = Value::BigInt(ln >> shift);
+                    let new_val = Value::BigInt(Box::new(*ln >> shift));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -5477,7 +5477,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
-                        let new_val = Value::BigInt(ln >> shift);
+                        let new_val = Value::BigInt(Box::new(*ln >> shift));
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5506,7 +5506,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
-                        let new_val = Value::BigInt(ln >> shift);
+                        let new_val = Value::BigInt(Box::new(*ln >> shift));
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
@@ -5611,7 +5611,7 @@ fn evaluate_expr_sub_assign<'gc>(
         let current = evaluate_var(mc, env, name)?;
         match (current, val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => {
-                let new_val = Value::BigInt(ln - rn);
+                let new_val = Value::BigInt(Box::new(*ln - *rn));
                 env_set_recursive(mc, env, name, new_val.clone())?;
                 Ok(new_val)
             }
@@ -5647,7 +5647,7 @@ fn evaluate_expr_mul_assign<'gc>(
             let current = evaluate_var(mc, env, name)?;
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
-                    let new_val = Value::BigInt(ln * rn);
+                    let new_val = Value::BigInt(Box::new(*ln * *rn));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -5672,7 +5672,7 @@ fn evaluate_expr_mul_assign<'gc>(
                 let key_val = PropertyKey::from(key.to_string());
                 let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
                 let new_val = match (current, val) {
-                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(ln * rn),
+                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln * *rn)),
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                         return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")));
                     }
@@ -5699,7 +5699,7 @@ fn evaluate_expr_mul_assign<'gc>(
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
                 let new_val = match (current, val) {
-                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(ln * rn),
+                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln * *rn)),
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                         return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")));
                     }
@@ -5738,7 +5738,7 @@ fn evaluate_expr_div_assign<'gc>(
                 if rn.is_zero() {
                     return Err(EvalError::Js(raise_eval_error!("Division by zero")));
                 }
-                Value::BigInt(ln / rn)
+                Value::BigInt(Box::new(*ln / *rn))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")));
@@ -5777,7 +5777,7 @@ fn evaluate_expr_mod_assign<'gc>(
                 if rn.is_zero() {
                     return Err(EvalError::Js(raise_eval_error!("Division by zero")));
                 }
-                Value::BigInt(ln % rn)
+                Value::BigInt(Box::new(*ln % *rn))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")));
@@ -5819,7 +5819,7 @@ fn evaluate_expr_pow_assign<'gc>(
                 let e = exp
                     .to_u32()
                     .ok_or_else(|| EvalError::Js(crate::raise_range_error!("Exponent too large")))?;
-                Value::BigInt(base.pow(e))
+                Value::BigInt(Box::new(base.pow(e)))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")));
@@ -6828,7 +6828,7 @@ fn evaluate_expr_binary<'gc>(
     let r_val = evaluate_expr(mc, env, right)?;
     match op {
         BinaryOp::Add => match (l_val.clone(), r_val.clone()) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(ln + rn)),
+            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln + *rn))),
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
             (Value::String(ls), Value::String(rs)) => {
                 let mut res = ls.clone();
@@ -6879,14 +6879,14 @@ fn evaluate_expr_binary<'gc>(
             }
         },
         BinaryOp::Sub => match (l_val, r_val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(ln - rn)),
+            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln - *rn))),
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
             (l, r) => Ok(Value::Number(to_number(&l)? - to_number(&r)?)),
         },
         BinaryOp::Mul => match (l_val, r_val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(ln * rn)),
+            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln * *rn))),
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
@@ -6897,7 +6897,7 @@ fn evaluate_expr_binary<'gc>(
                 if rn.is_zero() {
                     return Err(EvalError::Js(crate::raise_range_error!("Division by zero")));
                 }
-                Ok(Value::BigInt(ln / rn))
+                Ok(Value::BigInt(Box::new(*ln / *rn)))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
@@ -6907,7 +6907,7 @@ fn evaluate_expr_binary<'gc>(
         BinaryOp::LeftShift => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => {
                 let shift = bigint_shift_count(&rn)?;
-                Ok(Value::BigInt(ln << shift))
+                Ok(Value::BigInt(Box::new(*ln << shift)))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
@@ -6921,7 +6921,7 @@ fn evaluate_expr_binary<'gc>(
         BinaryOp::RightShift => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => {
                 let shift = bigint_shift_count(&rn)?;
-                Ok(Value::BigInt(ln >> shift))
+                Ok(Value::BigInt(Box::new(*ln >> shift)))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
@@ -7097,7 +7097,7 @@ fn evaluate_expr_binary<'gc>(
                 if rn.is_zero() {
                     return Err(EvalError::Js(crate::raise_range_error!("Division by zero")));
                 }
-                Ok(Value::BigInt(ln % rn))
+                Ok(Value::BigInt(Box::new(*ln % *rn)))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
@@ -7112,7 +7112,7 @@ fn evaluate_expr_binary<'gc>(
                 let e = exp
                     .to_u32()
                     .ok_or_else(|| EvalError::Js(crate::raise_range_error!("Exponent too large")))?;
-                Ok(Value::BigInt(base.pow(e)))
+                Ok(Value::BigInt(Box::new(base.pow(e))))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
@@ -7120,7 +7120,7 @@ fn evaluate_expr_binary<'gc>(
             (l, r) => Ok(Value::Number(to_number(&l)?.powf(to_number(&r)?))),
         },
         BinaryOp::BitAnd => match (l_val, r_val) {
-            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(l & r)),
+            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l & *r))),
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
@@ -7131,7 +7131,7 @@ fn evaluate_expr_binary<'gc>(
             }
         },
         BinaryOp::BitOr => match (l_val, r_val) {
-            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(l | r)),
+            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l | *r))),
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
@@ -7142,7 +7142,7 @@ fn evaluate_expr_binary<'gc>(
             }
         },
         BinaryOp::BitXor => match (l_val, r_val) {
-            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(l ^ r)),
+            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l ^ *r))),
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
@@ -7295,7 +7295,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let bi = s
                 .parse::<BigInt>()
                 .map_err(|e| EvalError::Js(raise_eval_error!(format!("Invalid BigInt literal: {e}"))))?;
-            Ok(Value::BigInt(bi))
+            Ok(Value::BigInt(Box::new(bi)))
         }
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::Boolean(b) => Ok(Value::Boolean(*b)),
@@ -7713,7 +7713,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::UnaryNeg(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
             match val {
-                Value::BigInt(b) => Ok(Value::BigInt(-b)),
+                Value::BigInt(b) => Ok(Value::BigInt(Box::new(-*b))),
                 other => Ok(Value::Number(-to_number(&other)?)),
             }
         }
@@ -7724,7 +7724,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::BitNot(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
             match val {
-                Value::BigInt(b) => Ok(Value::BigInt(!b)),
+                Value::BigInt(b) => Ok(Value::BigInt(Box::new(!*b))),
                 other => {
                     let n = to_int32_value(&other)?;
                     Ok(Value::Number((!n) as f64))

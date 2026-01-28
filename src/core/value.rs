@@ -421,7 +421,7 @@ pub enum PromiseState<'gc> {
 #[derive(Clone)]
 pub enum Value<'gc> {
     Number(f64),
-    BigInt(BigInt),
+    BigInt(Box<BigInt>),
     String(Vec<u16>),
     Boolean(bool),
     Undefined,

@@ -68,7 +68,7 @@ pub fn to_boolean(val: &Value<'_>) -> bool {
         Value::Boolean(b) => *b,
         Value::Number(n) => *n != 0.0 && !n.is_nan(),
         Value::String(s) => !s.is_empty(),
-        Value::BigInt(b) => *b != BigInt::from(0),
+        Value::BigInt(b) => **b != BigInt::from(0),
         Value::Object(_)
         | Value::Function(_)
         | Value::Closure(_)

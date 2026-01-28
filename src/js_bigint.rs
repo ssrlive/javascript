@@ -22,15 +22,15 @@ pub(crate) fn bigint_constructor<'gc>(
             if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
                 return Err(raise_type_error!("Cannot convert number to BigInt"));
             }
-            Ok(Value::BigInt(BigInt::from(*n as i64)))
+            Ok(Value::BigInt(Box::new(BigInt::from(*n as i64))))
         }
         Value::String(s) => {
             let st = utf16_to_utf8(s);
-            Ok(Value::BigInt(parse_bigint_string(&st)?))
+            Ok(Value::BigInt(Box::new(parse_bigint_string(&st)?)))
         }
         Value::Boolean(b) => {
             let bigint = if *b { BigInt::from(1) } else { BigInt::from(0) };
-            Ok(Value::BigInt(bigint))
+            Ok(Value::BigInt(Box::new(bigint)))
         }
         Value::Object(obj) => {
             // Try ToPrimitive with number hint first
@@ -40,11 +40,11 @@ pub(crate) fn bigint_constructor<'gc>(
                     if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
                         return Err(raise_type_error!("Cannot convert number to BigInt"));
                     }
-                    Ok(Value::BigInt(BigInt::from(n as i64)))
+                    Ok(Value::BigInt(Box::new(BigInt::from(n as i64))))
                 }
                 Value::String(s) => {
                     let st = utf16_to_utf8(&s);
-                    Ok(Value::BigInt(parse_bigint_string(&st)?))
+                    Ok(Value::BigInt(Box::new(parse_bigint_string(&st)?)))
                 }
                 Value::BigInt(b) => Ok(Value::BigInt(b)),
                 _ => Err(raise_type_error!("Cannot convert object to BigInt")),
@@ -136,7 +136,7 @@ pub fn handle_bigint_static_method<'gc>(
     // bigint argument: accept BigInt, Number (integer), String, Boolean, or Object (ToPrimitive)
     let bigint_val = &args[1];
     let bi = match bigint_val {
-        Value::BigInt(b) => b.clone(),
+        Value::BigInt(b) => (**b).clone(),
         Value::Number(n) => {
             if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
                 return Err(raise_eval_error!("Cannot convert number to BigInt"));
@@ -168,7 +168,7 @@ pub fn handle_bigint_static_method<'gc>(
                     let st = utf16_to_utf8(&s);
                     parse_bigint_string(&st)?
                 }
-                Value::BigInt(b) => b,
+                Value::BigInt(b) => (*b).clone(),
                 _ => return Err(raise_eval_error!("Cannot convert object to BigInt")),
             }
         }
@@ -185,18 +185,18 @@ pub fn handle_bigint_static_method<'gc>(
     }
 
     if method == "asUintN" {
-        return Ok(Value::BigInt(r));
+        return Ok(Value::BigInt(Box::new(r)));
     }
 
     // asIntN: if r >= 2^(bits-1) then r -= 2^bits
     if bits == 0 {
-        return Ok(Value::BigInt(BigInt::from(0)));
+        return Ok(Value::BigInt(Box::new(BigInt::from(0))));
     }
     let half = &modulus >> 1;
     if r >= half {
         r -= &modulus;
     }
-    Ok(Value::BigInt(r))
+    Ok(Value::BigInt(Box::new(r)))
 }
 
 pub fn parse_bigint_string(raw: &str) -> Result<BigInt, JSError> {

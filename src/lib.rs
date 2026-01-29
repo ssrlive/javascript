@@ -5,7 +5,7 @@ pub(crate) mod core;
 pub(crate) mod error;
 pub(crate) mod js_array;
 pub(crate) mod js_async;
-// pub(crate) mod js_assert;
+pub(crate) mod js_async_generator;
 pub(crate) mod js_bigint;
 pub(crate) mod js_boolean;
 pub(crate) mod js_class;

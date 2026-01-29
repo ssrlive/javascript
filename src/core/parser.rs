@@ -2467,10 +2467,17 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         }
 
         // Method or Property (support computed names via [expr])
-        // Optional '*' indicates a generator method (can appear before an identifier or before a computed '[' key)
-        let mut _is_generator = false;
+        // Optional 'async' indicates async method; optional '*' indicates a generator method (can appear before an identifier or before a computed '[' key)
+        let mut is_async_member = false;
+        if *index < t.len() && matches!(t[*index].token, Token::Async) {
+            // treat 'async' as keyword in class member position (assuming it precedes a method)
+            is_async_member = true;
+            *index += 1; // consume 'async'
+        }
+        let mut is_generator = false;
         if *index < t.len() && matches!(t[*index].token, Token::Multiply) {
-            _is_generator = true;
+            is_generator = true;
+            log::debug!("parse_class_member: saw '*' token at index {}", *index);
             *index += 1; // consume '*'
         }
 
@@ -2529,13 +2536,6 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             continue;
         }
 
-        // Support optional '*' prefix for generators
-        let mut is_generator = false;
-        if *index < t.len() && matches!(t[*index].token, Token::Multiply) {
-            is_generator = true;
-            *index += 1; // consume '*'
-        }
-
         if *index < t.len() && matches!(t[*index].token, Token::LParen) {
             // Method
             *index += 1; // (
@@ -2548,22 +2548,41 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             if is_generator {
                 if let Some(expr) = computed_key_expr {
                     if is_static {
-                        members.push(ClassMember::StaticMethodComputedGenerator(expr, params, body));
+                        if is_async_member {
+                            members.push(ClassMember::StaticMethodComputedAsyncGenerator(expr, params, body));
+                        } else {
+                            members.push(ClassMember::StaticMethodComputedGenerator(expr, params, body));
+                        }
+                    } else if is_async_member {
+                        members.push(ClassMember::MethodComputedAsyncGenerator(expr, params, body));
                     } else {
                         members.push(ClassMember::MethodComputedGenerator(expr, params, body));
                     }
                 } else if let Some(name) = name_str_opt {
                     if is_static {
-                        members.push(ClassMember::StaticMethodGenerator(name, params, body));
+                        if is_async_member {
+                            members.push(ClassMember::StaticMethodAsyncGenerator(name, params, body));
+                        } else {
+                            members.push(ClassMember::StaticMethodGenerator(name, params, body));
+                        }
                     } else if is_private {
+                        // Private async generator methods not implemented separately; fallback to PrivateMethod
                         members.push(ClassMember::PrivateMethod(name, params, body)); // private methods generators not implemented separately
+                    } else if is_async_member {
+                        members.push(ClassMember::MethodAsyncGenerator(name, params, body));
                     } else {
                         members.push(ClassMember::MethodGenerator(name, params, body));
                     }
                 }
             } else if let Some(expr) = computed_key_expr {
                 if is_static {
-                    members.push(ClassMember::StaticMethodComputed(expr, params, body));
+                    if is_async_member {
+                        members.push(ClassMember::StaticMethodComputedAsync(expr, params, body));
+                    } else {
+                        members.push(ClassMember::StaticMethodComputed(expr, params, body));
+                    }
+                } else if is_async_member {
+                    members.push(ClassMember::MethodComputedAsync(expr, params, body));
                 } else {
                     members.push(ClassMember::MethodComputed(expr, params, body));
                 }
@@ -2571,11 +2590,15 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 if is_static {
                     if is_private {
                         members.push(ClassMember::PrivateStaticMethod(name, params, body));
+                    } else if is_async_member {
+                        members.push(ClassMember::StaticMethodAsync(name, params, body));
                     } else {
                         members.push(ClassMember::StaticMethod(name, params, body));
                     }
                 } else if is_private {
                     members.push(ClassMember::PrivateMethod(name, params, body));
+                } else if is_async_member {
+                    members.push(ClassMember::MethodAsync(name, params, body));
                 } else {
                     members.push(ClassMember::Method(name, params, body));
                 }
@@ -3109,6 +3132,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
 
                         // Parse key
                         let mut is_shorthand_candidate = false;
+                        // Optional 'async' keyword indicates async concise method
+                        let mut is_async_member = false;
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::Async) {
+                            is_async_member = true;
+                            *index += 1; // consume 'async'
+                        }
                         // Optional '*' indicates generator concise method
                         let mut is_generator = false;
                         if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
@@ -3132,9 +3161,23 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 }
                                 *index += 1; // consume }
                                 if is_generator {
+                                    if is_async_member {
+                                        properties.push((
+                                            Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
+                                            Expr::AsyncGeneratorFunction(None, params, body),
+                                            true,
+                                        ));
+                                    } else {
+                                        properties.push((
+                                            Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
+                                            Expr::GeneratorFunction(None, params, body),
+                                            true,
+                                        ));
+                                    }
+                                } else if is_async_member {
                                     properties.push((
                                         Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
-                                        Expr::GeneratorFunction(None, params, body),
+                                        Expr::AsyncFunction(None, params, body),
                                         true,
                                     ));
                                 } else {
@@ -3513,14 +3556,25 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 *index,
                 tokens.iter().skip(start).take(4).collect::<Vec<_>>()
             );
-            // Async functions cannot be generators (async function* is invalid); mark false
-            let is_generator = false;
+            // Async functions may be generators (async function*). Determine generator status
+            let mut is_generator = false;
 
             // Async function expression: async function [name] ( ... ) { ... }
-            if next < tokens.len() && matches!(tokens[next].token, Token::Function) {
+            if next < tokens.len() && (matches!(tokens[next].token, Token::Function) || matches!(tokens[next].token, Token::FunctionStar)) {
                 log::trace!("parse_primary (async): detected 'async function' at start={} next={}", start, next);
-                // Advance index to point after the 'function' token
-                *index = next + 1; // position after 'function'
+                // Advance index to point after the 'function' or 'function*' token
+                if matches!(tokens[next].token, Token::FunctionStar) {
+                    is_generator = true;
+                    *index = next + 1; // position after 'function*'
+                } else {
+                    // Function token - check if immediately followed by a '*' token
+                    *index = next + 1; // position after 'function'
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+                        is_generator = true;
+                        *index += 1; // consume '*'
+                    }
+                }
+
                 // Optional name for async function expressions (same rules as normal functions)
                 let name = if *index < tokens.len() {
                     if let Token::Identifier(n) = &tokens[*index].token {
@@ -3570,10 +3624,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     }
                     *index += 1; // consume }
                     if is_generator {
-                        log::trace!("parse_primary: constructed GeneratorFunction name={:?} params={:?}", name, params);
-                        Expr::GeneratorFunction(name, params, body)
+                        log::trace!("parse_primary: constructed AsyncGeneratorFunction name={name:?} params={params:?}");
+                        Expr::AsyncGeneratorFunction(name, params, body)
                     } else {
-                        log::trace!("parse_primary: constructed AsyncFunction name={:?} params={:?}", name, params);
+                        log::trace!("parse_primary: constructed AsyncFunction name={name:?} params={params:?}");
                         Expr::AsyncFunction(name, params, body)
                     }
                 } else {

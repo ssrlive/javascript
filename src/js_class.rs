@@ -838,10 +838,51 @@ pub(crate) fn create_class_object<'gc>(
                 object_set_key_value(mc, &prototype_obj, pk.clone(), gen_fn)?;
                 prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
             }
+            ClassMember::MethodComputedAsyncGenerator(key_expr, params, body) => {
+                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_prim = if let Value::Object(_) = &key_val {
+                    crate::core::to_primitive(mc, &key_val, "string", env)?
+                } else {
+                    key_val.clone()
+                };
+                let pk = crate::core::PropertyKey::from(&key_prim);
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
+                // Async generators not implemented yet; fallback to generator function for now
+                let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
+                object_set_key_value(mc, &prototype_obj, pk.clone(), gen_fn)?;
+                prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
+            }
+            ClassMember::MethodComputedAsync(key_expr, params, body) => {
+                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_prim = if let Value::Object(_) = &key_val {
+                    crate::core::to_primitive(mc, &key_val, "string", env)?
+                } else {
+                    key_val.clone()
+                };
+                let pk = crate::core::PropertyKey::from(&key_prim);
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
+                let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
+                object_set_key_value(mc, &prototype_obj, pk.clone(), method_closure)?;
+                // Computed methods are also non-enumerable
+                prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
+            }
             ClassMember::MethodGenerator(method_name, params, body) => {
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
                 object_set_key_value(mc, &prototype_obj, method_name, gen_fn)?;
+                prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+            }
+            ClassMember::MethodAsync(method_name, params, body) => {
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
+                let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
+                object_set_key_value(mc, &prototype_obj, method_name, method_closure)?;
+                prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+            }
+            ClassMember::MethodAsyncGenerator(method_name, params, body) => {
+                // Create an AsyncGeneratorFunction value for async generator methods
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
+                let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
+                object_set_key_value(mc, &prototype_obj, method_name, async_gen_fn)?;
                 prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
             }
             ClassMember::Constructor(_, _) => {
@@ -1103,6 +1144,24 @@ pub(crate) fn create_class_object<'gc>(
                 object_set_key_value(mc, &class_obj, method_name, gen_fn)?;
                 class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
             }
+            ClassMember::StaticMethodAsync(method_name, params, body) => {
+                if method_name == "prototype" {
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                }
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
+                let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
+                object_set_key_value(mc, &class_obj, method_name, method_closure)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+            }
+            ClassMember::StaticMethodAsyncGenerator(method_name, params, body) => {
+                if method_name == "prototype" {
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                }
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
+                let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
+                object_set_key_value(mc, &class_obj, method_name, async_gen_fn)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+            }
             ClassMember::StaticMethodComputed(key_expr, params, body) => {
                 // Add computed static method (evaluate key first)
                 let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -1144,6 +1203,47 @@ pub(crate) fn create_class_object<'gc>(
                     }
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
+                let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
+                object_set_key_value(mc, &class_obj, pk.clone(), gen_fn)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(pk);
+            }
+            ClassMember::StaticMethodComputedAsync(key_expr, params, body) => {
+                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_prim = if let Value::Object(_) = &key_val {
+                    let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+                    log::debug!("DBG StaticMethodComputedAsync: key ToPrimitive -> {:?}", prim);
+                    prim
+                } else {
+                    key_val.clone()
+                };
+                let pk = crate::core::PropertyKey::from(&key_prim);
+                if let crate::core::PropertyKey::String(s) = &pk {
+                    if s == "prototype" {
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    }
+                }
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
+                let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
+                object_set_key_value(mc, &class_obj, pk.clone(), method_closure)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(pk);
+            }
+            ClassMember::StaticMethodComputedAsyncGenerator(key_expr, params, body) => {
+                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_prim = if let Value::Object(_) = &key_val {
+                    let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+                    log::debug!("DBG StaticMethodComputedAsyncGenerator: key ToPrimitive -> {:?}", prim);
+                    prim
+                } else {
+                    key_val.clone()
+                };
+                let pk = crate::core::PropertyKey::from(&key_prim);
+                if let crate::core::PropertyKey::String(s) = &pk {
+                    if s == "prototype" {
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    }
+                }
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
+                // Async generators not implemented yet; fallback to generator function for now
                 let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
                 object_set_key_value(mc, &class_obj, pk.clone(), gen_fn)?;
                 class_obj.borrow_mut(mc).set_non_enumerable(pk);

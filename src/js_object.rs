@@ -902,8 +902,8 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::Set(_) => "Set",
                 Value::WeakMap(_) => "WeakMap",
                 Value::WeakSet(_) => "WeakSet",
-                Value::GeneratorFunction(..) => "GeneratorFunction",
-                Value::Generator(_) => "Generator",
+                Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => "GeneratorFunction",
+                Value::Generator(_) | Value::AsyncGenerator(_) => "Generator",
                 Value::Proxy(_) => "Proxy",
                 Value::ArrayBuffer(_) => "ArrayBuffer",
                 Value::DataView(_) => "DataView",
@@ -1021,8 +1021,8 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
         Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
         Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
-        Value::GeneratorFunction(..) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
-        Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
+        Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
+        Value::Generator(_) | Value::AsyncGenerator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
         Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
         Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
         Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
@@ -1102,8 +1102,8 @@ pub(crate) fn handle_value_of_method<'gc>(
                 Value::Set(_) => "Set",
                 Value::WeakMap(_) => "WeakMap",
                 Value::WeakSet(_) => "WeakSet",
-                &Value::GeneratorFunction(..) => "GeneratorFunction",
-                &Value::Generator(_) => "Generator",
+                &Value::GeneratorFunction(..) | &Value::AsyncGeneratorFunction(..) => "GeneratorFunction",
+                &Value::Generator(_) | &Value::AsyncGenerator(_) => "Generator",
                 &Value::Proxy(_) => "Proxy",
                 &Value::ArrayBuffer(_) => "ArrayBuffer",
                 &Value::DataView(_) => "DataView",
@@ -1255,7 +1255,12 @@ pub(crate) fn handle_value_of_method<'gc>(
             let closure_data = ClosureData::new(&data.params, &data.body, data.env, None);
             Ok(Value::GeneratorFunction(None, Gc::new(mc, closure_data)))
         }
+        Value::AsyncGeneratorFunction(_, data) => {
+            let closure_data = ClosureData::new(&data.params, &data.body, data.env, None);
+            Ok(Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data)))
+        }
         Value::Generator(generator) => Ok(Value::Generator(*generator)),
+        Value::AsyncGenerator(generator) => Ok(Value::AsyncGenerator(*generator)),
         Value::Proxy(proxy) => Ok(Value::Proxy(*proxy)),
         Value::ArrayBuffer(array_buffer) => Ok(Value::ArrayBuffer(*array_buffer)),
         Value::DataView(data_view) => Ok(Value::DataView(*data_view)),

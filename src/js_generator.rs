@@ -191,7 +191,7 @@ fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut 
     }
 }
 
-fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, replaced: &mut bool) {
+pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, replaced: &mut bool) {
     match stmt.kind.as_mut() {
         StatementKind::Expr(e) => {
             *e = replace_first_yield_in_expr(e, send_value, replaced);
@@ -338,7 +338,7 @@ fn expr_contains_yield(e: &Expr) -> bool {
 
 // Replace the first nested statement containing a yield with a Throw statement
 // holding `throw_value`. Returns true if a replacement was performed.
-fn replace_first_yield_statement_with_throw(stmt: &mut Statement, _throw_value: &Value) -> bool {
+pub(crate) fn replace_first_yield_statement_with_throw(stmt: &mut Statement, _throw_value: &Value) -> bool {
     match stmt.kind.as_mut() {
         StatementKind::Expr(e) => {
             if expr_contains_yield(e) {
@@ -453,6 +453,123 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, _throw_value: 
     }
 }
 
+// Replace the first nested statement containing a yield with a Return statement
+// returning `__gen_throw_val`. Returns true if a replacement was performed.
+pub(crate) fn replace_first_yield_statement_with_return(stmt: &mut Statement) -> bool {
+    match stmt.kind.as_mut() {
+        StatementKind::Expr(e) => {
+            if expr_contains_yield(e) {
+                *stmt.kind = StatementKind::Return(Some(Expr::Var("__gen_throw_val".to_string(), None, None)));
+                return true;
+            }
+            false
+        }
+        StatementKind::Let(decls) | StatementKind::Var(decls) => {
+            for (_, expr_opt) in decls {
+                if let Some(expr) = expr_opt
+                    && expr_contains_yield(expr)
+                {
+                    *stmt.kind = StatementKind::Return(Some(Expr::Var("__gen_throw_val".to_string(), None, None)));
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::Const(decls) => {
+            for (_, expr) in decls {
+                if expr_contains_yield(expr) {
+                    *stmt.kind = StatementKind::Return(Some(Expr::Var("__gen_throw_val".to_string(), None, None)));
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::Return(Some(expr)) => {
+            if expr_contains_yield(expr) {
+                *stmt.kind = StatementKind::Return(Some(Expr::Var("__gen_throw_val".to_string(), None, None)));
+                return true;
+            }
+            false
+        }
+        StatementKind::If(if_stmt) => {
+            let if_stmt = if_stmt.as_mut();
+            for s in if_stmt.then_body.iter_mut() {
+                if replace_first_yield_statement_with_return(s) {
+                    return true;
+                }
+            }
+            if let Some(else_body) = if_stmt.else_body.as_mut() {
+                for s in else_body.iter_mut() {
+                    if replace_first_yield_statement_with_return(s) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        StatementKind::Block(stmts) => {
+            for s in stmts.iter_mut() {
+                if replace_first_yield_statement_with_return(s) {
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::For(for_stmt) => {
+            for s in for_stmt.as_mut().body.iter_mut() {
+                if replace_first_yield_statement_with_return(s) {
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::ForOf(_, _, _, body)
+        | StatementKind::ForIn(_, _, _, body)
+        | StatementKind::ForOfDestructuringObject(_, _, _, body)
+        | StatementKind::ForOfDestructuringArray(_, _, _, body)
+        | StatementKind::While(_, body) => {
+            for s in body.iter_mut() {
+                if replace_first_yield_statement_with_return(s) {
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::DoWhile(body, _) => {
+            for s in body.iter_mut() {
+                if replace_first_yield_statement_with_return(s) {
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::TryCatch(tc_stmt) => {
+            let tc_stmt = tc_stmt.as_mut();
+            for s in tc_stmt.try_body.iter_mut() {
+                if replace_first_yield_statement_with_return(s) {
+                    return true;
+                }
+            }
+            if let Some(catch_body) = tc_stmt.catch_body.as_mut() {
+                for s in catch_body.iter_mut() {
+                    if replace_first_yield_statement_with_return(s) {
+                        return true;
+                    }
+                }
+            }
+            if let Some(finally) = tc_stmt.finally_body.as_mut() {
+                for s in finally.iter_mut() {
+                    if replace_first_yield_statement_with_return(s) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn find_yield_in_expr(e: &Expr) -> Option<Option<Box<Expr>>> {
     match e {
         Expr::Yield(inner) => Some(inner.clone()),
@@ -489,7 +606,7 @@ fn find_yield_in_expr(e: &Expr) -> Option<Option<Box<Expr>>> {
 // index of the containing top-level statement, an optional inner index if
 // the yield is found inside a nested block/body, and the inner yield
 // expression (the Expr inside the yield/await).
-fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<usize>, Option<Box<Expr>>)> {
+pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<usize>, Option<Box<Expr>>)> {
     for (i, s) in stmts.iter().enumerate() {
         match &*s.kind {
             StatementKind::Expr(e) => {

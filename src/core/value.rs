@@ -49,6 +49,21 @@ pub struct JSGenerator<'gc> {
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
+pub struct JSAsyncGenerator<'gc> {
+    pub params: Vec<DestructuringElement>,
+    pub body: Vec<Statement>,
+    pub env: JSObjectDataPtr<'gc>,
+    // Capture call-time arguments for parameter binding
+    pub args: Vec<Value<'gc>>,
+    // Execution state for the async generator and cached initial yield value
+    pub state: GeneratorState<'gc>,
+    pub cached_initial_yield: Option<Value<'gc>>,
+    // Queue of pending requests: tuple of (Promise cell, request kind)
+    pub pending: Vec<(GcPtr<'gc, JSPromise<'gc>>, AsyncGeneratorRequest<'gc>)>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
 pub struct JSProxy<'gc> {
     pub target: Box<Value<'gc>>,
     pub handler: Box<Value<'gc>>,
@@ -113,6 +128,15 @@ pub enum GeneratorState<'gc> {
         pre_env: Option<JSObjectDataPtr<'gc>>,
     },
     Completed,
+}
+
+// Request kinds for AsyncGenerator pending queue
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub enum AsyncGeneratorRequest<'gc> {
+    Next(Value<'gc>),
+    Throw(Value<'gc>),
+    Return(Value<'gc>),
 }
 
 pub type JSObjectDataPtr<'gc> = GcPtr<'gc, JSObjectData<'gc>>;
@@ -474,6 +498,7 @@ pub enum Value<'gc> {
     Closure(Gc<'gc, ClosureData<'gc>>),
     AsyncClosure(Gc<'gc, ClosureData<'gc>>),
     GeneratorFunction(Option<String>, Gc<'gc, ClosureData<'gc>>),
+    AsyncGeneratorFunction(Option<String>, Gc<'gc, ClosureData<'gc>>),
     ClassDefinition(Gc<'gc, ClassDefinition>),
     // Getter/Setter legacy variants - keeping structures as implied by usage
     Getter(Vec<Statement>, JSObjectDataPtr<'gc>, Option<GcCell<JSObjectDataPtr<'gc>>>), // body, env, home object
@@ -490,6 +515,7 @@ pub enum Value<'gc> {
     WeakMap(GcPtr<'gc, JSWeakMap<'gc>>),
     WeakSet(GcPtr<'gc, JSWeakSet<'gc>>),
     Generator(GcPtr<'gc, JSGenerator<'gc>>),
+    AsyncGenerator(GcPtr<'gc, JSAsyncGenerator<'gc>>),
     Proxy(Gc<'gc, JSProxy<'gc>>),
     ArrayBuffer(GcPtr<'gc, JSArrayBuffer>),
     DataView(Gc<'gc, JSDataView<'gc>>),
@@ -551,6 +577,7 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
             Value::Closure(cl) => cl.trace(cc),
             Value::AsyncClosure(cl) => cl.trace(cc),
             Value::GeneratorFunction(_, cl) => cl.trace(cc),
+            Value::AsyncGeneratorFunction(_, cl) => cl.trace(cc),
             Value::ClassDefinition(cl) => cl.trace(cc),
             Value::Getter(body, env, home_object) => {
                 for s in body {
@@ -579,6 +606,7 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
             Value::WeakMap(m) => m.trace(cc),
             Value::WeakSet(s) => s.trace(cc),
             Value::Generator(g) => g.trace(cc),
+            Value::AsyncGenerator(g) => g.trace(cc),
             Value::Proxy(p) => p.trace(cc),
             Value::ArrayBuffer(b) => b.trace(cc),
             Value::DataView(d) => d.trace(cc),
@@ -768,6 +796,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::Closure(..) => "function".to_string(),
         Value::AsyncClosure(..) => "async function".to_string(),
         Value::GeneratorFunction(name, ..) => format!("function* {}", name.as_deref().unwrap_or("")),
+        Value::AsyncGeneratorFunction(name, ..) => format!("async function* {}", name.as_deref().unwrap_or("")),
         Value::ClassDefinition(..) => "class".to_string(),
         Value::Getter(..) => "[Getter]".to_string(),
         Value::Setter(..) => "[Setter]".to_string(),
@@ -777,6 +806,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::WeakMap(_) => "[object WeakMap]".to_string(),
         Value::WeakSet(_) => "[object WeakSet]".to_string(),
         Value::Generator(_) => "[object Generator]".to_string(),
+        Value::AsyncGenerator(_) => "[object AsyncGenerator]".to_string(),
         Value::Proxy(_) => "[object Proxy]".to_string(),
         Value::ArrayBuffer(_) => "[object ArrayBuffer]".to_string(),
         Value::DataView(_) => "[object DataView]".to_string(),

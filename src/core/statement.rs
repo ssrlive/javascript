@@ -171,6 +171,7 @@ pub enum Expr {
     Array(Vec<Option<Expr>>),
     GeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
     AsyncFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
+    AsyncGeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
     AsyncArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
     PostIncrement(Box<Expr>),
     PostDecrement(Box<Expr>),
@@ -233,12 +234,20 @@ pub enum ClassMember {
     Constructor(Vec<DestructuringElement>, Vec<Statement>),             // parameters, body
     Method(String, Vec<DestructuringElement>, Vec<Statement>),          // name, parameters, body
     MethodGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body (generator)
+    MethodAsync(String, Vec<DestructuringElement>, Vec<Statement>),     // async method
+    MethodAsyncGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // async generator method
     StaticMethod(String, Vec<DestructuringElement>, Vec<Statement>),    // name, parameters, body
     StaticMethodGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body (generator)
+    StaticMethodAsync(String, Vec<DestructuringElement>, Vec<Statement>), // static async method
+    StaticMethodAsyncGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // static async generator method
     MethodComputed(Expr, Vec<DestructuringElement>, Vec<Statement>),    // computed-key, parameters, body
     MethodComputedGenerator(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, generator
+    MethodComputedAsync(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, async
+    MethodComputedAsyncGenerator(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, async generator
     StaticMethodComputed(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, parameters, body
     StaticMethodComputedGenerator(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, generator
+    StaticMethodComputedAsync(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, async
+    StaticMethodComputedAsyncGenerator(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, async generator
     Property(String, Expr),                                             // name, value
     StaticProperty(String, Expr),                                       // name, value
     PropertyComputed(Expr, Expr),                                       // computed-key, value

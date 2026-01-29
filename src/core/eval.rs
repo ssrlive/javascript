@@ -892,7 +892,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 env.borrow().prototype.is_none()
             );
             if *is_generator {
-                // Create a generator function object (hoisted)
+                // Create a generator (or async generator) function object (hoisted)
                 let func_obj = crate::core::new_js_object_data(mc);
                 // Set __proto__ to Function.prototype
                 if let Some(func_ctor_val) = env_get(env, "Function")
@@ -914,7 +914,12 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                     enforce_strictness_inheritance: true,
                     ..ClosureData::default()
                 };
-                let closure_val = Value::GeneratorFunction(Some(name.clone()), Gc::new(mc, closure_data));
+                // Use AsyncGeneratorFunction for async generator declarations
+                let closure_val = if *is_async {
+                    Value::AsyncGeneratorFunction(Some(name.clone()), Gc::new(mc, closure_data))
+                } else {
+                    Value::GeneratorFunction(Some(name.clone()), Gc::new(mc, closure_data))
+                };
                 func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                 object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(name)))?;
 
@@ -5999,8 +6004,13 @@ pub fn evaluate_call_dispatch<'gc>(
     eval_args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     log::debug!(
-        "evaluate_call_dispatch: func_val={:?} this={:?} args_len={}",
+        "evaluate_call_dispatch: func_val_debug={:?} func_to_string='{}' is_closure={} is_generator_fn={} is_async_generator_fn={} is_function_obj={} this={:?} args_len={}",
         func_val,
+        crate::core::value_to_string(&func_val),
+        matches!(func_val, Value::Closure(_)),
+        matches!(func_val, Value::GeneratorFunction(..)),
+        matches!(func_val, Value::AsyncGeneratorFunction(..)),
+        matches!(func_val, Value::Object(_)),
         this_val,
         eval_args.len()
     );
@@ -6010,6 +6020,12 @@ pub fn evaluate_call_dispatch<'gc>(
             Ok(v) => Ok(v),
             Err(e) => Err(EvalError::Js(e)),
         },
+        Value::AsyncGeneratorFunction(_, cl) => {
+            match crate::js_async_generator::handle_async_generator_function_call(mc, &cl, &eval_args) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(EvalError::Js(e)),
+            }
+        }
         Value::Function(name) => {
             if let Some(res) = call_native_function(mc, &name, this_val.clone(), &eval_args, env)? {
                 return Ok(res);
@@ -6465,6 +6481,13 @@ pub fn evaluate_call_dispatch<'gc>(
                         Ok(v) => Ok(v),
                         Err(e) => Err(EvalError::Js(e)),
                     },
+                    // Async generator functions: create AsyncGenerator instance
+                    Value::AsyncGeneratorFunction(_, cl) => {
+                        match crate::js_async_generator::handle_async_generator_function_call(mc, cl, &eval_args) {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(EvalError::Js(e)),
+                        }
+                    }
                     _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
                 }
             } else if obj.borrow().class_def.is_some() {
@@ -6754,7 +6777,17 @@ fn evaluate_expr_call<'gc>(
 
     // If callee appears to be a non-callable primitive and the callee expression is a variable,
     // prefer a TypeError with the variable name (e.g., "a is not a function").
-    if !matches!(func_val, Value::Closure(_) | Value::Function(_) | Value::Object(_)) {
+    // Include generator/async-generator function and async closures as callable values too.
+    log::debug!("DBG evaluate_expr_call - callee value = {:?}", func_val);
+    if !matches!(
+        func_val,
+        Value::Closure(_)
+            | Value::Function(_)
+            | Value::Object(_)
+            | Value::GeneratorFunction(..)
+            | Value::AsyncGeneratorFunction(..)
+            | Value::AsyncClosure(_)
+    ) {
         if let Expr::Var(name, ..) = func_expr {
             return Err(EvalError::Js(raise_type_error!(format!("{} is not a function", name))));
         } else {
@@ -7378,6 +7411,59 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 ..ClosureData::default()
             };
             let closure_val = Value::GeneratorFunction(name.clone(), Gc::new(mc, closure_data));
+            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+            match name {
+                Some(n) if !n.is_empty() => {
+                    let desc = create_descriptor_object(mc, Value::String(utf8_to_utf16(n)), false, false, true)?;
+                    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
+                }
+                _ => {}
+            }
+
+            // Create prototype object
+            let proto_obj = crate::core::new_js_object_data(mc);
+            // Set prototype of prototype object to Object.prototype
+            if let Some(obj_val) = env_get(env, "Object")
+                && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+            {
+                proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+            }
+
+            // Set 'constructor' on prototype
+            object_set_key_value(mc, &proto_obj, "constructor", Value::Object(func_obj))?;
+            // Set 'prototype' on function
+            object_set_key_value(mc, &func_obj, "prototype", Value::Object(proto_obj))?;
+
+            Ok(Value::Object(func_obj))
+        }
+        Expr::AsyncGeneratorFunction(name, params, body) => {
+            // Async generator functions are represented as objects with an AsyncGeneratorFunction stored
+            // in an internal closure slot. They inherit from Function.prototype.
+            let func_obj = crate::core::new_js_object_data(mc);
+
+            // Set __proto__ to Function.prototype
+            if let Some(func_ctor_val) = env_get(env, "Function")
+                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+                && let Value::Object(proto) = &*proto_val.borrow()
+            {
+                func_obj.borrow_mut(mc).prototype = Some(*proto);
+            }
+
+            let is_strict = body.first()
+                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                .unwrap_or(false);
+            let closure_data = ClosureData {
+                params: params.to_vec(),
+                body: body.clone(),
+                env: Some(*env),
+                is_strict,
+                enforce_strictness_inheritance: true,
+                ..ClosureData::default()
+            };
+            let closure_val = Value::AsyncGeneratorFunction(name.clone(), Gc::new(mc, closure_data));
             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
             match name {
                 Some(n) if !n.is_empty() => {
@@ -8856,6 +8942,51 @@ pub fn call_native_function<'gc>(
     // Restricted accessor used to implement the throwing 'caller'/'arguments' accessors on Function.prototype
     if name == "Function.prototype.restrictedThrow" {
         return Err(EvalError::Js(raise_type_error!("Access to 'caller' or 'arguments' is restricted")));
+    }
+
+    if name == "AsyncGenerator.prototype.next" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            match crate::js_async_generator::handle_async_generator_prototype_next(mc, Some(Value::Object(obj)), args, env) {
+                Ok(Some(v)) => return Ok(Some(v)),
+                Ok(None) => return Ok(Some(Value::Undefined)),
+                Err(e) => return Err(EvalError::Js(e)),
+            }
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "AsyncGenerator.prototype.next called on non-object"
+            )));
+        }
+    }
+
+    if name == "AsyncGenerator.prototype.throw" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            match crate::js_async_generator::handle_async_generator_prototype_throw(mc, Some(Value::Object(obj)), args, env) {
+                Ok(Some(v)) => return Ok(Some(v)),
+                Ok(None) => return Ok(Some(Value::Undefined)),
+                Err(e) => return Err(EvalError::Js(e)),
+            }
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "AsyncGenerator.prototype.throw called on non-object"
+            )));
+        }
+    }
+
+    if name == "AsyncGenerator.prototype.return" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            match crate::js_async_generator::handle_async_generator_prototype_return(mc, Some(Value::Object(obj)), args, env) {
+                Ok(Some(v)) => return Ok(Some(v)),
+                Ok(None) => return Ok(Some(Value::Undefined)),
+                Err(e) => return Err(EvalError::Js(e)),
+            }
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "AsyncGenerator.prototype.return called on non-object"
+            )));
+        }
     }
 
     if name == "call" || name == "Function.prototype.call" {

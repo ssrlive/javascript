@@ -105,6 +105,29 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
       PREPEND_FILES = fixed;
     }
   })();
+
+  // If the test references Test262Error directly (e.g., older Sputnik tests that use
+  // 'throw new Test262Error(...)'), ensure we inject the Test262 harness 'sta.js'
+  // which defines Test262Error so the test can run. Prefer harness files from test262.
+  (function ensureTest262Error(){
+    const src = fs.readFileSync(testPath, 'utf8');
+    if (/\bTest262Error\b/.test(src)) {
+      // Check if any of the PREPEND_FILES already defines Test262Error
+      let definesTest262Error = false;
+      for (const p of PREPEND_FILES) {
+        if (!p || !fs.existsSync(p)) continue;
+        const s = fs.readFileSync(p, 'utf8');
+        if (/function\s+Test262Error\b|Test262Error.prototype/.test(s) || /defines:\s*\[[^\]]*\bTest262Error\b/.test(extractMeta(p))) { definesTest262Error = true; break; }
+      }
+      if (!definesTest262Error) {
+        const sta = harnessIndex['sta.js'];
+        if (sta && fs.existsSync(sta)) {
+          // Place it at the front so it defines Test262Error for subsequent includes/tests
+          PREPEND_FILES.unshift(sta);
+        }
+      }
+    }
+  })();
   debug.push(`DEBUG PREPEND_AFTER ${PREPEND_FILES.map(p => path.relative('.', p)).join(',')} , for ${testPath}`);
 
   // If no module tests: add strict wrapper

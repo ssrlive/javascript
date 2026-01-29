@@ -2560,7 +2560,9 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                     }
                 } else if let Some(name) = name_str_opt {
                     if is_static {
-                        if is_async_member {
+                        if is_private {
+                            members.push(ClassMember::PrivateStaticMethodAsyncGenerator(name, params, body));
+                        } else if is_async_member {
                             members.push(ClassMember::StaticMethodAsyncGenerator(name, params, body));
                         } else {
                             members.push(ClassMember::StaticMethodGenerator(name, params, body));

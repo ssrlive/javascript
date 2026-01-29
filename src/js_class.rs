@@ -1340,6 +1340,17 @@ pub(crate) fn create_class_object<'gc>(
                 object_set_key_value(mc, &prototype_obj, &final_key, async_gen_fn)?;
                 prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(final_key));
             }
+            ClassMember::PrivateStaticMethodAsyncGenerator(method_name, params, body) => {
+                let final_key = if method_name.starts_with('#') {
+                    method_name.clone()
+                } else {
+                    format!("#{method_name}")
+                };
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
+                let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
+                object_set_key_value(mc, &class_obj, &final_key, async_gen_fn)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(final_key));
+            }
             ClassMember::PrivateGetter(getter_name, body) => {
                 let key = format!("#{}", getter_name);
                 // Merge into existing property descriptor if present

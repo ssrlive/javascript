@@ -254,6 +254,8 @@ async function runAll(){
       if (res && res.status === 0) {
         log(`PASS ${f}`); pass++;
         execCount++;
+        // Progress indicator: print a dot to terminal after each successful test
+        try { process.stdout.write('.'); } catch (e) { /* ignore */ }
         // On success, remove temporary composed file to avoid clutter
         if (cleanupTmp && tmpPath && fs.existsSync(tmpPath)) {
           try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
@@ -285,7 +287,7 @@ async function runAll(){
         log('----------------');
         // Also print concise failure summary to terminal (stderr)
         try {
-          console.error(`FAIL ${f}`);
+          console.error(`\nFAIL ${f}`);
           console.error(summaryText);
           console.error('----------------');
         } catch (e) { /* ignore terminal print errors */ }
@@ -340,8 +342,10 @@ async function runAll(){
 
   log(`Ran ${n} candidates: pass=${pass} fail=${fail} skip=${skip}`);
   log(`Executed ${pass+fail} tests (pass+fail).`);
-  console.log(`Ran ${n} candidates: pass=${pass} fail=${fail} skip=${skip}`);
+  console.log(`\nRan ${n} candidates: pass=${pass} fail=${fail} skip=${skip}`);
   console.log(`Executed ${pass+fail} tests (pass+fail).`);
+  // Show location of verbose results file
+  console.log(`Details in ${RESULTS_FILE}`);
   // Exit non-zero if any tests failed (default behavior)
   if (fail > 0) {
     console.log('One or more tests failed; exiting with status 1');

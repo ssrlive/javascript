@@ -1,0 +1,14 @@
+{
+  "name": "test262-runner",
+  "version": "0.1.0",
+  "description": "Node-based Test262 runner (prototype)",
+  "main": "ci/runner.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node ci/test_compose.js",
+    "run": "node ci/runner.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {}
+}

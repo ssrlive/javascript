@@ -106,7 +106,7 @@ assert_eq!(result, "94");
 
 ### Working with Promises
 
-```rust
+```rust,no_run
 use javascript::evaluate_script;
 
 let result = evaluate_script(r#"

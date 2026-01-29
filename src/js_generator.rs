@@ -734,6 +734,10 @@ pub fn generator_next<'gc>(
                 let func_env =
                     prepare_function_call_env(mc, Some(&gen_obj.env), None, Some(&gen_obj.params[..]), &gen_obj.args, None, None)?;
 
+                // Ensure `arguments` object exists for generator function body so
+                // parameter accesses (and `arguments.length`) reflect the passed args.
+                crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
+
                 // If the yield is inside a nested block/branch we may need to
                 // execute pre-statements that are inside that block before
                 // evaluating the inner expression. For example, when the
@@ -801,6 +805,8 @@ pub fn generator_next<'gc>(
                 // returned value.
                 let func_env =
                     prepare_function_call_env(mc, Some(&gen_obj.env), None, Some(&gen_obj.params[..]), &gen_obj.args, None, None)?;
+                // Ensure `arguments` exists for the no-yield completion path too.
+                crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
                 let res = crate::core::evaluate_statements(mc, &func_env, &gen_obj.body);
                 gen_obj.state = GeneratorState::Completed;
                 match res {

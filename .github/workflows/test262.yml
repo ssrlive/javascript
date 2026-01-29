@@ -32,7 +32,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --timeout 20 --limit 510 --focus language
+          node ci/runner.js --timeout 20 --limit 620 --focus language
 
       - name: Upload results
         if: ${{ !cancelled() }}

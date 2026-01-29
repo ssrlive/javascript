@@ -52,13 +52,27 @@ fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     }
 }
 
-fn to_int32_value<'gc>(val: &Value<'gc>) -> Result<i32, EvalError<'gc>> {
-    let n = to_number(val)?;
+// Number-conversion that performs ToPrimitive (hint = 'number') for non-primitives
+fn to_number_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
+    let is_primitive = matches!(
+        val,
+        Value::Number(_) | Value::BigInt(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Null | Value::Symbol(_)
+    );
+    if is_primitive {
+        return to_number(val);
+    }
+    // Non-primitive -> perform ToPrimitive with hint 'number'
+    let prim = crate::core::to_primitive(mc, val, "number", env)?;
+    to_number(&prim)
+}
+
+fn to_int32_value_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i32, EvalError<'gc>> {
+    let n = to_number_with_env(mc, env, val)?;
     Ok(crate::core::number::to_int32(n))
 }
 
-fn to_uint32_value<'gc>(val: &Value<'gc>) -> Result<u32, EvalError<'gc>> {
-    let n = to_number(val)?;
+fn to_uint32_value_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<u32, EvalError<'gc>> {
+    let n = to_number_with_env(mc, env, val)?;
     Ok(crate::core::number::to_uint32(n))
 }
 
@@ -5086,8 +5100,8 @@ fn evaluate_expr_bitand_assign<'gc>(
                     Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                 }
                 (l, r) => {
-                    let l = to_int32_value(&l)?;
-                    let r = to_int32_value(&r)?;
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = to_int32_value_with_env(mc, env, &r)?;
                     let new_val = Value::Number((l & r) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
@@ -5109,8 +5123,8 @@ fn evaluate_expr_bitand_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = to_int32_value(&r)?;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = to_int32_value_with_env(mc, env, &r)?;
                         let new_val = Value::Number((l & r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
@@ -5137,8 +5151,8 @@ fn evaluate_expr_bitand_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = to_int32_value(&r)?;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = to_int32_value_with_env(mc, env, &r)?;
                         let new_val = Value::Number((l & r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
@@ -5174,8 +5188,8 @@ fn evaluate_expr_bitor_assign<'gc>(
                     Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                 }
                 (l, r) => {
-                    let l = to_int32_value(&l)?;
-                    let r = to_int32_value(&r)?;
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = to_int32_value_with_env(mc, env, &r)?;
                     let new_val = Value::Number((l | r) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
@@ -5197,8 +5211,8 @@ fn evaluate_expr_bitor_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = to_int32_value(&r)?;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = to_int32_value_with_env(mc, env, &r)?;
                         let new_val = Value::Number((l | r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
@@ -5225,8 +5239,8 @@ fn evaluate_expr_bitor_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = to_int32_value(&r)?;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = to_int32_value_with_env(mc, env, &r)?;
                         let new_val = Value::Number((l | r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
@@ -5262,8 +5276,8 @@ fn evaluate_expr_bitxor_assign<'gc>(
                     Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                 }
                 (l, r) => {
-                    let l = to_int32_value(&l)?;
-                    let r = to_int32_value(&r)?;
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = to_int32_value_with_env(mc, env, &r)?;
                     let new_val = Value::Number((l ^ r) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
@@ -5285,8 +5299,8 @@ fn evaluate_expr_bitxor_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = to_int32_value(&r)?;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = to_int32_value_with_env(mc, env, &r)?;
                         let new_val = Value::Number((l ^ r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
@@ -5313,8 +5327,8 @@ fn evaluate_expr_bitxor_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = to_int32_value(&r)?;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = to_int32_value_with_env(mc, env, &r)?;
                         let new_val = Value::Number((l ^ r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
@@ -5351,8 +5365,8 @@ fn evaluate_expr_leftshift_assign<'gc>(
                     Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                 }
                 (l, r) => {
-                    let l = to_int32_value(&l)?;
-                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number(((l << r) as i32) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
@@ -5375,8 +5389,8 @@ fn evaluate_expr_leftshift_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                         let new_val = Value::Number(((l << r) as i32) as f64);
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
@@ -5404,8 +5418,8 @@ fn evaluate_expr_leftshift_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                         let new_val = Value::Number(((l << r) as i32) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
@@ -5442,8 +5456,8 @@ fn evaluate_expr_rightshift_assign<'gc>(
                     Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                 }
                 (l, r) => {
-                    let l = to_int32_value(&l)?;
-                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number((l >> r) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
@@ -5466,8 +5480,8 @@ fn evaluate_expr_rightshift_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                         let new_val = Value::Number((l >> r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                         Ok(new_val)
@@ -5495,8 +5509,8 @@ fn evaluate_expr_rightshift_assign<'gc>(
                         Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                     }
                     (l, r) => {
-                        let l = to_int32_value(&l)?;
-                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let l = to_int32_value_with_env(mc, env, &l)?;
+                        let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                         let new_val = Value::Number((l >> r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
@@ -5525,8 +5539,8 @@ fn evaluate_expr_urightshift_assign<'gc>(
             match (current, val) {
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(EvalError::Js(crate::raise_type_error!("Unsigned right shift"))),
                 (l, r) => {
-                    let l = to_uint32_value(&l)?;
-                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let l = to_uint32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number((l >> r) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
@@ -5543,8 +5557,8 @@ fn evaluate_expr_urightshift_assign<'gc>(
                 }
                 let (l, r) = (current, val);
                 {
-                    let l = to_uint32_value(&l)?;
-                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let l = to_uint32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number((l >> r) as f64);
                     set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
                     Ok(new_val)
@@ -5565,8 +5579,8 @@ fn evaluate_expr_urightshift_assign<'gc>(
                 }
                 let (l, r) = (current, val);
                 {
-                    let l = to_uint32_value(&l)?;
-                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let l = to_uint32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number((l >> r) as f64);
                     set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                     Ok(new_val)
@@ -5600,9 +5614,9 @@ fn evaluate_expr_sub_assign<'gc>(
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
             (l, r) => {
-                // Coerce to numbers and validate not NaN
-                let ln = to_number(&l)?;
-                let rn = to_number(&r)?;
+                // Coerce to numbers (perform ToPrimitive when needed) and validate not NaN
+                let ln = to_number_with_env(mc, env, &l)?;
+                let rn = to_number_with_env(mc, env, &r)?;
                 if ln.is_nan() || rn.is_nan() {
                     return Err(EvalError::Js(raise_eval_error!("Invalid operands for subtraction")));
                 }
@@ -5636,8 +5650,8 @@ fn evaluate_expr_mul_assign<'gc>(
                     Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
                 }
                 (l, r) => {
-                    let ln = to_number(&l)?;
-                    let rn = to_number(&r)?;
+                    let ln = to_number_with_env(mc, env, &l)?;
+                    let rn = to_number_with_env(mc, env, &r)?;
                     if ln.is_nan() || rn.is_nan() {
                         return Err(EvalError::Js(raise_eval_error!("Invalid operands for multiplication")));
                     }
@@ -5658,8 +5672,8 @@ fn evaluate_expr_mul_assign<'gc>(
                         return Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")));
                     }
                     (l, r) => {
-                        let ln = to_number(&l)?;
-                        let rn = to_number(&r)?;
+                        let ln = to_number_with_env(mc, env, &l)?;
+                        let rn = to_number_with_env(mc, env, &r)?;
                         if ln.is_nan() || rn.is_nan() {
                             return Err(EvalError::Js(raise_eval_error!("Invalid operands for multiplication")));
                         }
@@ -6930,8 +6944,8 @@ fn evaluate_expr_binary<'gc>(
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
             (l, r) => {
-                let l = to_int32_value(&l)?;
-                let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                let l = to_int32_value_with_env(mc, env, &l)?;
+                let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                 Ok(Value::Number(((l << r) as i32) as f64))
             }
         },
@@ -6944,16 +6958,16 @@ fn evaluate_expr_binary<'gc>(
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
             (l, r) => {
-                let l = to_int32_value(&l)?;
-                let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                let l = to_int32_value_with_env(mc, env, &l)?;
+                let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                 Ok(Value::Number((l >> r) as f64))
             }
         },
         BinaryOp::UnsignedRightShift => match (l_val, r_val) {
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(EvalError::Js(crate::raise_type_error!("BigInt does not support >>>"))),
             (l, r) => {
-                let l = to_uint32_value(&l)?;
-                let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                let l = to_uint32_value_with_env(mc, env, &l)?;
+                let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                 Ok(Value::Number((l >> r) as f64))
             }
         },
@@ -7142,8 +7156,8 @@ fn evaluate_expr_binary<'gc>(
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
             (l, r) => {
-                let l = to_int32_value(&l)?;
-                let r = to_int32_value(&r)?;
+                let l = to_int32_value_with_env(mc, env, &l)?;
+                let r = to_int32_value_with_env(mc, env, &r)?;
                 Ok(Value::Number((l & r) as f64))
             }
         },
@@ -7153,8 +7167,8 @@ fn evaluate_expr_binary<'gc>(
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
             (l, r) => {
-                let l = to_int32_value(&l)?;
-                let r = to_int32_value(&r)?;
+                let l = to_int32_value_with_env(mc, env, &l)?;
+                let r = to_int32_value_with_env(mc, env, &r)?;
                 Ok(Value::Number((l | r) as f64))
             }
         },
@@ -7164,8 +7178,8 @@ fn evaluate_expr_binary<'gc>(
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
             (l, r) => {
-                let l = to_int32_value(&l)?;
-                let r = to_int32_value(&r)?;
+                let l = to_int32_value_with_env(mc, env, &l)?;
+                let r = to_int32_value_with_env(mc, env, &r)?;
                 Ok(Value::Number((l ^ r) as f64))
             }
         },
@@ -7771,19 +7785,19 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let val = evaluate_expr(mc, env, expr)?;
             match val {
                 Value::BigInt(b) => Ok(Value::BigInt(Box::new(-*b))),
-                other => Ok(Value::Number(-to_number(&other)?)),
+                other => Ok(Value::Number(-to_number_with_env(mc, env, &other)?)),
             }
         }
         Expr::UnaryPlus(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
-            Ok(Value::Number(to_number(&val)?))
+            Ok(Value::Number(to_number_with_env(mc, env, &val)?))
         }
         Expr::BitNot(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
             match val {
                 Value::BigInt(b) => Ok(Value::BigInt(Box::new(!*b))),
                 other => {
-                    let n = to_int32_value(&other)?;
+                    let n = to_int32_value_with_env(mc, env, &other)?;
                     Ok(Value::Number((!n) as f64))
                 }
             }

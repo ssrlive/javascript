@@ -255,6 +255,7 @@ pub enum ClassMember {
     PrivateProperty(String, Expr),                                      // name, value
     PrivateStaticProperty(String, Expr),                                // name, value
     PrivateMethod(String, Vec<DestructuringElement>, Vec<Statement>),   // name, parameters, body
+    PrivateMethodAsyncGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // private async generator method
     PrivateStaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
     PrivateGetter(String, Vec<Statement>),                              // name, body
     PrivateSetter(String, Vec<DestructuringElement>, Vec<Statement>),   // name, parameter, body

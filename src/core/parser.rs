@@ -2566,8 +2566,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                             members.push(ClassMember::StaticMethodGenerator(name, params, body));
                         }
                     } else if is_private {
-                        // Private async generator methods not implemented separately; fallback to PrivateMethod
-                        members.push(ClassMember::PrivateMethod(name, params, body)); // private methods generators not implemented separately
+                        members.push(ClassMember::PrivateMethodAsyncGenerator(name, params, body));
                     } else if is_async_member {
                         members.push(ClassMember::MethodAsyncGenerator(name, params, body));
                     } else {

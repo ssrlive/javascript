@@ -6561,8 +6561,11 @@ fn evaluate_expr_call<'gc>(
                 return Ok(Value::Undefined);
             }
             let f_val = if let Value::Object(obj) = &obj_val {
-                if let Some(val) = object_get_key_value(obj, key) {
-                    val.borrow().clone()
+                // Use accessor-aware property lookup so getters are executed
+                let key_pk = crate::core::PropertyKey::from(key.to_string());
+                let prop_val = get_property_with_accessors(mc, env, obj, &key_pk)?;
+                if !matches!(prop_val, Value::Undefined) {
+                    prop_val
                 } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
                     Value::Function(key.to_string())
                 } else {
@@ -6612,8 +6615,11 @@ fn evaluate_expr_call<'gc>(
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let f_val = if let Value::Object(obj) = &obj_val {
-                if let Some(val) = object_get_key_value(obj, key) {
-                    val.borrow().clone()
+                // Use accessor-aware property lookup so getters are executed.
+                let key_pk = crate::core::PropertyKey::from(key.to_string());
+                let prop_val = get_property_with_accessors(mc, env, obj, &key_pk)?;
+                if !matches!(prop_val, Value::Undefined) {
+                    prop_val
                 } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
                     Value::Function(key.to_string())
                 } else {
@@ -6634,6 +6640,7 @@ fn evaluate_expr_call<'gc>(
             } else {
                 get_primitive_prototype_property(mc, env, &obj_val, &key.as_str().into())?
             };
+
             (f_val, Some(obj_val))
         }
         Expr::Index(obj_expr, key_expr) => {
@@ -6648,8 +6655,10 @@ fn evaluate_expr_call<'gc>(
             };
 
             let f_val = if let Value::Object(obj) = &obj_val {
-                if let Some(val) = object_get_key_value(obj, &key) {
-                    val.borrow().clone()
+                // Use accessor-aware lookup so getters are invoked
+                let prop_val = get_property_with_accessors(mc, env, obj, &key)?;
+                if !matches!(prop_val, Value::Undefined) {
+                    prop_val
                 } else {
                     Value::Undefined
                 }
@@ -6778,7 +6787,6 @@ fn evaluate_expr_call<'gc>(
     // If callee appears to be a non-callable primitive and the callee expression is a variable,
     // prefer a TypeError with the variable name (e.g., "a is not a function").
     // Include generator/async-generator function and async closures as callable values too.
-    log::debug!("DBG evaluate_expr_call - callee value = {:?}", func_val);
     if !matches!(
         func_val,
         Value::Closure(_)
@@ -8580,12 +8588,7 @@ fn set_property_with_accessors<'gc>(
     key: &PropertyKey<'gc>,
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
-    log::debug!("DBG set_property_with_accessors: obj={:p} key={:?}", Gc::as_ptr(*obj), key);
-    log::debug!(
-        "DBG set_property_with_accessors: receiver_has_own={}",
-        get_own_property(obj, key).is_some()
-    );
-    // Diagnostic: locate owner (object on prototype chain that actually has the property)
+    // Locate owner (object on prototype chain that actually has the property)
     let mut owner_opt: Option<crate::core::JSObjectDataPtr> = None;
     {
         let mut cur = Some(*obj);
@@ -8601,18 +8604,7 @@ fn set_property_with_accessors<'gc>(
             cur = c.borrow().prototype;
         }
     }
-    let owner_ptr = owner_opt.map(Gc::as_ptr);
-    log::debug!(
-        "DBG set_property_with_accessors: owner_ptr={:?} receiver_ptr={:p} key={:?}",
-        owner_ptr,
-        Gc::as_ptr(*obj),
-        key
-    );
-    log::debug!(
-        "DBG set_property_with_accessors: env_ptr={:p} strictness={}",
-        Gc::as_ptr(*_env),
-        crate::core::env_get_strictness(_env)
-    );
+    let _owner_ptr = owner_opt.map(Gc::as_ptr);
     // Special-case assignment to `__proto__` to update the internal prototype pointer
     if let PropertyKey::String(s) = key
         && s == "__proto__"
@@ -8688,23 +8680,13 @@ fn set_property_with_accessors<'gc>(
     // If the receiver owns the property, the semantics of assignment must first honor the
     // receiver's own property (data or accessor). Only when there is no own property should we
     // consult the prototype chain for inherited setters or non-writable inherited properties.
-    log::debug!(
-        "DBG precheck: properties_keys={:?} contains_key={}",
-        obj.borrow().properties.keys().collect::<Vec<_>>(),
-        obj.borrow().properties.contains_key(key)
-    );
+
     if get_own_property(obj, key).is_none() {
         let mut proto_check = obj.borrow().prototype;
         while let Some(proto_obj) = proto_check {
             // Diagnostic: print prototype object pointer, whether it owns the key,
             // and its writability for the key. This helps verify that the pre-check
             // sees the same non-writable marker that `define_property_internal` set.
-            log::debug!(
-                "DBG proto_check: proto_ptr={:p} owns_key={} is_writable={}",
-                Gc::as_ptr(proto_obj),
-                get_own_property(&proto_obj, key).is_some(),
-                proto_obj.borrow().is_writable(key)
-            );
 
             if let Some(inherited_ptr) = object_get_key_value(&proto_obj, key) {
                 let inherited = inherited_ptr.borrow().clone();

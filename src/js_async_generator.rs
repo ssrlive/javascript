@@ -192,6 +192,11 @@ fn process_one_pending<'gc>(
                         None,
                     )?;
 
+                    // Ensure an `arguments` object is available to the function body so
+                    // parameter accesses (and `arguments.length`) reflect the passed args.
+                    // This mirrors what `call_closure`/function calls do for ordinary functions.
+                    crate::js_class::create_arguments_object(mc, &func_env, &gen_ptr_mut.args, None)?;
+
                     if idx > 0 {
                         let pre_stmts = gen_ptr_mut.body[0..idx].to_vec();
                         let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
@@ -245,6 +250,10 @@ fn process_one_pending<'gc>(
                         None,
                         None,
                     )?;
+
+                    // Ensure `arguments` exists for the no-yield completion path too.
+                    crate::js_class::create_arguments_object(mc, &func_env, &gen_ptr_mut.args, None)?;
+
                     match evaluate_statements(mc, &func_env, &gen_ptr_mut.body) {
                         Ok(v) => {
                             gen_ptr_mut.state = GeneratorState::Completed;

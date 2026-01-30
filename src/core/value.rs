@@ -209,7 +209,8 @@ impl<'gc> JSObjectData<'gc> {
             ..JSObjectData::default()
         }
     }
-    pub fn insert(&mut self, key: PropertyKey<'gc>, val: GcPtr<'gc, Value<'gc>>) {
+    pub fn insert(&mut self, key: impl Into<PropertyKey<'gc>>, val: GcPtr<'gc, Value<'gc>>) {
+        let key = key.into();
         // Normal insertion into the object's property map. Avoid panicking here -
         // higher-level helpers (e.g., `set_property` and `object_set_key_value`) are
         // responsible for treating implementation-internal keys specially.
@@ -218,21 +219,25 @@ impl<'gc> JSObjectData<'gc> {
     pub fn set_const(&mut self, key: String) {
         self.constants.insert(key);
     }
-    pub fn set_non_configurable(&mut self, key: PropertyKey<'gc>) {
+    pub fn set_non_configurable(&mut self, key: impl Into<PropertyKey<'gc>>) {
+        let key = key.into();
         self.non_configurable.insert(key);
     }
 
-    pub fn set_configurable(&mut self, key: PropertyKey<'gc>) {
+    pub fn set_configurable(&mut self, key: impl Into<PropertyKey<'gc>>) {
+        let key = key.into();
         self.non_configurable.remove(&key);
     }
 
-    pub fn set_non_writable(&mut self, key: PropertyKey<'gc>) {
+    pub fn set_non_writable(&mut self, key: impl Into<PropertyKey<'gc>>) {
+        let key = key.into();
         // Debug: log where non-writable markers are set
         log::debug!("set_non_writable: obj_ptr={:p} key={:?}", self as *const _, key);
         self.non_writable.insert(key);
     }
 
-    pub fn set_writable(&mut self, key: PropertyKey<'gc>) {
+    pub fn set_writable(&mut self, key: impl Into<PropertyKey<'gc>>) {
+        let key = key.into();
         // Debug: log where non-writable markers are cleared
         log::debug!("set_writable: obj_ptr={:p} key={:?}", self as *const _, key);
         self.non_writable.remove(&key);
@@ -342,24 +347,28 @@ impl<'gc> JSObjectData<'gc> {
         None
     }
 
-    pub fn set_non_enumerable(&mut self, key: PropertyKey<'gc>) {
+    pub fn set_non_enumerable(&mut self, key: impl Into<PropertyKey<'gc>>) {
+        let key = key.into();
         // Debug: log where non-enumerable markers are set
         log::debug!("set_non_enumerable: obj_ptr={:p} key={:?}", self as *const _, key);
         self.non_enumerable.insert(key);
     }
 
-    pub fn set_enumerable(&mut self, key: PropertyKey<'gc>) {
+    pub fn set_enumerable(&mut self, key: impl Into<PropertyKey<'gc>>) {
+        let key = key.into();
         // Debug: log where enumerable markers are cleared
         log::debug!("set_enumerable: obj_ptr={:p} key={:?}", self as *const _, key);
         self.non_enumerable.remove(&key);
     }
 
-    pub fn is_configurable(&self, key: &PropertyKey<'gc>) -> bool {
-        !self.non_configurable.contains(key)
+    pub fn is_configurable(&self, key: impl Into<PropertyKey<'gc>>) -> bool {
+        let key = key.into();
+        !self.non_configurable.contains(&key)
     }
 
-    pub fn is_writable(&self, key: &PropertyKey<'gc>) -> bool {
-        !self.non_writable.contains(key)
+    pub fn is_writable(&self, key: impl Into<PropertyKey<'gc>>) -> bool {
+        let key = key.into();
+        !self.non_writable.contains(&key)
     }
 
     // Extensibility helpers
@@ -371,8 +380,9 @@ impl<'gc> JSObjectData<'gc> {
         self.extensible = false;
     }
 
-    pub fn is_enumerable(&self, key: &PropertyKey<'gc>) -> bool {
-        !self.non_enumerable.contains(key)
+    pub fn is_enumerable(&self, key: impl Into<PropertyKey<'gc>>) -> bool {
+        let key = key.into();
+        !self.non_enumerable.contains(&key)
     }
 
     pub fn get_home_object(&self) -> Option<GcCell<JSObjectDataPtr<'gc>>> {
@@ -1102,7 +1112,7 @@ pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
 pub fn env_set_strictness<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
     let val = Value::Boolean(is_strict);
     let val_ptr = new_gc_cell_ptr(mc, val);
-    env.borrow_mut(mc).insert("__is_strict".into(), val_ptr);
+    env.borrow_mut(mc).insert("__is_strict", val_ptr);
     Ok(())
 }
 

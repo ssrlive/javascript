@@ -1,5 +1,5 @@
+use crate::core::JSWeakMap;
 use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
-use crate::core::{JSWeakMap, PropertyKey};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
     error::JSError,
@@ -26,12 +26,11 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
     // Create a wrapper object for the WeakMap
     let weakmap_obj = new_js_object_data(mc);
     // Store the actual weakmap data
-    weakmap_obj.borrow_mut(mc).insert(
-        PropertyKey::String("__weakmap__".to_string()),
-        new_gc_cell_ptr(mc, Value::WeakMap(weakmap)),
-    );
+    weakmap_obj
+        .borrow_mut(mc)
+        .insert("__weakmap__", new_gc_cell_ptr(mc, Value::WeakMap(weakmap)));
     // Internal slot should be non-enumerable so it doesn't show up in `evaluate_script` output
-    weakmap_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__weakmap__"));
+    weakmap_obj.borrow_mut(mc).set_non_enumerable("__weakmap__");
 
     // Set prototype to WeakMap.prototype if available
     if let Some(weakmap_ctor) = object_get_key_value(env, "WeakMap")
@@ -113,10 +112,10 @@ pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     for method in methods {
         let val = Value::Function(format!("WeakMap.prototype.{method}"));
         object_set_key_value(mc, &weakmap_proto, method, val)?;
-        weakmap_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        weakmap_proto.borrow_mut(mc).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
-    weakmap_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    weakmap_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     env_set(mc, env, "WeakMap", Value::Object(weakmap_ctor))?;
     Ok(())

@@ -142,7 +142,7 @@ pub fn create_arguments_object<'gc>(
 
     // Set 'length' property
     object_set_key_value(mc, &arguments_obj, "length", Value::Number(evaluated_args.len() as f64))?;
-    arguments_obj.borrow_mut(mc).set_non_enumerable("length".into());
+    arguments_obj.borrow_mut(mc).set_non_enumerable("length");
 
     for (i, arg) in evaluated_args.iter().enumerate() {
         object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
@@ -190,12 +190,8 @@ pub fn create_arguments_object<'gc>(
 
         object_set_key_value(mc, &arguments_obj, "callee", prop)?;
         // Non-enumerable is handled by object_set_key_value if we pass Property? No.
-        arguments_obj
-            .borrow_mut(mc)
-            .set_non_enumerable(crate::core::PropertyKey::from("callee"));
-        arguments_obj
-            .borrow_mut(mc)
-            .set_non_configurable(crate::core::PropertyKey::from("callee"));
+        arguments_obj.borrow_mut(mc).set_non_enumerable("callee");
+        arguments_obj.borrow_mut(mc).set_non_configurable("callee");
     }
 
     object_set_key_value(mc, func_env, "arguments", Value::Object(arguments_obj))?;
@@ -455,7 +451,7 @@ pub(crate) fn evaluate_new<'gc>(
                                 }
                                 // Don't add an own 'constructor' property on instance; prototype carries it.
                                 // Fix __proto__ non-enumerable
-                                inst_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
+                                inst_obj.borrow_mut(mc).set_non_enumerable("__proto__");
 
                                 return Ok(parent_inst);
                             } else {
@@ -517,10 +513,10 @@ pub(crate) fn evaluate_new<'gc>(
                         instance.borrow_mut(mc).prototype = Some(*proto_obj);
                         object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj))?;
                         // Ensure the instance __proto__ helper property is non-enumerable
-                        instance.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
+                        instance.borrow_mut(mc).set_non_enumerable("__proto__");
                     } else {
                         object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone())?;
-                        instance.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
+                        instance.borrow_mut(mc).set_non_enumerable("__proto__");
                     }
                 }
 
@@ -723,17 +719,17 @@ pub(crate) fn create_class_object<'gc>(
     }
     // Set the 'length' property on the constructor (non-enumerable, non-writable)
     object_set_key_value(mc, &class_obj, "length", Value::Number(ctor_len as f64))?;
-    class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("length"));
-    class_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("length"));
+    class_obj.borrow_mut(mc).set_non_enumerable("length");
+    class_obj.borrow_mut(mc).set_non_writable("length");
 
     // Set class name
     object_set_key_value(mc, &class_obj, "name", Value::String(utf8_to_utf16(name)))?;
     // Class constructor `name` should be non-enumerable
-    class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("name"));
+    class_obj.borrow_mut(mc).set_non_enumerable("name");
     log::debug!(
         "DBG create_class_object - set initial name on ctor ptr={:p} name_enumerable={}",
         &*class_obj.borrow(),
-        class_obj.borrow().is_enumerable(&PropertyKey::from("name"))
+        class_obj.borrow().is_enumerable("name")
     );
 
     // Create the prototype object first
@@ -773,11 +769,11 @@ pub(crate) fn create_class_object<'gc>(
 
     object_set_key_value(mc, &class_obj, "prototype", Value::Object(prototype_obj))?;
     // The 'prototype' property of constructor should be non-enumerable
-    class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("prototype"));
+    class_obj.borrow_mut(mc).set_non_enumerable("prototype");
     object_set_key_value(mc, &prototype_obj, "constructor", Value::Object(class_obj))?;
     // Make prototype internal properties non-enumerable so for..in does not list them
-    prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
-    prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    prototype_obj.borrow_mut(mc).set_non_enumerable("__proto__");
+    prototype_obj.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Store class definition for later use (use internal slot, not an own property)
     let class_def = ClassDefinition {
@@ -804,7 +800,7 @@ pub(crate) fn create_class_object<'gc>(
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &prototype_obj, method_name, method_closure)?;
                 // Methods defined in class bodies are non-enumerable
-                prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+                prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::MethodComputed(key_expr, params, body) => {
                 // Evaluate computed key and set method (ToPropertyKey semantics)
@@ -821,9 +817,9 @@ pub(crate) fn create_class_object<'gc>(
                 let pk = crate::core::PropertyKey::from(&key_prim);
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &prototype_obj, pk.clone(), method_closure)?;
+                object_set_key_value(mc, &prototype_obj, &pk, method_closure)?;
                 // Computed methods are also non-enumerable
-                prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
+                prototype_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::MethodComputedGenerator(key_expr, params, body) => {
                 let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -835,8 +831,8 @@ pub(crate) fn create_class_object<'gc>(
                 let pk = crate::core::PropertyKey::from(&key_prim);
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
-                object_set_key_value(mc, &prototype_obj, pk.clone(), gen_fn)?;
-                prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
+                object_set_key_value(mc, &prototype_obj, &pk, gen_fn)?;
+                prototype_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::MethodComputedAsyncGenerator(key_expr, params, body) => {
                 let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -870,20 +866,20 @@ pub(crate) fn create_class_object<'gc>(
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
                 object_set_key_value(mc, &prototype_obj, method_name, gen_fn)?;
-                prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+                prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::MethodAsync(method_name, params, body) => {
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &prototype_obj, method_name, method_closure)?;
-                prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+                prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::MethodAsyncGenerator(method_name, params, body) => {
                 // Create an AsyncGeneratorFunction value for async generator methods
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
                 object_set_key_value(mc, &prototype_obj, method_name, async_gen_fn)?;
-                prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+                prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::Constructor(_, _) => {
                 // Constructor is handled separately during instantiation
@@ -911,7 +907,7 @@ pub(crate) fn create_class_object<'gc>(
                                 setter: setter.clone(),
                             };
                             object_set_key_value(mc, &prototype_obj, getter_name, new_prop)?;
-                            prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(getter_name));
+                            prototype_obj.borrow_mut(mc).set_non_enumerable(getter_name);
                         }
                         Value::Setter(params, body_set, set_env, home) => {
                             // Convert to property descriptor with both getter and setter
@@ -930,7 +926,7 @@ pub(crate) fn create_class_object<'gc>(
                                 setter: None,
                             };
                             object_set_key_value(mc, &prototype_obj, getter_name, new_prop)?;
-                            prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(getter_name));
+                            prototype_obj.borrow_mut(mc).set_non_enumerable(getter_name);
                         }
                     }
                 } else {
@@ -1133,7 +1129,7 @@ pub(crate) fn create_class_object<'gc>(
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &class_obj, method_name, method_closure)?;
                 // Static methods are non-enumerable
-                class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+                class_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::StaticMethodGenerator(method_name, params, body) => {
                 if method_name == "prototype" {
@@ -1142,7 +1138,7 @@ pub(crate) fn create_class_object<'gc>(
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
                 object_set_key_value(mc, &class_obj, method_name, gen_fn)?;
-                class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+                class_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::StaticMethodAsync(method_name, params, body) => {
                 if method_name == "prototype" {
@@ -1151,7 +1147,7 @@ pub(crate) fn create_class_object<'gc>(
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &class_obj, method_name, method_closure)?;
-                class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+                class_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::StaticMethodAsyncGenerator(method_name, params, body) => {
                 if method_name == "prototype" {
@@ -1160,7 +1156,7 @@ pub(crate) fn create_class_object<'gc>(
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
                 object_set_key_value(mc, &class_obj, method_name, async_gen_fn)?;
-                class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method_name));
+                class_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::StaticMethodComputed(key_expr, params, body) => {
                 // Add computed static method (evaluate key first)
@@ -1183,9 +1179,9 @@ pub(crate) fn create_class_object<'gc>(
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, pk.clone(), method_closure)?;
+                object_set_key_value(mc, &class_obj, &pk, method_closure)?;
                 // Computed static keys are also non-enumerable
-                class_obj.borrow_mut(mc).set_non_enumerable(pk);
+                class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticMethodComputedGenerator(key_expr, params, body) => {
                 let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -1204,8 +1200,8 @@ pub(crate) fn create_class_object<'gc>(
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, pk.clone(), gen_fn)?;
-                class_obj.borrow_mut(mc).set_non_enumerable(pk);
+                object_set_key_value(mc, &class_obj, &pk, gen_fn)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticMethodComputedAsync(key_expr, params, body) => {
                 let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -1224,8 +1220,8 @@ pub(crate) fn create_class_object<'gc>(
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, pk.clone(), method_closure)?;
-                class_obj.borrow_mut(mc).set_non_enumerable(pk);
+                object_set_key_value(mc, &class_obj, &pk, method_closure)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticMethodComputedAsyncGenerator(key_expr, params, body) => {
                 let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -1245,8 +1241,8 @@ pub(crate) fn create_class_object<'gc>(
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 // Async generators not implemented yet; fallback to generator function for now
                 let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, pk.clone(), gen_fn)?;
-                class_obj.borrow_mut(mc).set_non_enumerable(pk);
+                object_set_key_value(mc, &class_obj, &pk, gen_fn)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticProperty(prop_name, value_expr) => {
                 // Disallow static `prototype` property definitions
@@ -1338,7 +1334,7 @@ pub(crate) fn create_class_object<'gc>(
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
                 object_set_key_value(mc, &prototype_obj, &final_key, async_gen_fn)?;
-                prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(final_key));
+                prototype_obj.borrow_mut(mc).set_non_enumerable(&final_key);
             }
             ClassMember::PrivateStaticMethodAsyncGenerator(method_name, params, body) => {
                 let final_key = if method_name.starts_with('#') {
@@ -1349,7 +1345,7 @@ pub(crate) fn create_class_object<'gc>(
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
                 object_set_key_value(mc, &class_obj, &final_key, async_gen_fn)?;
-                class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(final_key));
+                class_obj.borrow_mut(mc).set_non_enumerable(&final_key);
             }
             ClassMember::PrivateGetter(getter_name, body) => {
                 let key = format!("#{}", getter_name);
@@ -1466,14 +1462,14 @@ pub(crate) fn create_class_object<'gc>(
     }
 
     // Ensure constructor name is non-enumerable at end of creation (catch any overwrites)
-    class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("name"));
+    class_obj.borrow_mut(mc).set_non_enumerable("name");
     let ptr_str = format!("{:p}", &*class_obj.borrow());
     let exists = class_obj.borrow().properties.contains_key(&PropertyKey::from("name"));
     log::debug!(
         "DBG create_class_object - ctor ptr={} name_exists={} name_enumerable={} non_enumerable_set_contains={}",
         ptr_str,
         exists,
-        class_obj.borrow().is_enumerable(&PropertyKey::from("name")),
+        class_obj.borrow().is_enumerable("name"),
         class_obj.borrow().non_enumerable.contains(&PropertyKey::from("name"))
     );
 

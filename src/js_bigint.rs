@@ -1,4 +1,3 @@
-use crate::PropertyKey;
 use crate::core::MutationContext;
 use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value, to_primitive};
 use crate::error::JSError;
@@ -241,9 +240,9 @@ pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     object_set_key_value(mc, &bigint_proto, "constructor", Value::Object(bigint_ctor))?;
 
     // Mark prototype methods and constructor non-enumerable
-    bigint_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));
-    bigint_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("valueOf"));
-    bigint_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    bigint_proto.borrow_mut(mc).set_non_enumerable("toString");
+    bigint_proto.borrow_mut(mc).set_non_enumerable("valueOf");
+    bigint_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     env_set(mc, env, "BigInt", Value::Object(bigint_ctor))?;
 

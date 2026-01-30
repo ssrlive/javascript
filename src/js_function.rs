@@ -1696,21 +1696,17 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
     // Function.prototype.bind
     object_set_key_value(mc, &func_proto, "bind", Value::Function("Function.prototype.bind".to_string()))?;
-    func_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("bind"));
+    func_proto.borrow_mut(mc).set_non_enumerable("bind");
 
     // Function.prototype.call
     object_set_key_value(mc, &func_proto, "call", Value::Function("Function.prototype.call".to_string()))?;
-    func_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("call"));
+    func_proto.borrow_mut(mc).set_non_enumerable("call");
 
     // Function.prototype.apply
     object_set_key_value(mc, &func_proto, "apply", Value::Function("Function.prototype.apply".to_string()))?;
-    func_proto
-        .borrow_mut(mc)
-        .set_non_enumerable(crate::core::PropertyKey::from("apply"));
+    func_proto.borrow_mut(mc).set_non_enumerable("apply");
 
-    func_proto
-        .borrow_mut(mc)
-        .set_non_enumerable(crate::core::PropertyKey::from("constructor"));
+    func_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Define restricted 'caller' and 'arguments' accessors that throw a TypeError when accessed or assigned
     let restricted_desc = crate::core::new_js_object_data(mc);

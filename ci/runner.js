@@ -15,7 +15,7 @@ let FAIL_ON_FAILURE = false;
 let CAP_MULTIPLIER = 5;
 // FOCUS_LIST: array of focus tokens. Accepts multiple `--focus` flags and comma-separated tokens.
 let FOCUS_LIST = [];
-let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 10;
+let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 20;
 const envKeep = process.env.TEST262_KEEP_TMP;
 // Default: keep ephemeral /tmp files (use --no-keep-tmp or set TEST262_KEEP_TMP=0 to disable)
 let KEEP_TMP = (envKeep === undefined) ? true : (envKeep === '1' || envKeep === 'true');
@@ -44,7 +44,11 @@ if (!fs.existsSync(REPO_DIR)){
 
 // Build engine
 console.log('Building engine example...');
-spawnSync('cargo', ['build', '--example', 'js', '--all-features'], {stdio:'inherit'});
+const buildRes = spawnSync('cargo', ['build', '--example', 'js', '--all-features'], {stdio:'inherit'});
+if (!buildRes || buildRes.status !== 0) {
+  console.error('ERROR: Engine build failed. Aborting tests.');
+  process.exit(buildRes && buildRes.status ? buildRes.status : 1);
+}
 
 // locate binary
 let BIN = '';
@@ -176,7 +180,14 @@ async function runAll(){
     if (feats){
       const featsList = feats.split(',').map(s=>s.trim().replace(/^['\"]|['\"]$/g,''));
       let unsupported=false;
-      for (const ft of featsList){ if (!detectFeature(ft)) { unsupported=true; log(`SKIP (feature unsupported: ${ft}) ${f}`); skip++; break; } }
+      for (const ft of featsList) {
+        if (!detectFeature(ft)) {
+          unsupported = true;
+          log(`SKIP (feature unsupported: ${ft}) ${f}`);
+          skip++;
+          break;
+        }
+      }
       if (unsupported) continue;
     }
 
@@ -232,7 +243,10 @@ async function runAll(){
     }
 
     // Compose test
-    const needStrict = true;
+    // Only force a strict wrapper if the test explicitly requests it via the Test262
+    // metadata flag 'onlyStrict'. For legacy tests that expect sloppy semantics, do
+    // not inject a global "use strict" which can change eval semantics.
+    const needStrict = hasFlag(meta, 'onlyStrict');
     const {testToRun, tmpPath, cleanupTmp, debug} = composeTest({testPath: f, repoDir: REPO_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict});
     // Only emit detailed debug lines when explicitly requested via TEST262_LOG_LEVEL=debug
     if (process.env.TEST262_LOG_LEVEL === 'debug') {

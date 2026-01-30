@@ -103,16 +103,16 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     // Make global 'undefined', 'NaN', and 'Infinity' non-writable and non-configurable per ECMAScript
-    env.borrow_mut(mc).set_non_configurable(crate::core::PropertyKey::from("undefined"));
-    env.borrow_mut(mc).set_non_writable(crate::core::PropertyKey::from("undefined"));
+    env.borrow_mut(mc).set_non_configurable("undefined");
+    env.borrow_mut(mc).set_non_writable("undefined");
 
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
-    env.borrow_mut(mc).set_non_configurable(crate::core::PropertyKey::from("NaN"));
-    env.borrow_mut(mc).set_non_writable(crate::core::PropertyKey::from("NaN"));
+    env.borrow_mut(mc).set_non_configurable("NaN");
+    env.borrow_mut(mc).set_non_writable("NaN");
 
     env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;
-    env.borrow_mut(mc).set_non_configurable(crate::core::PropertyKey::from("Infinity"));
-    env.borrow_mut(mc).set_non_writable(crate::core::PropertyKey::from("Infinity"));
+    env.borrow_mut(mc).set_non_configurable("Infinity");
+    env.borrow_mut(mc).set_non_writable("Infinity");
 
     env_set(mc, env, "eval", Value::Function("eval".to_string()))?;
 
@@ -574,7 +574,7 @@ where
             let mut i = 0_usize;
             while let Some(_item_val) = object_get_key_value(&obj, i) {
                 // Use accessor-aware get so getters are invoked and any throws propagate
-                let item = crate::core::eval::get_property_with_accessors(mc, env, &obj, &PropertyKey::from(i))?;
+                let item = crate::core::eval::get_property_with_accessors(mc, env, &obj, i)?;
                 process_item(item)?;
                 i += 1;
             }

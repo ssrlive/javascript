@@ -577,7 +577,7 @@ fn make_typedarray_prototype<'gc>(
     if let Some(proto_proto) = object_prototype {
         proto.borrow_mut(mc).prototype = Some(proto_proto);
         object_set_key_value(mc, &proto, "__proto__", Value::Object(proto_proto))?;
-        proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("__proto__"));
+        proto.borrow_mut(mc).set_non_enumerable("__proto__");
     }
 
     // Store the kind in the prototype for later use
@@ -1018,20 +1018,20 @@ pub fn handle_typedarray_constructor<'gc>(
         if let Value::Object(proto_obj) = &*proto_val.borrow() {
             obj.borrow_mut(mc).prototype = Some(*proto_obj);
             object_set_key_value(mc, &obj, "__proto__", Value::Object(*proto_obj))?;
-            obj.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("__proto__"));
+            obj.borrow_mut(mc).set_non_enumerable("__proto__");
         } else {
             // Fallback: create new prototype (legacy behavior, though incorrect for identity)
             let proto = make_typedarray_prototype(mc, kind.clone(), None)?;
             obj.borrow_mut(mc).prototype = Some(proto);
             object_set_key_value(mc, &obj, "__proto__", Value::Object(proto))?;
-            obj.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("__proto__"));
+            obj.borrow_mut(mc).set_non_enumerable("__proto__");
         }
     } else {
         // Fallback
         let proto = make_typedarray_prototype(mc, kind.clone(), None)?;
         obj.borrow_mut(mc).prototype = Some(proto);
         object_set_key_value(mc, &obj, "__proto__", Value::Object(proto))?;
-        obj.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("__proto__"));
+        obj.borrow_mut(mc).set_non_enumerable("__proto__");
     }
 
     // Create TypedArray instance

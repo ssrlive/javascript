@@ -23,7 +23,7 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     object_set_key_value(mc, &object_ctor, "prototype", Value::Object(object_proto))?;
     object_set_key_value(mc, &object_proto, "constructor", Value::Object(object_ctor))?;
     // Make constructor non-enumerable
-    object_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    object_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // 3. Register static methods
     let static_methods = vec![
@@ -69,7 +69,7 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     for method in proto_methods {
         object_set_key_value(mc, &object_proto, method, Value::Function(format!("Object.prototype.{method}")))?;
         // Methods on prototypes should be non-enumerable so for..in doesn't list them
-        object_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        object_proto.borrow_mut(mc).set_non_enumerable(method);
     }
 
     Ok(())
@@ -786,7 +786,8 @@ pub fn handle_object_method<'gc>(
                         if key == "__proto__".into() {
                             continue;
                         }
-                        if let PropertyKey::String(_) = &key
+                        // Copy both string and symbol keyed enumerable own properties
+                        if (matches!(key, PropertyKey::String(_)) || matches!(key, PropertyKey::Symbol(_)))
                             && source_obj.borrow().is_enumerable(&key)
                             && let Some(v_rc) = object_get_key_value(&source_obj, &key)
                         {
@@ -815,6 +816,7 @@ pub fn handle_object_method<'gc>(
             let prop_key = match prop_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
                 _ => return Err(raise_type_error!("Unsupported property key type in Object.defineProperty")),
             };
 
@@ -868,6 +870,13 @@ pub fn handle_object_method<'gc>(
             }
 
             Ok(Value::Object(target_obj))
+        }
+        "is" => {
+            // Object.is(x,y) - SameValue comparison
+            let a = args.first().cloned().unwrap_or(Value::Undefined);
+            let b = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let eq = crate::core::values_equal(mc, &a, &b);
+            Ok(Value::Boolean(eq))
         }
         _ => Err(raise_eval_error!(format!("Object.{method} is not implemented"))),
     }

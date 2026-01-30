@@ -2,9 +2,9 @@
 
 use crate::core::MutationContext;
 use crate::core::{JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value, to_primitive};
+use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use crate::{PropertyKey, env_set};
 
 pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let number_obj = make_number_object(mc, env)?;
@@ -39,58 +39,49 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     object_set_key_value(mc, &number_obj, "parseInt", Value::Function("Number.parseInt".to_string()))?;
 
     // Make static Number properties non-enumerable
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("MAX_VALUE"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("MIN_VALUE"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("NaN"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("POSITIVE_INFINITY"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("NEGATIVE_INFINITY"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("EPSILON"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("MAX_SAFE_INTEGER"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("MIN_SAFE_INTEGER"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("isNaN"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("isFinite"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("isInteger"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("isSafeInteger"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("parseFloat"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("parseInt"));
+    number_obj.borrow_mut(mc).set_non_enumerable("MAX_VALUE");
+    number_obj.borrow_mut(mc).set_non_enumerable("MIN_VALUE");
+    number_obj.borrow_mut(mc).set_non_enumerable("NaN");
+    number_obj.borrow_mut(mc).set_non_enumerable("POSITIVE_INFINITY");
+    number_obj.borrow_mut(mc).set_non_enumerable("NEGATIVE_INFINITY");
+    number_obj.borrow_mut(mc).set_non_enumerable("EPSILON");
+    number_obj.borrow_mut(mc).set_non_enumerable("MAX_SAFE_INTEGER");
+    number_obj.borrow_mut(mc).set_non_enumerable("MIN_SAFE_INTEGER");
+    number_obj.borrow_mut(mc).set_non_enumerable("isNaN");
+    number_obj.borrow_mut(mc).set_non_enumerable("isFinite");
+    number_obj.borrow_mut(mc).set_non_enumerable("isInteger");
+    number_obj.borrow_mut(mc).set_non_enumerable("isSafeInteger");
+    number_obj.borrow_mut(mc).set_non_enumerable("parseFloat");
+    number_obj.borrow_mut(mc).set_non_enumerable("parseInt");
 
     // Per ECMAScript spec, the numeric constants on Number are non-writable and non-configurable
-    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("MAX_VALUE"));
-    number_obj.borrow_mut(mc).set_non_configurable(PropertyKey::from("MAX_VALUE"));
+    number_obj.borrow_mut(mc).set_non_writable("MAX_VALUE");
+    number_obj.borrow_mut(mc).set_non_configurable("MAX_VALUE");
 
-    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("MIN_VALUE"));
-    number_obj.borrow_mut(mc).set_non_configurable(PropertyKey::from("MIN_VALUE"));
+    number_obj.borrow_mut(mc).set_non_writable("MIN_VALUE");
+    number_obj.borrow_mut(mc).set_non_configurable("MIN_VALUE");
+    number_obj.borrow_mut(mc).set_non_writable("NaN");
+    number_obj.borrow_mut(mc).set_non_configurable("NaN");
 
-    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("NaN"));
-    number_obj.borrow_mut(mc).set_non_configurable(PropertyKey::from("NaN"));
+    number_obj.borrow_mut(mc).set_non_writable("POSITIVE_INFINITY");
+    number_obj.borrow_mut(mc).set_non_configurable("POSITIVE_INFINITY");
 
-    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("POSITIVE_INFINITY"));
-    number_obj
-        .borrow_mut(mc)
-        .set_non_configurable(PropertyKey::from("POSITIVE_INFINITY"));
+    number_obj.borrow_mut(mc).set_non_writable("NEGATIVE_INFINITY");
+    number_obj.borrow_mut(mc).set_non_configurable("NEGATIVE_INFINITY");
 
-    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("NEGATIVE_INFINITY"));
-    number_obj
-        .borrow_mut(mc)
-        .set_non_configurable(PropertyKey::from("NEGATIVE_INFINITY"));
+    number_obj.borrow_mut(mc).set_non_writable("EPSILON");
+    number_obj.borrow_mut(mc).set_non_configurable("EPSILON");
 
-    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("EPSILON"));
-    number_obj.borrow_mut(mc).set_non_configurable(PropertyKey::from("EPSILON"));
+    number_obj.borrow_mut(mc).set_non_writable("MAX_SAFE_INTEGER");
+    number_obj.borrow_mut(mc).set_non_configurable("MAX_SAFE_INTEGER");
 
-    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("MAX_SAFE_INTEGER"));
-    number_obj
-        .borrow_mut(mc)
-        .set_non_configurable(PropertyKey::from("MAX_SAFE_INTEGER"));
-
-    number_obj.borrow_mut(mc).set_non_writable(PropertyKey::from("MIN_SAFE_INTEGER"));
-    number_obj
-        .borrow_mut(mc)
-        .set_non_configurable(PropertyKey::from("MIN_SAFE_INTEGER"));
+    number_obj.borrow_mut(mc).set_non_writable("MIN_SAFE_INTEGER");
+    number_obj.borrow_mut(mc).set_non_configurable("MIN_SAFE_INTEGER");
 
     // Internal markers and prototype should not be enumerable
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__is_constructor"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__native_ctor"));
-    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("prototype"));
+    number_obj.borrow_mut(mc).set_non_enumerable("__is_constructor");
+    number_obj.borrow_mut(mc).set_non_enumerable("__native_ctor");
+    number_obj.borrow_mut(mc).set_non_enumerable("prototype");
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -147,17 +138,13 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     )?;
 
     // Make number prototype methods non-enumerable and mark constructor non-enumerable
-    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));
-    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("valueOf"));
-    number_prototype
-        .borrow_mut(mc)
-        .set_non_enumerable(PropertyKey::from("toLocaleString"));
-    number_prototype
-        .borrow_mut(mc)
-        .set_non_enumerable(PropertyKey::from("toExponential"));
-    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toFixed"));
-    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toPrecision"));
-    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    number_prototype.borrow_mut(mc).set_non_enumerable("toString");
+    number_prototype.borrow_mut(mc).set_non_enumerable("valueOf");
+    number_prototype.borrow_mut(mc).set_non_enumerable("toLocaleString");
+    number_prototype.borrow_mut(mc).set_non_enumerable("toExponential");
+    number_prototype.borrow_mut(mc).set_non_enumerable("toFixed");
+    number_prototype.borrow_mut(mc).set_non_enumerable("toPrecision");
+    number_prototype.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Set prototype on Number constructor
     object_set_key_value(mc, &number_obj, "prototype", Value::Object(number_prototype))?;
@@ -168,7 +155,7 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     {
         object_set_key_value(mc, proto_obj, "constructor", Value::Object(number_obj))?;
         // Non-enumerable already set above, but ensure it's non-enumerable
-        proto_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+        proto_obj.borrow_mut(mc).set_non_enumerable("constructor");
     }
 
     Ok(number_obj)

@@ -83,7 +83,7 @@ pub(crate) fn handle_proxy_revocable<'gc>(
     let revoke_env = new_js_object_data(mc);
     revoke_env
         .borrow_mut(mc)
-        .insert("__revoke_proxy".into(), new_gc_cell_ptr(mc, Value::Proxy(proxy)));
+        .insert("__revoke_proxy", new_gc_cell_ptr(mc, Value::Proxy(proxy)));
 
     // Create a wrapper object for the Proxy
     let proxy_wrapper = new_js_object_data(mc);
@@ -96,11 +96,11 @@ pub(crate) fn handle_proxy_revocable<'gc>(
     // Also capture the wrapper object so the internal revoke helper can replace the stored proxy
     revoke_env
         .borrow_mut(mc)
-        .insert("__proxy_wrapper".into(), new_gc_cell_ptr(mc, Value::Object(proxy_wrapper)));
+        .insert("__proxy_wrapper", new_gc_cell_ptr(mc, Value::Object(proxy_wrapper)));
 
     // Provide a callable function in the revoke env that dispatches to the internal revoke helper
     revoke_env.borrow_mut(mc).insert(
-        "__internal_revoke".into(),
+        "__internal_revoke",
         new_gc_cell_ptr(mc, Value::Function("Proxy.__internal_revoke".to_string())),
     );
 
@@ -208,12 +208,13 @@ pub(crate) fn proxy_set_property<'gc>(
 }
 
 /// Check if property exists on proxy target, applying has trap if available
-pub(crate) fn _proxy_has_property<'gc>(
+pub(crate) fn proxy_has_property<'gc>(
     mc: &MutationContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
-    key: &PropertyKey<'gc>,
+    key: impl Into<PropertyKey<'gc>>,
 ) -> Result<bool, EvalError<'gc>> {
-    let result = apply_proxy_trap(mc, proxy, "has", vec![(*proxy.target).clone(), property_key_to_value(key)], || {
+    let key = key.into();
+    let result = apply_proxy_trap(mc, proxy, "has", vec![(*proxy.target).clone(), property_key_to_value(&key)], || {
         // Default behavior: check if property exists on target
         match &*proxy.target {
             Value::Object(obj) => Ok(Value::Boolean(object_get_key_value(obj, key).is_some())),

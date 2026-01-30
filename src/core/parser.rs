@@ -125,12 +125,21 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
     let start = *index;
     *index += 1; // consume class
     let name = if *index < t.len() {
-        if let Token::Identifier(name) = &t[*index].token {
-            let n = name.clone();
-            *index += 1;
-            n
-        } else {
-            return Err(raise_parse_error_at!(t.get(*index)));
+        match &t[*index].token {
+            Token::Identifier(name) => {
+                let n = name.clone();
+                *index += 1;
+                n
+            }
+            Token::Await => {
+                *index += 1;
+                "await".to_string()
+            }
+            Token::Async => {
+                *index += 1;
+                "async".to_string()
+            }
+            _ => return Err(raise_parse_error_at!(t.get(*index))),
         }
     } else {
         return Err(raise_parse_error_at!(t.get(*index)));
@@ -2735,12 +2744,21 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             // Class Expression
             // class [Identifier] [extends Expression] { ClassBody }
             let name = if *index < tokens.len() {
-                if let Token::Identifier(n) = &tokens[*index].token {
-                    let n = n.clone();
-                    *index += 1;
-                    n
-                } else {
-                    "".to_string() // Anonymous class expression
+                match &tokens[*index].token {
+                    Token::Identifier(n) => {
+                        let n = n.clone();
+                        *index += 1;
+                        n
+                    }
+                    Token::Await => {
+                        *index += 1;
+                        "await".to_string()
+                    }
+                    Token::Async => {
+                        *index += 1;
+                        "async".to_string()
+                    }
+                    _ => "".to_string(), // Anonymous class expression
                 }
             } else {
                 "".to_string()

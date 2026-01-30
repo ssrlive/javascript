@@ -6,36 +6,35 @@ use crate::error::JSError;
 pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let math_obj = new_js_object_data(mc);
     object_set_key_value(mc, &math_obj, "PI", Value::Number(std::f64::consts::PI))?;
-    math_obj.borrow_mut(mc).set_non_configurable("PI".into());
-    math_obj.borrow_mut(mc).set_non_writable("PI".into());
+    math_obj.borrow_mut(mc).set_non_configurable("PI");
+    math_obj.borrow_mut(mc).set_non_writable("PI");
 
     object_set_key_value(mc, &math_obj, "E", Value::Number(std::f64::consts::E))?;
-    math_obj.borrow_mut(mc).set_non_configurable("E".into());
-    math_obj.borrow_mut(mc).set_non_writable("E".into());
+    math_obj.borrow_mut(mc).set_non_configurable("E");
+    math_obj.borrow_mut(mc).set_non_writable("E");
 
     object_set_key_value(mc, &math_obj, "LN2", Value::Number(std::f64::consts::LN_2))?;
-    math_obj.borrow_mut(mc).set_non_configurable("LN2".into());
-    math_obj.borrow_mut(mc).set_non_writable("LN2".into());
+    math_obj.borrow_mut(mc).set_non_configurable("LN2");
+    math_obj.borrow_mut(mc).set_non_writable("LN2");
 
     object_set_key_value(mc, &math_obj, "LN10", Value::Number(std::f64::consts::LN_10))?;
-    math_obj.borrow_mut(mc).set_non_configurable("LN10".into());
-    math_obj.borrow_mut(mc).set_non_writable("LN10".into());
+    math_obj.borrow_mut(mc).set_non_configurable("LN10");
+    math_obj.borrow_mut(mc).set_non_writable("LN10");
 
     object_set_key_value(mc, &math_obj, "LOG2E", Value::Number(std::f64::consts::LOG2_E))?;
-    math_obj.borrow_mut(mc).set_non_configurable("LOG2E".into());
-    math_obj.borrow_mut(mc).set_non_writable("LOG2E".into());
+    math_obj.borrow_mut(mc).set_non_configurable("LOG2E");
+    math_obj.borrow_mut(mc).set_non_writable("LOG2E");
 
     object_set_key_value(mc, &math_obj, "LOG10E", Value::Number(std::f64::consts::LOG10_E))?;
-    math_obj.borrow_mut(mc).set_non_configurable("LOG10E".into());
-    math_obj.borrow_mut(mc).set_non_writable("LOG10E".into());
+    math_obj.borrow_mut(mc).set_non_configurable("LOG10E");
+    math_obj.borrow_mut(mc).set_non_writable("LOG10E");
 
     object_set_key_value(mc, &math_obj, "SQRT1_2", Value::Number(std::f64::consts::FRAC_1_SQRT_2))?;
-    math_obj.borrow_mut(mc).set_non_configurable("SQRT1_2".into());
-    math_obj.borrow_mut(mc).set_non_writable("SQRT1_2".into());
-
+    math_obj.borrow_mut(mc).set_non_configurable("SQRT1_2");
+    math_obj.borrow_mut(mc).set_non_writable("SQRT1_2");
     object_set_key_value(mc, &math_obj, "SQRT2", Value::Number(std::f64::consts::SQRT_2))?;
-    math_obj.borrow_mut(mc).set_non_configurable("SQRT2".into());
-    math_obj.borrow_mut(mc).set_non_writable("SQRT2".into());
+    math_obj.borrow_mut(mc).set_non_configurable("SQRT2");
+    math_obj.borrow_mut(mc).set_non_writable("SQRT2");
 
     object_set_key_value(mc, &math_obj, "floor", Value::Function("Math.floor".to_string()))?;
     object_set_key_value(mc, &math_obj, "ceil", Value::Function("Math.ceil".to_string()))?;

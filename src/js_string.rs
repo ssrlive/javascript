@@ -107,11 +107,11 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     for method in methods {
         object_set_key_value(mc, &string_proto, method, Value::Function(format!("String.prototype.{method}")))?;
         // Methods on String.prototype should be non-enumerable
-        string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        string_proto.borrow_mut(mc).set_non_enumerable(method);
     }
 
     // Make constructor non-enumerable on the prototype
-    string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    string_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     env_set(mc, env, "String", Value::Object(string_ctor))?;
     Ok(())

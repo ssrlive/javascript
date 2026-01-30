@@ -40,10 +40,10 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 
     for method in methods {
         object_set_key_value(mc, &set_proto, method, Value::Function(format!("Set.prototype.{}", method)))?;
-        set_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        set_proto.borrow_mut(mc).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
-    set_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    set_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Get Symbol.iterator
     let iterator_sym = if let Some(sym_ctor) = object_get_key_value(env, "Symbol")

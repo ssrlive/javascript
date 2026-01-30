@@ -1,5 +1,5 @@
+use crate::core::JSWeakSet;
 use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
-use crate::core::{JSWeakSet, PropertyKey};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
     error::JSError,
@@ -26,12 +26,11 @@ pub(crate) fn handle_weakset_constructor<'gc>(
     // Create a wrapper object for the WeakSet
     let weakset_obj = new_js_object_data(mc);
     // Store the actual weakset data
-    weakset_obj.borrow_mut(mc).insert(
-        PropertyKey::String("__weakset__".to_string()),
-        new_gc_cell_ptr(mc, Value::WeakSet(weakset)),
-    );
+    weakset_obj
+        .borrow_mut(mc)
+        .insert("__weakset__", new_gc_cell_ptr(mc, Value::WeakSet(weakset)));
     // Internal slot should be non-enumerable so it doesn't show up in `evaluate_script` output
-    weakset_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__weakset__"));
+    weakset_obj.borrow_mut(mc).set_non_enumerable("__weakset__");
 
     // Set prototype to WeakSet.prototype if available
     if let Some(weakset_ctor) = object_get_key_value(env, "WeakSet")
@@ -105,10 +104,10 @@ pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     for method in methods {
         let val = Value::Function(format!("WeakSet.prototype.{}", method));
         object_set_key_value(mc, &weakset_proto, method, val)?;
-        weakset_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        weakset_proto.borrow_mut(mc).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
-    weakset_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    weakset_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     env_set(mc, env, "WeakSet", Value::Object(weakset_ctor))?;
     Ok(())

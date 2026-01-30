@@ -128,7 +128,7 @@ fn step<'gc>(
         }
         Err(e) => {
             // Generator threw an error synchronously (or during processing), reject the promise
-            let msg = e.to_string();
+            let msg = e.message();
             let val = Value::String(utf8_to_utf16(&msg));
             crate::js_promise::call_function(mc, &reject, &[val], env)?;
         }

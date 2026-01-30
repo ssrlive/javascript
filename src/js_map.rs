@@ -1,7 +1,7 @@
 use crate::core::{GcPtr, new_gc_cell_ptr};
 use crate::core::{
-    JSMap, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data,
-    object_get_key_value, object_set_key_value, values_equal,
+    JSMap, JSObjectDataPtr, MutationContext, Value, env_set, initialize_collection_from_iterable, new_js_object_data, object_get_key_value,
+    object_set_key_value, values_equal,
 };
 use crate::js_array::{create_array, set_array_length};
 use crate::unicode::utf8_to_utf16;
@@ -37,10 +37,10 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 
     for method in methods {
         object_set_key_value(mc, &map_proto, method, Value::Function(format!("Map.prototype.{}", method)))?;
-        map_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        map_proto.borrow_mut(mc).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
-    map_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    map_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Register size getter
     let size_getter = Value::Function("Map.prototype.size".to_string());
@@ -85,8 +85,8 @@ pub(crate) fn handle_map_constructor<'gc>(
 
     initialize_collection_from_iterable(mc, env, args, "Map", |entry| {
         if let Value::Object(entry_obj) = entry {
-            let key_val_opt = crate::core::get_property_with_accessors(mc, env, &entry_obj, &PropertyKey::from("0".to_string()));
-            let value_val_opt = crate::core::get_property_with_accessors(mc, env, &entry_obj, &PropertyKey::from("1".to_string()));
+            let key_val_opt = crate::core::get_property_with_accessors(mc, env, &entry_obj, "0");
+            let value_val_opt = crate::core::get_property_with_accessors(mc, env, &entry_obj, "1");
             match (key_val_opt, value_val_opt) {
                 (Ok(key_val), Ok(value_val)) => {
                     map.borrow_mut(mc).entries.push((key_val, value_val));

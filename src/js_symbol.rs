@@ -62,23 +62,23 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     // toString method
     let val = Value::Function("Symbol.prototype.toString".to_string());
     object_set_key_value(mc, &symbol_proto, "toString", val)?;
-    symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));
+    symbol_proto.borrow_mut(mc).set_non_enumerable("toString");
 
     // valueOf method
     let val_of = Value::Function("Symbol.prototype.valueOf".to_string());
     object_set_key_value(mc, &symbol_proto, "valueOf", val_of)?;
-    symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("valueOf"));
+    symbol_proto.borrow_mut(mc).set_non_enumerable("valueOf");
 
-    symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    symbol_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Symbol.for and Symbol.keyFor (static) - register as functions on the constructor
     let for_fn = Value::Function("Symbol.for".to_string());
     object_set_key_value(mc, &symbol_ctor, "for", for_fn)?;
-    symbol_ctor.borrow_mut(mc).set_non_enumerable(PropertyKey::from("for"));
+    symbol_ctor.borrow_mut(mc).set_non_enumerable("for");
 
     let keyfor_fn = Value::Function("Symbol.keyFor".to_string());
     object_set_key_value(mc, &symbol_ctor, "keyFor", keyfor_fn)?;
-    symbol_ctor.borrow_mut(mc).set_non_enumerable(PropertyKey::from("keyFor"));
+    symbol_ctor.borrow_mut(mc).set_non_enumerable("keyFor");
 
     // Create per-environment symbol registry object used by Symbol.for / Symbol.keyFor
     let registry_obj = new_js_object_data(mc);

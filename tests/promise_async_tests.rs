@@ -211,3 +211,30 @@ fn test_allsettled_with_error_like_does_not_report_unhandled() {
         Err(e) => panic!("Expected Ok, got Err: {:?}", e),
     }
 }
+
+// Executor throws a non-Error value: should not abort synchronous flow and should not be reported immediately
+#[test]
+fn test_executor_throw_non_error_not_immediate() {
+    let script = r#"
+        let after = 0;
+        new Promise(function(resolve, reject) { throw 2; });
+        after = 1;
+        after
+    "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "1");
+}
+
+// Executor throws an Error object: should be treated as an Error-like rejection and reported
+#[test]
+fn test_executor_throw_error_reported_immediately() {
+    let script = r#"new Promise(function(resolve, reject) { throw new Error('boom'); })"#;
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Err(e) => {
+            let s = format!("{:?}", e);
+            assert!(s.contains("boom"), "expected error message 'boom' in {:?}", e);
+        }
+        Ok(v) => panic!("Expected Err, got Ok: {:?}", v),
+    }
+}

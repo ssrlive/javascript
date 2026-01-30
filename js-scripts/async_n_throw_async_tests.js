@@ -92,19 +92,27 @@ function asyncTest(testFunc) {
  *   otherwise rejects
  */
 assert.throwsAsync = function (expectedErrorConstructor, func, message) {
+  // Validate arguments synchronously and return a rejected promise if invalid
+  if (typeof expectedErrorConstructor !== "function") {
+    return Promise.reject(new Test262Error("assert.throwsAsync called with an argument that is not an error constructor"));
+  }
+  if (typeof func !== "function") {
+    return Promise.reject(new Test262Error("assert.throwsAsync called with an argument that is not a function"));
+  }
+
   return new Promise(function (resolve) {
+    var pendingFailDetail;
+    var onResFulfilled, onResRejected;
     var fail = function (detail) {
-      if (message === undefined) {
-        throw new Test262Error(detail);
+      if (typeof onResRejected === "function") {
+        onResRejected(new Test262Error(message === undefined ? detail : (message + " " + detail)));
+        return;
       }
-      throw new Test262Error(message + " " + detail);
+      // Record pending failure for later application once the resSettlementP is ready
+      pendingFailDetail = message === undefined ? detail : (message + " " + detail);
+      return;
     };
-    if (typeof expectedErrorConstructor !== "function") {
-      fail("assert.throwsAsync called with an argument that is not an error constructor");
-    }
-    if (typeof func !== "function") {
-      fail("assert.throwsAsync called with an argument that is not a function");
-    }
+
     var expectedName = expectedErrorConstructor.name;
     var expectation = "Expected a " + expectedName + " to be thrown asynchronously";
     var res;
@@ -116,11 +124,14 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
     if (res === null || typeof res !== "object" || typeof res.then !== "function") {
       fail(expectation + " but result was not a thenable");
     }
-    var onResFulfilled, onResRejected;
     var resSettlementP = new Promise(function (onFulfilled, onRejected) {
       onResFulfilled = onFulfilled;
       onResRejected = onRejected;
     });
+    if (pendingFailDetail !== undefined && typeof onResRejected === "function") {
+      onResRejected(new Test262Error(pendingFailDetail));
+      pendingFailDetail = undefined;
+    }
     try {
       res.then(onResFulfilled, onResRejected)
     } catch (thrown) {
@@ -219,23 +230,23 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
 
   // Test assert.throwsAsync behavior
   async function runThrowTests() {
-    async function passCase() {
+    var passCase = async function () {
       await assert.throwsAsync(TypeError, function () { return Promise.reject(new TypeError('boom')); });
       console.log('assert.throwsAsync: reject-with-TypeError -> PASS');
-    }
+    };
 
-    async function failCase() {
+    var failCase = async function () {
       try {
         await assert.throwsAsync(TypeError, function () { return Promise.resolve('ok'); });
         console.log('assert.throwsAsync: resolve-case -> FAIL (should have rejected)');
       } catch (e) {
         console.log('assert.throwsAsync: resolve-case -> PASS (rejected with:', e && e.message ? e.message : e, ')');
       }
-    }
+    };
 
-    function syncThrowCase() {
+    var syncThrowCase = function () {
       return assert.throwsAsync(TypeError, function () { throw new TypeError('sync'); });
-    }
+    };
 
     // Invalid arg case (first arg not a constructor) should reject the returned promise
     try {

@@ -114,19 +114,28 @@ function runSingleAsyncTest(name, testFunc, expectError) {
 }
 
 assert.throwsAsync = function (expectedErrorConstructor, func, message) {
+  // Validate arguments synchronously and return a rejected promise if invalid
+  if (typeof expectedErrorConstructor !== "function") {
+    return Promise.reject(new Test262Error("assert.throwsAsync called with an argument that is not an error constructor"));
+  }
+  if (typeof func !== "function") {
+    return Promise.reject(new Test262Error("assert.throwsAsync called with an argument that is not a function"));
+  }
+
   return new Promise(function (resolve) {
+    var pendingFailDetail;
+    var onResFulfilled, onResRejected;
     var fail = function (detail) {
-      if (message === undefined) {
-        throw new Test262Error(detail);
+      // If the resSettlementP's rejection handler is available, use it to reject
+      if (typeof onResRejected === "function") {
+        onResRejected(new Test262Error(message === undefined ? detail : (message + " " + detail)));
+        return;
       }
-      throw new Test262Error(message + " " + detail);
+      // Otherwise, record the pending failure so it can be applied once resSettlementP is available
+      pendingFailDetail = message === undefined ? detail : (message + " " + detail);
+      // Do not throw synchronously here; the pending failure will be applied to the promise
+      return;
     };
-    if (typeof expectedErrorConstructor !== "function") {
-      fail("assert.throwsAsync called with an argument that is not an error constructor");
-    }
-    if (typeof func !== "function") {
-      fail("assert.throwsAsync called with an argument that is not a function");
-    }
     var expectedName = expectedErrorConstructor.name;
     var expectation = "Expected a " + expectedName + " to be thrown asynchronously";
     var res;
@@ -138,11 +147,16 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
     if (res === null || typeof res !== "object" || typeof res.then !== "function") {
       fail(expectation + " but result was not a thenable");
     }
-    var onResFulfilled, onResRejected;
     var resSettlementP = new Promise(function (onFulfilled, onRejected) {
       onResFulfilled = onFulfilled;
       onResRejected = onRejected;
     });
+    // If a fail was requested before resSettlementP existed, apply it now via onResRejected
+    if (pendingFailDetail !== undefined && typeof onResRejected === "function") {
+      onResRejected(new Test262Error(pendingFailDetail));
+      // clear pending detail after reporting
+      pendingFailDetail = undefined;
+    }
     try {
       res.then(onResFulfilled, onResRejected)
     } catch (thrown) {
@@ -168,25 +182,43 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
 };
 
 async function runThrowTests() {
-  async function passCase() {
+  var passCase = async function () {
     await assert.throwsAsync(TypeError, function () { return Promise.reject(new TypeError('boom')); });
-  }
-  async function failCase() {
+  };
+  var failCase = async function () {
     try {
       await assert.throwsAsync(TypeError, function () { return Promise.resolve('ok'); });
     } catch (e) {}
-  }
-  function syncThrowCase() {
+  };
+  var syncThrowCase = function () {
     return assert.throwsAsync(TypeError, function () { throw new TypeError('sync'); });
-  }
+  };
 
   try {
+    console.log('RUN: before invalid-arg assert');
     await assert.throwsAsync(null, function () { return Promise.reject(new TypeError()); });
-  } catch (e) {}
+    console.log('RUN: after invalid-arg assert');
+  } catch (e) { console.log('RUN: caught invalid-arg'); }
 
-  await passCase();
-  await failCase();
-  try { await syncThrowCase(); } catch (e) {}
+  console.log('RUN: before passCase');
+  try {
+    await assert.throwsAsync(TypeError, function () { return Promise.reject(new TypeError('boom')); });
+    console.log('RUN: after inline passCase');
+  } catch (e) { console.log('RUN: inline passCase threw', e && e.message ? e.message : e); }
+
+  console.log('RUN: before failCase');
+  try {
+    try {
+      await assert.throwsAsync(TypeError, function () { return Promise.resolve('ok'); });
+      console.log('RUN: inline failCase -> FAIL (should have rejected)');
+    } catch (e) {
+      console.log('RUN: inline failCase -> PASS (rejected with:', e && e.message ? e.message : e, ')');
+    }
+  } catch (e) { console.log('RUN: inline failCase outer error', e && e.message ? e.message : e); }
+
+  console.log('RUN: before syncThrowCase');
+  try { await assert.throwsAsync(TypeError, function () { throw new TypeError('sync'); }); } catch (e) { console.log('RUN: caught inline syncThrowCase'); }
+  console.log('RUN: after syncThrowCase');
 }
 
 (async function () {

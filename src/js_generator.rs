@@ -1,6 +1,9 @@
 use crate::core::{Gc, GcCell, GeneratorState, MutationContext};
 use crate::{
-    core::{Expr, JSObjectDataPtr, Statement, StatementKind, Value, object_get_key_value, object_set_key_value, prepare_function_call_env},
+    core::{
+        EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, Value, object_get_key_value, object_set_key_value,
+        prepare_function_call_env,
+    },
     error::JSError,
 };
 
@@ -60,7 +63,7 @@ pub fn handle_generator_instance_method<'gc>(
     method: &str,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "next" => {
             // Get optional value to send to the generator
@@ -72,15 +75,26 @@ pub fn handle_generator_instance_method<'gc>(
             // Return a value and close the generator
             let return_value = if args.is_empty() { Value::Undefined } else { args[0].clone() };
 
-            generator_return(mc, generator, return_value)
+            Ok(generator_return(mc, generator, return_value)?)
         }
         "throw" => {
             // Throw an exception into the generator
             let throw_value = if args.is_empty() { Value::Undefined } else { args[0].clone() };
 
-            generator_throw(mc, generator, throw_value)
+            // If generator_throw indicates a thrown JS value we should propagate
+            match generator_throw(mc, generator, throw_value.clone()) {
+                Ok(v) => Ok(v),
+                Err(_e) => {
+                    // If the generator threw a JS value, it is represented via "throw_value" already
+                    // generator_throw returns a JSError for thrown values via raise_throw_error, but to preserve
+                    // the original thrown JS value we convert to EvalError::Throw with the original value here.
+                    // Inspect e.kind to detect Throw; but since generator_throw was passed the actual thrown value
+                    // we can simply propagate it.
+                    Err(crate::core::js_error::EvalError::Throw(throw_value, None, None))
+                }
+            }
         }
-        _ => Err(raise_eval_error!(format!("Generator.prototype.{} is not implemented", method))),
+        _ => Err(raise_eval_error!(format!("Generator.prototype.{} is not implemented", method)).into()),
     }
 }
 
@@ -698,7 +712,7 @@ pub fn generator_next<'gc>(
     mc: &MutationContext<'gc>,
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     _send_value: Value<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut gen_obj = generator.borrow_mut(mc);
 
     // Take ownership of the generator state so we don't hold a long-lived
@@ -748,7 +762,7 @@ pub fn generator_next<'gc>(
                     let pre_stmts = gen_obj.body[0..idx].to_vec();
                     // Execute pre-yield statements in the function env so that
                     // bindings and side-effects are recorded on that environment.
-                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
                     Some(func_env)
                 } else if let Some(inner_idx) = inner_idx_opt {
                     if inner_idx > 0 {
@@ -787,12 +801,9 @@ pub fn generator_next<'gc>(
                         Ok(val) => {
                             // Cache the value so re-entry/resume paths can use it
                             gen_obj.cached_initial_yield = Some(val.clone());
-                            return create_iterator_result(mc, val, false);
+                            return Ok(create_iterator_result(mc, val, false)?);
                         }
-                        Err(_) => {
-                            gen_obj.cached_initial_yield = Some(Value::Undefined);
-                            return create_iterator_result(mc, Value::Undefined, false);
-                        }
+                        Err(e) => return Err(e),
                     }
                 }
 
@@ -810,8 +821,11 @@ pub fn generator_next<'gc>(
                 let res = crate::core::evaluate_statements(mc, &func_env, &gen_obj.body);
                 gen_obj.state = GeneratorState::Completed;
                 match res {
-                    Ok(v) => Ok(create_iterator_result(mc, v, true)?),
-                    Err(e) => Err(e.into()),
+                    Ok(v) => match create_iterator_result(mc, v, true) {
+                        Ok(r) => Ok(r),
+                        Err(e) => Err(crate::core::js_error::EvalError::Js(e)),
+                    },
+                    Err(e) => Err(e),
                 }
             }
         }
@@ -824,7 +838,7 @@ pub fn generator_next<'gc>(
             log::trace!("DEBUG: generator_next Suspended. pc={}, send_value={:?}", pc_val, _send_value);
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = GeneratorState::Completed;
-                return create_iterator_result(mc, Value::Undefined, true);
+                return Ok(create_iterator_result(mc, Value::Undefined, true)?);
             }
             // Clone the tail and replace first yield in the first statement
             let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
@@ -859,11 +873,14 @@ pub fn generator_next<'gc>(
             log::trace!("DEBUG: evaluate_statements result: {:?}", result);
             gen_obj.state = GeneratorState::Completed;
             match result {
-                Ok(val) => Ok(create_iterator_result(mc, val, true)?),
-                Err(_) => Ok(create_iterator_result(mc, Value::Undefined, true)?),
+                Ok(val) => match create_iterator_result(mc, val, true) {
+                    Ok(r) => Ok(r),
+                    Err(e) => Err(e.into()),
+                },
+                Err(e) => Err(e),
             }
         }
-        GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running")),
+        GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running").into()),
         GeneratorState::Completed => Ok(create_iterator_result(mc, Value::Undefined, true)?),
     }
 }
@@ -873,10 +890,10 @@ fn generator_return<'gc>(
     mc: &MutationContext<'gc>,
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     return_value: Value<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut gen_obj = generator.borrow_mut(mc);
     gen_obj.state = GeneratorState::Completed;
-    create_iterator_result(mc, return_value, true)
+    Ok(create_iterator_result(mc, return_value, true)?)
 }
 
 /// Execute generator.throw()
@@ -884,19 +901,19 @@ pub fn generator_throw<'gc>(
     mc: &MutationContext<'gc>,
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     throw_value: Value<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut gen_obj = generator.borrow_mut(mc);
     match &mut gen_obj.state {
         GeneratorState::NotStarted => {
             // Throwing into a not-started generator throws synchronously
-            Err(raise_throw_error!(throw_value))
+            Err(EvalError::Throw(throw_value, None, None))
         }
         GeneratorState::Suspended { pc, .. } => {
             // Replace the suspended statement with a Throw containing the thrown value
             let pc_val = *pc;
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = GeneratorState::Completed;
-                return Err(raise_throw_error!(throw_value));
+                return Err(EvalError::Throw(throw_value, None, None));
             }
             let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
             // Attempt to replace the first nested statement containing a `yield`
@@ -928,11 +945,11 @@ pub fn generator_throw<'gc>(
 
             match result {
                 Ok(val) => Ok(create_iterator_result(mc, val, true)?),
-                Err(e) => Err(e.into()),
+                Err(e) => Err(e),
             }
         }
-        GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running")),
-        GeneratorState::Completed => Err(raise_eval_error!("Generator has already completed")),
+        GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running").into()),
+        GeneratorState::Completed => Err(raise_eval_error!("Generator has already completed").into()),
     }
 }
 
@@ -974,6 +991,20 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
 
     let val = Value::Function("Generator.prototype.throw".to_string());
     object_set_key_value(mc, &gen_proto, "throw", val)?;
+
+    // Register Symbol.iterator on Generator.prototype -> returns the generator object itself
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
+        && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+    {
+        // Create a function name recognized by the call dispatcher
+        let val = Value::Function("Generator.prototype.iterator".to_string());
+        object_set_key_value(mc, &gen_proto, iter_sym, val)?;
+        gen_proto
+            .borrow_mut(mc)
+            .set_non_enumerable(crate::core::PropertyKey::Symbol(*iter_sym));
+    }
 
     // link prototype to constructor and expose on global env
     object_set_key_value(mc, &gen_ctor, "prototype", Value::Object(gen_proto))?;

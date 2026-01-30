@@ -27,8 +27,8 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, PropertyKey, Statement,
-    StatementKind, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value, generate_unique_id,
-    object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    StatementKind, Value, env_set, evaluate_call_dispatch, evaluate_expr, evaluate_statements, extract_closure_from_value,
+    generate_unique_id, object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
 use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -1527,19 +1527,138 @@ pub fn handle_promise_constructor_direct<'gc>(
     };
 
     log::trace!("About to call executor function");
+    if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+        match &executor {
+            Value::Function(name) => eprintln!("PROMISE-CONSTRUCTOR: executor variant=Function({})", name),
+            Value::Closure(_) => eprintln!("PROMISE-CONSTRUCTOR: executor variant=Closure"),
+            Value::Object(_) => eprintln!("PROMISE-CONSTRUCTOR: executor variant=Object"),
+            other => eprintln!("PROMISE-CONSTRUCTOR: executor variant=Other({:?})", other),
+        }
+    }
     // Execute the executor function by calling it depending on the value kind
     match executor {
         Value::Function(ref func_name) => {
-            // Builtin function name dispatch
-            let _ = crate::js_function::handle_global_function(mc, func_name, &[resolve_func.clone(), reject_func.clone()], &executor_env)?;
+            // Builtin function name dispatch: call and catch exceptions to reject the promise
+            match crate::js_function::handle_global_function(mc, func_name, &[resolve_func.clone(), reject_func.clone()], &executor_env) {
+                Ok(_) => {}
+                Err(e) => {
+                    // Convert the thrown error to a JS string and call the reject function
+                    if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+                        eprintln!("PROMISE-CONSTRUCTOR: executor error: {}", e.message());
+                    }
+                    let reason = Value::String(utf8_to_utf16(&e.message()));
+                    let _ = match &reject_func {
+                        Value::Function(name) => {
+                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                mc,
+                                Some(&executor_env),
+                                None,
+                                None,
+                                &[reason.clone()],
+                                None,
+                                Some(&executor_env),
+                                None,
+                            )?;
+                            let res = crate::core::evaluate_call_dispatch(
+                                mc,
+                                &call_env,
+                                Value::Function(name.clone()),
+                                None,
+                                vec![reason.clone()],
+                            );
+                            if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+                                eprintln!("PROMISE-CONSTRUCTOR: called reject via function, res={:?}", res);
+                            }
+                            res
+                        }
+                        Value::Closure(cl) => {
+                            let res = crate::core::call_closure(mc, cl, None, &[reason.clone()], &executor_env, None);
+                            if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+                                eprintln!("PROMISE-CONSTRUCTOR: called reject via closure, res={:?}", res);
+                            }
+                            res
+                        }
+                        _ => Ok(Value::Undefined),
+                    };
+                }
+            }
         }
         Value::Closure(ref data) => {
-            let _ = crate::core::call_closure(mc, data, None, &[resolve_func.clone(), reject_func.clone()], &executor_env, None)?;
+            match crate::core::call_closure(mc, data, None, &[resolve_func.clone(), reject_func.clone()], &executor_env, None) {
+                Ok(_) => {}
+                Err(e) => {
+                    if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+                        eprintln!("PROMISE-CONSTRUCTOR: executor error: {}", e.message());
+                    }
+                    let reason = Value::String(utf8_to_utf16(&e.message()));
+                    let _ = match &reject_func {
+                        Value::Function(name) => {
+                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                mc,
+                                Some(&executor_env),
+                                None,
+                                None,
+                                &[reason.clone()],
+                                None,
+                                Some(&executor_env),
+                                None,
+                            )?;
+                            let res = crate::core::evaluate_call_dispatch(
+                                mc,
+                                &call_env,
+                                Value::Function(name.clone()),
+                                None,
+                                vec![reason.clone()],
+                            );
+                            if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+                                eprintln!("PROMISE-CONSTRUCTOR: called reject via function, res={:?}", res);
+                            }
+                            res
+                        }
+                        Value::Closure(cl) => {
+                            let res = crate::core::call_closure(mc, cl, None, &[reason.clone()], &executor_env, None);
+                            if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+                                eprintln!("PROMISE-CONSTRUCTOR: called reject via closure, res={:?}", res);
+                            }
+                            res
+                        }
+                        _ => Ok(Value::Undefined),
+                    };
+                }
+            }
         }
         Value::Object(ref obj) => {
             if let Some(cl_rc) = obj.borrow().get_closure() {
                 if let Value::Closure(data) = &*cl_rc.borrow() {
-                    let _ = crate::core::call_closure(mc, data, None, &[resolve_func.clone(), reject_func.clone()], &executor_env, None)?;
+                    match crate::core::call_closure(mc, data, None, &[resolve_func.clone(), reject_func.clone()], &executor_env, None) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let reason = Value::String(utf8_to_utf16(&e.message()));
+                            let _ = match &reject_func {
+                                Value::Function(name) => {
+                                    let call_env = crate::js_class::prepare_call_env_with_this(
+                                        mc,
+                                        Some(&executor_env),
+                                        None,
+                                        None,
+                                        &[reason.clone()],
+                                        None,
+                                        Some(&executor_env),
+                                        None,
+                                    )?;
+                                    crate::core::evaluate_call_dispatch(
+                                        mc,
+                                        &call_env,
+                                        Value::Function(name.clone()),
+                                        None,
+                                        vec![reason.clone()],
+                                    )
+                                }
+                                Value::Closure(cl) => crate::core::call_closure(mc, cl, None, &[reason.clone()], &executor_env, None),
+                                _ => Ok(Value::Undefined),
+                            };
+                        }
+                    }
                 } else {
                     return Err(EvalError::Js(raise_eval_error!("Promise executor not callable as object")));
                 }
@@ -1550,6 +1669,7 @@ pub fn handle_promise_constructor_direct<'gc>(
         _ => return Err(EvalError::Js(raise_eval_error!("Promise executor not callable"))),
     }
 
+    // Even if executor threw, the promise should be returned (and rejected via the reject callback above)
     handle_promise_then_direct(mc, promise, args, env)
 }
 
@@ -4428,14 +4548,62 @@ pub fn handle_promise_constructor_val<'gc>(
     let reject_func = create_reject_function_direct(mc, promise.clone(), env);
 
     if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(executor) {
-        let executor_args = vec![resolve_func, reject_func];
+        let executor_args = vec![resolve_func.clone(), reject_func.clone()];
         let executor_env = if params.is_empty() {
             prepare_closure_call_env(mc, Some(&captured_env), None, &[], None)?
         } else {
             prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &executor_args, None)?
         };
         log::trace!("Promise executor params={:?}", params);
-        crate::core::evaluate_statements(mc, &executor_env, &body)?;
+        match crate::core::evaluate_statements(mc, &executor_env, &body) {
+            Ok(_) => {}
+            Err(e) => {
+                // Executor threw synchronously — reject the created promise instead of propagating
+                if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+                    eprintln!("PROMISE-CONSTRUCTOR-VAL: executor threw: {:?}", e);
+                }
+                // Extract a JS reason value when possible
+                let reason = match e {
+                    EvalError::Throw(val, _line, _col) => val,
+                    EvalError::Js(js_err) => Value::String(utf8_to_utf16(&js_err.message())),
+                    _ => Value::String(utf8_to_utf16(&format!("{:?}", e))),
+                };
+                if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
+                    let reason_str = match &reason {
+                        Value::String(s) => utf16_to_utf8(s),
+                        _ => crate::core::value_to_string(&reason),
+                    };
+                    eprintln!("PROMISE-CONSTRUCTOR-VAL: reason -> {}", reason_str);
+                }
+                // Call reject callback with the reason
+                match &reject_func {
+                    Value::Closure(cl) => {
+                        let _ = crate::core::call_closure(mc, cl, None, &[reason.clone()], &executor_env, None);
+                    }
+                    Value::Function(name) => {
+                        if let Ok(call_env) = crate::js_class::prepare_call_env_with_this(
+                            mc,
+                            Some(&executor_env),
+                            None,
+                            None,
+                            &[reason.clone()],
+                            None,
+                            Some(&executor_env),
+                            None,
+                        ) {
+                            let _ = crate::core::evaluate_call_dispatch(
+                                mc,
+                                &call_env,
+                                Value::Function(name.clone()),
+                                None,
+                                vec![reason.clone()],
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     } else {
         return Err(EvalError::Js(crate::raise_type_error!("Promise executor must be a function")));
     }

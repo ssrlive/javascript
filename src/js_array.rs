@@ -37,7 +37,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     object_set_key_value(mc, &array_ctor, "prototype", Value::Object(array_proto))?;
     object_set_key_value(mc, &array_proto, "constructor", Value::Object(array_ctor))?;
     // Make constructor non-enumerable
-    array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    array_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Register static methods
     object_set_key_value(mc, &array_ctor, "isArray", Value::Function("Array.isArray".to_string()))?;
@@ -88,7 +88,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         object_set_key_value(mc, &array_proto, method, val)?;
 
         // Methods on prototypes should be non-enumerable so for..in doesn't list them
-        array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        array_proto.borrow_mut(mc).set_non_enumerable(method);
     }
 
     // Register Symbol.iterator on Array.prototype (alias to Array.prototype.values)
@@ -234,9 +234,12 @@ pub(crate) fn handle_array_static_method<'gc>(
                         if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
                             if let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator") {
                                 if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
-                                    if let Some(iter_fn_val) = object_get_key_value(&object, iter_sym) {
+                                    // Support accessors: use accessor-aware property read which may call getter
+                                    let iter_fn_val_res = crate::core::get_property_with_accessors(mc, env, &object, iter_sym)?;
+                                    // If there is no iterator method (undefined), fall back to array-like handling
+                                    if !matches!(iter_fn_val_res, Value::Undefined) {
                                         // Call iterator method on the object to get an iterator
-                                        let iterator = match &*iter_fn_val.borrow() {
+                                        let iterator = match iter_fn_val_res {
                                             Value::Function(name) => {
                                                 let call_env = crate::js_class::prepare_call_env_with_this(
                                                     mc,
@@ -259,7 +262,45 @@ pub(crate) fn handle_array_static_method<'gc>(
                                             Value::Closure(cl) => {
                                                 crate::core::call_closure(mc, &*cl, Some(Value::Object(object.clone())), &[], env, None)?
                                             }
-                                            _ => return Err(EvalError::Js(raise_eval_error!("Array.from iterable is not iterable"))),
+                                            Value::Object(o) => {
+                                                if let Some(cl_ptr) = o.borrow().get_closure() {
+                                                    match &*cl_ptr.borrow() {
+                                                        Value::Closure(cl) => crate::core::call_closure(
+                                                            mc,
+                                                            &*cl,
+                                                            Some(Value::Object(o.clone())),
+                                                            &[],
+                                                            env,
+                                                            None,
+                                                        )?,
+                                                        Value::Function(name) => {
+                                                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                                                mc,
+                                                                Some(env),
+                                                                Some(Value::Object(o.clone())),
+                                                                None,
+                                                                &[],
+                                                                None,
+                                                                Some(env),
+                                                                None,
+                                                            )?;
+                                                            crate::core::evaluate_call_dispatch(
+                                                                mc,
+                                                                &call_env,
+                                                                Value::Function(name.clone()),
+                                                                Some(Value::Object(o.clone())),
+                                                                vec![],
+                                                            )?
+                                                        }
+                                                        _ => {
+                                                            return Err(raise_eval_error!("Array.from iterable is not iterable").into());
+                                                        }
+                                                    }
+                                                } else {
+                                                    return Err(raise_eval_error!("Array.from iterable is not iterable").into());
+                                                }
+                                            }
+                                            _ => return Err(raise_eval_error!("Array.from iterable is not iterable").into()),
                                         };
 
                                         // Consume iterator by repeatedly calling its next() method
@@ -298,10 +339,48 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                                 env,
                                                                 None,
                                                             )?,
+                                                            Value::Object(o) => {
+                                                                if let Some(cl_ptr) = o.borrow().get_closure() {
+                                                                    match &*cl_ptr.borrow() {
+                                                                        Value::Closure(cl) => crate::core::call_closure(
+                                                                            mc,
+                                                                            &*cl,
+                                                                            Some(Value::Object(o.clone())),
+                                                                            &[],
+                                                                            env,
+                                                                            None,
+                                                                        )?,
+                                                                        Value::Function(name) => {
+                                                                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                                                                mc,
+                                                                                Some(env),
+                                                                                Some(Value::Object(o.clone())),
+                                                                                None,
+                                                                                &[],
+                                                                                None,
+                                                                                Some(env),
+                                                                                None,
+                                                                            )?;
+                                                                            crate::core::evaluate_call_dispatch(
+                                                                                mc,
+                                                                                &call_env,
+                                                                                Value::Function(name.clone()),
+                                                                                Some(Value::Object(o.clone())),
+                                                                                vec![],
+                                                                            )?
+                                                                        }
+                                                                        _ => {
+                                                                            return Err(
+                                                                                raise_eval_error!("Iterator.next is not callable").into()
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    return Err(raise_eval_error!("Iterator.next is not callable").into());
+                                                                }
+                                                            }
                                                             _ => {
-                                                                return Err(EvalError::Js(raise_eval_error!(
-                                                                    "Iterator.next is not callable"
-                                                                )));
+                                                                return Err(raise_eval_error!("Iterator.next is not callable").into());
                                                             }
                                                         };
 
@@ -382,7 +461,7 @@ pub(crate) fn handle_array_static_method<'gc>(
 
                     if let Some(len) = get_array_length(mc, &object) {
                         for i in 0..len {
-                            let element = crate::core::get_property_with_accessors(mc, env, &object, &PropertyKey::from(i))?;
+                            let element = crate::core::get_property_with_accessors(mc, env, &object, i)?;
 
                             if let Some(ref fn_val) = map_fn {
                                 // Support closures or function names for map function
@@ -1933,7 +2012,7 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     object_set_key_value(mc, &arr, "__is_array", Value::Boolean(true))?;
     arr.borrow_mut(mc).non_enumerable.insert("__is_array".into());
     // Mark 'length' as non-enumerable on arrays per spec
-    arr.borrow_mut(mc).set_non_enumerable(PropertyKey::from("length"));
+    arr.borrow_mut(mc).set_non_enumerable("length");
 
     // Set prototype
     let mut root_env_opt = Some(env.clone());
@@ -2035,7 +2114,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
         return Ok(Value::Object(result_obj));
     }
 
-    let element_val = crate::core::get_property_with_accessors(mc, env, &arr_ptr, &PropertyKey::from(index))?;
+    let element_val = crate::core::get_property_with_accessors(mc, env, &arr_ptr, index)?;
 
     let result_value = match kind.as_str() {
         "keys" => Value::Number(index as f64),

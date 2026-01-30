@@ -1,4 +1,3 @@
-use crate::PropertyKey;
 use crate::core::{EvalError, GcPtr, JSObjectDataPtr};
 use crate::core::{MutationContext, Value, env_set, get_own_property, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::error::JSError;
@@ -59,13 +58,13 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
     ];
     for method in inst_methods {
         object_set_key_value(mc, &date_proto, method, Value::Function(format!("Date.prototype.{method}")))?;
-        date_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        date_proto.borrow_mut(mc).set_non_enumerable(method);
         if let Some(val_rc) = object_get_key_value(&date_proto, method) {
             log::debug!("DBG initialize_date: method {} stored as {:?}", method, val_rc.borrow());
         }
     }
     // Mark constructor non-enumerable
-    date_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    date_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Static methods
     object_set_key_value(mc, &date_ctor, "now", Value::Function("Date.now".to_string()))?;

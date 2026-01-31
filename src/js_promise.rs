@@ -1523,14 +1523,6 @@ pub fn handle_promise_constructor_direct<'gc>(
     };
 
     log::trace!("About to call executor function");
-    if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-        match &executor {
-            Value::Function(name) => eprintln!("PROMISE-CONSTRUCTOR: executor variant=Function({})", name),
-            Value::Closure(_) => eprintln!("PROMISE-CONSTRUCTOR: executor variant=Closure"),
-            Value::Object(_) => eprintln!("PROMISE-CONSTRUCTOR: executor variant=Object"),
-            other => eprintln!("PROMISE-CONSTRUCTOR: executor variant=Other({:?})", other),
-        }
-    }
     // Execute the executor function by calling it depending on the value kind
     match executor {
         Value::Function(ref func_name) => {
@@ -1539,9 +1531,6 @@ pub fn handle_promise_constructor_direct<'gc>(
                 Ok(_) => {}
                 Err(e) => {
                     // Convert the thrown error to a JS string and call the reject function
-                    if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-                        eprintln!("PROMISE-CONSTRUCTOR: executor error: {}", e.message());
-                    }
                     let reason = Value::String(utf8_to_utf16(&e.message()));
                     let _ = match &reject_func {
                         Value::Function(name) => {
@@ -1562,16 +1551,10 @@ pub fn handle_promise_constructor_direct<'gc>(
                                 None,
                                 vec![reason.clone()],
                             );
-                            if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-                                eprintln!("PROMISE-CONSTRUCTOR: called reject via function, res={:?}", res);
-                            }
                             res
                         }
                         Value::Closure(cl) => {
                             let res = crate::core::call_closure(mc, cl, None, &[reason.clone()], &executor_env, None);
-                            if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-                                eprintln!("PROMISE-CONSTRUCTOR: called reject via closure, res={:?}", res);
-                            }
                             res
                         }
                         _ => Ok(Value::Undefined),
@@ -1583,9 +1566,6 @@ pub fn handle_promise_constructor_direct<'gc>(
             match crate::core::call_closure(mc, data, None, &[resolve_func.clone(), reject_func.clone()], &executor_env, None) {
                 Ok(_) => {}
                 Err(e) => {
-                    if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-                        eprintln!("PROMISE-CONSTRUCTOR: executor error: {}", e.message());
-                    }
                     let reason = Value::String(utf8_to_utf16(&e.message()));
                     let _ = match &reject_func {
                         Value::Function(name) => {
@@ -1606,16 +1586,10 @@ pub fn handle_promise_constructor_direct<'gc>(
                                 None,
                                 vec![reason.clone()],
                             );
-                            if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-                                eprintln!("PROMISE-CONSTRUCTOR: called reject via function, res={:?}", res);
-                            }
                             res
                         }
                         Value::Closure(cl) => {
                             let res = crate::core::call_closure(mc, cl, None, &[reason.clone()], &executor_env, None);
-                            if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-                                eprintln!("PROMISE-CONSTRUCTOR: called reject via closure, res={:?}", res);
-                            }
                             res
                         }
                         _ => Ok(Value::Undefined),
@@ -4553,21 +4527,11 @@ pub fn handle_promise_constructor_val<'gc>(
             Ok(_) => {}
             Err(e) => {
                 // Executor threw synchronously — reject the created promise instead of propagating
-                if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-                    eprintln!("PROMISE-CONSTRUCTOR-VAL: executor threw: {:?}", e);
-                }
                 // Extract a JS reason value when possible
                 let reason = match e {
                     EvalError::Throw(val, _line, _col) => val,
                     EvalError::Js(js_err) => Value::String(utf8_to_utf16(&js_err.message())),
                 };
-                if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
-                    let reason_str = match &reason {
-                        Value::String(s) => utf16_to_utf8(s),
-                        _ => crate::core::value_to_string(&reason),
-                    };
-                    eprintln!("PROMISE-CONSTRUCTOR-VAL: reason -> {}", reason_str);
-                }
                 // Call reject callback with the reason
                 match &reject_func {
                     Value::Closure(cl) => {

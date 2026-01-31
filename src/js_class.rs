@@ -99,6 +99,42 @@ pub(crate) fn evaluate_this<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataP
     Ok(Value::Object(last_seen))
 }
 
+// Walk the environment/prototype chain to locate the nearest [[HomeObject]]
+// which may be present on an ancestor environment (e.g., when a strict
+// direct eval creates a fresh declarative environment whose prototype points
+// at the function's environment). Return `Some(home_obj)` if found.
+fn find_home_object_in_env<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<GcCell<JSObjectDataPtr<'gc>>> {
+    let mut cur = Some(*env);
+    while let Some(e) = cur {
+        // Prefer explicit [[HomeObject]] on the environment itself
+        if let Some(home) = e.borrow().get_home_object() {
+            return Some(home);
+        }
+        // If there is a __function binding in this environment, try to extract the
+        // [[HomeObject]] from the bound function value (covers cases where the
+        // environment is a fresh declarative environment created for strict direct
+        // eval and the function object is stored on the caller env).
+        if let Some(f_rc) = object_get_key_value(&e, "__function") {
+            let f_val = f_rc.borrow().clone();
+            match f_val {
+                Value::Object(obj) => {
+                    if let Some(h) = obj.borrow().get_home_object() {
+                        return Some(h);
+                    }
+                }
+                Value::Closure(cl) => {
+                    if let Some(h) = cl.home_object.clone() {
+                        return Some(h);
+                    }
+                }
+                _ => {}
+            }
+        }
+        cur = e.borrow().prototype;
+    }
+    None
+}
+
 fn find_binding<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<Value<'gc>> {
     let mut current = *env;
     loop {
@@ -635,10 +671,15 @@ pub(crate) fn evaluate_new<'gc>(
                 Some(Value::Object(instance)),
                 Some(params),
                 evaluated_args,
-                None,
+                Some(instance), // pass instance pointer so prepare_call_env_with_this sets __instance
                 Some(env),
                 None,
             )?;
+
+            // Ensure the call environment is aware of the function object so `new.target`
+            // can be returned at runtime. For closures we set the `__function` property
+            // to the closure value so it can be returned directly.
+            crate::core::object_set_key_value(mc, &func_env, "__function", Value::Closure(data))?;
 
             create_arguments_object(mc, &func_env, evaluated_args, None)?;
 
@@ -1661,11 +1702,45 @@ pub(crate) fn evaluate_super_call<'gc>(
     // runtime should throw if `this` was already initialized.
     let already_initialized = this_initialized;
 
-    // Find the current constructor function to get its prototype (the parent class)
-    let current_function = find_binding(env, "__function").ok_or_else(|| raise_type_error!("super() called in invalid context"))?;
+    // Find the current constructor function to get its prototype (the parent class).
+    // Per spec, if the call site is inside an arrow function, the `current function` for
+    // resolving `super` must skip over arrow functions. Walk the environment chain and
+    // pick the nearest `__function` binding that is *not* an arrow function.
+    let mut cur_env = Some(*env);
+    let mut chosen_function: Option<Value> = None;
+    while let Some(e) = cur_env {
+        if let Some(f_rc) = object_get_key_value(&e, "__function") {
+            let f_val = f_rc.borrow().clone();
+            // determine if f_val corresponds to an arrow function
+            let mut is_arrow = false;
+            match &f_val {
+                Value::Closure(data) | Value::AsyncClosure(data) => {
+                    is_arrow = data.is_arrow;
+                }
+                Value::Object(func_obj) => {
+                    if let Some(cl_ptr) = func_obj.borrow().get_closure() {
+                        if let Value::Closure(data) | Value::AsyncClosure(data) = &*cl_ptr.borrow() {
+                            is_arrow = data.is_arrow;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if !is_arrow {
+                chosen_function = Some(f_val);
+                break;
+            }
+        }
+        cur_env = e.borrow().prototype;
+    }
+    let current_function = chosen_function.ok_or_else(|| raise_type_error!("super() called in invalid context"))?;
 
-    let parent_class = if let Value::Object(func_obj) = current_function {
-        if let Some(proto_val) = object_get_key_value(&func_obj, "__proto__") {
+    let parent_class = if let Value::Object(func_obj) = &current_function {
+        // Prefer using the internal prototype (the function object's [[Prototype]]) as
+        // the parent class. Fallback to an own `__proto__` property if present.
+        if let Some(proto_ptr) = func_obj.borrow().prototype {
+            Value::Object(proto_ptr)
+        } else if let Some(proto_val) = object_get_key_value(func_obj, "__proto__") {
             proto_val.borrow().clone()
         } else {
             Value::Undefined
@@ -1673,8 +1748,6 @@ pub(crate) fn evaluate_super_call<'gc>(
     } else {
         Value::Undefined
     };
-
-    log::debug!("evaluate_super_call: parent_class = {:?}", parent_class);
 
     // Initialize this in the lexical environment
     crate::core::object_set_key_value(mc, &lexical_env, "this", Value::Object(instance))?;
@@ -1723,8 +1796,6 @@ pub(crate) fn evaluate_super_call<'gc>(
                     return Ok(Value::Object(instance));
                 }
             }
-
-            return Ok(Value::Object(instance));
         }
 
         // Handle native constructors (like Array, Object, etc.)
@@ -1748,21 +1819,34 @@ pub(crate) fn evaluate_super_call<'gc>(
         }
     }
 
+    if already_initialized {
+        return Err(raise_reference_error!("super() called after this is initialized"));
+    }
+
     Err(raise_type_error!("super() failed: parent constructor not found"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn evaluate_super_property<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     prop: &str,
 ) -> Result<Value<'gc>, JSError> {
+    // Debug: print the environment chain and probes to help diagnose missing [[HomeObject]]
+    log::trace!("DBG evaluate_super_property: called prop='{}' env_ptr={:p}", prop, env);
     // super.property accesses parent class properties
-    // Use [[HomeObject]] if available
-    if let Some(home_obj) = env.borrow().get_home_object() {
+    // Use [[HomeObject]] if available; search up environment prototype chain
+    if let Some(home_obj) = find_home_object_in_env(env) {
         // Super is the prototype of HomeObject
         if let Some(super_obj) = home_obj.borrow().borrow().prototype {
             // Look up property on super object
             if let Some(prop_val) = object_get_key_value(&super_obj, prop) {
+                // Debug: show the kind of property we found on super object
+                log::trace!(
+                    "DBG evaluate_super_property: found prop_val on super_obj for '{}' => {:?}",
+                    prop,
+                    prop_val.borrow()
+                );
                 // If this is a property descriptor with a getter, call the getter with the current `this` as receiver
                 match &*prop_val.borrow() {
                     Value::Property { getter: Some(getter), .. } => {
@@ -1842,6 +1926,11 @@ pub(crate) fn evaluate_super_property<'gc>(
                     _ => return Ok(prop_val.borrow().clone()),
                 }
             }
+            log::trace!(
+                "DBG evaluate_super_property: property '{}' not found on super_obj {:p} - returning undefined",
+                prop,
+                Gc::as_ptr(super_obj)
+            );
             return Ok(Value::Undefined);
         }
     }
@@ -1856,6 +1945,12 @@ pub(crate) fn evaluate_super_property<'gc>(
                         if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
                             // Look for property in parent prototype
                             if let Some(prop_val) = object_get_key_value(parent_proto_obj, prop) {
+                                // Debug: show the kind of property we found on parent prototype
+                                log::trace!(
+                                    "DBG evaluate_super_property: found prop_val on parent_proto for '{}' => {:?}",
+                                    prop,
+                                    prop_val.borrow()
+                                );
                                 // If this is an accessor or getter, call it
                                 match &*prop_val.borrow() {
                                     Value::Property { getter: Some(getter), .. } => {
@@ -1918,13 +2013,23 @@ pub(crate) fn evaluate_super_property<'gc>(
                                     _ => return Ok(prop_val.borrow().clone()),
                                 }
                             }
+                            log::trace!(
+                                "DBG evaluate_super_property: property '{}' not found on parent prototype {:p} - returning undefined",
+                                prop,
+                                Gc::as_ptr(*parent_proto_obj)
+                            );
                         }
                     }
                 }
             }
         }
     }
-    Err(raise_eval_error!(format!("Property '{prop}' not found in parent class")))
+    // If no parent class/property found, return undefined (per spec, missing super property yields undefined)
+    log::trace!(
+        "DBG evaluate_super_property: no parent class/property found for '{}' - returning undefined",
+        prop
+    );
+    Ok(Value::Undefined)
 }
 
 pub(crate) fn evaluate_super_method<'gc>(
@@ -1933,6 +2038,7 @@ pub(crate) fn evaluate_super_method<'gc>(
     method: &str,
     evaluated_args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
+    log::trace!("DBG evaluate_super_method: called method='{}' env_ptr={:p}", method, env);
     // super.method() calls parent class methods
 
     // Debug: print basic context to track recursion
@@ -1943,8 +2049,8 @@ pub(crate) fn evaluate_super_method<'gc>(
         env.borrow().get_home_object().is_some()
     );
 
-    // Use [[HomeObject]] if available
-    if let Some(home_obj) = env.borrow().get_home_object() {
+    // Use [[HomeObject]] if available; search up env prototype chain
+    if let Some(home_obj) = find_home_object_in_env(env) {
         // Super is the prototype of HomeObject
         let super_obj_opt = home_obj.borrow().borrow().prototype;
         if let Some(super_obj) = super_obj_opt {
@@ -2292,6 +2398,7 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
 
     if let Some(ps) = params {
         for (i, p) in ps.iter().enumerate() {
+            log::trace!("DEBUG-PARAM-SIG: index={} param={:?}", i, p);
             match p {
                 DestructuringElement::Variable(name, _) => {
                     let v = args.get(i).cloned().unwrap_or(Value::Undefined);
@@ -2306,9 +2413,74 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
                     object_set_key_value(mc, &array_obj, "length", Value::Number(rest_args.len() as f64))?;
                     crate::core::env_set(mc, &new_env, name, Value::Object(array_obj))?;
                 }
+                DestructuringElement::NestedArray(elms, maybe_def) => {
+                    // Build an Expr::Array pattern and delegate to the evaluator's assign helper
+                    let pattern = Expr::Array(convert_array_pattern(elms));
+                    let mut pattern_with_default = pattern;
+                    if let Some(def) = maybe_def {
+                        pattern_with_default = Expr::Assign(Box::new(pattern_with_default), Box::new((**def).clone()));
+                    }
+                    let val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                    // Debug: show that we're about to perform parameter destructuring
+                    log::trace!("DEBUG-PARAM-DESTRUCTURE: index={} val_variant={:?}", i, val);
+                    // Use the core evaluator's assign-target helper so GetIterator will be used
+                    crate::core::evaluate_assign_target_with_value(mc, &new_env, &pattern_with_default, val)?;
+                }
+                DestructuringElement::NestedObject(_, _) => {
+                    // TODO: implement full object destructuring parameter semantics (including defaults and property
+                    // keys). For now, create an empty object fallback to avoid panics; will be expanded as needed.
+                    if let Some(v) = args.get(i) {
+                        let obj_val = v.clone();
+                        if let Value::Object(o) = obj_val {
+                            crate::core::env_set(mc, &new_env, "__obj_param_placeholder", Value::Object(o))?;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
     Ok(new_env)
+}
+
+// Helper: convert DestructuringElement -> Expr::Array/Expr::Object patterns
+fn convert_array_pattern(elms: &[DestructuringElement]) -> Vec<Option<Expr>> {
+    let mut out: Vec<Option<Expr>> = Vec::new();
+    for e in elms.iter() {
+        match e {
+            DestructuringElement::Empty => out.push(None),
+            DestructuringElement::Variable(name, maybe_def) => {
+                if let Some(def) = maybe_def {
+                    out.push(Some(Expr::Assign(
+                        Box::new(Expr::Var(name.clone(), None, None)),
+                        Box::new((**def).clone()),
+                    )));
+                } else {
+                    out.push(Some(Expr::Var(name.clone(), None, None)));
+                }
+            }
+            DestructuringElement::Rest(name) => {
+                out.push(Some(Expr::Spread(Box::new(Expr::Var(name.clone(), None, None)))));
+            }
+            DestructuringElement::NestedArray(inner, maybe_def) => {
+                let inner_arr = convert_array_pattern(inner);
+                let mut arr_expr = Expr::Array(inner_arr);
+                if let Some(def) = maybe_def {
+                    arr_expr = Expr::Assign(Box::new(arr_expr), Box::new((**def).clone()));
+                }
+                out.push(Some(arr_expr));
+            }
+            DestructuringElement::NestedObject(_, _) => {
+                // For now, do not implement object pattern conversion here; leave for future
+                // (most failing tests are array-related). Push a placeholder Var(undefined) so
+                // evaluation will still run but will likely need more complete support.
+                out.push(Some(Expr::Var(String::new(), None, None)));
+            }
+            DestructuringElement::Property(_, _) => {
+                // Property should be handled in object patterns, not arrays; push elision
+                out.push(None);
+            }
+        }
+    }
+    out
 }

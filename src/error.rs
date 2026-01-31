@@ -227,14 +227,14 @@ macro_rules! function_name {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! make_js_error {
-    ($kind:expr) => {
+    ($kind:expr) => {{
         $crate::JSError::new(
             $kind,
             file!().to_string(),
             $crate::function_name!().to_string(),
             Some(line!() as usize),
         )
-    };
+    }};
 }
 
 // --- These macros use make_js_error! to create specific error types ---

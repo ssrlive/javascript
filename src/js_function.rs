@@ -2,7 +2,7 @@ use crate::core::{
     ClosureData, EvalError, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr, get_own_property,
     has_own_property_value, new_js_object_data, prepare_function_call_env,
 };
-use crate::core::{PropertyKey, object_get_key_value, object_set_key_value};
+use crate::core::{PropertyKey, Token, object_get_key_value, object_set_key_value};
 use crate::error::{JSError, JSErrorKind};
 use crate::js_array::handle_array_constructor;
 use crate::js_class::prepare_call_env_with_this;
@@ -1213,10 +1213,424 @@ fn evalute_eval_function<'gc>(
                     tokens.pop();
                 }
 
+                // Fast special-case: token-only single `new.target` statement in the eval body.
+                // Pattern: [New, Dot, Identifier("target"), opt Semicolon]
+                let mut t_iter = tokens.iter().filter(|td| !matches!(td.token, Token::LineTerminator));
+                let is_single_new_target = match (t_iter.next(), t_iter.next(), t_iter.next(), t_iter.next()) {
+                    (Some(a), Some(b), Some(c), Some(d)) => {
+                        matches!(a.token, Token::New)
+                            && matches!(b.token, Token::Dot)
+                            && matches!(&c.token, Token::Identifier(id) if id == "target")
+                            && matches!(d.token, Token::Semicolon)
+                    }
+                    (Some(a), Some(b), Some(c), None) => {
+                        matches!(a.token, Token::New)
+                            && matches!(b.token, Token::Dot)
+                            && matches!(&c.token, Token::Identifier(id) if id == "target")
+                    }
+                    _ => false,
+                };
+
+                if is_single_new_target {
+                    // detect indirect eval marker
+                    let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval")
+                        .map(|c| matches!(*c.borrow(), crate::core::Value::Boolean(true)))
+                        .unwrap_or(false);
+                    // find nearest function scope and arrow-ness
+                    // NOTE: do not treat the global environment (prototype == None) as a function scope
+                    let mut cur = Some(*env);
+                    let mut in_function = false;
+                    let mut in_arrow = false;
+                    while let Some(e) = cur {
+                        if e.borrow().is_function_scope && e.borrow().prototype.is_some() {
+                            in_function = true;
+                            if let Some(flag_rc) = crate::core::object_get_key_value(&e, "__is_arrow_function") {
+                                in_arrow = matches!(*flag_rc.borrow(), crate::core::Value::Boolean(true));
+                            }
+                            break;
+                        }
+                        cur = e.borrow().prototype;
+                    }
+                    if !(!is_indirect_eval && in_function && !in_arrow) {
+                        // throw SyntaxError
+                        let msg = "Invalid use of 'new.target' in eval code";
+                        let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+                        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                            v.borrow().clone()
+                        } else {
+                            return Err(raise_syntax_error!(msg).into());
+                        };
+                        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                            Ok(Value::Object(obj)) => {
+                                return Err(EvalError::Throw(Value::Object(obj), None, None));
+                            }
+                            Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                            Err(_) => return Err(raise_syntax_error!(msg).into()),
+                        }
+                    }
+                    // allowed — return runtime new.target value: function object if constructor call, otherwise undefined
+                    if in_function
+                        && let Some(e) = cur
+                        && let Some(inst_rc) = object_get_key_value(&e, "__instance")
+                        && !matches!(*inst_rc.borrow(), Value::Undefined)
+                        && let Some(func_rc) = object_get_key_value(&e, "__function")
+                    {
+                        return Ok(Value::Closure(match &*func_rc.borrow() {
+                            Value::Closure(cl) => *cl,
+                            _ => return Ok(Value::Undefined),
+                        }));
+                    }
+                    return Ok(Value::Undefined);
+                }
+
+                // Fast-path token check for 'super' -- calculate before parsing because
+                // parsing may consume or rewrite tokens.
+                let contains_super = tokens.iter().any(|td| matches!(td.token, Token::Super));
+                log::trace!("eval fast-path check: contains_super = {}", contains_super);
+
                 // index for parsing start position
                 let mut index: usize = 0;
 
                 let mut stmts = crate::core::parse_statements(&tokens, &mut index)?;
+
+                // Early errors for eval code: importing/exporting and `super` usages are
+                // not allowed inside eval code (Script) per the spec's early error rules.
+                // Fast-path: if the token stream contains 'super' or module import/export
+                // tokens, throw a SyntaxError rather than attempting to evaluate.
+                // If the token stream contains 'super', inspect the parsed
+                // AST to determine if it's a SuperCall or SuperProperty usage, and
+                // apply the appropriate early-error rules per spec.
+                {
+                    // Walk AST to find SuperCall, SuperProperty and NewTarget occurrences
+                    let mut has_super_call = false;
+                    let mut has_super_prop = false;
+                    let mut has_new_target = false;
+                    fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has_new_target: &mut bool) {
+                        match e {
+                            Expr::SuperCall(args) => {
+                                *has_super_call = true;
+                                for a in args {
+                                    walk_expr(a, has_super_call, has_super_prop, has_new_target);
+                                }
+                            }
+                            Expr::SuperProperty(_) => {
+                                *has_super_prop = true;
+                            }
+                            Expr::NewTarget => {
+                                *has_new_target = true;
+                            }
+                            Expr::Super => {
+                                // Bare `super` appearing as an object in an index expression
+                                // (e.g. `super["x"]`) should be treated as a SuperProperty
+                                log::trace!("walk_expr (js_function fast-path): found Expr::Super");
+                                *has_super_prop = true;
+                            }
+                            Expr::Call(callee, args) | Expr::New(callee, args) => {
+                                walk_expr(callee, has_super_call, has_super_prop, has_new_target);
+                                for a in args {
+                                    walk_expr(a, has_super_call, has_super_prop, has_new_target);
+                                }
+                            }
+                            Expr::Property(obj, _)
+                            | Expr::OptionalProperty(obj, _)
+                            | Expr::TypeOf(obj)
+                            | Expr::UnaryNeg(obj)
+                            | Expr::UnaryPlus(obj)
+                            | Expr::BitNot(obj)
+                            | Expr::Delete(obj)
+                            | Expr::Void(obj)
+                            | Expr::Await(obj)
+                            | Expr::Yield(Some(obj))
+                            | Expr::YieldStar(obj)
+                            | Expr::LogicalNot(obj)
+                            | Expr::PostIncrement(obj)
+                            | Expr::PostDecrement(obj)
+                            | Expr::Spread(obj)
+                            | Expr::OptionalCall(obj, _)
+                            | Expr::TaggedTemplate(obj, _, _)
+                            | Expr::DynamicImport(obj)
+                            | Expr::BitAndAssign(obj, _) => {
+                                // common single-child variants
+                                walk_expr(obj, has_super_call, has_super_prop, has_new_target);
+                            }
+                            Expr::Assign(l, r)
+                            | Expr::Binary(l, _, r)
+                            | Expr::Conditional(l, _, r)
+                            | Expr::Comma(l, r)
+                            | Expr::LogicalAnd(l, r)
+                            | Expr::LogicalOr(l, r)
+                            | Expr::Mod(l, r)
+                            | Expr::Pow(l, r) => {
+                                walk_expr(l, has_super_call, has_super_prop, has_new_target);
+                                walk_expr(r, has_super_call, has_super_prop, has_new_target);
+                            }
+                            Expr::Index(obj, idx) | Expr::OptionalIndex(obj, idx) => {
+                                walk_expr(obj, has_super_call, has_super_prop, has_new_target);
+                                walk_expr(idx, has_super_call, has_super_prop, has_new_target);
+                            }
+                            Expr::Object(kv) => {
+                                for (k, v, _flag) in kv {
+                                    walk_expr(k, has_super_call, has_super_prop, has_new_target);
+                                    walk_expr(v, has_super_call, has_super_prop, has_new_target);
+                                }
+                            }
+                            Expr::Array(elems) => {
+                                for e in elems.iter().flatten() {
+                                    walk_expr(e, has_super_call, has_super_prop, has_new_target);
+                                }
+                            }
+                            Expr::Function(_, _, body)
+                            | Expr::ArrowFunction(_, body)
+                            | Expr::AsyncFunction(_, _, body)
+                            | Expr::GeneratorFunction(_, _, body)
+                            | Expr::AsyncGeneratorFunction(_, _, body)
+                            | Expr::AsyncArrowFunction(_, body) => {
+                                // Do not descend into nested function bodies for eval early errors
+                                let _ = body;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    fn walk_stmt(
+                        s: &crate::core::Statement,
+                        has_super_call: &mut bool,
+                        has_super_prop: &mut bool,
+                        has_new_target: &mut bool,
+                    ) {
+                        match &*s.kind {
+                            StatementKind::Expr(expr) => walk_expr(expr, has_super_call, has_super_prop, has_new_target),
+                            StatementKind::If(ifstmt) => {
+                                walk_expr(&ifstmt.condition, has_super_call, has_super_prop, has_new_target);
+                                for st in &ifstmt.then_body {
+                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                }
+                                if let Some(else_body) = &ifstmt.else_body {
+                                    for st in else_body {
+                                        walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                    }
+                                }
+                            }
+                            StatementKind::While(cond, body) => {
+                                walk_expr(cond, has_super_call, has_super_prop, has_new_target);
+                                for st in body {
+                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                }
+                            }
+                            StatementKind::DoWhile(body, cond) => {
+                                for st in body {
+                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                }
+                                walk_expr(cond, has_super_call, has_super_prop, has_new_target);
+                            }
+                            StatementKind::For(forstmt) => {
+                                if let Some(init) = &forstmt.init {
+                                    walk_stmt(init, has_super_call, has_super_prop, has_new_target);
+                                }
+                                if let Some(test) = &forstmt.test {
+                                    walk_expr(test, has_super_call, has_super_prop, has_new_target);
+                                }
+                                if let Some(update) = &forstmt.update {
+                                    walk_stmt(update, has_super_call, has_super_prop, has_new_target);
+                                }
+                                for st in &forstmt.body {
+                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                }
+                            }
+                            StatementKind::Block(vec) => {
+                                for st in vec {
+                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                }
+                            }
+                            StatementKind::TryCatch(tc) => {
+                                for st in &tc.try_body {
+                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                }
+                                if let Some(cb) = &tc.catch_body {
+                                    for st in cb {
+                                        walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                    }
+                                }
+                                if let Some(fb) = &tc.finally_body {
+                                    for st in fb {
+                                        walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                    }
+                                }
+                            }
+                            StatementKind::Switch(sw) => {
+                                walk_expr(&sw.expr, has_super_call, has_super_prop, has_new_target);
+                                for case in &sw.cases {
+                                    match case {
+                                        crate::core::SwitchCase::Case(_, stmts) => {
+                                            for st in stmts {
+                                                walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                            }
+                                        }
+                                        crate::core::SwitchCase::Default(stmts) => {
+                                            for st in stmts {
+                                                walk_stmt(st, has_super_call, has_super_prop, has_new_target);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            StatementKind::FunctionDeclaration(_, _, _body, _, _) => { /* do not descend */ }
+                            _ => {}
+                        }
+                    }
+
+                    for st in &stmts {
+                        walk_stmt(st, &mut has_super_call, &mut has_super_prop, &mut has_new_target);
+                    }
+                    log::trace!(
+                        "FASTPATH-AST: has_super_call={} has_super_prop={} has_new_target={}",
+                        has_super_call,
+                        has_super_prop,
+                        has_new_target
+                    );
+
+                    // Determine inMethod / inConstructor per spec rules by walking the env prototype chain
+                    let mut cur_env = Some(*env);
+                    let mut in_method = false;
+                    while let Some(e) = cur_env {
+                        if e.borrow().get_home_object().is_some() {
+                            in_method = true;
+                            break;
+                        }
+                        cur_env = e.borrow().prototype;
+                    }
+
+                    let in_constructor = if in_method {
+                        if let Some(func_val_ptr) = crate::core::env_get(env, "__function") {
+                            match &*func_val_ptr.borrow() {
+                                Value::Object(func_obj) => {
+                                    if let Some(is_ctor_ptr) = object_get_key_value(func_obj, "__is_constructor") {
+                                        matches!(*is_ctor_ptr.borrow(), Value::Boolean(true))
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    // SuperCall: only allowed in direct eval when inMethod && inConstructor
+                    log::debug!(
+                        "eval-super-check: has_super_call={} has_super_prop={} in_method={} in_constructor={}",
+                        has_super_call,
+                        has_super_prop,
+                        in_method,
+                        in_constructor
+                    );
+                    if has_super_call && !(in_method && in_constructor) {
+                        let msg = "Invalid use of 'super' in eval code";
+                        let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                            v.borrow().clone()
+                        } else {
+                            return Err(raise_syntax_error!(msg).into());
+                        };
+                        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                            Ok(Value::Object(obj)) => {
+                                return Err(EvalError::Throw(Value::Object(obj), None, None));
+                            }
+                            Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                            Err(_) => return Err(raise_syntax_error!(msg).into()),
+                        }
+                    }
+
+                    // SuperProperty: only allowed in direct eval when inMethod
+                    if has_super_prop && !in_method {
+                        let msg = "Invalid use of 'super' in eval code";
+                        let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                            v.borrow().clone()
+                        } else {
+                            return Err(raise_syntax_error!(msg).into());
+                        };
+                        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                            Ok(Value::Object(obj)) => {
+                                return Err(EvalError::Throw(Value::Object(obj), None, None));
+                            }
+                            Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                            Err(_) => return Err(raise_syntax_error!(msg).into()),
+                        }
+                    }
+
+                    // NewTarget: only allowed in direct eval when the eval is contained in function code that is not an ArrowFunction
+                    if has_new_target {
+                        // is_indirect_eval = true when this is an indirect eval
+                        let is_indirect_eval = if let Some(flag) = crate::core::object_get_key_value(env, "__is_indirect_eval") {
+                            matches!(*flag.borrow(), crate::core::Value::Boolean(true))
+                        } else {
+                            false
+                        };
+
+                        // Walk environment chain to locate a function scope and
+                        // detect arrow functions using the `__is_arrow_function` flag
+                        // set by `call_closure`.
+                        let mut cur = Some(*env);
+                        let mut in_function = false;
+                        let mut in_arrow = false;
+                        while let Some(e) = cur {
+                            if e.borrow().is_function_scope {
+                                in_function = true;
+                                if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function") {
+                                    in_arrow = matches!(*flag_rc.borrow(), Value::Boolean(true));
+                                } else {
+                                    in_arrow = false;
+                                }
+                                break;
+                            }
+                            cur = e.borrow().prototype;
+                        }
+
+                        // Allowed only when direct eval, inside a function, and that function is NOT an arrow
+                        log::trace!(
+                            "DEBUG-FASTPATH-NEWTARGET: is_indirect_eval={} in_function={} in_arrow={} has_new_target={}",
+                            is_indirect_eval,
+                            in_function,
+                            in_arrow,
+                            has_new_target
+                        );
+                        if !(!is_indirect_eval && in_function && !in_arrow) {
+                            let msg = "Invalid use of 'new.target' in eval code";
+                            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                                v.borrow().clone()
+                            } else {
+                                return Err(raise_syntax_error!(msg).into());
+                            };
+                            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                                Ok(Value::Object(obj)) => {
+                                    return Err(EvalError::Throw(Value::Object(obj), None, None));
+                                }
+                                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                                Err(_) => return Err(raise_syntax_error!(msg).into()),
+                            }
+                        }
+                    }
+                }
+
+                if tokens.iter().any(|td| matches!(td.token, Token::Import | Token::Export)) {
+                    let msg = "Import/Export declarations may not appear in eval code";
+                    let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                    let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                        v.borrow().clone()
+                    } else {
+                        return Err(raise_syntax_error!(msg).into());
+                    };
+                    match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                        Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
+                        Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                        Err(_) => return Err(raise_syntax_error!(msg).into()),
+                    }
+                }
 
                 // If this is an indirect eval executed in the global env and the eval code
                 // is strict (starts with "use strict"), do not instantiate top-level

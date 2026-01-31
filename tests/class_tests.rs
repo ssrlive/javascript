@@ -329,6 +329,20 @@ mod class_tests {
     }
 
     #[test]
+    fn test_super_getter_descriptor_inspect() {
+        // Debugging test: inspect the descriptor stored on C.prototype for 'value'
+        let script = r#"
+            class P { get value() { return "parent"; } }
+            class C extends P { }
+            Object.getOwnPropertyDescriptor(C.prototype, 'value')
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        // Print descriptor to stderr for inspection when running with --nocapture
+        eprintln!("DESCRIPTOR: {}", result);
+        // Expect descriptor to be { get: [Getter], set: undefined, enumerable: false, configurable: true }
+        assert!(result.contains("get"), "Descriptor should include getter");
+    }
+    #[test]
     fn test_super_deep_chain() {
         let script = r#"
             class A { toString() { return "A"; } }

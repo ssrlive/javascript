@@ -161,6 +161,7 @@ pub enum Expr {
     Spread(Box<Expr>),
     ArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
     This,
+    NewTarget,
     SuperCall(Vec<Expr>),
     SuperMethod(String, Vec<Expr>),
     SuperProperty(String),

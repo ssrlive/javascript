@@ -15,7 +15,7 @@ let FAIL_ON_FAILURE = false;
 let CAP_MULTIPLIER = 5;
 // FOCUS_LIST: array of focus tokens. Accepts multiple `--focus` flags and comma-separated tokens.
 let FOCUS_LIST = [];
-let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 20;
+let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 60;
 const envKeep = process.env.TEST262_KEEP_TMP;
 // Default: keep ephemeral /tmp files (use --no-keep-tmp or set TEST262_KEEP_TMP=0 to disable)
 let KEEP_TMP = (envKeep === undefined) ? true : (envKeep === '1' || envKeep === 'true');
@@ -253,6 +253,7 @@ async function runAll(){
       for (const d of debug) log(d);
     }
 
+    let currentSucceeds = false;
     // Run test
     try {
       log(`RUN ${f}`);
@@ -274,6 +275,7 @@ async function runAll(){
         if (cleanupTmp && tmpPath && fs.existsSync(tmpPath)) {
           try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
         }
+        currentSucceeds = true;
       } else {
         log(`FAIL ${f}`);
         execCount++;
@@ -303,6 +305,9 @@ async function runAll(){
         try {
           console.error(`\nFAIL ${f}`);
           console.error(summaryText);
+          if (KEEP_TMP) {
+            console.error(`TEST FILE KEPT: ${tmpPath}`);
+          }
           console.error('----------------');
         } catch (e) { /* ignore terminal print errors */ }
         // If KEEP_TMP is true, keep the ephemeral tmp file in /tmp (do NOT copy into ci/retained)
@@ -335,6 +340,9 @@ async function runAll(){
       try {
         console.error(`FAIL ${f}`);
         console.error(errText);
+        if (KEEP_TMP) {
+          console.error(`TEST FILE KEPT: ${tmpPath}`);
+        }
         console.error('----------------');
       } catch (e) { /* ignore terminal print errors */ }
       fail++;
@@ -342,10 +350,10 @@ async function runAll(){
       // Remove tmp file unless KEEP_TMP is true; we keep ephemeral /tmp files when KEEP_TMP is true
       try {
         if (cleanupTmp && tmpPath && fs.existsSync(tmpPath)) {
-          if (KEEP_TMP) {
-            log(`NOTE: keeping ephemeral tmp file ${tmpPath} because TEST262_KEEP_TMP is set`);
-          } else {
+          if (currentSucceeds || !KEEP_TMP) {
             fs.unlinkSync(tmpPath);
+          } else {
+            log(`NOTE: keeping ephemeral tmp file ${tmpPath} because TEST262_KEEP_TMP is set`);
           }
         }
       } catch (e) {

@@ -2789,6 +2789,41 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             Expr::Class(Box::new(class_def))
         }
         Token::New => {
+            // Special-case: `new.target` meta-property (no arguments, just 'new.target')
+            // Recognize `new` followed by optional line terminators, a '.' and identifier 'target'
+            // Debug: print nearby tokens when encountering 'new' to diagnose parsing issues
+            {
+                let mut s = String::new();
+                for i in 0..5 {
+                    if *index + i < tokens.len() {
+                        s.push_str(&format!("{:?} ", tokens[*index + i].token));
+                    }
+                }
+                log::trace!("DEBUG-PARSER-New-lookahead: {}", s);
+            }
+            // Lookahead: parse_primary has already advanced *index to the token after 'new',
+            // so start at *index (which may be '.' or line-terminators) rather than *index + 1.
+            let mut look = *index;
+            // skip intervening line terminators between 'new' and '.' per spacing rules
+            while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
+                look += 1;
+            }
+            // Expect '.' after the optional line terminators
+            if look < tokens.len() && matches!(tokens[look].token, Token::Dot) {
+                look += 1; // skip '.'
+                while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
+                    look += 1;
+                }
+                if look < tokens.len()
+                    && let Token::Identifier(id) = &tokens[look].token
+                    && id == "target"
+                {
+                    // consume up through identifier (look points at identifier)
+                    *index = look + 1;
+                    return Ok(Expr::NewTarget);
+                }
+            }
+
             let constructor = parse_primary(tokens, index, false)?;
 
             // Check for arguments

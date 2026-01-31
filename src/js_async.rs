@@ -121,7 +121,7 @@ fn step<'gc>(
                 if let Value::Object(p_obj) = p_val
                     && let Some(then_method) = object_get_key_value(&p_obj, "then")
                 {
-                    // eprintln!("DEBUG: Calling then method with this");
+                    log::trace!("DEBUG: Calling then method with this");
                     call_function_with_this(mc, &then_method.borrow(), Some(p_val), &[on_fulfilled, on_rejected], env)?;
                 }
             }

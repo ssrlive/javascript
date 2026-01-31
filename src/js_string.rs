@@ -217,7 +217,7 @@ pub fn handle_string_method<'gc>(
         "normalize" => string_normalize_method(s, args),
         "toWellFormed" => string_to_well_formed_method(mc, s, args, env),
         "replaceAll" => string_replace_all_method(s, args),
-        _ => Err(EvalError::Js(raise_eval_error!(format!("Unknown string method: {method}")))), // method not found
+        _ => Err(raise_eval_error!(format!("Unknown string method: {method}")).into()), // method not found
     }
 }
 
@@ -226,7 +226,7 @@ fn string_to_string_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<
         Ok(Value::String(s.to_vec()))
     } else {
         let msg = format!("toString method expects no arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -261,11 +261,11 @@ fn string_substring_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<
             let end_idx = end_idx.min(len);
             Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
         } else {
-            Err(EvalError::Js(raise_eval_error!("substring: first argument must be a number")))
+            Err(raise_eval_error!("substring: first argument must be a number").into())
         }
     } else {
         let msg = format!("substring method expects 1 or 2 arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -294,11 +294,11 @@ fn string_substr_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc
             let end_idx = end_idx.max(0) as usize;
             Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
         } else {
-            Err(EvalError::Js(raise_eval_error!("substr: first argument must be a number")))
+            Err(raise_eval_error!("substr: first argument must be a number").into())
         }
     } else {
         let msg = format!("substr method expects 1 or 2 arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -339,7 +339,7 @@ fn string_to_uppercase<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>
         Ok(Value::String(utf16_to_uppercase(s)))
     } else {
         let msg = format!("toUpperCase method expects no arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -348,7 +348,7 @@ fn string_to_lowercase<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>
         Ok(Value::String(utf16_to_lowercase(s)))
     } else {
         let msg = format!("toLowerCase method expects no arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -375,13 +375,10 @@ fn string_indexof_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'g
                 }
             }
         } else {
-            Err(EvalError::Js(raise_eval_error!("indexOf: first argument must be a string")))
+            Err(raise_eval_error!("indexOf: first argument must be a string").into())
         }
     } else {
-        Err(EvalError::Js(raise_eval_error!(format!(
-            "indexOf method expects 1 or 2 arguments, got {}",
-            args.len()
-        ))))
+        Err(raise_eval_error!(format!("indexOf method expects 1 or 2 arguments, got {}", args.len())).into())
     }
 }
 
@@ -418,11 +415,11 @@ fn string_lastindexof_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
                 }
             }
         } else {
-            Err(EvalError::Js(raise_eval_error!("lastIndexOf: first argument must be a string")))
+            Err(raise_eval_error!("lastIndexOf: first argument must be a string").into())
         }
     } else {
         let msg = format!("lastIndexOf method expects 1 or 2 arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -446,8 +443,7 @@ fn string_replace_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'g
                 // Extract pattern
                 let pattern_u16 = internal_get_regex_pattern(&object)?;
 
-                let re =
-                    create_regex_from_utf16(&pattern_u16, &flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
+                let re = create_regex_from_utf16(&pattern_u16, &flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
 
                 // replacement string must be string (function replacement not supported yet)
                 if let Value::String(repl_u16) = replace_val {
@@ -578,25 +574,18 @@ fn string_replace_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'g
                     out.extend_from_slice(&s[last_pos..]);
                     Ok(Value::String(out))
                 } else {
-                    Err(EvalError::Js(raise_eval_error!(
-                        "replace only supports string as replacement argument for RegExp search"
-                    )))
+                    Err(raise_eval_error!("replace only supports string as replacement argument for RegExp search").into())
                 }
             } else {
-                Err(EvalError::Js(raise_eval_error!(
-                    "replace: search argument must be a string or RegExp"
-                )))
+                Err(raise_eval_error!("replace: search argument must be a string or RegExp").into())
             }
         } else if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
             Ok(Value::String(utf16_replace(s, &search, &replace)))
         } else {
-            Err(EvalError::Js(raise_eval_error!("replace: both arguments must be strings")))
+            Err(raise_eval_error!("replace: both arguments must be strings").into())
         }
     } else {
-        Err(EvalError::Js(raise_eval_error!(format!(
-            "replace method expects 2 arguments, got {}",
-            args.len()
-        ))))
+        Err(raise_eval_error!(format!("replace method expects 2 arguments, got {}", args.len())).into())
     }
 }
 
@@ -727,13 +716,11 @@ fn string_split_method<'gc>(
             set_array_length(mc, &arr, parts.len())?;
             Ok(Value::Object(arr))
         } else {
-            Err(EvalError::Js(raise_eval_error!(
-                "split: argument must be a string, RegExp, or undefined"
-            )))
+            Err(raise_eval_error!("split: argument must be a string, RegExp, or undefined").into())
         }
     } else {
         let msg = format!("split method expects 0 to 2 arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -758,38 +745,38 @@ fn string_match_method<'gc>(
             };
             match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pattern))])? {
                 Value::Object(o) => o,
-                _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from argument"))),
+                _ => return Err(raise_eval_error!("failed to construct RegExp from argument").into()),
             }
         }
     } else if let Value::String(su) = &search_val {
         match handle_regexp_constructor(mc, &[Value::String(su.clone())])? {
             Value::Object(o) => o,
-            _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from string"))),
+            _ => return Err(raise_eval_error!("failed to construct RegExp from string").into()),
         }
     } else if let Value::Undefined = search_val {
         // new RegExp() default
         match handle_regexp_constructor(mc, &[])? {
             Value::Object(o) => o,
-            _ => return Err(EvalError::Js(raise_eval_error!("failed to construct default RegExp"))),
+            _ => return Err(raise_eval_error!("failed to construct default RegExp").into()),
         }
     } else if let Value::Number(n) = search_val {
         let pat = n.to_string();
         match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))])? {
             Value::Object(o) => o,
-            _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from number"))),
+            _ => return Err(raise_eval_error!("failed to construct RegExp from number").into()),
         }
     } else if let Value::Boolean(b) = search_val {
         let pat = b.to_string();
         match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))])? {
             Value::Object(o) => o,
-            _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from bool"))),
+            _ => return Err(raise_eval_error!("failed to construct RegExp from bool").into()),
         }
     } else {
         // Fallback: coerce to string using value_to_string
         let pat = crate::core::value_to_string(&search_val);
         match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))])? {
             Value::Object(o) => o,
-            _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from arg"))),
+            _ => return Err(raise_eval_error!("failed to construct RegExp from arg").into()),
         }
     };
 
@@ -882,13 +869,10 @@ fn string_charat_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc
                 }
             }
         } else {
-            Err(EvalError::Js(raise_eval_error!("charAt: argument must be a number")))
+            Err(raise_eval_error!("charAt: argument must be a number").into())
         }
     } else {
-        Err(EvalError::Js(raise_eval_error!(format!(
-            "charAt method expects 1 argument, got {}",
-            args.len()
-        ))))
+        Err(raise_eval_error!(format!("charAt method expects 1 argument, got {}", args.len())).into())
     }
 }
 
@@ -905,11 +889,11 @@ fn string_char_code_at_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Val
                 Ok(Value::Number(f64::NAN))
             }
         } else {
-            Err(EvalError::Js(raise_eval_error!("charCodeAt: index must be a number")))
+            Err(raise_eval_error!("charCodeAt: index must be a number").into())
         }
     } else {
         let msg = format!("charCodeAt method expects 1 argument, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -919,10 +903,7 @@ fn string_trim_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>,
         let trimmed = str_val.trim();
         Ok(Value::String(utf8_to_utf16(trimmed)))
     } else {
-        Err(EvalError::Js(raise_eval_error!(format!(
-            "trim method expects no arguments, got {}",
-            args.len()
-        ))))
+        Err(raise_eval_error!(format!("trim method expects no arguments, got {}", args.len())).into())
     }
 }
 
@@ -933,7 +914,7 @@ fn string_trim_end_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'
         Ok(Value::String(utf8_to_utf16(trimmed)))
     } else {
         let msg = format!("trimEnd method expects no arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -944,7 +925,7 @@ fn string_trim_start_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value
         Ok(Value::String(utf8_to_utf16(trimmed)))
     } else {
         let msg = format!("trimStart method expects no arguments, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -955,11 +936,11 @@ fn string_starts_with_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
             let starts = s.len() >= search.len() && s[..search.len()] == search[..];
             Ok(Value::Boolean(starts))
         } else {
-            Err(EvalError::Js(raise_eval_error!("startsWith: argument must be a string")))
+            Err(raise_eval_error!("startsWith: argument must be a string").into())
         }
     } else {
         let msg = format!("startsWith method expects 1 argument, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -970,19 +951,16 @@ fn string_ends_with_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<
             let ends = s.len() >= search.len() && s[s.len() - search.len()..] == search[..];
             Ok(Value::Boolean(ends))
         } else {
-            Err(EvalError::Js(raise_eval_error!("endsWith: argument must be a string")))
+            Err(raise_eval_error!("endsWith: argument must be a string").into())
         }
     } else {
-        Err(EvalError::Js(raise_eval_error!(format!(
-            "endsWith method expects 1 argument, got {}",
-            args.len()
-        ))))
+        Err(raise_eval_error!(format!("endsWith method expects 1 argument, got {}", args.len())).into())
     }
 }
 
 fn string_includes_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
-        return Err(EvalError::Js(raise_eval_error!("includes method expects at least 1 argument")));
+        return Err(raise_eval_error!("includes method expects at least 1 argument").into());
     }
     let search_val = args[0].clone();
     // Convert search to string-like UTF-16
@@ -1017,13 +995,10 @@ fn string_repeat_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc
             }
             Ok(Value::String(repeated))
         } else {
-            Err(EvalError::Js(raise_eval_error!("repeat: argument must be a number")))
+            Err(raise_eval_error!("repeat: argument must be a number").into())
         }
     } else {
-        Err(EvalError::Js(raise_eval_error!(format!(
-            "repeat method expects 1 argument, got {}",
-            args.len()
-        ))))
+        Err(raise_eval_error!(format!("repeat method expects 1 argument, got {}", args.len())).into())
     }
 }
 
@@ -1072,11 +1047,11 @@ fn string_pad_start_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<
                 Ok(Value::String(padded))
             }
         } else {
-            Err(EvalError::Js(raise_eval_error!("padStart: first argument must be a number")))
+            Err(raise_eval_error!("padStart: first argument must be a number").into())
         }
     } else {
         let msg = format!("padStart method expects at least 1 argument, got {}", args.len());
-        Err(EvalError::Js(raise_eval_error!(msg)))
+        Err(raise_eval_error!(msg).into())
     }
 }
 
@@ -1105,13 +1080,10 @@ fn string_pad_end_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'g
                 Ok(Value::String(padded))
             }
         } else {
-            Err(EvalError::Js(raise_eval_error!("padEnd: first argument must be a number")))
+            Err(raise_eval_error!("padEnd: first argument must be a number").into())
         }
     } else {
-        Err(EvalError::Js(raise_eval_error!(format!(
-            "padEnd method expects at least 1 argument, got {}",
-            args.len()
-        ))))
+        Err(raise_eval_error!(format!("padEnd method expects at least 1 argument, got {}", args.len())).into())
     }
 }
 
@@ -1182,7 +1154,7 @@ fn string_search_method<'gc>(
                 if let Value::Object(obj) = val {
                     (obj, String::new())
                 } else {
-                    return Err(EvalError::Js(raise_eval_error!("Failed to create RegExp")));
+                    return Err(raise_eval_error!("Failed to create RegExp").into());
                 }
             }
             v => {
@@ -1192,7 +1164,7 @@ fn string_search_method<'gc>(
                 if let Value::Object(obj) = val {
                     (obj, String::new())
                 } else {
-                    return Err(EvalError::Js(raise_eval_error!("Failed to create RegExp")));
+                    return Err(raise_eval_error!("Failed to create RegExp").into());
                 }
             }
         }
@@ -1202,7 +1174,7 @@ fn string_search_method<'gc>(
         if let Value::Object(obj) = val {
             (obj, String::new())
         } else {
-            return Err(EvalError::Js(raise_eval_error!("Failed to create RegExp")));
+            return Err(raise_eval_error!("Failed to create RegExp").into());
         }
     };
 
@@ -1220,7 +1192,7 @@ fn string_search_method<'gc>(
     let matcher_obj = if let Value::Object(o) = matcher_val {
         o
     } else {
-        return Err(EvalError::Js(raise_eval_error!("Failed to clone RegExp")));
+        return Err(raise_eval_error!("Failed to clone RegExp").into());
     };
 
     object_set_key_value(mc, &matcher_obj, "lastIndex", Value::Number(0.0))?;
@@ -1258,9 +1230,7 @@ fn string_match_all_method<'gc>(
                     None => String::new(),
                 };
                 if !f.contains('g') {
-                    return Err(EvalError::Js(raise_type_error!(
-                        "String.prototype.matchAll called with a non-global RegExp argument"
-                    )));
+                    return Err(raise_type_error!("String.prototype.matchAll called with a non-global RegExp argument").into());
                 }
                 (obj, f)
             }
@@ -1270,7 +1240,7 @@ fn string_match_all_method<'gc>(
                 if let Value::Object(obj) = val {
                     (obj, String::from("g"))
                 } else {
-                    return Err(EvalError::Js(raise_eval_error!("Failed to create RegExp")));
+                    return Err(raise_eval_error!("Failed to create RegExp").into());
                 }
             }
             _ => {
@@ -1284,7 +1254,7 @@ fn string_match_all_method<'gc>(
                 if let Value::Object(obj) = val {
                     (obj, String::from("g"))
                 } else {
-                    return Err(EvalError::Js(raise_eval_error!("Failed to create RegExp")));
+                    return Err(raise_eval_error!("Failed to create RegExp").into());
                 }
             }
         }
@@ -1294,7 +1264,7 @@ fn string_match_all_method<'gc>(
         if let Value::Object(obj) = val {
             (obj, String::from("g"))
         } else {
-            return Err(EvalError::Js(raise_eval_error!("Failed to create RegExp")));
+            return Err(raise_eval_error!("Failed to create RegExp").into());
         }
     };
 
@@ -1305,7 +1275,7 @@ fn string_match_all_method<'gc>(
     let matcher_obj = if let Value::Object(o) = matcher_val {
         o
     } else {
-        return Err(EvalError::Js(raise_eval_error!("Failed to clone RegExp")));
+        return Err(raise_eval_error!("Failed to clone RegExp").into());
     };
 
     object_set_key_value(mc, &matcher_obj, "lastIndex", Value::Number(0.0))?;
@@ -1411,16 +1381,13 @@ fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
                     None => "".to_string(),
                 };
                 if !flags.contains('g') {
-                    return Err(EvalError::Js(raise_type_error!(
-                        "String.prototype.replaceAll called with a non-global RegExp argument"
-                    )));
+                    return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
                 }
 
                 // Extract pattern
                 let pattern_u16 = internal_get_regex_pattern(&object)?;
 
-                let re =
-                    create_regex_from_utf16(&pattern_u16, &flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
+                let re = create_regex_from_utf16(&pattern_u16, &flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
 
                 if let Value::String(repl_u16) = replace_val {
                     let repl = utf16_to_utf8(&repl_u16);
@@ -1525,14 +1492,10 @@ fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
                     out.extend_from_slice(&s[last_pos..]);
                     Ok(Value::String(out))
                 } else {
-                    Err(EvalError::Js(raise_eval_error!(
-                        "replaceAll only supports string as replacement argument for RegExp search"
-                    )))
+                    Err(raise_eval_error!("replaceAll only supports string as replacement argument for RegExp search").into())
                 }
             } else {
-                Err(EvalError::Js(raise_eval_error!(
-                    "replaceAll: search argument must be a string or RegExp"
-                )))
+                Err(raise_eval_error!("replaceAll: search argument must be a string or RegExp").into())
             }
         } else if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
             // String replaceAll
@@ -1549,13 +1512,10 @@ fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
             out.extend_from_slice(&s[last_pos..]);
             Ok(Value::String(out))
         } else {
-            Err(EvalError::Js(raise_eval_error!("replaceAll: both arguments must be strings")))
+            Err(raise_eval_error!("replaceAll: both arguments must be strings").into())
         }
     } else {
-        Err(EvalError::Js(raise_eval_error!(format!(
-            "replaceAll method expects 2 arguments, got {}",
-            args.len()
-        ))))
+        Err(raise_eval_error!(format!("replaceAll method expects 2 arguments, got {}", args.len())).into())
     }
 }
 
@@ -1577,8 +1537,8 @@ pub fn string_from_char_code<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, Eva
                 let s = utf16_to_utf8(s);
                 crate::js_number::string_to_f64(s.trim()).unwrap_or(f64::NAN)
             }
-            Value::BigInt(_) => return Err(EvalError::Js(crate::raise_type_error!("Cannot convert a BigInt value to a number"))),
-            Value::Symbol(_) => return Err(EvalError::Js(crate::raise_type_error!("Cannot convert Symbol"))),
+            Value::BigInt(_) => return Err(crate::raise_type_error!("Cannot convert a BigInt value to a number").into()),
+            Value::Symbol(_) => return Err(crate::raise_type_error!("Cannot convert Symbol").into()),
             _ => f64::NAN,
         };
         let u = num as u16;
@@ -1600,7 +1560,7 @@ pub fn string_from_code_point<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, Ev
             let encoded = c.encode_utf16(&mut buf);
             chars.extend_from_slice(encoded);
         } else {
-            return Err(EvalError::Js(crate::raise_range_error!("Invalid code point")));
+            return Err(raise_range_error!("Invalid code point").into());
         }
     }
     Ok(Value::String(chars))
@@ -1628,23 +1588,19 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     iterator: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Get string
-    let str_val = object_get_key_value(iterator, "__iterator_string__")
-        .ok_or(raise_eval_error!("Iterator has no string"))
-        .map_err(EvalError::Js)?;
+    let str_val = object_get_key_value(iterator, "__iterator_string__").ok_or(raise_eval_error!("Iterator has no string"))?;
     let s = if let Value::String(utf16) = &*str_val.borrow() {
         utf16.clone()
     } else {
-        return Err(EvalError::Js(raise_eval_error!("Iterator string is invalid")));
+        return Err(raise_eval_error!("Iterator string is invalid").into());
     };
 
     // Get index
-    let index_val = object_get_key_value(iterator, "__iterator_index__")
-        .ok_or(raise_eval_error!("Iterator has no index"))
-        .map_err(EvalError::Js)?;
+    let index_val = object_get_key_value(iterator, "__iterator_index__").ok_or(raise_eval_error!("Iterator has no index"))?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         if *n < 0.0 { 0 } else { *n as usize }
     } else {
-        return Err(EvalError::Js(raise_eval_error!("Iterator index is invalid")));
+        return Err(raise_eval_error!("Iterator index is invalid").into());
     };
 
     let len = s.len();

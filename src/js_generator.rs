@@ -820,13 +820,7 @@ pub fn generator_next<'gc>(
                 crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
                 let res = crate::core::evaluate_statements(mc, &func_env, &gen_obj.body);
                 gen_obj.state = GeneratorState::Completed;
-                match res {
-                    Ok(v) => match create_iterator_result(mc, v, true) {
-                        Ok(r) => Ok(r),
-                        Err(e) => Err(crate::core::js_error::EvalError::Js(e)),
-                    },
-                    Err(e) => Err(e),
-                }
+                Ok(create_iterator_result(mc, res?, true)?)
             }
         }
         GeneratorState::Suspended { pc, stack: _, pre_env } => {

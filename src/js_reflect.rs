@@ -73,7 +73,7 @@ pub fn handle_reflect_method<'gc>(
     match method {
         "apply" => {
             if args.len() < 2 {
-                return Err(EvalError::Js(raise_type_error!("Reflect.apply requires at least 2 arguments")));
+                return Err(raise_type_error!("Reflect.apply requires at least 2 arguments").into());
             }
             let target = args[0].clone();
             let this_arg = args[1].clone();
@@ -95,16 +95,12 @@ pub fn handle_reflect_method<'gc>(
                             }
                         }
                     } else {
-                        return Err(EvalError::Js(raise_type_error!(
-                            "Reflect.apply argumentsList must be an array-like object"
-                        )));
+                        return Err(raise_type_error!("Reflect.apply argumentsList must be an array-like object").into());
                     }
                 }
                 Value::Undefined => {}
                 _ => {
-                    return Err(EvalError::Js(raise_type_error!(
-                        "Reflect.apply argumentsList must be an array-like object"
-                    )));
+                    return Err(raise_type_error!("Reflect.apply argumentsList must be an array-like object").into());
                 }
             }
 
@@ -154,14 +150,14 @@ pub fn handle_reflect_method<'gc>(
                             return crate::core::evaluate_statements(mc, &func_env, &body);
                         }
                     }
-                    Err(EvalError::Js(raise_type_error!("Reflect.apply target is not callable")))
+                    Err(raise_type_error!("Reflect.apply target is not callable").into())
                 }
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.apply target is not callable"))),
+                _ => Err(raise_type_error!("Reflect.apply target is not callable").into()),
             }
         }
         "construct" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_type_error!("Reflect.construct requires at least 1 argument")));
+                return Err(raise_type_error!("Reflect.construct requires at least 1 argument").into());
             }
             let target = args[0].clone();
             let arguments_list = if args.len() > 1 { args[1].clone() } else { Value::Undefined };
@@ -182,16 +178,12 @@ pub fn handle_reflect_method<'gc>(
                             }
                         }
                     } else {
-                        return Err(EvalError::Js(raise_type_error!(
-                            "Reflect.construct argumentsList must be an array-like object"
-                        )));
+                        return Err(raise_type_error!("Reflect.construct argumentsList must be an array-like object").into());
                     }
                 }
                 Value::Undefined => {}
                 _ => {
-                    return Err(EvalError::Js(raise_type_error!(
-                        "Reflect.construct argumentsList must be an array-like object"
-                    )));
+                    return Err(raise_type_error!("Reflect.construct argumentsList must be an array-like object").into());
                 }
             }
 
@@ -199,7 +191,7 @@ pub fn handle_reflect_method<'gc>(
         }
         "defineProperty" => {
             if args.len() < 3 {
-                return Err(EvalError::Js(raise_type_error!("Reflect.defineProperty requires 3 arguments")));
+                return Err(raise_type_error!("Reflect.defineProperty requires 3 arguments").into());
             }
             let target = args[0].clone();
             let property_key = args[1].clone();
@@ -211,7 +203,7 @@ pub fn handle_reflect_method<'gc>(
                         let prop_key = match property_key {
                             Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                             Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                            _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
+                            _ => return Err(raise_type_error!("Invalid property key").into()),
                         };
                         match PropertyDescriptor::from_object(attr_obj) {
                             Ok(pd) => {
@@ -230,12 +222,12 @@ pub fn handle_reflect_method<'gc>(
                         Ok(Value::Boolean(false))
                     }
                 }
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.defineProperty target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.defineProperty target must be an object").into()),
             }
         }
         "deleteProperty" => {
             if args.len() < 2 {
-                return Err(EvalError::Js(raise_type_error!("Reflect.deleteProperty requires 2 arguments")));
+                return Err(raise_type_error!("Reflect.deleteProperty requires 2 arguments").into());
             }
             let target = args[0].clone();
             let property_key = args[1].clone();
@@ -245,18 +237,18 @@ pub fn handle_reflect_method<'gc>(
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
+                        _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
                     // For now, always return true as we don't have configurable properties
                     let _ = obj.borrow_mut(mc).properties.shift_remove(&prop_key);
                     Ok(Value::Boolean(true))
                 }
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.deleteProperty target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.deleteProperty target must be an object").into()),
             }
         }
         "get" => {
             if args.len() < 2 {
-                return Err(EvalError::Js(raise_type_error!("Reflect.get requires at least 2 arguments")));
+                return Err(raise_type_error!("Reflect.get requires at least 2 arguments").into());
             }
             let target = args[0].clone();
             let property_key = args[1].clone();
@@ -267,7 +259,7 @@ pub fn handle_reflect_method<'gc>(
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
+                        _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
                     if let Some(value_rc) = object_get_key_value(&obj, &prop_key) {
                         Ok(value_rc.borrow().clone())
@@ -275,14 +267,12 @@ pub fn handle_reflect_method<'gc>(
                         Ok(Value::Undefined)
                     }
                 }
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.get target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.get target must be an object").into()),
             }
         }
         "getOwnPropertyDescriptor" => {
             if args.len() < 2 {
-                return Err(EvalError::Js(raise_type_error!(
-                    "Reflect.getOwnPropertyDescriptor requires 2 arguments"
-                )));
+                return Err(raise_type_error!("Reflect.getOwnPropertyDescriptor requires 2 arguments").into());
             }
             let target = args[0].clone();
             let property_key = args[1].clone();
@@ -292,7 +282,7 @@ pub fn handle_reflect_method<'gc>(
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
+                        _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
                     if let Some(_value_rc) = object_get_key_value(&obj, &prop_key) {
                         if let Some(pd) = crate::core::build_property_descriptor(mc, &obj, &prop_key) {
@@ -306,14 +296,12 @@ pub fn handle_reflect_method<'gc>(
                         Ok(Value::Undefined)
                     }
                 }
-                _ => Err(EvalError::Js(raise_type_error!(
-                    "Reflect.getOwnPropertyDescriptor target must be an object"
-                ))),
+                _ => Err(raise_type_error!("Reflect.getOwnPropertyDescriptor target must be an object").into()),
             }
         }
         "getPrototypeOf" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_type_error!("Reflect.getPrototypeOf requires 1 argument")));
+                return Err(raise_type_error!("Reflect.getPrototypeOf requires 1 argument").into());
             }
             match &args[0] {
                 Value::Object(obj) => {
@@ -323,12 +311,12 @@ pub fn handle_reflect_method<'gc>(
                         Ok(Value::Undefined)
                     }
                 }
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.getPrototypeOf target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.getPrototypeOf target must be an object").into()),
             }
         }
         "has" => {
             if args.len() < 2 {
-                return Err(EvalError::Js(raise_type_error!("Reflect.has requires 2 arguments")));
+                return Err(raise_type_error!("Reflect.has requires 2 arguments").into());
             }
             let target = args[0].clone();
             let property_key = args[1].clone();
@@ -338,28 +326,28 @@ pub fn handle_reflect_method<'gc>(
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
+                        _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
                     let has_prop = object_get_key_value(&obj, &prop_key).is_some();
                     Ok(Value::Boolean(has_prop))
                 }
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.has target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.has target must be an object").into()),
             }
         }
         "isExtensible" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_type_error!("Reflect.isExtensible requires 1 argument")));
+                return Err(raise_type_error!("Reflect.isExtensible requires 1 argument").into());
             }
             let target = args[0].clone();
 
             match target {
                 Value::Object(obj) => Ok(Value::Boolean(obj.borrow().is_extensible())),
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.isExtensible target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.isExtensible target must be an object").into()),
             }
         }
         "ownKeys" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_type_error!("Reflect.ownKeys requires 1 argument")));
+                return Err(raise_type_error!("Reflect.ownKeys requires 1 argument").into());
             }
             match args[0] {
                 Value::Object(obj) => {
@@ -379,12 +367,12 @@ pub fn handle_reflect_method<'gc>(
                     set_array_length(mc, &result_obj, keys_len)?;
                     Ok(Value::Object(result_obj))
                 }
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.ownKeys target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.ownKeys target must be an object").into()),
             }
         }
         "preventExtensions" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_type_error!("Reflect.preventExtensions requires 1 argument")));
+                return Err(raise_type_error!("Reflect.preventExtensions requires 1 argument").into());
             }
             let target = args[0].clone();
 
@@ -393,14 +381,12 @@ pub fn handle_reflect_method<'gc>(
                     obj.borrow_mut(mc).prevent_extensions();
                     Ok(Value::Boolean(true))
                 }
-                _ => Err(EvalError::Js(raise_type_error!(
-                    "Reflect.preventExtensions target must be an object"
-                ))),
+                _ => Err(raise_type_error!("Reflect.preventExtensions target must be an object").into()),
             }
         }
         "set" => {
             if args.len() < 3 {
-                return Err(EvalError::Js(raise_type_error!("Reflect.set requires at least 3 arguments")));
+                return Err(raise_type_error!("Reflect.set requires at least 3 arguments").into());
             }
             let target = args[0].clone();
             let property_key = args[1].clone();
@@ -412,17 +398,17 @@ pub fn handle_reflect_method<'gc>(
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
+                        _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
                     object_set_key_value(mc, &obj, &prop_key, value)?;
                     Ok(Value::Boolean(true))
                 }
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.set target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.set target must be an object").into()),
             }
         }
         "setPrototypeOf" => {
             if args.len() < 2 {
-                return Err(EvalError::Js(raise_type_error!("Reflect.setPrototypeOf requires 2 arguments")));
+                return Err(raise_type_error!("Reflect.setPrototypeOf requires 2 arguments").into());
             }
             match &args[0] {
                 Value::Object(obj) => match args[1] {
@@ -434,13 +420,11 @@ pub fn handle_reflect_method<'gc>(
                         obj.borrow_mut(mc).prototype = None;
                         Ok(Value::Boolean(true))
                     }
-                    _ => Err(EvalError::Js(raise_type_error!(
-                        "Reflect.setPrototypeOf prototype must be an object or null"
-                    ))),
+                    _ => Err(raise_type_error!("Reflect.setPrototypeOf prototype must be an object or null").into()),
                 },
-                _ => Err(EvalError::Js(raise_type_error!("Reflect.setPrototypeOf target must be an object"))),
+                _ => Err(raise_type_error!("Reflect.setPrototypeOf target must be an object").into()),
             }
         }
-        _ => Err(EvalError::Js(raise_eval_error!("Unknown Reflect method"))),
+        _ => Err(raise_eval_error!("Unknown Reflect method").into()),
     }
 }

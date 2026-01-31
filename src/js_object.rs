@@ -889,7 +889,7 @@ pub(crate) fn handle_to_string_method<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if !args.is_empty() {
-        return Err(EvalError::Js(raise_type_error!(format!(
+        return Err(raise_type_error!(format!(
             "{}.toString() takes no arguments, but {} were provided",
             match obj_val {
                 Value::Number(_) => "Number",
@@ -920,7 +920,8 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::Uninitialized => "undefined",
             },
             args.len()
-        ))));
+        ))
+        .into());
     }
 
     if let Value::Object(object) = obj_val {
@@ -1045,7 +1046,7 @@ pub(crate) fn handle_error_to_string_method<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if !args.is_empty() {
-        return Err(EvalError::Js(raise_type_error!("Error.prototype.toString takes no arguments")));
+        return Err(raise_type_error!("Error.prototype.toString takes no arguments").into());
     }
 
     // Expect an object receiver
@@ -1078,7 +1079,7 @@ pub(crate) fn handle_error_to_string_method<'gc>(
             Ok(Value::String(utf8_to_utf16(&format!("{}: {}", name, message))))
         }
     } else {
-        Err(EvalError::Js(raise_type_error!("Error.prototype.toString called on non-object")))
+        Err(raise_type_error!("Error.prototype.toString called on non-object").into())
     }
 }
 
@@ -1089,7 +1090,7 @@ pub(crate) fn handle_value_of_method<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if !args.is_empty() {
-        return Err(EvalError::Js(raise_type_error!(format!(
+        return Err(raise_type_error!(format!(
             "{}.valueOf() takes no arguments, but {} were provided",
             match obj_val {
                 Value::Number(_) => "Number",
@@ -1120,15 +1121,16 @@ pub(crate) fn handle_value_of_method<'gc>(
                 Value::Uninitialized => "undefined",
             },
             args.len()
-        ))));
+        ))
+        .into());
     }
     match obj_val {
         Value::Number(n) => Ok(Value::Number(*n)),
         Value::BigInt(s) => Ok(Value::BigInt(s.clone())),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::Boolean(*b)),
-        Value::Undefined => Err(EvalError::Js(raise_type_error!("Cannot convert undefined to object"))),
-        Value::Null => Err(EvalError::Js(raise_type_error!("Cannot convert null to object"))),
+        Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object").into()),
+        Value::Null => Err(raise_type_error!("Cannot convert null to object").into()),
         Value::Object(obj) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = object_get_key_value(obj, "__value__") {
@@ -1274,7 +1276,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::ArrayBuffer(array_buffer) => Ok(Value::ArrayBuffer(*array_buffer)),
         Value::DataView(data_view) => Ok(Value::DataView(*data_view)),
         Value::TypedArray(typed_array) => Ok(Value::TypedArray(*typed_array)),
-        Value::Uninitialized => Err(EvalError::Js(raise_type_error!("Cannot convert uninitialized to object"))),
+        Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object").into()),
     }
 }
 
@@ -1293,7 +1295,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
     match func_name {
         "Object.prototype.hasOwnProperty" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("hasOwnProperty requires one argument")));
+                return Err(raise_eval_error!("hasOwnProperty requires one argument").into());
             }
             let key_val = args[0].clone();
             let exists = crate::core::has_own_property_value(object, &key_val);
@@ -1301,7 +1303,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
         }
         "Object.prototype.isPrototypeOf" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("isPrototypeOf requires one argument")));
+                return Err(raise_eval_error!("isPrototypeOf requires one argument").into());
             }
             let target_val = args[0].clone();
             match target_val {
@@ -1320,7 +1322,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
         }
         "Object.prototype.propertyIsEnumerable" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("propertyIsEnumerable requires one argument")));
+                return Err(raise_eval_error!("propertyIsEnumerable requires one argument").into());
             }
             let key_val = args[0].clone();
             let exists = crate::core::has_own_property_value(object, &key_val);

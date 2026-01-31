@@ -228,8 +228,8 @@ fn format_value_pretty<'gc>(
                         s.push_str("...");
                         s.push_str(name);
                     }
-                    DestructuringElement::NestedObject(_) => s.push_str("{}"),
-                    DestructuringElement::NestedArray(_) => s.push_str("[]"),
+                    DestructuringElement::NestedObject(..) => s.push_str("{}"),
+                    DestructuringElement::NestedArray(..) => s.push_str("[]"),
                     DestructuringElement::Property(name, _) => s.push_str(name),
                     DestructuringElement::Empty => {}
                 }
@@ -293,40 +293,6 @@ fn format_promise<'gc>(
         }
     }
 }
-
-// pub fn handle_console_method<'gc>(
-//     mc: &MutationContext<'gc>, // added mc
-//     method: &str,
-//     values: &[Value<'gc>],
-//     _env: &JSObjectDataPtr<'gc>,
-// ) -> Result<Value<'gc>, crate::core::EvalError<'gc>> {
-//     match method {
-//         "log" | "error" => {
-//             let output = values
-//                 .iter()
-//                 .map(|v| {
-//                     if is_error(v)
-//                         && let Value::Object(obj) = v
-//                     {
-//                         // If it has a stack property, use it
-//                         if let Some(stack) = obj.borrow().get_property(mc, "stack") {
-//                             return stack;
-//                         }
-//                     }
-//                     if let Value::String(s) = v {
-//                         utf16_to_utf8(s)
-//                     } else {
-//                         value_to_string(v)
-//                     }
-//                 })
-//                 .collect::<Vec<_>>()
-//                 .join(" ");
-//             println!("{}", output);
-//             Ok(Value::Undefined)
-//         }
-//         _ => Err(crate::core::EvalError::Js(crate::raise_eval_error!(format!("Console method {method} not implemented")))),
-//     }
-// }
 
 /// Handle console object method calls
 pub fn handle_console_method<'gc>(
@@ -432,7 +398,7 @@ pub fn handle_console_method<'gc>(
             println!("{}", output);
             Ok(Value::Undefined)
         }
-        _ => Err(EvalError::Js(raise_eval_error!(format!("Console method {method} not implemented")))),
+        _ => Err(raise_eval_error!(format!("Console method {method} not implemented")).into()),
     }
 }
 

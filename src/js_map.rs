@@ -125,7 +125,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
     match method {
         "set" => {
             if args.len() != 2 {
-                return Err(EvalError::Js(raise_eval_error!("Map.prototype.set requires exactly two arguments")));
+                return Err(raise_eval_error!("Map.prototype.set requires exactly two arguments").into());
             }
             let key = args[0].clone();
             let value = args[1].clone();
@@ -139,7 +139,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
         }
         "get" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("Map.prototype.get requires exactly one argument")));
+                return Err(raise_eval_error!("Map.prototype.get requires exactly one argument").into());
             }
             let key = args[0].clone();
 
@@ -152,7 +152,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
         }
         "has" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("Map.prototype.has requires exactly one argument")));
+                return Err(raise_eval_error!("Map.prototype.has requires exactly one argument").into());
             }
             let key = args[0].clone();
 
@@ -161,9 +161,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
         }
         "delete" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!(
-                    "Map.prototype.delete requires exactly one argument"
-                )));
+                return Err(raise_eval_error!("Map.prototype.delete requires exactly one argument").into());
             }
             let key = args[0].clone();
 
@@ -175,39 +173,36 @@ pub(crate) fn handle_map_instance_method<'gc>(
         }
         "clear" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Map.prototype.clear takes no arguments")));
+                return Err(raise_eval_error!("Map.prototype.clear takes no arguments").into());
             }
             map.borrow_mut(mc).entries.clear();
             Ok(Value::Undefined)
         }
         "size" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Map.prototype.size is a getter")));
+                return Err(raise_eval_error!("Map.prototype.size is a getter").into());
             }
             Ok(Value::Number(map.borrow().entries.len() as f64))
         }
         "keys" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Map.prototype.keys takes no arguments")));
+                return Err(raise_eval_error!("Map.prototype.keys takes no arguments").into());
             }
-            create_map_iterator(mc, env, *map, "keys").map_err(EvalError::Js)
+            Ok(create_map_iterator(mc, env, *map, "keys")?)
         }
         "values" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Map.prototype.values takes no arguments")));
+                return Err(raise_eval_error!("Map.prototype.values takes no arguments").into());
             }
-            create_map_iterator(mc, env, *map, "values").map_err(EvalError::Js)
+            Ok(create_map_iterator(mc, env, *map, "values")?)
         }
         "entries" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Map.prototype.entries takes no arguments")));
+                return Err(raise_eval_error!("Map.prototype.entries takes no arguments").into());
             }
-            create_map_iterator(mc, env, *map, "entries").map_err(EvalError::Js)
+            Ok(create_map_iterator(mc, env, *map, "entries")?)
         }
-        _ => Err(EvalError::Js(raise_eval_error!(format!(
-            "Map.prototype.{} is not implemented",
-            method
-        )))),
+        _ => Err(raise_eval_error!(format!("Map.prototype.{} is not implemented", method)).into()),
     }
 }
 

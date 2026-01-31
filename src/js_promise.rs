@@ -146,9 +146,9 @@ pub fn call_function<'gc>(
                     return crate::core::call_closure(mc, &*cl, None, args, env, None);
                 }
             }
-            Err(EvalError::Js(crate::raise_type_error!("Not a function")))
+            Err(raise_type_error!("Not a function").into())
         }
-        _ => Err(EvalError::Js(crate::raise_type_error!("Not a function"))),
+        _ => Err(raise_type_error!("Not a function").into()),
     }
 }
 
@@ -170,7 +170,7 @@ pub fn call_function_with_this<'gc>(
                     // Use the existing env as the parent scope loop up
                     call_env.borrow_mut(mc).prototype = Some(*env);
                     call_env.borrow_mut(mc).is_function_scope = true;
-                    object_set_key_value(mc, &call_env, "this", this.clone()).map_err(EvalError::Js)?;
+                    object_set_key_value(mc, &call_env, "this", this.clone())?;
                     crate::js_function::handle_global_function(mc, name, args, &call_env)
                 } else {
                     crate::js_function::handle_global_function(mc, name, args, env)
@@ -183,9 +183,9 @@ pub fn call_function_with_this<'gc>(
                     return crate::core::call_closure(mc, cl, this_val, args, env, None);
                 }
             }
-            Err(EvalError::Js(crate::raise_type_error!("Not a function")))
+            Err(raise_type_error!("Not a function").into())
         }
-        _ => Err(EvalError::Js(crate::raise_type_error!("Not a function"))),
+        _ => Err(raise_type_error!("Not a function").into()),
     }
 }
 
@@ -1496,23 +1496,19 @@ pub fn handle_promise_constructor_direct<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
-        return Err(EvalError::Js(raise_eval_error!(
-            "Promise constructor requires an executor function"
-        )));
+        return Err(raise_eval_error!("Promise constructor requires an executor function").into());
     }
 
     let executor = evaluate_expr(mc, env, &args[0])?;
     let (params, captured_env) = if let Some((p, _body, c)) = extract_closure_from_value(&executor) {
         (p.clone(), c.clone())
     } else {
-        return Err(EvalError::Js(raise_eval_error!(
-            "Promise constructor requires a function as executor"
-        )));
+        return Err(raise_eval_error!("Promise constructor requires a function as executor").into());
     };
 
     // Create the promise directly
     let promise = new_gc_cell_ptr(mc, JSPromise::new());
-    let _promise_obj = make_promise_js_object(mc, promise, Some(*env)).map_err(EvalError::Js)?;
+    let _promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
 
     // Create resolve and reject functions directly
     let resolve_func = create_resolve_function_direct(mc, promise, env);
@@ -1521,9 +1517,9 @@ pub fn handle_promise_constructor_direct<'gc>(
     // Create executor function environment and bind resolve/reject into params
     let executor_args = vec![resolve_func.clone(), reject_func.clone()];
     let executor_env = if params.is_empty() {
-        crate::core::prepare_closure_call_env(mc, Some(&captured_env), None, &[], None).map_err(EvalError::Js)?
+        crate::core::prepare_closure_call_env(mc, Some(&captured_env), None, &[], None)?
     } else {
-        crate::core::prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &executor_args, None).map_err(EvalError::Js)?
+        crate::core::prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &executor_args, None)?
     };
 
     log::trace!("About to call executor function");
@@ -1660,13 +1656,13 @@ pub fn handle_promise_constructor_direct<'gc>(
                         }
                     }
                 } else {
-                    return Err(EvalError::Js(raise_eval_error!("Promise executor not callable as object")));
+                    return Err(raise_eval_error!("Promise executor not callable as object").into());
                 }
             } else {
-                return Err(EvalError::Js(raise_eval_error!("Promise executor not callable")));
+                return Err(raise_eval_error!("Promise executor not callable").into());
             }
         }
-        _ => return Err(EvalError::Js(raise_eval_error!("Promise executor not callable"))),
+        _ => return Err(raise_eval_error!("Promise executor not callable").into()),
     }
 
     // Even if executor threw, the promise should be returned (and rejected via the reject callback above)
@@ -3091,7 +3087,7 @@ pub fn handle_promise_method<'gc>(
         "then" => handle_promise_then(mc, object, args, env),
         "catch" => handle_promise_catch(mc, object, args, env),
         "finally" => handle_promise_finally(mc, object, args, env),
-        _ => Err(EvalError::Js(raise_eval_error!(format!("Promise has no method '{method}'")))),
+        _ => Err(raise_eval_error!(format!("Promise has no method '{method}'")).into()),
     }
 }
 
@@ -4533,16 +4529,14 @@ pub fn handle_promise_constructor_val<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
-        return Err(EvalError::Js(crate::raise_eval_error!(
-            "Promise constructor requires an executor function"
-        )));
+        return Err(raise_eval_error!("Promise constructor requires an executor function").into());
     }
     let executor = &args[0];
 
     let promise = new_gc_cell_ptr(mc, JSPromise::new());
-    let promise_obj = make_promise_js_object(mc, promise, Some(*env)).map_err(EvalError::Js)?;
+    let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
     // Also store the internal id on the object for correlation
-    object_set_key_value(mc, &promise_obj, "__promise_internal_id", Value::Number(promise.borrow().id as f64)).map_err(EvalError::Js)?;
+    object_set_key_value(mc, &promise_obj, "__promise_internal_id", Value::Number(promise.borrow().id as f64))?;
 
     let resolve_func = create_resolve_function_direct(mc, promise.clone(), env);
     let reject_func = create_reject_function_direct(mc, promise.clone(), env);
@@ -4566,7 +4560,6 @@ pub fn handle_promise_constructor_val<'gc>(
                 let reason = match e {
                     EvalError::Throw(val, _line, _col) => val,
                     EvalError::Js(js_err) => Value::String(utf8_to_utf16(&js_err.message())),
-                    _ => Value::String(utf8_to_utf16(&format!("{:?}", e))),
                 };
                 if std::env::var("TEST262_LOG_LEVEL").map(|v| v == "debug").unwrap_or(false) {
                     let reason_str = match &reason {
@@ -4605,7 +4598,7 @@ pub fn handle_promise_constructor_val<'gc>(
             }
         }
     } else {
-        return Err(EvalError::Js(crate::raise_type_error!("Promise executor must be a function")));
+        return Err(raise_type_error!("Promise executor must be a function").into());
     }
     Ok(Value::Object(promise_obj))
 }

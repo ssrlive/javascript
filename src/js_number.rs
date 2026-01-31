@@ -5,6 +5,7 @@ use crate::core::{JSObjectDataPtr, Value, new_js_object_data, object_get_key_val
 use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
+use num_traits::ToPrimitive;
 
 pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let number_obj = make_number_object(mc, env)?;
@@ -177,6 +178,14 @@ pub(crate) fn number_constructor<'gc>(
             Value::Boolean(b) => Ok(Value::Number(if *b { 1.0 } else { 0.0 })),
             Value::Null => Ok(Value::Number(0.0)),
             Value::Undefined => Ok(Value::Number(f64::NAN)),
+            Value::BigInt(b) => {
+                // Convert BigInt to Number (may lose precision)
+                if let Some(n) = b.to_f64() {
+                    Ok(Value::Number(n))
+                } else {
+                    Ok(Value::Number(f64::NAN))
+                }
+            }
             Value::Object(obj) => {
                 // Try ToPrimitive with 'number' hint
                 let prim = to_primitive(mc, &Value::Object(*obj), "number", env)?;

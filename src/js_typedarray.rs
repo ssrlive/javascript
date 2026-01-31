@@ -1,5 +1,6 @@
-use crate::core::{Gc, MutationContext, new_gc_cell_ptr};
-use crate::core::{JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value};
+use crate::core::{Gc, MutationContext, get_property_with_accessors, js_error_to_value, new_gc_cell_ptr};
+use crate::core::{JSObjectDataPtr, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value};
+use crate::js_array::is_array;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
 use crate::{JSError, core::EvalError};
@@ -50,6 +51,88 @@ pub fn make_atomics_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDat
     Ok(obj)
 }
 
+pub(crate) fn is_typedarray(obj: &JSObjectDataPtr) -> bool {
+    object_get_key_value(obj, "__typedarray").is_some()
+}
+
+pub(crate) fn get_array_like_element<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    arr_obj: &JSObjectDataPtr<'gc>,
+    index: usize,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if is_array(mc, arr_obj) {
+        Ok(if let Some(cell) = object_get_key_value(arr_obj, index) {
+            cell.borrow().clone()
+        } else {
+            Value::Undefined
+        })
+    } else if is_typedarray(arr_obj) {
+        get_property_with_accessors(mc, env, arr_obj, index)
+    } else {
+        Ok(Value::Undefined)
+    }
+}
+
+pub(crate) fn ensure_typedarray_in_bounds<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    stmt_line: Option<usize>,
+    stmt_column: Option<usize>,
+    obj: &JSObjectDataPtr<'gc>,
+) -> Result<(), EvalError<'gc>> {
+    // If the object is a fixed-length TypedArray whose underlying ArrayBuffer
+    // has been resized so the view falls outside the buffer, throw TypeError.
+    if let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string()))
+        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+    {
+        if !ta.length_tracking {
+            let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+            let needed = ta.byte_offset + ta.element_size() * ta.length;
+            log::trace!(
+                "ensure_typedarray_in_bounds: needed={} buf_len={} byte_offset={} length={}",
+                needed,
+                buf_len,
+                ta.byte_offset,
+                ta.length
+            );
+            if buf_len < needed {
+                log::trace!("ensure_typedarray_in_bounds: out of bounds detected");
+                let js_err = raise_type_error!("TypedArray is out of bounds");
+                let val = js_error_to_value(mc, env, &js_err);
+                log::trace!(
+                    "ensure_typedarray_in_bounds: throwing TypeError at js_line={:?} js_col={:?}",
+                    stmt_line,
+                    stmt_column
+                );
+                return Err(EvalError::Throw(val, stmt_line, stmt_column));
+            }
+        } else {
+            // For length-tracking views: if the byte_offset itself is already
+            // beyond the (shrunk) buffer length then the view is entirely out
+            // of range and operations should throw a TypeError.
+            let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+            log::trace!(
+                "ensure_typedarray_in_bounds: length-tracking check: byte_offset={} buf_len={}",
+                ta.byte_offset,
+                buf_len
+            );
+            if ta.byte_offset > buf_len {
+                log::trace!("ensure_typedarray_in_bounds: length-tracking view out of bounds detected");
+                let js_err = raise_type_error!("TypedArray is out of bounds");
+                let val = js_error_to_value(mc, env, &js_err);
+                log::trace!(
+                    "ensure_typedarray_in_bounds: throwing TypeError at js_line={:?} js_col={:?}",
+                    stmt_line,
+                    stmt_column
+                );
+                return Err(EvalError::Throw(val, stmt_line, stmt_column));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Handle Atomics.* calls (minimal mutex-backed implementations)
 pub fn handle_atomics_method<'gc>(
     mc: &MutationContext<'gc>,
@@ -59,18 +142,18 @@ pub fn handle_atomics_method<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Helper to extract TypedArray from first argument
     if args.is_empty() {
-        return Err(EvalError::Js(raise_eval_error!("Atomics method requires arguments")));
+        return Err(raise_eval_error!("Atomics method requires arguments").into());
     }
     // Special-case Atomics.isLockFree which accepts a size (in bytes)
     // and does not require a TypedArray as the first argument.
     if method == "isLockFree" {
         if args.len() != 1 {
-            return Err(EvalError::Js(raise_eval_error!("Atomics.isLockFree requires 1 argument")));
+            return Err(raise_eval_error!("Atomics.isLockFree requires 1 argument").into());
         }
         let size_val = args[0].clone();
         let size = match size_val {
             Value::Number(n) => n as usize,
-            _ => return Err(EvalError::Js(raise_eval_error!("Atomics.isLockFree argument must be a number"))),
+            _ => return Err(raise_eval_error!("Atomics.isLockFree argument must be a number").into()),
         };
 
         #[allow(clippy::match_like_matches_macro, clippy::needless_bool)]
@@ -89,42 +172,42 @@ pub fn handle_atomics_method<'gc>(
             if let Value::TypedArray(ta) = &*ta_rc.borrow() {
                 *ta
             } else {
-                return Err(EvalError::Js(raise_eval_error!("First argument to Atomics must be a TypedArray")));
+                return Err(raise_eval_error!("First argument to Atomics must be a TypedArray").into());
             }
         } else {
-            return Err(EvalError::Js(raise_eval_error!("First argument to Atomics must be a TypedArray")));
+            return Err(raise_eval_error!("First argument to Atomics must be a TypedArray").into());
         }
     } else {
-        return Err(EvalError::Js(raise_eval_error!("First argument to Atomics must be a TypedArray")));
+        return Err(raise_eval_error!("First argument to Atomics must be a TypedArray").into());
     };
 
     match method {
         "load" => {
             if args.len() != 2 {
-                return Err(EvalError::Js(raise_eval_error!("Atomics.load requires 2 arguments")));
+                return Err(raise_eval_error!("Atomics.load requires 2 arguments").into());
             }
             let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
+                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
             };
             let v = ta_obj.get(idx)?;
             Ok(Value::Number(v as f64))
         }
         "store" => {
             if args.len() != 3 {
-                return Err(EvalError::Js(raise_eval_error!("Atomics.store requires 3 arguments")));
+                return Err(raise_eval_error!("Atomics.store requires 3 arguments").into());
             }
             let idx_val = args[1].clone();
             let val_val = args[2].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
+                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
             };
             let v = match val_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics value must be a number or BigInt"))),
+                _ => return Err(raise_eval_error!("Atomics value must be a number or BigInt").into()),
             };
             let old = ta_obj.get(idx)?;
             ta_obj.set(mc, idx, v as f64)?;
@@ -132,24 +215,24 @@ pub fn handle_atomics_method<'gc>(
         }
         "compareExchange" => {
             if args.len() != 4 {
-                return Err(EvalError::Js(raise_eval_error!("Atomics.compareExchange requires 4 arguments")));
+                return Err(raise_eval_error!("Atomics.compareExchange requires 4 arguments").into());
             }
             let idx_val = args[1].clone();
             let expected_val = args[2].clone();
             let replacement_val = args[3].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
+                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
             };
             let expected = match expected_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics expected must be a number or BigInt"))),
+                _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt").into()),
             };
             let replacement = match replacement_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics replacement must be a number or BigInt"))),
+                _ => return Err(raise_eval_error!("Atomics replacement must be a number or BigInt").into()),
             };
             let old = ta_obj.get(idx)?;
             if (old as i64) == (expected as i64) {
@@ -159,19 +242,19 @@ pub fn handle_atomics_method<'gc>(
         }
         "add" | "sub" | "and" | "or" | "xor" | "exchange" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(EvalError::Js(raise_eval_error!(format!("Atomics.{} invalid args", method))));
+                return Err(raise_eval_error!(format!("Atomics.{} invalid args", method)).into());
             }
             let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
+                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
             };
             let operand = if args.len() == 3 {
                 let v = args[2].clone();
                 match v {
                     Value::Number(n) => n as i64,
                     Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                    _ => return Err(EvalError::Js(raise_eval_error!("Atomics operand must be a number or BigInt"))),
+                    _ => return Err(raise_eval_error!("Atomics operand must be a number or BigInt").into()),
                 }
             } else {
                 0
@@ -192,18 +275,18 @@ pub fn handle_atomics_method<'gc>(
         "wait" => {
             // Atomics.wait(typedArray, index, value[, timeout])
             if args.len() < 3 || args.len() > 4 {
-                return Err(EvalError::Js(raise_eval_error!("Atomics.wait requires 3 or 4 arguments")));
+                return Err(raise_eval_error!("Atomics.wait requires 3 or 4 arguments").into());
             }
             let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
+                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
             };
             let expected_val = args[2].clone();
             let expected = match expected_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics expected must be a number or BigInt"))),
+                _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt").into()),
             };
 
             // Check current value
@@ -281,18 +364,18 @@ pub fn handle_atomics_method<'gc>(
         "notify" => {
             // Atomics.notify(typedArray, index[, count])
             if args.len() < 2 || args.len() > 3 {
-                return Err(EvalError::Js(raise_eval_error!("Atomics.notify requires 2 or 3 arguments")));
+                return Err(raise_eval_error!("Atomics.notify requires 2 or 3 arguments").into());
             }
             let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
+                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
             };
             let count = if args.len() == 3 {
                 let cval = args[2].clone();
                 match cval {
                     Value::Number(n) => n as usize,
-                    _ => return Err(EvalError::Js(raise_eval_error!("Atomics count must be a number"))),
+                    _ => return Err(raise_eval_error!("Atomics count must be a number").into()),
                 }
             } else {
                 usize::MAX
@@ -324,9 +407,7 @@ pub fn handle_atomics_method<'gc>(
             }
             Ok(Value::Number(awakened as f64))
         }
-        _ => Err(EvalError::Js(raise_eval_error!(format!(
-            "Atomics method '{method}' not implemented"
-        )))),
+        _ => Err(raise_eval_error!(format!("Atomics method '{method}' not implemented")).into()),
     }
 }
 
@@ -363,6 +444,7 @@ pub fn make_arraybuffer_prototype<'gc>(mc: &MutationContext<'gc>) -> Result<JSOb
     object_set_key_value(mc, &proto, "byteLength", byte_len_prop)?;
 
     object_set_key_value(mc, &proto, "slice", Value::Function("ArrayBuffer.prototype.slice".to_string()))?;
+    object_set_key_value(mc, &proto, "resize", Value::Function("ArrayBuffer.prototype.resize".to_string()))?;
 
     Ok(proto)
 }
@@ -520,7 +602,7 @@ pub fn make_typedarray_constructors<'gc>(
     let mut constructors = Vec::new();
 
     for (name, kind) in kinds {
-        let constructor = make_typedarray_constructor(mc, name, kind, object_prototype)?;
+        let constructor = make_typedarray_constructor(mc, env, name, kind, object_prototype)?;
         constructors.push((name.to_string(), constructor));
     }
 
@@ -545,6 +627,7 @@ fn typedarray_kind_to_number(kind: &TypedArrayKind) -> i32 {
 
 fn make_typedarray_constructor<'gc>(
     mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
     name: &str,
     kind: TypedArrayKind,
     object_prototype: Option<JSObjectDataPtr<'gc>>,
@@ -558,17 +641,42 @@ fn make_typedarray_constructor<'gc>(
         mc,
         &obj,
         "prototype",
-        Value::Object(make_typedarray_prototype(mc, kind, object_prototype)?),
+        Value::Object(make_typedarray_prototype(mc, env, kind.clone(), object_prototype)?),
     )?;
     object_set_key_value(mc, &obj, "name", Value::String(utf8_to_utf16(name)))?;
 
     object_set_key_value(mc, &obj, "__kind", Value::Number(kind_value as f64))?;
     object_set_key_value(mc, &obj, "__native_ctor", Value::String(utf8_to_utf16("TypedArray")))?;
+
+    // 22.2.5.1 TypedArray.BYTES_PER_ELEMENT - create constructor and prototype
+    let bytes_per_element = match kind {
+        TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
+        TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
+        TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
+        TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
+    } as f64;
+
+    object_set_key_value(mc, &obj, "BYTES_PER_ELEMENT", Value::Number(bytes_per_element))?;
+    obj.borrow_mut(mc).set_non_enumerable("BYTES_PER_ELEMENT");
+    obj.borrow_mut(mc).set_non_writable("BYTES_PER_ELEMENT");
+    obj.borrow_mut(mc).set_non_configurable("BYTES_PER_ELEMENT");
+
+    // Also set on prototype per spec (TypedArray.prototype.BYTES_PER_ELEMENT)
+    if let Some(proto_val) = object_get_key_value(&obj, "prototype")
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        object_set_key_value(mc, proto_obj, "BYTES_PER_ELEMENT", Value::Number(bytes_per_element))?;
+        proto_obj.borrow_mut(mc).set_non_enumerable("BYTES_PER_ELEMENT");
+        proto_obj.borrow_mut(mc).set_non_writable("BYTES_PER_ELEMENT");
+        proto_obj.borrow_mut(mc).set_non_configurable("BYTES_PER_ELEMENT");
+    }
+
     Ok(obj)
 }
 
 fn make_typedarray_prototype<'gc>(
     mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
     kind: TypedArrayKind,
     object_prototype: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
@@ -682,6 +790,22 @@ fn make_typedarray_prototype<'gc>(
         .borrow_mut(mc)
         .non_enumerable
         .insert(crate::core::PropertyKey::String("subarray".to_string()));
+    object_set_key_value(mc, &proto, "values", Value::Function("TypedArray.prototype.values".to_string()))?;
+    // values is non-enumerable
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("values".to_string()));
+
+    // Register Symbol.iterator on TypedArray.prototype (alias to TypedArray.prototype.values)
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+        && let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator")
+        && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+    {
+        let val = Value::Function("TypedArray.prototype.values".to_string());
+        object_set_key_value(mc, &proto, iter_sym, val)?;
+    }
 
     Ok(proto)
 }
@@ -703,13 +827,34 @@ pub fn handle_arraybuffer_constructor<'gc>(
         _ => return Err(raise_eval_error!("ArrayBuffer length must be a non-negative integer")),
     };
 
+    // Parse optional options object for resizable buffers
+    let mut max_byte_length: Option<usize> = None;
+    if args.len() > 1 {
+        let opts = args[1].clone();
+        if let Value::Object(obj) = opts {
+            // Look for maxByteLength property
+            if let Some(val) = object_get_key_value(&obj, "maxByteLength") {
+                match &*val.borrow() {
+                    Value::Number(n) if *n >= 0.0 && *n <= u32::MAX as f64 && n.fract() == 0.0 => {
+                        let max = *n as usize;
+                        if max < length {
+                            return Err(crate::raise_range_error!("maxByteLength must be >= length"));
+                        }
+                        max_byte_length = Some(max);
+                    }
+                    _ => return Err(crate::raise_range_error!("maxByteLength must be a non-negative integer")),
+                }
+            }
+        }
+    }
+
     // Create ArrayBuffer instance
     let buffer = new_gc_cell_ptr(
         mc,
         JSArrayBuffer {
             data: Arc::new(Mutex::new(vec![0; length])),
-            detached: false,
-            shared: false,
+            max_byte_length,
+            ..JSArrayBuffer::default()
         },
     );
 
@@ -746,8 +891,8 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
         mc,
         JSArrayBuffer {
             data: Arc::new(Mutex::new(vec![0; length])),
-            detached: false,
             shared: true,
+            ..JSArrayBuffer::default()
         },
     );
 
@@ -854,7 +999,7 @@ pub fn handle_typedarray_constructor<'gc>(
     mc: &MutationContext<'gc>,
     constructor_obj: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get the kind from the constructor
     let kind_val = object_get_key_value(constructor_obj, "__kind");
@@ -894,8 +1039,7 @@ pub fn handle_typedarray_constructor<'gc>(
             mc,
             JSArrayBuffer {
                 data: Arc::new(Mutex::new(vec![])),
-                detached: false,
-                shared: false,
+                ..JSArrayBuffer::default()
             },
         );
         (buffer, 0, 0)
@@ -909,8 +1053,7 @@ pub fn handle_typedarray_constructor<'gc>(
                     mc,
                     JSArrayBuffer {
                         data: Arc::new(Mutex::new(vec![0; length * element_size])),
-                        detached: false,
-                        shared: false,
+                        ..JSArrayBuffer::default()
                     },
                 );
                 (buffer, 0, length)
@@ -925,8 +1068,7 @@ pub fn handle_typedarray_constructor<'gc>(
                             mc,
                             JSArrayBuffer {
                                 data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
-                                detached: false,
-                                shared: false,
+                                ..JSArrayBuffer::default()
                             },
                         );
                         // TODO: Copy data from source TypedArray
@@ -1021,27 +1163,41 @@ pub fn handle_typedarray_constructor<'gc>(
             obj.borrow_mut(mc).set_non_enumerable("__proto__");
         } else {
             // Fallback: create new prototype (legacy behavior, though incorrect for identity)
-            let proto = make_typedarray_prototype(mc, kind.clone(), None)?;
+            let proto = make_typedarray_prototype(mc, env, kind.clone(), None)?;
             obj.borrow_mut(mc).prototype = Some(proto);
             object_set_key_value(mc, &obj, "__proto__", Value::Object(proto))?;
             obj.borrow_mut(mc).set_non_enumerable("__proto__");
         }
     } else {
         // Fallback
-        let proto = make_typedarray_prototype(mc, kind.clone(), None)?;
+        let proto = make_typedarray_prototype(mc, env, kind.clone(), None)?;
         obj.borrow_mut(mc).prototype = Some(proto);
         object_set_key_value(mc, &obj, "__proto__", Value::Object(proto))?;
         obj.borrow_mut(mc).set_non_enumerable("__proto__");
     }
 
+    // Determine if this TypedArray should be length-tracking (no explicit length argument)
+    let length_tracking = match args.len() {
+        1 => match &args[0] {
+            Value::Object(obj) => object_get_key_value(obj, "__arraybuffer").is_some(),
+            _ => false,
+        },
+        2 => match &args[0] {
+            Value::Object(obj) => object_get_key_value(obj, "__arraybuffer").is_some(),
+            _ => false,
+        },
+        _ => false,
+    };
+
     // Create TypedArray instance
     let typed_array = Gc::new(
         mc,
         JSTypedArray {
-            kind,
+            kind: kind.clone(),
             buffer,
             byte_offset,
             length,
+            length_tracking,
         },
     );
 
@@ -1050,6 +1206,12 @@ pub fn handle_typedarray_constructor<'gc>(
     obj.borrow_mut(mc)
         .non_enumerable
         .insert(crate::core::PropertyKey::String("__typedarray".to_string()));
+    log::debug!(
+        "created typedarray instance: obj={:p} kind={:?} length_tracking={}",
+        &*obj.borrow(),
+        kind,
+        length_tracking
+    );
 
     Ok(Value::Object(obj))
 }
@@ -1068,22 +1230,22 @@ pub fn handle_dataview_method<'gc>(
         if let Value::DataView(dv) = &*dv_val.borrow() {
             *dv
         } else {
-            return Err(EvalError::Js(raise_eval_error!("Invalid DataView object")));
+            return Err(raise_eval_error!("Invalid DataView object").into());
         }
     } else {
-        return Err(EvalError::Js(raise_eval_error!("DataView method called on non-DataView object")));
+        return Err(raise_eval_error!("DataView method called on non-DataView object").into());
     };
 
     match method {
         // Get methods - use immutable borrow
         "getInt8" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.getInt8 requires exactly 1 argument")));
+                return Err(raise_eval_error!("DataView.getInt8 requires exactly 1 argument").into());
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let data_view = data_view_rc;
             data_view
@@ -1093,12 +1255,12 @@ pub fn handle_dataview_method<'gc>(
         }
         "getUint8" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.getUint8 requires exactly 1 argument")));
+                return Err(raise_eval_error!("DataView.getUint8 requires exactly 1 argument").into());
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let data_view = data_view_rc;
             data_view
@@ -1108,18 +1270,18 @@ pub fn handle_dataview_method<'gc>(
         }
         "getInt16" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.getInt16 requires 1 or 2 arguments")));
+                return Err(raise_eval_error!("DataView.getInt16 requires 1 or 2 arguments").into());
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1132,18 +1294,18 @@ pub fn handle_dataview_method<'gc>(
         }
         "getUint16" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.getUint16 requires 1 or 2 arguments")));
+                return Err(raise_eval_error!("DataView.getUint16 requires 1 or 2 arguments").into());
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1156,18 +1318,18 @@ pub fn handle_dataview_method<'gc>(
         }
         "getInt32" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.getInt32 requires 1 or 2 arguments")));
+                return Err(raise_eval_error!("DataView.getInt32 requires 1 or 2 arguments").into());
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1180,18 +1342,18 @@ pub fn handle_dataview_method<'gc>(
         }
         "getUint32" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.getUint32 requires 1 or 2 arguments")));
+                return Err(raise_eval_error!("DataView.getUint32 requires 1 or 2 arguments").into());
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1204,18 +1366,18 @@ pub fn handle_dataview_method<'gc>(
         }
         "getFloat32" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.getFloat32 requires 1 or 2 arguments")));
+                return Err(raise_eval_error!("DataView.getFloat32 requires 1 or 2 arguments").into());
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1228,18 +1390,18 @@ pub fn handle_dataview_method<'gc>(
         }
         "getFloat64" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.getFloat64 requires 1 or 2 arguments")));
+                return Err(raise_eval_error!("DataView.getFloat64 requires 1 or 2 arguments").into());
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1253,17 +1415,17 @@ pub fn handle_dataview_method<'gc>(
         // Set methods - use mutable borrow
         "setInt8" => {
             if args.len() != 2 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.setInt8 requires exactly 2 arguments")));
+                return Err(raise_eval_error!("DataView.setInt8 requires exactly 2 arguments").into());
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let value = match value_val {
                 Value::Number(n) => n as i8,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
+                _ => return Err(raise_eval_error!("DataView value must be a number").into()),
             };
             data_view_rc
                 .set_int8(offset, value)
@@ -1272,17 +1434,17 @@ pub fn handle_dataview_method<'gc>(
         }
         "setUint8" => {
             if args.len() != 2 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.setUint8 requires exactly 2 arguments")));
+                return Err(raise_eval_error!("DataView.setUint8 requires exactly 2 arguments").into());
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let value = match value_val {
                 Value::Number(n) => n as u8,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
+                _ => return Err(raise_eval_error!("DataView value must be a number").into()),
             };
             data_view_rc
                 .set_uint8(offset, value)
@@ -1291,23 +1453,23 @@ pub fn handle_dataview_method<'gc>(
         }
         "setInt16" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.setInt16 requires 2 or 3 arguments")));
+                return Err(raise_eval_error!("DataView.setInt16 requires 2 or 3 arguments").into());
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let value = match value_val {
                 Value::Number(n) => n as i16,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
+                _ => return Err(raise_eval_error!("DataView value must be a number").into()),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1319,23 +1481,23 @@ pub fn handle_dataview_method<'gc>(
         }
         "setUint16" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.setUint16 requires 2 or 3 arguments")));
+                return Err(raise_eval_error!("DataView.setUint16 requires 2 or 3 arguments").into());
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let value = match value_val {
                 Value::Number(n) => n as u16,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
+                _ => return Err(raise_eval_error!("DataView value must be a number").into()),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1347,23 +1509,23 @@ pub fn handle_dataview_method<'gc>(
         }
         "setInt32" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.setInt32 requires 2 or 3 arguments")));
+                return Err(raise_eval_error!("DataView.setInt32 requires 2 or 3 arguments").into());
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let value = match value_val {
                 Value::Number(n) => n as i32,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
+                _ => return Err(raise_eval_error!("DataView value must be a number").into()),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1375,23 +1537,23 @@ pub fn handle_dataview_method<'gc>(
         }
         "setUint32" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.setUint32 requires 2 or 3 arguments")));
+                return Err(raise_eval_error!("DataView.setUint32 requires 2 or 3 arguments").into());
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let value = match value_val {
                 Value::Number(n) => n as u32,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
+                _ => return Err(raise_eval_error!("DataView value must be a number").into()),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1403,23 +1565,23 @@ pub fn handle_dataview_method<'gc>(
         }
         "setFloat32" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.setFloat32 requires 2 or 3 arguments")));
+                return Err(raise_eval_error!("DataView.setFloat32 requires 2 or 3 arguments").into());
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let value = match value_val {
                 Value::Number(n) => n as f32,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
+                _ => return Err(raise_eval_error!("DataView value must be a number").into()),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1431,23 +1593,23 @@ pub fn handle_dataview_method<'gc>(
         }
         "setFloat64" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(EvalError::Js(raise_eval_error!("DataView.setFloat64 requires 2 or 3 arguments")));
+                return Err(raise_eval_error!("DataView.setFloat64 requires 2 or 3 arguments").into());
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
+                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer").into()),
             };
             let value = match value_val {
                 Value::Number(n) => n,
-                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
+                _ => return Err(raise_eval_error!("DataView value must be a number").into()),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
+                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean").into()),
                 }
             } else {
                 false
@@ -1461,9 +1623,7 @@ pub fn handle_dataview_method<'gc>(
         "buffer" => Ok(Value::ArrayBuffer(data_view_rc.buffer)),
         "byteLength" => Ok(Value::Number(data_view_rc.byte_length as f64)),
         "byteOffset" => Ok(Value::Number(data_view_rc.byte_offset as f64)),
-        _ => Err(EvalError::Js(raise_eval_error!(format!(
-            "DataView method '{method}' not implemented"
-        )))),
+        _ => Err(raise_eval_error!(format!("DataView method '{method}' not implemented")).into()),
     }
 }
 
@@ -1672,7 +1832,15 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
         let data = buffer.data.lock().unwrap();
 
         if byte_offset + size > data.len() {
-            return Ok(f64::NAN); // Undefined -> NaN for number?
+            // If this typed array is a fixed-length view backed by a resizable
+            // ArrayBuffer and the access falls outside the current buffer bounds,
+            // the operation should throw a TypeError per the spec. For length-tracking
+            // views, out-of-bounds reads behave like undefined -> NaN when coerced to Number.
+            if !self.length_tracking {
+                return Err(raise_type_error!("TypedArray access is out of bounds"));
+            } else {
+                return Ok(f64::NAN);
+            }
         }
 
         // Very basic implementation:
@@ -1794,6 +1962,57 @@ pub fn handle_arraybuffer_accessor<'gc>(
     }
 }
 
+pub fn handle_arraybuffer_method<'gc>(
+    _mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, JSError> {
+    match method {
+        "resize" => {
+            // Get the ArrayBuffer internal
+            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
+                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    // Must be resizable
+                    if let Some(max) = (**ab).borrow().max_byte_length {
+                        if args.is_empty() {
+                            return Err(raise_range_error!("resize requires a new length"));
+                        }
+                        let new_len_val = args[0].clone();
+                        let new_len = match new_len_val {
+                            Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
+                            _ => return Err(raise_range_error!("new length must be a non-negative integer")),
+                        };
+                        if new_len > max {
+                            return Err(raise_range_error!("new length exceeds maximum"));
+                        }
+                        let ab_borrow = (**ab).borrow();
+                        let mut data = ab_borrow.data.lock().unwrap();
+                        let cur_len = data.len();
+                        if new_len > cur_len {
+                            data.resize(new_len, 0u8);
+                        } else if new_len < cur_len {
+                            data.truncate(new_len);
+                        }
+                        Ok(Value::Undefined)
+                    } else {
+                        Err(raise_type_error!("ArrayBuffer is not resizable"))
+                    }
+                } else {
+                    Err(raise_eval_error!(
+                        "Method ArrayBuffer.prototype.resize called on incompatible receiver"
+                    ))
+                }
+            } else {
+                Err(raise_eval_error!(
+                    "Method ArrayBuffer.prototype.resize called on incompatible receiver"
+                ))
+            }
+        }
+        _ => Ok(Value::Undefined),
+    }
+}
+
 pub fn handle_typedarray_accessor<'gc>(
     _mc: &MutationContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
@@ -1803,9 +2022,33 @@ pub fn handle_typedarray_accessor<'gc>(
         if let Value::TypedArray(ta) = &*ta_val.borrow() {
             match property {
                 "buffer" => Ok(Value::ArrayBuffer(ta.buffer)),
-                "byteLength" => Ok(Value::Number((ta.length * ta.element_size()) as f64)),
+                "byteLength" => {
+                    let cur_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        ta.length
+                    };
+                    Ok(Value::Number((cur_len * ta.element_size()) as f64))
+                }
                 "byteOffset" => Ok(Value::Number(ta.byte_offset as f64)),
-                "length" => Ok(Value::Number(ta.length as f64)),
+                "length" => {
+                    let cur_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        ta.length
+                    };
+                    Ok(Value::Number(cur_len as f64))
+                }
                 "toStringTag" => {
                     let name = match ta.kind {
                         TypedArrayKind::Int8 => "Int8Array",
@@ -1833,6 +2076,119 @@ pub fn handle_typedarray_accessor<'gc>(
         Err(raise_eval_error!(
             "Method TypedArray.prototype getter called on incompatible receiver"
         ))
+    }
+}
+
+pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+    if let Value::Object(obj) = this_val {
+        if let Some(ta_cell) = object_get_key_value(obj, "__typedarray_iterator")
+            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+            && let Some(index_cell) = object_get_key_value(obj, "__index")
+            && let Value::Number(index) = &*index_cell.borrow()
+        {
+            let cur_len = if ta.length_tracking {
+                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                if buf_len <= ta.byte_offset {
+                    0
+                } else {
+                    (buf_len - ta.byte_offset) / ta.element_size()
+                }
+            } else {
+                ta.length
+            };
+
+            let idx = *index as usize;
+            if idx < cur_len {
+                // Get the value
+                let value = match ta.kind {
+                    TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => {
+                        // For BigInt arrays, read the raw bytes and create a BigInt
+                        let size = ta.element_size();
+                        let byte_offset = ta.byte_offset + idx * size;
+                        let buffer = ta.buffer.borrow();
+                        let data = buffer.data.lock().unwrap();
+                        if byte_offset + size <= data.len() {
+                            let bytes = &data[byte_offset..byte_offset + size];
+                            let big_int = if matches!(ta.kind, TypedArrayKind::BigInt64) {
+                                let mut b = [0u8; 8];
+                                b.copy_from_slice(bytes);
+                                num_bigint::BigInt::from(i64::from_le_bytes(b))
+                            } else {
+                                let mut b = [0u8; 8];
+                                b.copy_from_slice(bytes);
+                                num_bigint::BigInt::from(u64::from_le_bytes(b))
+                            };
+                            Value::BigInt(Box::new(big_int))
+                        } else {
+                            Value::Undefined
+                        }
+                    }
+                    _ => match ta.get(idx) {
+                        Ok(n) => Value::Number(n),
+                        Err(_) => Value::Undefined,
+                    },
+                };
+
+                // Update index
+                object_set_key_value(mc, obj, "__index", Value::Number((idx + 1) as f64))?;
+
+                // Return { value, done: false }
+                let result_obj = new_js_object_data(mc);
+                object_set_key_value(mc, &result_obj, "value", value)?;
+                object_set_key_value(mc, &result_obj, "done", Value::Boolean(false))?;
+                Ok(Value::Object(result_obj))
+            } else {
+                // Done
+                let result_obj = new_js_object_data(mc);
+                object_set_key_value(mc, &result_obj, "value", Value::Undefined)?;
+                object_set_key_value(mc, &result_obj, "done", Value::Boolean(true))?;
+                Ok(Value::Object(result_obj))
+            }
+        } else {
+            Err(raise_eval_error!(
+                "TypedArrayIterator.prototype.next called on incompatible receiver"
+            ))
+        }
+    } else {
+        Err(raise_eval_error!(
+            "TypedArrayIterator.prototype.next called on incompatible receiver"
+        ))
+    }
+}
+
+pub fn handle_typedarray_method<'gc>(
+    mc: &MutationContext<'gc>,
+    this_val: &Value<'gc>,
+    method: &str,
+    _args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if let Value::Object(obj) = this_val {
+        if let Some(ta_cell) = object_get_key_value(obj, "__typedarray")
+            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+        {
+            match method {
+                "values" => {
+                    // Return an iterator that yields the values
+                    // For now, create a simple iterator object
+                    let iter_obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &iter_obj, "__typedarray_iterator", Value::TypedArray(*ta))?;
+                    object_set_key_value(mc, &iter_obj, "__index", Value::Number(0.0))?;
+                    object_set_key_value(
+                        mc,
+                        &iter_obj,
+                        "next",
+                        Value::Function("TypedArrayIterator.prototype.next".to_string()),
+                    )?;
+                    Ok(Value::Object(iter_obj))
+                }
+                _ => Err(raise_eval_error!(format!("TypedArray.prototype.{} not implemented", method))),
+            }
+        } else {
+            Err(raise_eval_error!("Method TypedArray.prototype called on incompatible receiver"))
+        }
+    } else {
+        Err(raise_eval_error!("Method TypedArray.prototype called on incompatible receiver"))
     }
 }
 

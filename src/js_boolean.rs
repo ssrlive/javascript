@@ -38,6 +38,32 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     Ok(())
 }
 
+pub(crate) fn handle_boolean_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    evaluated_args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let bool_val = if evaluated_args.is_empty() {
+        false
+    } else {
+        let arg_val = evaluated_args[0].clone();
+        match arg_val {
+            Value::Boolean(b) => b,
+            Value::Number(n) => n != 0.0 && !n.is_nan(),
+            Value::String(s) => !s.is_empty(),
+            Value::Undefined => false,
+            Value::Object(_) => true,
+            _ => false,
+        }
+    };
+    let obj = new_js_object_data(mc);
+    object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
+    object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string()))?;
+    object_set_key_value(mc, &obj, "__value__", Value::Boolean(bool_val))?;
+    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
+    Ok(Value::Object(obj))
+}
+
 pub fn boolean_prototype_to_string<'gc>(
     _mc: &MutationContext<'gc>,
     _args: &[Value<'gc>],

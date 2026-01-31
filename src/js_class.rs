@@ -6,6 +6,7 @@ use crate::core::{
 };
 use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
 use crate::core::{PropertyKey, object_get_key_value, object_set_key_value, value_to_string};
+use crate::js_boolean::handle_boolean_constructor;
 use crate::js_typedarray::handle_typedarray_constructor;
 use crate::unicode::utf16_to_utf8;
 use crate::{error::JSError, unicode::utf8_to_utf16};
@@ -252,8 +253,7 @@ pub(crate) fn evaluate_new<'gc>(
                     // Attach a debug identifier to help correlate runtime instances
                     // with logs (printed as a pointer string).
                     let dbg_ptr_str = format!("{:p}", Gc::as_ptr(instance));
-                    object_set_key_value(mc, &instance, "__dbg_ptr__", Value::String(utf8_to_utf16(&dbg_ptr_str)))
-                        .map_err(EvalError::Js)?;
+                    object_set_key_value(mc, &instance, "__dbg_ptr__", Value::String(utf8_to_utf16(&dbg_ptr_str)))?;
                     log::debug!(
                         "DBG evaluate_new - created instance ptr={:p} __dbg_ptr__={}",
                         Gc::as_ptr(instance),
@@ -264,9 +264,9 @@ pub(crate) fn evaluate_new<'gc>(
                     if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype") {
                         if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                             instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                            object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj)).map_err(EvalError::Js)?;
+                            object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj))?;
                         } else {
-                            object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone()).map_err(EvalError::Js)?;
+                            object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone())?;
                         }
                     }
 
@@ -359,10 +359,10 @@ pub(crate) fn evaluate_new<'gc>(
                 if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype") {
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                         instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                        object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj)).map_err(EvalError::Js)?;
+                        object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj))?;
                     } else {
                         // Fallback: store whatever prototype value was provided
-                        object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone()).map_err(EvalError::Js)?;
+                        object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone())?;
                     }
                 }
 
@@ -370,7 +370,7 @@ pub(crate) fn evaluate_new<'gc>(
                 for member in &class_def_ptr.borrow().members {
                     if let ClassMember::Property(prop_name, value_expr) = member {
                         let value = evaluate_expr(mc, env, value_expr)?;
-                        object_set_key_value(mc, &instance, prop_name, value).map_err(EvalError::Js)?;
+                        object_set_key_value(mc, &instance, prop_name, value)?;
                     } else if let ClassMember::PrivateProperty(prop_name, value_expr) = member {
                         // Store instance private fields under a key prefixed with '#'
                         let value = evaluate_expr(mc, env, value_expr)?;
@@ -445,8 +445,7 @@ pub(crate) fn evaluate_new<'gc>(
                                 if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype") {
                                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                                         inst_obj.borrow_mut(mc).prototype = Some(*proto_obj);
-                                        object_set_key_value(mc, inst_obj, "__proto__", Value::Object(*proto_obj))
-                                            .map_err(EvalError::Js)?;
+                                        object_set_key_value(mc, inst_obj, "__proto__", Value::Object(*proto_obj))?;
                                     }
                                 }
                                 // Don't add an own 'constructor' property on instance; prototype carries it.
@@ -458,7 +457,7 @@ pub(crate) fn evaluate_new<'gc>(
                                 return Ok(parent_inst);
                             }
                         } else {
-                            return Err(EvalError::Js(raise_type_error!("Parent constructor not found")));
+                            return Err(raise_type_error!("Parent constructor not found").into());
                         }
                     } else {
                         // Base class default constructor (empty)
@@ -683,7 +682,7 @@ pub(crate) fn evaluate_new<'gc>(
     }
 
     log::trace!("evaluate_new: constructor is not callable - falling through to error path");
-    Err(EvalError::Js(raise_type_error!("Constructor is not callable")))
+    Err(raise_type_error!("Constructor is not callable").into())
 }
 
 pub(crate) fn create_class_object<'gc>(
@@ -757,7 +756,9 @@ pub(crate) fn create_class_object<'gc>(
                 log::debug!("create_class_object class={} parent has no prototype property", name);
             }
 
-            // Set the class object's __proto__ to the parent class object (inherit static methods)
+            // Set the class object's internal prototype to the parent class object so static properties are inherited
+            class_obj.borrow_mut(mc).prototype = Some(parent_class_obj);
+            // Also expose it as the `__proto__` property for compatibility
             object_set_key_value(mc, &class_obj, "__proto__", Value::Object(parent_class_obj))?;
         }
     } else {
@@ -2206,32 +2207,6 @@ pub(crate) fn handle_number_constructor<'gc>(
     object_set_key_value(mc, &obj, "toString", Value::Function("Number_toString".to_string()))?;
     object_set_key_value(mc, &obj, "__value__", Value::Number(num_val))?;
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number")?;
-    Ok(Value::Object(obj))
-}
-
-pub(crate) fn handle_boolean_constructor<'gc>(
-    mc: &MutationContext<'gc>,
-    evaluated_args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    let bool_val = if evaluated_args.is_empty() {
-        false
-    } else {
-        let arg_val = evaluated_args[0].clone();
-        match arg_val {
-            Value::Boolean(b) => b,
-            Value::Number(n) => n != 0.0 && !n.is_nan(),
-            Value::String(s) => !s.is_empty(),
-            Value::Undefined => false,
-            Value::Object(_) => true,
-            _ => false,
-        }
-    };
-    let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string())).map_err(EvalError::Js)?;
-    object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string())).map_err(EvalError::Js)?;
-    object_set_key_value(mc, &obj, "__value__", Value::Boolean(bool_val)).map_err(EvalError::Js)?;
-    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean").map_err(EvalError::Js)?;
     Ok(Value::Object(obj))
 }
 

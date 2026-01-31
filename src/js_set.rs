@@ -130,7 +130,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
     match method {
         "add" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Set.prototype.add requires at least one argument")));
+                return Err(raise_eval_error!("Set.prototype.add requires at least one argument").into());
             }
             let value = args[0].clone();
 
@@ -144,7 +144,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
         }
         "has" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("Set.prototype.has requires exactly one argument")));
+                return Err(raise_eval_error!("Set.prototype.has requires exactly one argument").into());
             }
             let value = args[0].clone();
 
@@ -153,9 +153,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
         }
         "delete" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!(
-                    "Set.prototype.delete requires exactly one argument"
-                )));
+                return Err(raise_eval_error!("Set.prototype.delete requires exactly one argument").into());
             }
             let value = args[0].clone();
 
@@ -167,40 +165,38 @@ pub(crate) fn handle_set_instance_method<'gc>(
         }
         "clear" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Set.prototype.clear takes no arguments")));
+                return Err(raise_eval_error!("Set.prototype.clear takes no arguments").into());
             }
             set.borrow_mut(mc).values.clear();
             Ok(Value::Undefined)
         }
         "size" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Set.prototype.size is a getter")));
+                return Err(raise_eval_error!("Set.prototype.size is a getter").into());
             }
             Ok(Value::Number(set.borrow().values.len() as f64))
         }
         "values" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Set.prototype.values takes no arguments")));
+                return Err(raise_eval_error!("Set.prototype.values takes no arguments").into());
             }
-            create_set_iterator(mc, _env, *set, "values").map_err(EvalError::Js)
+            Ok(create_set_iterator(mc, _env, *set, "values")?)
         }
         "keys" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Set.prototype.keys takes no arguments")));
+                return Err(raise_eval_error!("Set.prototype.keys takes no arguments").into());
             }
-            create_set_iterator(mc, _env, *set, "values").map_err(EvalError::Js) // Set keys are same as values
+            Ok(create_set_iterator(mc, _env, *set, "values")?) // Set keys are same as values
         }
         "entries" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Set.prototype.entries takes no arguments")));
+                return Err(raise_eval_error!("Set.prototype.entries takes no arguments").into());
             }
-            create_set_iterator(mc, _env, *set, "entries").map_err(EvalError::Js)
+            Ok(create_set_iterator(mc, _env, *set, "entries")?)
         }
         "forEach" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!(
-                    "Set.prototype.forEach requires at least one argument"
-                )));
+                return Err(raise_eval_error!("Set.prototype.forEach requires at least one argument").into());
             }
             let callback = args[0].clone();
             let this_arg = args.get(1).cloned();
@@ -222,33 +218,24 @@ pub(crate) fn handle_set_instance_method<'gc>(
                         match &*cl_val.borrow() {
                             Value::Closure(cl) => execute(cl)?,
                             _ => {
-                                return Err(EvalError::Js(crate::raise_type_error!(
-                                    "Set.prototype.forEach callback is not a closure"
-                                )));
+                                return Err(raise_type_error!("Set.prototype.forEach callback is not a closure").into());
                             }
                         }
                     } else if let Some(_native_ctor) = object_get_key_value(&obj, "__native_ctor") {
                         // Native function object
-                        return Err(EvalError::Js(raise_eval_error!("Native functions in forEach not supported yet")));
+                        return Err(raise_eval_error!("Native functions in forEach not supported yet").into());
                     } else {
-                        return Err(EvalError::Js(crate::raise_type_error!(
-                            "Set.prototype.forEach callback is not a function"
-                        )));
+                        return Err(raise_type_error!("Set.prototype.forEach callback is not a function").into());
                     }
                 }
                 Value::Closure(cl) => execute(&cl)?,
                 _ => {
-                    return Err(EvalError::Js(crate::raise_type_error!(
-                        "Set.prototype.forEach callback must be a function"
-                    )));
+                    return Err(raise_type_error!("Set.prototype.forEach callback must be a function").into());
                 }
             }
             Ok(Value::Undefined)
         }
-        _ => Err(EvalError::Js(raise_eval_error!(format!(
-            "Set.prototype.{} is not implemented",
-            method
-        )))),
+        _ => Err(raise_eval_error!(format!("Set.prototype.{} is not implemented", method)).into()),
     }
 }
 

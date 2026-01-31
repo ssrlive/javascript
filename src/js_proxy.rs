@@ -17,9 +17,7 @@ pub(crate) fn handle_proxy_constructor<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() != 2 {
-        return Err(EvalError::Js(raise_eval_error!(
-            "Proxy constructor requires exactly two arguments: target and handler"
-        )));
+        return Err(raise_eval_error!("Proxy constructor requires exactly two arguments: target and handler").into());
     }
 
     let target = args[0].clone();
@@ -53,9 +51,7 @@ pub(crate) fn handle_proxy_revocable<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() != 2 {
-        return Err(EvalError::Js(raise_eval_error!(
-            "Proxy.revocable requires exactly two arguments: target and handler"
-        )));
+        return Err(raise_eval_error!("Proxy.revocable requires exactly two arguments: target and handler").into());
     }
 
     let target = args[0].clone();
@@ -108,8 +104,8 @@ pub(crate) fn handle_proxy_revocable<'gc>(
 
     // Create the revocable result object
     let result_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &result_obj, "proxy", Value::Object(proxy_wrapper)).map_err(EvalError::Js)?;
-    object_set_key_value(mc, &result_obj, "revoke", revoke_func).map_err(EvalError::Js)?;
+    object_set_key_value(mc, &result_obj, "proxy", Value::Object(proxy_wrapper))?;
+    object_set_key_value(mc, &result_obj, "revoke", revoke_func)?;
 
     Ok(Value::Object(result_obj))
 }
@@ -123,7 +119,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
     default_fn: impl FnOnce() -> Result<Value<'gc>, EvalError<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if proxy.revoked {
-        return Err(EvalError::Js(raise_eval_error!("Cannot perform operation on a revoked proxy")));
+        return Err(raise_eval_error!("Cannot perform operation on a revoked proxy").into());
     }
 
     // Check if handler has the trap
@@ -193,7 +189,7 @@ pub(crate) fn proxy_set_property<'gc>(
             // Default behavior: set property on target
             match &*proxy.target {
                 Value::Object(obj) => {
-                    object_set_key_value(mc, obj, key, value).map_err(EvalError::Js)?;
+                    object_set_key_value(mc, obj, key, value)?;
                     Ok(Value::Boolean(true))
                 }
                 _ => Ok(Value::Boolean(false)), // Non-objects can't have properties set

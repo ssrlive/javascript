@@ -101,7 +101,7 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(EvalError::Js(raise_type_error!("Invalid RegExp pattern")));
+                return Err(raise_type_error!("Invalid RegExp pattern").into());
             }
         };
         (pattern, "".to_string())
@@ -115,7 +115,7 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(EvalError::Js(raise_type_error!("Invalid RegExp pattern")));
+                return Err(raise_type_error!("Invalid RegExp pattern").into());
             }
         };
 
@@ -124,7 +124,7 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(EvalError::Js(raise_type_error!("Invalid RegExp flags")));
+                return Err(raise_type_error!("Invalid RegExp flags").into());
             }
         };
 
@@ -156,15 +156,13 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
             'd' => has_indices = true,
             'v' => unicode_sets = true,
             _ => {
-                return Err(EvalError::Js(raise_syntax_error!(format!("Invalid RegExp flag: {flag}"))));
+                return Err(raise_syntax_error!(format!("Invalid RegExp flag: {flag}")).into());
             }
         }
     }
 
     if unicode && unicode_sets {
-        return Err(EvalError::Js(raise_syntax_error!(
-            "Invalid RegExp flags: cannot use both 'u' and 'v'"
-        )));
+        return Err(raise_syntax_error!("Invalid RegExp flags: cannot use both 'u' and 'v'").into());
     }
 
     // Combine inline flags so fancy-regex can parse features like backreferences
@@ -196,7 +194,7 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
     }
 
     if let Err(e) = create_regex_from_utf16(&pattern_u16, &regress_flags) {
-        return Err(EvalError::Js(raise_syntax_error!(format!("Invalid RegExp: {}", e))));
+        return Err(raise_syntax_error!(format!("Invalid RegExp: {}", e)).into());
     }
 
     // Create RegExp object
@@ -252,7 +250,7 @@ pub(crate) fn handle_regexp_method<'gc>(
     match method {
         "exec" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_type_error!("RegExp.prototype.exec requires a string argument")));
+                return Err(raise_type_error!("RegExp.prototype.exec requires a string argument").into());
             }
 
             let input_val = args[0].clone();
@@ -268,7 +266,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                             // Simple toString for object
                             "[object Object]".to_string()
                         }
-                        _ => return Err(EvalError::Js(raise_type_error!("RegExp.prototype.exec requires a string argument"))),
+                        _ => return Err(raise_type_error!("RegExp.prototype.exec requires a string argument").into()),
                     };
                     utf8_to_utf16(&s)
                 }
@@ -410,7 +408,7 @@ pub(crate) fn handle_regexp_method<'gc>(
         }
         "test" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_type_error!("RegExp.prototype.test requires a string argument")));
+                return Err(raise_type_error!("RegExp.prototype.test requires a string argument").into());
             }
 
             let input_val = args[0].clone();
@@ -423,7 +421,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                         Value::Undefined => "undefined".to_string(),
                         Value::Null => "null".to_string(),
                         Value::Object(_) => "[object Object]".to_string(),
-                        _ => return Err(EvalError::Js(raise_type_error!("RegExp.prototype.test requires a string argument"))),
+                        _ => return Err(raise_type_error!("RegExp.prototype.test requires a string argument").into()),
                     };
                     utf8_to_utf16(&s)
                 }
@@ -504,9 +502,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             let result = format!("/{}/{}", pattern, flags);
             Ok(Value::String(utf8_to_utf16(&result)))
         }
-        _ => Err(EvalError::Js(raise_eval_error!(format!(
-            "RegExp.prototype.{method} is not implemented"
-        )))),
+        _ => Err(raise_eval_error!(format!("RegExp.prototype.{method} is not implemented")).into()),
     }
 }
 

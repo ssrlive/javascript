@@ -11,14 +11,20 @@ pub fn trace_expr<'gc, T: GcTrace<'gc>>(context: &mut T, expr: &Expr) {
             DestructuringElement::Variable(_, None) => {}
             DestructuringElement::Rest(_) => {}
             DestructuringElement::Empty => {}
-            DestructuringElement::NestedArray(arr) => {
+            DestructuringElement::NestedArray(arr, default_expr) => {
                 for a in arr {
                     trace_destructuring(cc, a);
                 }
+                if let Some(d) = default_expr {
+                    d.trace(cc);
+                }
             }
-            DestructuringElement::NestedObject(obj) => {
+            DestructuringElement::NestedObject(obj, default_expr) => {
                 for e in obj {
                     trace_destructuring(cc, e);
+                }
+                if let Some(d) = default_expr {
+                    d.trace(cc);
                 }
             }
         }

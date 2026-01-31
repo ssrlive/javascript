@@ -96,7 +96,6 @@ pub fn handle_global_function<'gc>(
         "new" => return evaluate_new_expression(mc, args, env),
         "eval" => return evalute_eval_function(mc, args, env),
         "Date" => return handle_date_constructor(mc, args, env),
-        "testWithIntlConstructors" => return test_with_intl_constructors(mc, args, env),
 
         "Object.prototype.valueOf" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
@@ -656,7 +655,7 @@ fn dynamic_import_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) 
     };
 
     // Load the module dynamically
-    let _module_value = crate::js_module::load_module(mc, &module_name, None).map_err(EvalError::Js)?;
+    let _module_value = crate::js_module::load_module(mc, &module_name, None)?;
 
     // Return a Promise that resolves to the module
     // let promise = Gc::new(
@@ -1101,7 +1100,7 @@ fn symbol_prototype_value_of<'gc>(
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let this_val = crate::js_class::evaluate_this(mc, env).map_err(EvalError::Js)?;
+    let this_val = crate::js_class::evaluate_this(mc, env)?;
     match this_val {
         Value::Symbol(s) => Ok(Value::Symbol(s)),
         Value::Object(obj) => {
@@ -1121,7 +1120,7 @@ fn symbol_prototype_to_string<'gc>(
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let this_val = crate::js_class::evaluate_this(mc, env).map_err(EvalError::Js)?;
+    let this_val = crate::js_class::evaluate_this(mc, env)?;
     let sym = match this_val {
         Value::Symbol(s) => s,
         Value::Object(obj) => {
@@ -1201,7 +1200,7 @@ fn evalute_eval_function<'gc>(
                     return Ok(Value::Undefined);
                 }
 
-                let mut tokens = crate::core::tokenize(&code).map_err(EvalError::Js)?;
+                let mut tokens = crate::core::tokenize(&code)?;
                 // Debug: always emit token list for eval bodies containing 'return' or for small bodies
                 if code.contains("return") || code.len() < 256 {
                     log::trace!(
@@ -1217,7 +1216,7 @@ fn evalute_eval_function<'gc>(
                 // index for parsing start position
                 let mut index: usize = 0;
 
-                let mut stmts = crate::core::parse_statements(&tokens, &mut index).map_err(EvalError::Js)?;
+                let mut stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
                 // If this is an indirect eval executed in the global env and the eval code
                 // is strict (starts with "use strict"), do not instantiate top-level
@@ -1402,7 +1401,7 @@ fn internal_promise_allsettled_resolve<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for legacy allSettled - requires 3 args: (idx, value, shared_state)
-    validate_internal_args(args, 3).map_err(EvalError::Js)?;
+    validate_internal_args(args, 3)?;
     // let numbers = validate_number_args(&args, 1)?;
     // // crate::js_promise::__internal_promise_allsettled_resolve(mc, numbers[0], args[1].clone(), args[2].clone())?;
     // Ok(Value::Undefined)
@@ -1416,7 +1415,7 @@ fn internal_promise_allsettled_reject<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for legacy allSettled - requires 3 args: (idx, reason, shared_state)
-    validate_internal_args(args, 3).map_err(EvalError::Js)?;
+    validate_internal_args(args, 3)?;
     // let numbers = validate_number_args(&args, 1)?;
     // crate::js_promise::__internal_promise_allsettled_reject(mc, numbers[0], args[1].clone(), args[2].clone())?;
     // Ok(Value::Undefined)
@@ -1430,8 +1429,8 @@ fn internal_allsettled_state_record_fulfilled<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for new allSettled - requires 3 args: (state_index, index, value)
-    validate_internal_args(args, 3).map_err(EvalError::Js)?;
-    let numbers = validate_number_args(args, 2).map_err(EvalError::Js)?;
+    validate_internal_args(args, 3)?;
+    let numbers = validate_number_args(args, 2)?;
     log::trace!(
         "__internal_allsettled_state_record_fulfilled called: state_id={}, index={}, value={:?}",
         numbers[0],
@@ -1450,8 +1449,8 @@ fn internal_allsettled_state_record_rejected<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for new allSettled - requires 3 args: (state_index, index, reason)
-    validate_internal_args(args, 3).map_err(EvalError::Js)?;
-    let numbers = validate_number_args(args, 2).map_err(EvalError::Js)?;
+    validate_internal_args(args, 3)?;
+    let numbers = validate_number_args(args, 2)?;
     log::trace!(
         "__internal_allsettled_state_record_rejected called: state_id={}, index={}, reason={:?}",
         numbers[0],
@@ -1527,14 +1526,14 @@ fn internal_promise_all_resolve<'gc>(
         if let Some(results_val_rc) = object_get_key_value(&state_obj, "results")
             && let Value::Object(results_obj) = &*results_val_rc.borrow()
         {
-            object_set_key_value(mc, results_obj, idx, value).map_err(EvalError::Js)?;
+            object_set_key_value(mc, results_obj, idx, value)?;
         }
         // Increment completed
         if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
             && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
-            object_set_key_value(mc, &state_obj, "completed", Value::Number(new_completed)).map_err(EvalError::Js)?;
+            object_set_key_value(mc, &state_obj, "completed", Value::Number(new_completed))?;
             // Check if all completed
             if let Some(total_val_rc) = object_get_key_value(&state_obj, "total")
                 && let Value::Number(total) = &*total_val_rc.borrow()
@@ -1562,7 +1561,7 @@ fn internal_promise_all_reject<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for Promise.all reject - requires 2 args: (reason, state)
-    validate_internal_args(args, 2).map_err(EvalError::Js)?;
+    validate_internal_args(args, 2)?;
     let _reason = args[0].clone();
     if let Value::Object(state_obj) = args[1].clone() {
         // Reject result_promise
@@ -1574,41 +1573,6 @@ fn internal_promise_all_reject<'gc>(
         }
     }
     Ok(Value::Undefined)
-}
-
-#[allow(dead_code)]
-fn test_with_intl_constructors<'gc>(
-    _mc: &MutationContext<'gc>,
-    _args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    /*
-    // testWithIntlConstructors function - used for testing Intl constructors
-    if args.len() != 1 {
-        return Err(EvalError::Js(raise_type_error!("testWithIntlConstructors requires exactly 1 argument")));
-    }
-    let callback = args[0].clone();
-    let callback_func = match callback {
-        Value::Closure(data) | Value::AsyncClosure(data) => (data.params.clone(), data.body.clone(), data.env.clone()),
-        _ => {
-            return Err(EvalError::Js(raise_type_error!("testWithIntlConstructors requires a function as argument")));
-        }
-    };
-
-    // Create a mock constructor
-    let mock_constructor = crate::js_testintl::create_mock_intl_constructor(mc)?;
-
-    // Call the callback function with the mock constructor as argument
-    // Create a fresh function environment and bind parameters
-    let args_vals = vec![mock_constructor];
-    let func_env =
-        crate::core::prepare_function_call_env(mc, Some(&callback_func.2), None, Some(&callback_func.0), &args_vals, None, None)?;
-    // Execute function body
-    crate::core::evaluate_statements(mc, &func_env, &callback_func.1)?;
-
-    Ok(Value::Undefined)
-    // */
-    todo!("testWithIntlConstructors is not yet implemented");
 }
 
 fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {

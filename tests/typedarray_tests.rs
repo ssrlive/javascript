@@ -1,4 +1,4 @@
-use javascript::{JSArrayBuffer, TypedArrayKind, evaluate_script};
+use javascript::{JSArrayBuffer, TypedArrayKind, evaluate_script, read_script_file};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -13,8 +13,7 @@ fn test_jsarraybuffer_creation_and_access() {
     // Test creating a new ArrayBuffer
     let mut buffer = JSArrayBuffer {
         data: Arc::new(Mutex::new(vec![0; 16])),
-        detached: false,
-        shared: false,
+        ..JSArrayBuffer::default()
     };
 
     assert_eq!(buffer.data.lock().unwrap().len(), 16);
@@ -36,8 +35,7 @@ fn test_arraybuffer_detachment() {
     // Create an ArrayBuffer
     let buffer = Rc::new(RefCell::new(JSArrayBuffer {
         data: Arc::new(Mutex::new(vec![1, 2, 3, 4])),
-        detached: false,
-        shared: false,
+        ..JSArrayBuffer::default()
     }));
 
     assert!(!buffer.borrow().detached);
@@ -221,5 +219,18 @@ fn test_js_for_in_resizable_buffer_via_script() {
     "#;
 
     let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"OK\"");
+}
+
+#[test]
+fn test_typedarray_destructuring_resizable_buffer_regression() {
+    let path = std::path::Path::new("js-scripts/typedarray_destructuring_resizable_buffer_regression.js");
+    let script = read_script_file(path).expect("failed to read regression script");
+
+    // Append a final expression so evaluate_script returns the script's return value as final result
+    let _wrapped = format!("{}\nJSON.stringify(({}));", script, "(function(){return (function(){})();})()");
+
+    // Evaluate and assert
+    let result = evaluate_script(&script, Some(path)).expect("evaluate_script failed");
     assert_eq!(result, "\"OK\"");
 }

@@ -306,8 +306,8 @@ pub enum DestructuringElement {
     Property(String, Box<DestructuringElement>),
     Rest(String),
     Empty,
-    NestedArray(Vec<DestructuringElement>),
-    NestedObject(Vec<DestructuringElement>),
+    NestedArray(Vec<DestructuringElement>, Option<Box<Expr>>),
+    NestedObject(Vec<DestructuringElement>, Option<Box<Expr>>),
 }
 
 unsafe impl<'gc> Collect<'gc> for DestructuringElement {
@@ -323,14 +323,20 @@ unsafe impl<'gc> Collect<'gc> for DestructuringElement {
             }
             DestructuringElement::Rest(_) => {}
             DestructuringElement::Empty => {}
-            DestructuringElement::NestedArray(arr) => {
+            DestructuringElement::NestedArray(arr, default_expr) => {
                 for elem in arr {
                     elem.trace(cc);
                 }
+                if let Some(d) = default_expr {
+                    d.trace(cc);
+                }
             }
-            DestructuringElement::NestedObject(obj) => {
+            DestructuringElement::NestedObject(obj, default_expr) => {
                 for elem in obj {
                     elem.trace(cc);
+                }
+                if let Some(d) = default_expr {
+                    d.trace(cc);
                 }
             }
         }

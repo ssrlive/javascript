@@ -608,11 +608,23 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         *index += 1;
     }
 
-    let is_generator = matches!(t[*index].token, Token::FunctionStar);
+    let mut is_generator = matches!(t[*index].token, Token::FunctionStar);
     if !is_generator && !matches!(t[*index].token, Token::Function) {
         return Err(raise_parse_error_at!(t.get(*index)));
     }
-    *index += 1; // consume function or function*
+    // Handle both `function*` (single token) and `function *` (two tokens)
+    if matches!(t[*index].token, Token::Function) {
+        // If next token is '*' treat as generator and consume both
+        if *index + 1 < t.len() && matches!(t[*index + 1].token, Token::Multiply) {
+            is_generator = true;
+            *index += 2; // consume 'function' and '*'
+        } else {
+            *index += 1; // consume 'function'
+        }
+    } else {
+        // consume single Token::FunctionStar
+        *index += 1;
+    }
     let name = if let Token::Identifier(name) = &t[*index].token {
         name.clone()
     } else {
@@ -1798,10 +1810,10 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 }
             } else if matches!(tokens[*index].token, Token::LBrace) {
                 let pattern = parse_object_destructuring_pattern(tokens, index)?;
-                params.push(DestructuringElement::NestedObject(pattern));
+                params.push(DestructuringElement::NestedObject(pattern, None));
             } else if matches!(tokens[*index].token, Token::LBracket) {
                 let pattern = parse_array_destructuring_pattern(tokens, index)?;
-                params.push(DestructuringElement::NestedArray(pattern));
+                params.push(DestructuringElement::NestedArray(pattern, None));
             } else if let Some(Token::Identifier(param)) = tokens.get(*index).map(|t| &t.token).cloned() {
                 *index += 1;
                 let mut default_expr: Option<Box<Expr>> = None;
@@ -3471,7 +3483,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             }
         }
         Token::Function | Token::FunctionStar => {
-            let is_generator = matches!(current, Token::FunctionStar);
+            let mut is_generator = matches!(current, Token::FunctionStar);
+            // Support both `function*` (single token) and `function *` (two tokens)
+            if !is_generator && *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+                is_generator = true;
+                log::trace!("parse_primary: saw separate '*' token after 'function' - treating as generator");
+                *index += 1; // consume '*'
+            }
             log::trace!(
                 "parse_primary: function expression, next tokens (first 8): {:?}",
                 tokens.iter().take(8).collect::<Vec<_>>()
@@ -3661,6 +3679,28 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 // Async arrow function
                 log::trace!("parse_primary (async): detected '(' => possible async arrow at idx {}", *index);
                 *index += 1; // consume (
+                // Fast attempt: try parsing a full parameter list (supports destructuring) followed by '=>'
+                let saved_idx = *index;
+                if let Ok(p) = parse_parameters(tokens, index) {
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                        *index += 1; // consume '=>'
+                        // Parse arrow body
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+                            *index += 1; // consume '{'
+                            let body = parse_statement_block(tokens, index)?;
+                            return Ok(Expr::AsyncArrowFunction(p, body));
+                        } else {
+                            let body_expr = parse_assignment(tokens, index)?;
+                            return Ok(Expr::AsyncArrowFunction(
+                                p,
+                                vec![Statement::from(StatementKind::Return(Some(body_expr)))],
+                            ));
+                        }
+                    } else {
+                        // rollback - not an arrow
+                        *index = saved_idx;
+                    }
+                }
                 let mut params: Vec<DestructuringElement> = Vec::new();
                 let mut is_arrow = false;
                 if matches!(tokens.get(*index).map(|t| &t.token), Some(&Token::RParen)) {
@@ -4268,11 +4308,57 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
         } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
             // Nested array destructuring
             let nested_pattern = parse_array_destructuring_pattern(tokens, index)?;
-            pattern.push(DestructuringElement::NestedArray(nested_pattern));
+            // Optional default initializer after nested pattern: `[...] = expr`
+            let mut default_expr: Option<Box<Expr>> = None;
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                *index += 1; // consume '='
+                let mut depth: i32 = 0;
+                let mut init_tokens: Vec<TokenData> = Vec::new();
+                while *index < tokens.len() {
+                    if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBracket)) {
+                        break;
+                    }
+                    match tokens[*index].token {
+                        Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                        Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                    init_tokens.push(tokens[*index].clone());
+                    *index += 1;
+                }
+                if !init_tokens.is_empty() {
+                    let expr = parse_expression(&init_tokens, &mut 0)?;
+                    default_expr = Some(Box::new(expr));
+                }
+            }
+            pattern.push(DestructuringElement::NestedArray(nested_pattern, default_expr));
         } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
             // Nested object destructuring
             let nested_pattern = parse_object_destructuring_pattern(tokens, index)?;
-            pattern.push(DestructuringElement::NestedObject(nested_pattern));
+            // Optional default initializer after nested pattern: `{...} = expr`
+            let mut default_expr: Option<Box<Expr>> = None;
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                *index += 1; // consume '='
+                let mut depth: i32 = 0;
+                let mut init_tokens: Vec<TokenData> = Vec::new();
+                while *index < tokens.len() {
+                    if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBracket)) {
+                        break;
+                    }
+                    match tokens[*index].token {
+                        Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                        Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                    init_tokens.push(tokens[*index].clone());
+                    *index += 1;
+                }
+                if !init_tokens.is_empty() {
+                    let expr = parse_expression(&init_tokens, &mut 0)?;
+                    default_expr = Some(Box::new(expr));
+                }
+            }
+            pattern.push(DestructuringElement::NestedObject(nested_pattern, default_expr));
         } else if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
             *index += 1;
             // Accept optional default initializer in patterns: e.g. `a = 1`
@@ -4323,6 +4409,14 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
             break;
         } else if matches!(tokens[*index].token, Token::Comma) {
             *index += 1; // consume ,
+            // Allow trailing comma before closing bracket
+            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::RBracket) {
+                *index += 1; // consume ]
+                break;
+            }
         } else {
             return Err(raise_parse_error_at!(tokens.get(*index)));
         }
@@ -4397,9 +4491,59 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                 *index += 1; // consume :
                 // Parse the value pattern
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
-                    DestructuringElement::NestedArray(parse_array_destructuring_pattern(tokens, index)?)
+                    // Nested array destructuring as property value: `a: [ ... ]` possibly followed by `= init`
+                    let nested = parse_array_destructuring_pattern(tokens, index)?;
+                    let mut nested_default: Option<Box<Expr>> = None;
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                        *index += 1; // consume '='
+                        let mut depth: i32 = 0;
+                        let mut init_tokens: Vec<TokenData> = Vec::new();
+                        while *index < tokens.len() {
+                            if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBrace))
+                            {
+                                break;
+                            }
+                            match tokens[*index].token {
+                                Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                                Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                                _ => {}
+                            }
+                            init_tokens.push(tokens[*index].clone());
+                            *index += 1;
+                        }
+                        if !init_tokens.is_empty() {
+                            let expr = parse_expression(&init_tokens, &mut 0)?;
+                            nested_default = Some(Box::new(expr));
+                        }
+                    }
+                    DestructuringElement::NestedArray(nested, nested_default)
                 } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
-                    DestructuringElement::NestedObject(parse_object_destructuring_pattern(tokens, index)?)
+                    // Nested object destructuring as property value: `a: { ... }` possibly followed by `= init`
+                    let nested = parse_object_destructuring_pattern(tokens, index)?;
+                    let mut nested_default: Option<Box<Expr>> = None;
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                        *index += 1; // consume '='
+                        let mut depth: i32 = 0;
+                        let mut init_tokens: Vec<TokenData> = Vec::new();
+                        while *index < tokens.len() {
+                            if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBrace))
+                            {
+                                break;
+                            }
+                            match tokens[*index].token {
+                                Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                                Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                                _ => {}
+                            }
+                            init_tokens.push(tokens[*index].clone());
+                            *index += 1;
+                        }
+                        if !init_tokens.is_empty() {
+                            let expr = parse_expression(&init_tokens, &mut 0)?;
+                            nested_default = Some(Box::new(expr));
+                        }
+                    }
+                    DestructuringElement::NestedObject(nested, nested_default)
                 } else if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                     *index += 1;
                     // Allow default initializer for property value like `a: b = 1`
@@ -4423,11 +4567,6 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                         }
                         if !init_tokens.is_empty() {
                             let tmp = init_tokens.clone();
-                            log::trace!("parse_object_destructuring_pattern: default init tokens (tokens): {:?}", tmp);
-                            log::trace!(
-                                "parse_object_destructuring_pattern: default init tokens (tokens.tokens): {:?}",
-                                tmp.iter().map(|t| &t.token).collect::<Vec<_>>()
-                            );
                             let expr = parse_expression(&tmp, &mut 0)?;
                             default_expr = Some(Box::new(expr));
                         }

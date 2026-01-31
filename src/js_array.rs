@@ -126,7 +126,7 @@ pub(crate) fn handle_array_static_method<'gc>(
     match method {
         "isArray" => {
             if args.len() != 1 {
-                return Err(EvalError::Js(raise_eval_error!("Array.isArray requires exactly one argument")));
+                return Err(raise_eval_error!("Array.isArray requires exactly one argument").into());
             }
             // let arg = evaluate_expr(mc, env, &args[0])?;
             let arg = args[0].clone();
@@ -139,7 +139,7 @@ pub(crate) fn handle_array_static_method<'gc>(
         "from" => {
             // Array.from(iterable, mapFn?, thisArg?)
             if args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Array.from requires at least one argument")));
+                return Err(raise_eval_error!("Array.from requires at least one argument").into());
             }
 
             // let iterable = evaluate_expr(mc, env, &args[0])?;
@@ -164,7 +164,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                             let mapped = match fn_val {
                                 Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
                                 Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
-                                _ => return Err(EvalError::Js(raise_eval_error!("Array.from map function must be a function"))),
+                                _ => return Err(raise_eval_error!("Array.from map function must be a function").into()),
                             };
                             result.push(mapped);
                         } else {
@@ -422,9 +422,10 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                                         mc, name, &call_args, env,
                                                                     )?,
                                                                     _ => {
-                                                                        return Err(EvalError::Js(raise_eval_error!(
+                                                                        return Err(raise_eval_error!(
                                                                             "Array.from map function must be a function"
-                                                                        )));
+                                                                        )
+                                                                        .into());
                                                                     }
                                                                 };
                                                                 result.push(mapped);
@@ -435,16 +436,14 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                             idx += 1;
                                                             continue;
                                                         } else {
-                                                            return Err(EvalError::Js(raise_eval_error!(
-                                                                "Iterator.next did not return an object"
-                                                            )));
+                                                            return Err(raise_eval_error!("Iterator.next did not return an object").into());
                                                         }
                                                     } else {
-                                                        return Err(EvalError::Js(raise_eval_error!("Iterator has no next method")));
+                                                        return Err(raise_eval_error!("Iterator has no next method").into());
                                                     }
                                                 }
                                             }
-                                            _ => return Err(EvalError::Js(raise_eval_error!("Iterator call did not return an object"))),
+                                            _ => return Err(raise_eval_error!("Iterator call did not return an object").into()),
                                         }
 
                                         let new_array = create_array(mc, env)?;
@@ -479,7 +478,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                 let mapped = match &actual_fn {
                                     Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
                                     Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
-                                    _ => return Err(EvalError::Js(raise_eval_error!("Array.from map function must be a function"))),
+                                    _ => return Err(raise_eval_error!("Array.from map function must be a function").into()),
                                 };
                                 result.push(mapped);
                             } else {
@@ -487,11 +486,11 @@ pub(crate) fn handle_array_static_method<'gc>(
                             }
                         }
                     } else {
-                        return Err(EvalError::Js(raise_eval_error!("Array.from iterable must be array-like")));
+                        return Err(raise_eval_error!("Array.from iterable must be array-like").into());
                     }
                 }
                 _ => {
-                    return Err(EvalError::Js(raise_eval_error!("Array.from iterable must be array-like")));
+                    return Err(raise_eval_error!("Array.from iterable must be array-like").into());
                 }
             }
 
@@ -513,7 +512,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             set_array_length(mc, &new_array, args.len())?;
             Ok(Value::Object(new_array))
         }
-        _ => Err(EvalError::Js(raise_eval_error!(format!("Array.{method} is not implemented")))),
+        _ => Err(raise_eval_error!(format!("Array.{method} is not implemented")).into()),
     }
 }
 
@@ -535,16 +534,16 @@ pub(crate) fn handle_array_constructor<'gc>(
         match arg_val {
             Value::Number(n) => {
                 if n.is_nan() {
-                    return Err(EvalError::Js(raise_range_error!("Invalid array length")));
+                    return Err(raise_range_error!("Invalid array length").into());
                 }
                 if n.fract() != 0.0 {
-                    return Err(EvalError::Js(raise_range_error!("Invalid array length")));
+                    return Err(raise_range_error!("Invalid array length").into());
                 }
                 if n < 0.0 {
-                    return Err(EvalError::Js(raise_range_error!("Invalid array length")));
+                    return Err(raise_range_error!("Invalid array length").into());
                 }
                 if n > u32::MAX as f64 {
-                    return Err(EvalError::Js(raise_range_error!("Invalid array length")));
+                    return Err(raise_range_error!("Invalid array length").into());
                 }
                 // Array(length) - create array with specified length
                 let array_obj = create_array(mc, env)?;
@@ -631,7 +630,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 // Return the array object (chainable)
                 Ok(Value::Object(object.clone()))
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.push expects at least one argument")))
+                Err(raise_eval_error!("Array.push expects at least one argument").into())
             }
         }
         "pop" => {
@@ -751,13 +750,13 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             Value::Function(name) => {
                                 crate::js_function::handle_global_function(mc, name, &call_args, env)?;
                             }
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.forEach callback must be a function"))),
+                            _ => return Err(raise_eval_error!("Array.forEach callback must be a function").into()),
                         }
                     }
                 }
                 Ok(Value::Undefined)
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.forEach expects at least one argument")))
+                Err(raise_eval_error!("Array.forEach expects at least one argument").into())
             }
         }
         "map" => {
@@ -794,14 +793,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_callback_val {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.map callback must be a function"))),
+                            _ => return Err(raise_eval_error!("Array.map callback must be a function").into()),
                         };
                         object_set_key_value(mc, &new_array, i, res)?;
                     }
                 }
                 Ok(Value::Object(new_array))
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.map expects at least one argument")))
+                Err(raise_eval_error!("Array.map expects at least one argument").into())
             }
         }
         "filter" => {
@@ -831,7 +830,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.filter expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.filter expects a function").into()),
                         };
 
                         // truthy check
@@ -852,7 +851,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 set_array_length(mc, &new_array, idx)?;
                 Ok(Value::Object(new_array))
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.filter expects at least one argument")))
+                Err(raise_eval_error!("Array.filter expects at least one argument").into())
             }
         }
         "reduce" => {
@@ -870,9 +869,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 if current_len == 0 && initial_value.is_none() {
-                    return Err(EvalError::Js(raise_eval_error!(
-                        "Array.reduce called on empty array with no initial value"
-                    )));
+                    return Err(raise_eval_error!("Array.reduce called on empty array with no initial value").into());
                 }
 
                 let mut accumulator: Value = if let Some(ref val) = initial_value {
@@ -907,7 +904,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.reduce expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.reduce expects a function").into()),
                         };
 
                         accumulator = res;
@@ -915,7 +912,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 Ok(accumulator)
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.reduce expects at least one argument")))
+                Err(raise_eval_error!("Array.reduce expects at least one argument").into())
             }
         }
         "reduceRight" => {
@@ -933,9 +930,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 if current_len == 0 && initial_value.is_none() {
-                    return Err(EvalError::Js(raise_eval_error!(
-                        "Array.reduceRight called on empty array with no initial value"
-                    )));
+                    return Err(raise_eval_error!("Array.reduceRight called on empty array with no initial value").into());
                 }
 
                 let mut accumulator: Value;
@@ -957,9 +952,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         }
                     }
                     if !found {
-                        return Err(EvalError::Js(raise_eval_error!(
-                            "Array.reduceRight called on empty array with no initial value"
-                        )));
+                        return Err(raise_eval_error!("Array.reduceRight called on empty array with no initial value").into());
                     }
                 }
 
@@ -997,7 +990,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.reduceRight expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.reduceRight expects a function").into()),
                         };
 
                         accumulator = res;
@@ -1005,7 +998,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 Ok(accumulator)
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.reduceRight expects at least one argument")))
+                Err(raise_eval_error!("Array.reduceRight expects at least one argument").into())
             }
         }
         "find" => {
@@ -1032,7 +1025,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.find expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.find expects a function").into()),
                         };
 
                         let is_truthy = match res {
@@ -1050,7 +1043,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 Ok(Value::Undefined)
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.find expects at least one argument")))
+                Err(raise_eval_error!("Array.find expects at least one argument").into())
             }
         }
         "findIndex" => {
@@ -1097,7 +1090,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.findIndex expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.findIndex expects a function").into()),
                         };
 
                         let is_truthy = match res {
@@ -1115,7 +1108,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 Ok(Value::Number(-1.0))
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.findIndex expects at least one argument")))
+                Err(raise_eval_error!("Array.findIndex expects at least one argument").into())
             }
         }
         "some" => {
@@ -1162,7 +1155,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.some expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.some expects a function").into()),
                         };
 
                         let is_truthy = match res {
@@ -1180,7 +1173,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 Ok(Value::Boolean(false))
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.some expects at least one argument")))
+                Err(raise_eval_error!("Array.some expects at least one argument").into())
             }
         }
         "every" => {
@@ -1227,7 +1220,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.every expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.every expects a function").into()),
                         };
 
                         let is_truthy = match res {
@@ -1245,7 +1238,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 Ok(Value::Boolean(true))
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.every expects at least one argument")))
+                Err(raise_eval_error!("Array.every expects at least one argument").into())
             }
         }
         "concat" => {
@@ -1289,7 +1282,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
         }
         "indexOf" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Array.indexOf expects at least one argument")));
+                return Err(raise_eval_error!("Array.indexOf expects at least one argument").into());
             }
 
             let search_element = args[0].clone();
@@ -1322,7 +1315,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
         }
         "includes" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Array.includes expects at least one argument")));
+                return Err(raise_eval_error!("Array.includes expects at least one argument").into());
             }
 
             let search_element = args[0].clone();
@@ -1720,7 +1713,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
         }
         "flatMap" => {
             if args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Array.flatMap expects at least one argument")));
+                return Err(raise_eval_error!("Array.flatMap expects at least one argument").into());
             }
 
             let callback_val = args[0].clone();
@@ -1745,7 +1738,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let mapped_val = match &actual_func {
                         Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                         Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                        _ => return Err(EvalError::Js(raise_eval_error!("Array.flatMap expects a function"))),
+                        _ => return Err(raise_eval_error!("Array.flatMap expects a function").into()),
                     };
 
                     flatten_single_value(mc, mapped_val, &mut result, 1)?;
@@ -1829,19 +1822,19 @@ pub(crate) fn handle_array_instance_method<'gc>(
         }
         "keys" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Array.prototype.keys takes no arguments")));
+                return Err(raise_eval_error!("Array.prototype.keys takes no arguments").into());
             }
             Ok(create_array_iterator(mc, env, object.clone(), "keys")?)
         }
         "values" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Array.prototype.values takes no arguments")));
+                return Err(raise_eval_error!("Array.prototype.values takes no arguments").into());
             }
             Ok(create_array_iterator(mc, env, object.clone(), "values")?)
         }
         "entries" => {
             if !args.is_empty() {
-                return Err(EvalError::Js(raise_eval_error!("Array.prototype.entries takes no arguments")));
+                return Err(raise_eval_error!("Array.prototype.entries takes no arguments").into());
             }
             Ok(create_array_iterator(mc, env, object.clone(), "entries")?)
         }
@@ -1869,7 +1862,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.findLast expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.findLast expects a function").into()),
                         };
 
                         let is_truthy = match res {
@@ -1887,7 +1880,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 Ok(Value::Undefined)
             } else {
-                Err(EvalError::Js(raise_eval_error!("Array.findLast expects at least one argument")))
+                Err(raise_eval_error!("Array.findLast expects at least one argument").into())
             }
         }
         "findLastIndex" => {
@@ -1914,7 +1907,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let res = match &actual_func {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(EvalError::Js(raise_eval_error!("Array.findLastIndex expects a function"))),
+                            _ => return Err(raise_eval_error!("Array.findLastIndex expects a function").into()),
                         };
 
                         let is_truthy = match res {
@@ -1932,12 +1925,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 Ok(Value::Number(-1.0))
             } else {
-                Err(EvalError::Js(raise_eval_error!(
-                    "Array.findLastIndex expects at least one argument"
-                )))
+                Err(raise_eval_error!("Array.findLastIndex expects at least one argument").into())
             }
         }
-        _ => Err(EvalError::Js(raise_eval_error!(format!("Array.{method} not found")))),
+        _ => Err(raise_eval_error!(format!("Array.{method} not found")).into()),
     }
 }
 
@@ -2085,7 +2076,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     let arr_ptr = if let Value::Object(o) = &*arr_val.borrow() {
         o.clone()
     } else {
-        return Err(EvalError::Js(raise_eval_error!("Iterator array is invalid")));
+        return Err(raise_eval_error!("Iterator array is invalid").into());
     };
 
     // Get index
@@ -2094,7 +2085,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
-        return Err(EvalError::Js(raise_eval_error!("Iterator index is invalid")));
+        return Err(raise_eval_error!("Iterator index is invalid").into());
     };
 
     // Get kind
@@ -2102,7 +2093,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {
-        return Err(EvalError::Js(raise_eval_error!("Iterator kind is invalid")));
+        return Err(raise_eval_error!("Iterator kind is invalid").into());
     };
 
     let length = get_array_length(mc, &arr_ptr).unwrap_or(0);
@@ -2126,7 +2117,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
             set_array_length(mc, &entry, 2)?;
             Value::Object(entry)
         }
-        _ => return Err(EvalError::Js(raise_eval_error!("Unknown iterator kind"))),
+        _ => return Err(raise_eval_error!("Unknown iterator kind").into()),
     };
 
     // Update index

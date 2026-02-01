@@ -188,7 +188,14 @@ pub(crate) fn define_property_internal<'gc>(
 
     // If descriptor is a property descriptor (has value/get/set), unspecified attributes default to false
     let is_property_desc = pd.value.is_some() || pd.get.is_some() || pd.set.is_some();
-    if is_property_desc {
+    // Only apply defaults when the property does not exist yet or is configurable. If the
+    // existing property is non-configurable, missing attributes should not be defaulted
+    // to false (per DefinePropertyOrThrow semantics); only explicitly provided attributes
+    // should be applied/checked.
+    let existed = object_get_key_value(target_obj, prop_key).is_some();
+    let existing_is_configurable = !existed || target_obj.borrow().is_configurable(prop_key);
+
+    if is_property_desc && existing_is_configurable {
         // Only default missing 'writable' to false for data descriptors (value or writable present).
         // For accessor descriptors (get/set) the 'writable' attribute does not apply and
         // must not be defaulted to false here.
@@ -221,8 +228,7 @@ pub(crate) fn define_property_internal<'gc>(
     }
 
     // Only update writable/enumerable if property is configurable or does not exist
-    let existed = object_get_key_value(target_obj, prop_key).is_some();
-    let is_configurable = existed || target_obj.borrow().is_configurable(prop_key);
+    let is_configurable = existing_is_configurable;
     log::debug!(
         "define_property_internal: existed={} is_configurable={} for {:?} on obj_ptr={:p}",
         existed,

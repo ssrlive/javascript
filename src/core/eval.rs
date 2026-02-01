@@ -758,8 +758,14 @@ fn bind_array_inner_for_var<'gc>(
     Ok(())
 }
 
-fn hoist_name<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<(), EvalError<'gc>> {
+fn hoist_name<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    name: &str,
+    is_indirect_eval: bool,
+) -> Result<(), EvalError<'gc>> {
     let mut target_env = *env;
+    log::trace!("hoist_name: called for '{}' with env {:p}", name, env);
     while !target_env.borrow().is_function_scope {
         if let Some(proto) = target_env.borrow().prototype {
             target_env = proto;
@@ -772,15 +778,111 @@ fn hoist_name<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: 
         // For indirect eval, CreateGlobalVarBinding(..., true) should be used which creates
         // a configurable=true property. Detect indirect eval marker on the global env.
         if target_env.borrow().prototype.is_none() {
-            let deletable = if let Some(flag) = crate::core::object_get_key_value(&target_env, "__is_indirect_eval") {
-                matches!(*flag.borrow(), Value::Boolean(true))
-            } else {
-                false
-            };
+            // If creating a global var binding during an indirect eval, the spec
+            // requires we detect conflicts with existing global lexical
+            // declarations and throw a SyntaxError. Check for that here before
+            // creating the property on the global env.
+            log::trace!(
+                "hoist_name: creating global var '{}' - checking for existing global lexical/TDZ on env {:p}",
+                name,
+                &target_env
+            );
+            log::trace!(
+                "hoist_name: creating global var - target_env ptr={:p} extensible={}",
+                &target_env,
+                target_env.borrow().is_extensible()
+            );
+            if target_env.borrow().has_lexical(name) {
+                log::trace!("hoist_name: conflict - global env {:p} already has lexical '{}'", &target_env, name);
+                return Err(raise_syntax_error!("Variable declaration would conflict with existing lexical declaration").into());
+            }
+            if let Some(existing_val_ptr) = env_get_own(&target_env, name)
+                && let Value::Uninitialized = &*existing_val_ptr.borrow()
+            {
+                log::trace!(
+                    "hoist_name: conflict - global env {:p} already has Uninitialized binding '{}'",
+                    &target_env,
+                    name
+                );
+                return Err(raise_syntax_error!("Variable declaration would conflict with existing lexical declaration").into());
+            }
+
+            // If the global object is non-extensible, CanDeclareGlobalVar should be false
+            // and a TypeError must be thrown per spec.
+            if !target_env.borrow().is_extensible() {
+                log::trace!(
+                    "hoist_name: global_env {:p} is non-extensible -> Cannot declare global var '{}'",
+                    &target_env,
+                    name
+                );
+                return Err(raise_type_error!("Cannot add property to non-extensible object").into());
+            }
+
+            // Use the provided is_indirect_eval flag to determine deletability
+            let deletable = is_indirect_eval;
             let desc_obj = crate::core::create_descriptor_object(mc, Value::Undefined, true, true, deletable)?;
             crate::js_object::define_property_internal(mc, &target_env, name, &desc_obj)?;
         } else {
             env_set(mc, &target_env, name, Value::Undefined)?;
+        }
+    } else {
+        // If there's already an own binding, then detect the special case where an
+        // existing lexical declaration (TDZ / Uninitialized) blocks creation of a
+        // global var binding for indirect evals in non-strict mode. The ECMAScript
+        // semantics require a SyntaxError in that situation.
+        // Compute the topmost global environment (prototype == None).
+        let mut top_env = Some(*env);
+        let mut global_env = None;
+        while let Some(e) = top_env {
+            if e.borrow().prototype.is_none() {
+                global_env = Some(e);
+                break;
+            }
+            top_env = e.borrow().prototype;
+        }
+
+        if let Some(g_env) = global_env {
+            // Use the provided is_indirect_eval flag to decide whether to apply
+            // the indirect-eval lexical conflict checks. When true, an indirect
+            // non-strict eval attempting to create a var binding must throw a
+            // SyntaxError if an existing global lexical or TDZ binding exists.
+            if is_indirect_eval {
+                log::trace!(
+                    "hoist_name: checking lexical conflict for '{}' - has_lexical={} own_exists={} is_indirect_eval={}",
+                    name,
+                    g_env.borrow().has_lexical(name),
+                    env_get_own(&g_env, name).is_some(),
+                    is_indirect_eval
+                );
+                if g_env.borrow().has_lexical(name) {
+                    log::trace!("hoist_name: existing own lexical declaration '{}' on global env", name);
+                    return Err(raise_syntax_error!("Variable declaration would conflict with existing lexical declaration").into());
+                }
+
+                if let Some(existing_val_ptr) = env_get_own(&g_env, name) {
+                    if let Value::Uninitialized = &*existing_val_ptr.borrow() {
+                        log::trace!("hoist_name: existing own binding '{}' is Uninitialized on global env", name);
+                        return Err(raise_syntax_error!("Variable declaration would conflict with existing lexical declaration").into());
+                    } else {
+                        log::trace!("hoist_name: existing own binding '{}' exists but is not Uninitialized", name);
+                    }
+                }
+            } else {
+                if g_env.borrow().has_lexical(name) {
+                    log::trace!("hoist_name: existing own lexical declaration '{}' on global env", name);
+                    return Err(raise_syntax_error!("Variable declaration would conflict with existing lexical declaration").into());
+                }
+                if let Some(existing_val_ptr) = env_get_own(&g_env, name)
+                    && let Value::Uninitialized = &*existing_val_ptr.borrow()
+                {
+                    log::trace!(
+                        "hoist_name: conflict - global env {:p} already has Uninitialized binding '{}'",
+                        &g_env,
+                        name
+                    );
+                    return Err(raise_syntax_error!("Variable declaration would conflict with existing lexical declaration").into());
+                }
+            }
         }
     }
     Ok(())
@@ -790,121 +892,131 @@ fn hoist_var_declarations<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
+    is_indirect_eval: bool,
 ) -> Result<(), EvalError<'gc>> {
+    log::trace!(
+        "hoist_var_declarations: called with env {:p} (is_function_scope={})",
+        env,
+        env.borrow().is_function_scope
+    );
     for stmt in statements {
         match &*stmt.kind {
             StatementKind::Var(decls) => {
                 for (name, _) in decls {
-                    hoist_name(mc, env, name)?;
+                    hoist_name(mc, env, name, is_indirect_eval)?;
                 }
             }
             StatementKind::VarDestructuringArray(pattern, _) => {
                 let mut names = Vec::new();
                 collect_names_from_destructuring(pattern, &mut names);
                 for name in names {
-                    hoist_name(mc, env, &name)?;
+                    hoist_name(mc, env, &name, is_indirect_eval)?;
                 }
             }
             StatementKind::VarDestructuringObject(pattern, _) => {
                 let mut names = Vec::new();
                 collect_names_from_object_destructuring(pattern, &mut names);
                 for name in names {
-                    hoist_name(mc, env, &name)?;
+                    hoist_name(mc, env, &name, is_indirect_eval)?;
                 }
             }
-            StatementKind::Block(stmts) => hoist_var_declarations(mc, env, stmts)?,
+            StatementKind::Block(stmts) => hoist_var_declarations(mc, env, stmts, is_indirect_eval)?,
             StatementKind::If(if_stmt) => {
                 let if_stmt = if_stmt.as_ref();
-                hoist_var_declarations(mc, env, &if_stmt.then_body)?;
+                hoist_var_declarations(mc, env, &if_stmt.then_body, is_indirect_eval)?;
                 if let Some(else_stmts) = &if_stmt.else_body {
-                    hoist_var_declarations(mc, env, else_stmts)?;
+                    hoist_var_declarations(mc, env, else_stmts, is_indirect_eval)?;
                 }
             }
             StatementKind::For(for_stmt) => {
                 if let Some(init) = &for_stmt.init {
-                    hoist_var_declarations(mc, env, std::slice::from_ref(init))?;
+                    hoist_var_declarations(mc, env, std::slice::from_ref(init), is_indirect_eval)?;
                 }
-                hoist_var_declarations(mc, env, &for_stmt.body)?;
+                hoist_var_declarations(mc, env, &for_stmt.body, is_indirect_eval)?;
             }
             StatementKind::ForIn(decl, name, _, body) => {
                 if let Some(crate::core::VarDeclKind::Var) = decl {
-                    hoist_name(mc, env, name)?;
+                    hoist_name(mc, env, name, is_indirect_eval)?;
                 }
-                hoist_var_declarations(mc, env, body)?;
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
             }
             StatementKind::ForOf(decl, name, _, body) => {
                 if let Some(crate::core::VarDeclKind::Var) = decl {
-                    hoist_name(mc, env, name)?;
+                    hoist_name(mc, env, name, is_indirect_eval)?;
                 }
-                hoist_var_declarations(mc, env, body)?;
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
             }
             StatementKind::ForOfDestructuringObject(decl, pattern, _, body) => {
                 if let Some(crate::core::VarDeclKind::Var) = decl {
                     let mut names = Vec::new();
                     collect_names_from_object_destructuring(pattern, &mut names);
+                    // Use passed is_indirect_eval
                     for name in names {
-                        hoist_name(mc, env, &name)?;
+                        hoist_name(mc, env, &name, is_indirect_eval)?;
                     }
                 }
-                hoist_var_declarations(mc, env, body)?;
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
             }
             StatementKind::ForOfDestructuringArray(decl, pattern, _, body) => {
                 if let Some(crate::core::VarDeclKind::Var) = decl {
                     let mut names = Vec::new();
                     collect_names_from_destructuring(pattern, &mut names);
+                    // Use passed is_indirect_eval
                     for name in names {
-                        hoist_name(mc, env, &name)?;
+                        hoist_name(mc, env, &name, is_indirect_eval)?;
                     }
                 }
-                hoist_var_declarations(mc, env, body)?;
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
             }
             StatementKind::ForInDestructuringObject(decl, pattern, _, body) => {
                 if let Some(crate::core::VarDeclKind::Var) = decl {
                     let mut names = Vec::new();
                     collect_names_from_object_destructuring(pattern, &mut names);
+                    // Use passed is_indirect_eval
                     for name in names {
-                        hoist_name(mc, env, &name)?;
+                        hoist_name(mc, env, &name, is_indirect_eval)?;
                     }
                 }
-                hoist_var_declarations(mc, env, body)?;
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
             }
             StatementKind::ForInDestructuringArray(decl, pattern, _, body) => {
                 if let Some(crate::core::VarDeclKind::Var) = decl {
                     let mut names = Vec::new();
                     collect_names_from_destructuring(pattern, &mut names);
+                    // Use passed is_indirect_eval
                     for name in names {
-                        hoist_name(mc, env, &name)?;
+                        hoist_name(mc, env, &name, is_indirect_eval)?;
                     }
                 }
-                hoist_var_declarations(mc, env, body)?;
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
             }
-            StatementKind::While(_, body) => hoist_var_declarations(mc, env, body)?,
-            StatementKind::DoWhile(body, _) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::While(_, body) => hoist_var_declarations(mc, env, body, is_indirect_eval)?,
+            StatementKind::DoWhile(body, _) => hoist_var_declarations(mc, env, body, is_indirect_eval)?,
             StatementKind::TryCatch(tc_stmt) => {
                 let tc_stmt = tc_stmt.as_ref();
-                hoist_var_declarations(mc, env, &tc_stmt.try_body)?;
+                hoist_var_declarations(mc, env, &tc_stmt.try_body, is_indirect_eval)?;
                 if let Some(catch_stmts) = &tc_stmt.catch_body {
-                    hoist_var_declarations(mc, env, catch_stmts)?;
+                    hoist_var_declarations(mc, env, catch_stmts, is_indirect_eval)?;
                 }
                 if let Some(finally_stmts) = &tc_stmt.finally_body {
-                    hoist_var_declarations(mc, env, finally_stmts)?;
+                    hoist_var_declarations(mc, env, finally_stmts, is_indirect_eval)?;
                 }
             }
             StatementKind::Switch(sw_stmt) => {
                 for case in &sw_stmt.cases {
                     match case {
-                        crate::core::SwitchCase::Case(_, stmts) => hoist_var_declarations(mc, env, stmts)?,
-                        crate::core::SwitchCase::Default(stmts) => hoist_var_declarations(mc, env, stmts)?,
+                        crate::core::SwitchCase::Case(_, stmts) => hoist_var_declarations(mc, env, stmts, is_indirect_eval)?,
+                        crate::core::SwitchCase::Default(stmts) => hoist_var_declarations(mc, env, stmts, is_indirect_eval)?,
                     }
                 }
             }
             StatementKind::Label(_, stmt) => {
                 // Label contains a single statement, but it might be a block or loop
                 // We need to wrap it in a slice to recurse
-                hoist_var_declarations(mc, env, std::slice::from_ref(stmt))?;
+                hoist_var_declarations(mc, env, std::slice::from_ref(stmt), is_indirect_eval)?;
             }
             StatementKind::Export(_, Some(decl)) => {
-                hoist_var_declarations(mc, env, std::slice::from_ref(decl))?;
+                hoist_var_declarations(mc, env, std::slice::from_ref(decl), is_indirect_eval)?;
             }
             _ => {}
         }
@@ -912,7 +1024,13 @@ fn hoist_var_declarations<'gc>(
     Ok(())
 }
 
-fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, statements: &[Statement]) -> Result<(), EvalError<'gc>> {
+fn hoist_declarations<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &[Statement],
+    skip_lexicals: bool,
+    is_indirect_eval: bool,
+) -> Result<(), EvalError<'gc>> {
     // 1. Hoist FunctionDeclarations (only top-level in this list of statements)
     for stmt in statements {
         if let StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async) = &*stmt.kind {
@@ -1071,55 +1189,64 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     }
 
     // 2. Hoist Var declarations (recursively)
-    hoist_var_declarations(mc, env, statements)?;
+    hoist_var_declarations(mc, env, statements, is_indirect_eval)?;
 
     // 3. Hoist Lexical declarations (let, const, class) - top-level only, initialize to Uninitialized (TDZ)
-    for stmt in statements {
-        match &*stmt.kind {
-            StatementKind::Let(decls) => {
-                for (name, _) in decls {
-                    env_set(mc, env, name, Value::Uninitialized)?;
+    if !skip_lexicals {
+        for stmt in statements {
+            match &*stmt.kind {
+                StatementKind::Let(decls) => {
+                    for (name, _) in decls {
+                        env_set(mc, env, name, Value::Uninitialized)?;
+                        env.borrow_mut(mc).set_lexical(name.clone());
+                        log::trace!("hoist_declarations: hoisted lexical '{}' into env {:p}", name, env);
+                    }
                 }
-            }
-            StatementKind::Const(decls) => {
-                for (name, _) in decls {
-                    env_set(mc, env, name, Value::Uninitialized)?;
+                StatementKind::Const(decls) => {
+                    for (name, _) in decls {
+                        env_set(mc, env, name, Value::Uninitialized)?;
+                        env.borrow_mut(mc).set_lexical(name.clone());
+                        log::trace!("hoist_declarations: hoisted const lexical '{}' into env {:p}", name, env);
+                    }
                 }
-            }
-            StatementKind::Class(class_def) => {
-                env_set(mc, env, &class_def.name, Value::Uninitialized)?;
-            }
-            StatementKind::Import(specifiers, _) => {
-                for spec in specifiers {
-                    match spec {
-                        ImportSpecifier::Default(name) => {
-                            env_set(mc, env, name, Value::Uninitialized)?;
-                        }
-                        ImportSpecifier::Named(name, alias) => {
-                            let binding_name = alias.as_ref().unwrap_or(name);
-                            env_set(mc, env, binding_name, Value::Uninitialized)?;
-                        }
-                        ImportSpecifier::Namespace(name) => {
-                            env_set(mc, env, name, Value::Uninitialized)?;
+                StatementKind::Class(class_def) => {
+                    env_set(mc, env, &class_def.name, Value::Uninitialized)?;
+                    env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                    log::trace!("hoist_declarations: hoisted class lexical '{}' into env {:p}", class_def.name, env);
+                }
+                StatementKind::Import(specifiers, _) => {
+                    for spec in specifiers {
+                        match spec {
+                            ImportSpecifier::Default(name) => {
+                                env_set(mc, env, name, Value::Uninitialized)?;
+                            }
+                            ImportSpecifier::Named(name, alias) => {
+                                let binding_name = alias.as_ref().unwrap_or(name);
+                                env_set(mc, env, binding_name, Value::Uninitialized)?;
+                                env.borrow_mut(mc).set_lexical(binding_name.clone());
+                            }
+                            ImportSpecifier::Namespace(name) => {
+                                env_set(mc, env, name, Value::Uninitialized)?;
+                            }
                         }
                     }
                 }
-            }
-            StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
-                let mut names = Vec::new();
-                collect_names_from_destructuring(pattern, &mut names);
-                for name in names {
-                    env_set(mc, env, &name, Value::Uninitialized)?;
+                StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
+                    let mut names = Vec::new();
+                    collect_names_from_destructuring(pattern, &mut names);
+                    for name in names {
+                        env_set(mc, env, &name, Value::Uninitialized)?;
+                    }
                 }
-            }
-            StatementKind::LetDestructuringObject(pattern, _) | StatementKind::ConstDestructuringObject(pattern, _) => {
-                let mut names = Vec::new();
-                collect_names_from_object_destructuring(pattern, &mut names);
-                for name in names {
-                    env_set(mc, env, &name, Value::Uninitialized)?;
+                StatementKind::LetDestructuringObject(pattern, _) | StatementKind::ConstDestructuringObject(pattern, _) => {
+                    let mut names = Vec::new();
+                    collect_names_from_object_destructuring(pattern, &mut names);
+                    for name in names {
+                        env_set(mc, env, &name, Value::Uninitialized)?;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
     Ok(())
@@ -1130,6 +1257,11 @@ pub fn evaluate_statements<'gc>(
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    log::trace!(
+        "evaluate_statements: entering env {:p} lexicals={:?}",
+        env,
+        env.borrow().lexical_declarations
+    );
     match evaluate_statements_with_labels(mc, env, statements, &[], &[])? {
         ControlFlow::Normal(val) => Ok(val),
         ControlFlow::Return(val) => Ok(val),
@@ -1525,31 +1657,143 @@ pub fn evaluate_statements_with_labels<'gc>(
     // its prototype set to the global env and perform hoisting/evaluation there
     // so declarations don't leak into the global scope.
     let mut exec_env = *env;
-    if let Some(stmt0) = statements.first()
+
+    // Detect indirect eval marker on the provided environment (global) so we
+    // can apply the correct hoisting semantics for indirect evals.
+    let is_indirect_eval = if let Some(flag_rc) = object_get_key_value(env, "__is_indirect_eval") {
+        matches!(*flag_rc.borrow(), Value::Boolean(true))
+    } else {
+        false
+    };
+
+    // Check for 'use strict' directive
+    let starts_with_use_strict = if let Some(stmt0) = statements.first()
         && let StatementKind::Expr(expr) = &*stmt0.kind
         && let Expr::StringLit(s) = expr
         && utf16_to_utf8(s).as_str() == "use strict"
     {
-        log::trace!("evaluate_statements: detected 'use strict' directive; marking env as strict");
-        // If this env (or its prototype chain) indicates it is an indirect eval
-        // invocation, create a fresh declarative environment whose prototype is
-        // the current env so hoisting occurs on the new env and does not mutate
-        // the global bindings.
-        if let Some(flag_rc) = object_get_key_value(env, "__is_indirect_eval")
-            && matches!(*flag_rc.borrow(), Value::Boolean(true))
-        {
+        true
+    } else {
+        false
+    };
+
+    if is_indirect_eval {
+        if starts_with_use_strict {
             log::trace!("evaluate_statements: indirect strict eval - creating declarative env");
             let new_env = crate::core::new_js_object_data(mc);
             new_env.borrow_mut(mc).prototype = Some(*env);
             // Prevent hoisting into the global env: treat this declarative env as a function scope
             new_env.borrow_mut(mc).is_function_scope = true;
             exec_env = new_env;
+            env_set_strictness(mc, &exec_env, true)?;
+
+            // In the strict indirect case, hoisting should be performed on the
+            // new environment so function declarations do not leak into the global
+            // environment.
+            hoist_declarations(mc, &exec_env, statements, false, true)?;
+        } else {
+            // Non-strict indirect eval: lexical declarations (let/const/class)
+            // must be created in a fresh declarative environment whose prototype
+            // is the global env, but var/function/var-hoisted declarations still
+            // go into the global variable environment.
+            log::trace!("evaluate_statements: non-strict indirect eval - create lex env for lexical bindings");
+            // Find topmost global environment (prototype == None)
+            let mut top_env = Some(*env);
+            let mut global_env = *env;
+            while let Some(e) = top_env {
+                if e.borrow().prototype.is_none() {
+                    global_env = e;
+                    break;
+                }
+                top_env = e.borrow().prototype;
+            }
+
+            log::trace!(
+                "evaluate_statements: computed global_env ptr={:p} extensible={}",
+                &global_env,
+                global_env.borrow().is_extensible()
+            );
+            let lex_env = crate::core::new_js_object_data(mc);
+            lex_env.borrow_mut(mc).prototype = Some(global_env);
+
+            // Hoist functions and var declarations into the global env,
+            // but skip lexical hoisting there.
+            log::trace!(
+                "evaluate_statements: hoisting functions/vars on global env {:p} (skip_lexicals=true)",
+                &global_env
+            );
+            hoist_declarations(mc, &global_env, statements, true, true)?;
+            log::trace!(
+                "evaluate_statements: finished hoisting functions/vars on global env {:p}",
+                &global_env
+            );
+
+            // Now perform lexical hoisting (TDZ) into the lex env
+            for stmt in statements {
+                match &*stmt.kind {
+                    StatementKind::Let(decls) => {
+                        for (name, _) in decls {
+                            env_set(mc, &lex_env, name, Value::Uninitialized)?;
+                            lex_env.borrow_mut(mc).set_lexical(name.clone());
+                            log::trace!(
+                                "evaluate_statements: non-strict indirect - hoisted lexical '{}' into lex_env {:p}",
+                                name,
+                                &lex_env
+                            );
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            env_set(mc, &lex_env, name, Value::Uninitialized)?;
+                            lex_env.borrow_mut(mc).set_lexical(name.clone());
+                            log::trace!(
+                                "evaluate_statements: non-strict indirect - hoisted const lexical '{}' into lex_env {:p}",
+                                name,
+                                &lex_env
+                            );
+                        }
+                    }
+                    StatementKind::Class(class_def) => {
+                        env_set(mc, &lex_env, &class_def.name, Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                        log::trace!(
+                            "evaluate_statements: non-strict indirect - hoisted class lexical '{}' into lex_env {:p}",
+                            class_def.name,
+                            &lex_env
+                        );
+                    }
+                    StatementKind::Import(specifiers, _) => {
+                        for spec in specifiers {
+                            match spec {
+                                ImportSpecifier::Default(name) => {
+                                    env_set(mc, &lex_env, name, Value::Uninitialized)?;
+                                }
+                                ImportSpecifier::Named(name, alias) => {
+                                    let binding_name = alias.as_ref().unwrap_or(name);
+                                    env_set(mc, &lex_env, binding_name, Value::Uninitialized)?;
+                                }
+                                ImportSpecifier::Namespace(name) => {
+                                    env_set(mc, &lex_env, name, Value::Uninitialized)?;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Execute in the lex env so lexical references resolve correctly
+            exec_env = lex_env;
+        }
+    } else {
+        // Not an indirect eval: just honor 'use strict' directive if present
+        if starts_with_use_strict {
+            log::trace!("evaluate_statements: detected 'use strict' directive; marking env as strict");
+            env_set_strictness(mc, &exec_env, true)?;
         }
 
-        env_set_strictness(mc, &exec_env, true)?;
+        hoist_declarations(mc, &exec_env, statements, false, false)?;
     }
-
-    hoist_declarations(mc, &exec_env, statements)?;
 
     // If the execution environment is marked strict, scan for certain forbidden
     // patterns such as assignment to the Identifier 'arguments' in function
@@ -1606,24 +1850,90 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
     // This mirrors evaluate_statements_with_labels but returns the last_value alongside the ControlFlow
 
     let mut exec_env = *env;
-    if let Some(stmt0) = statements.first()
+
+    // Detect indirect eval marker on the provided environment (global) so we
+    // can apply the correct hoisting semantics for indirect evals.
+    let is_indirect_eval = if let Some(flag_rc) = object_get_key_value(env, "__is_indirect_eval") {
+        matches!(*flag_rc.borrow(), Value::Boolean(true))
+    } else {
+        false
+    };
+
+    // Check for 'use strict' directive
+    let starts_with_use_strict = if let Some(stmt0) = statements.first()
         && let StatementKind::Expr(expr) = &*stmt0.kind
         && let Expr::StringLit(s) = expr
         && utf16_to_utf8(s).as_str() == "use strict"
     {
-        if let Some(flag_rc) = object_get_key_value(env, "__is_indirect_eval")
-            && matches!(*flag_rc.borrow(), Value::Boolean(true))
-        {
+        true
+    } else {
+        false
+    };
+
+    if is_indirect_eval {
+        if starts_with_use_strict {
             let new_env = crate::core::new_js_object_data(mc);
             new_env.borrow_mut(mc).prototype = Some(*env);
             new_env.borrow_mut(mc).is_function_scope = true;
             exec_env = new_env;
+            env_set_strictness(mc, &exec_env, true)?;
+
+            // In strict indirect case, hoist into the new env so declarations don't
+            // mutate the global bindings.
+            hoist_declarations(mc, &exec_env, statements, false, true)?;
+        } else {
+            // Non-strict indirect: lexical declarations should use a fresh
+            // decl env while var/function remain in global env.
+            let lex_env = crate::core::new_js_object_data(mc);
+            lex_env.borrow_mut(mc).prototype = Some(*env);
+
+            hoist_declarations(mc, env, statements, true, true)?;
+
+            // Hoist lexical decls into lex env
+            for stmt in statements {
+                match &*stmt.kind {
+                    StatementKind::Let(decls) => {
+                        for (name, _) in decls {
+                            env_set(mc, &lex_env, name, Value::Uninitialized)?;
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            env_set(mc, &lex_env, name, Value::Uninitialized)?;
+                        }
+                    }
+                    StatementKind::Class(class_def) => {
+                        env_set(mc, &lex_env, &class_def.name, Value::Uninitialized)?;
+                    }
+                    StatementKind::Import(specifiers, _) => {
+                        for spec in specifiers {
+                            match spec {
+                                ImportSpecifier::Default(name) => {
+                                    env_set(mc, &lex_env, name, Value::Uninitialized)?;
+                                }
+                                ImportSpecifier::Named(name, alias) => {
+                                    let binding_name = alias.as_ref().unwrap_or(name);
+                                    env_set(mc, &lex_env, binding_name, Value::Uninitialized)?;
+                                }
+                                ImportSpecifier::Namespace(name) => {
+                                    env_set(mc, &lex_env, name, Value::Uninitialized)?;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            exec_env = lex_env;
+        }
+    } else {
+        if starts_with_use_strict {
+            env_set_strictness(mc, &exec_env, true)?;
         }
 
-        env_set_strictness(mc, &exec_env, true)?;
+        hoist_declarations(mc, &exec_env, statements, false, false)?;
     }
-
-    hoist_declarations(mc, &exec_env, statements)?;
 
     if env_get_strictness(&exec_env) {
         for stmt in statements {
@@ -2916,7 +3226,8 @@ fn eval_res<'gc>(
         StatementKind::ForOf(decl_kind_opt, var_name, iterable, body) => {
             // Hoist var declaration if necessary
             if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
-                hoist_name(mc, env, var_name)?;
+                let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval").is_some();
+                hoist_name(mc, env, var_name, is_indirect_eval)?;
             }
 
             // If this is a lexical (let/const) declaration, create a head lexical environment
@@ -3315,7 +3626,8 @@ fn eval_res<'gc>(
 
             // If the for-in uses `var`, ensure the variable is hoisted to function scope
             if let Some(crate::core::VarDeclKind::Var) = decl_kind {
-                hoist_name(mc, env, var_name)?;
+                let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval").is_some();
+                hoist_name(mc, env, var_name, is_indirect_eval)?;
             }
 
             if let Value::Object(obj) = iter_val {
@@ -3620,7 +3932,8 @@ fn eval_res<'gc>(
             collect_names_from_object_destructuring(pattern, &mut names);
             for name in names.iter() {
                 if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
-                    hoist_name(mc, env, name)?;
+                    let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval").is_some();
+                    hoist_name(mc, env, name, is_indirect_eval)?;
                 }
             }
 
@@ -3775,7 +4088,8 @@ fn eval_res<'gc>(
             collect_names_from_destructuring(pattern, &mut names);
             for name in names.iter() {
                 if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
-                    hoist_name(mc, env, name)?;
+                    let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval").is_some();
+                    hoist_name(mc, env, name, is_indirect_eval)?;
                 }
             }
 
@@ -3919,7 +4233,8 @@ fn eval_res<'gc>(
             collect_names_from_object_destructuring(pattern, &mut names);
             for name in names.iter() {
                 if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
-                    hoist_name(mc, env, name)?;
+                    let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval").is_some();
+                    hoist_name(mc, env, name, is_indirect_eval)?;
                 }
             }
 
@@ -4023,7 +4338,8 @@ fn eval_res<'gc>(
             collect_names_from_destructuring(pattern, &mut names);
             for name in names.iter() {
                 if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
-                    hoist_name(mc, env, name)?;
+                    let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval").is_some();
+                    hoist_name(mc, env, name, is_indirect_eval)?;
                 }
             }
 
@@ -7613,15 +7929,17 @@ fn evaluate_expr_call<'gc>(
     // Is this a *direct* eval call? (IsDirectEvalCall: callee is an IdentifierReference named "eval")
     let is_direct_eval = matches!(func_expr, Expr::Var(name, ..) if name == "eval");
 
-    // If this is an *indirect* call to the builtin "eval", execute it in the global environment
+    // If this is an *indirect* call to the builtin "eval", execute it in the caller's global environment
+    // (the environment provided to the call), not necessarily the topmost realm object. Use the
+    // passed-in `env` as the env_for_call when indirect. This allows detecting global lexical
+    // declarations that live in the caller's global scope.
     let is_indirect_eval_call = matches!(func_val, Value::Function(ref name) if name == "eval") && !is_direct_eval;
     let env_for_call = if is_indirect_eval_call {
-        // Walk up prototypes to find the top-level (global) environment
-        let mut root_env = *env;
-        while let Some(proto) = root_env.borrow().prototype {
-            root_env = proto;
+        let mut t = *env;
+        while let Some(proto) = t.borrow().prototype {
+            t = proto;
         }
-        root_env
+        t
     } else {
         *env
     };

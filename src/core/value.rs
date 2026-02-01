@@ -164,6 +164,8 @@ pub struct JSObjectData<'gc> {
     pub non_configurable: std::collections::HashSet<PropertyKey<'gc>>,
     pub prototype: Option<JSObjectDataPtr<'gc>>,
     pub is_function_scope: bool,
+    /// Track names that were declared as lexical bindings (let/const/class) on this environment
+    pub lexical_declarations: std::collections::HashSet<String>,
     // Whether new own properties can be added to this object. Default true.
     pub extensible: bool,
     // Optional internal class definition slot (not exposed as an own property)
@@ -223,6 +225,14 @@ impl<'gc> JSObjectData<'gc> {
     }
     pub fn set_const(&mut self, key: String) {
         self.constants.insert(key);
+    }
+
+    pub fn set_lexical(&mut self, key: String) {
+        self.lexical_declarations.insert(key);
+    }
+
+    pub fn has_lexical(&self, key: &str) -> bool {
+        self.lexical_declarations.contains(key)
     }
     pub fn set_non_configurable(&mut self, key: impl Into<PropertyKey<'gc>>) {
         let key = key.into();

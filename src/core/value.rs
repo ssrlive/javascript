@@ -700,9 +700,25 @@ pub fn to_primitive<'gc>(
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                 && let Some(tp_sym_val) = object_get_key_value(sym_obj, "toPrimitive")
                 && let Value::Symbol(tp_sym) = &*tp_sym_val.borrow()
-                && let Some(func_val_rc) = object_get_key_value(obj, crate::core::PropertyKey::Symbol(*tp_sym))
             {
-                let func_val = func_val_rc.borrow().clone();
+                let func_val = if let Some(val_ptr) = object_get_key_value(obj, crate::core::PropertyKey::Symbol(*tp_sym)) {
+                    let val = val_ptr.borrow().clone();
+                    match val {
+                        Value::Property { getter, value, .. } => {
+                            if let Some(g) = getter {
+                                crate::core::eval::call_accessor(mc, env, obj, &g)?
+                            } else if let Some(v) = value {
+                                v.borrow().clone()
+                            } else {
+                                Value::Undefined
+                            }
+                        }
+                        Value::Getter(..) => crate::core::eval::call_accessor(mc, env, obj, &val)?,
+                        _ => val,
+                    }
+                } else {
+                    Value::Undefined
+                };
                 if !matches!(func_val, Value::Undefined | Value::Null) {
                     log::debug!("DBG to_primitive: calling @@toPrimitive with hint={}", hint);
                     // Call it with hint
@@ -711,6 +727,13 @@ pub fn to_primitive<'gc>(
                     use std::slice::from_ref;
                     let res_eval: Result<Value<'gc>, crate::core::js_error::EvalError> = match func_val {
                         Value::Closure(cl) => crate::core::call_closure(mc, &cl, Some(Value::Object(*obj)), from_ref(&arg), env, None),
+                        Value::Function(name) => crate::core::evaluate_call_dispatch(
+                            mc,
+                            env,
+                            Value::Function(name),
+                            Some(Value::Object(*obj)),
+                            vec![arg.clone()],
+                        ),
                         Value::Object(func_obj) => {
                             if let Some(cl_ptr) = func_obj.borrow().get_closure() {
                                 if let Value::Closure(cl) = &*cl_ptr.borrow() {

@@ -940,7 +940,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_) => {
                     // If it's an object, it might be a function object (with an internal closure slot)
                     log::debug!("DBG handle_to_string_method: calling toString implementation");
-                    let res = evaluate_call_dispatch(mc, env, method_val, Some(obj_val.clone()), Vec::new()).map_err(JSError::from)?;
+                    let res = evaluate_call_dispatch(mc, env, method_val, Some(obj_val.clone()), Vec::new())?;
                     log::debug!("DBG handle_to_string_method: toString returned {:?}", res);
                     return Ok(res);
                 }

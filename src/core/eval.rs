@@ -92,6 +92,13 @@ fn value_to_concat_string<'gc>(val: &Value<'gc>) -> String {
     }
 }
 
+fn to_string_for_concat<'gc>(val: &Value<'gc>) -> Result<String, EvalError<'gc>> {
+    match val {
+        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol").into()),
+        _ => Ok(value_to_concat_string(val)),
+    }
+}
+
 fn loose_equal<'gc>(
     mc: &MutationContext<'gc>,
     l_val: Value<'gc>,
@@ -7969,55 +7976,30 @@ fn evaluate_expr_binary<'gc>(
     let l_val = evaluate_expr(mc, env, left)?;
     let r_val = evaluate_expr(mc, env, right)?;
     match op {
-        BinaryOp::Add => match (l_val.clone(), r_val.clone()) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln + *rn))),
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
-            (Value::String(ls), Value::String(rs)) => {
-                let mut res = ls.clone();
-                res.extend(rs);
-                Ok(Value::String(res))
-            }
-            (Value::String(ls), other) => {
-                // Ensure ToPrimitive('default') is applied to the non-string operand
-                let r_prim = crate::core::to_primitive(mc, &other, "default", env)?;
-                let mut res = ls.clone();
+        BinaryOp::Add => {
+            let l_prim = crate::core::to_primitive(mc, &l_val, "default", env)?;
+            let r_prim = crate::core::to_primitive(mc, &r_val, "default", env)?;
+
+            // If either is String, concatenate with ToString semantics
+            if matches!(l_prim, Value::String(_)) || matches!(r_prim, Value::String(_)) {
+                let mut res = match &l_prim {
+                    Value::String(ls) => ls.clone(),
+                    _ => utf8_to_utf16(&to_string_for_concat(&l_prim)?),
+                };
                 match &r_prim {
                     Value::String(rs) => res.extend(rs.clone()),
-                    _ => res.extend(utf8_to_utf16(&value_to_concat_string(&r_prim))),
+                    _ => res.extend(utf8_to_utf16(&to_string_for_concat(&r_prim)?)),
                 }
-                Ok(Value::String(res))
+                return Ok(Value::String(res));
             }
-            (other, Value::String(rs)) => {
-                // Ensure ToPrimitive('default') is applied to the non-string operand
-                let l_prim = crate::core::to_primitive(mc, &other, "default", env)?;
-                let mut res = match &l_prim {
-                    Value::String(ls2) => ls2.clone(),
-                    _ => utf8_to_utf16(&value_to_concat_string(&l_prim)),
-                };
-                res.extend(rs.clone());
-                Ok(Value::String(res))
+
+            match (l_prim, r_prim) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln + *rn))),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
+                (lprim, rprim) => Ok(Value::Number(to_number(&lprim)? + to_number(&rprim)?)),
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            _ => {
-                // Try ToPrimitive on both operands with 'default' hint and handle string concatenation or numeric addition
-                let l_prim = crate::core::to_primitive(mc, &l_val, "default", env)?;
-                let r_prim = crate::core::to_primitive(mc, &r_val, "default", env)?;
-                match (l_prim, r_prim) {
-                    (Value::String(ls), other) => {
-                        let mut res = ls.clone();
-                        res.extend(utf8_to_utf16(&value_to_concat_string(&other)));
-                        Ok(Value::String(res))
-                    }
-                    (other, Value::String(rs)) => {
-                        let mut res = utf8_to_utf16(&value_to_concat_string(&other));
-                        res.extend(rs);
-                        Ok(Value::String(res))
-                    }
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
-                    (lprim, rprim) => Ok(Value::Number(to_number(&lprim)? + to_number(&rprim)?)),
-                }
-            }
-        },
+        }
         BinaryOp::Sub => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln - *rn))),
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8404,14 +8386,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::BigInt(chars) => {
             let s = utf16_to_utf8(chars);
-            // Assuming the parser gives us a valid integer string.
-            // But it might have 'n' at the end?
-            // The parser probably stripped 'n' or it's just digits.
-            // If it's from source code "123n", lexer handles it.
-            // Let's assume it's parsable.
-            let bi = s
-                .parse::<BigInt>()
-                .map_err(|e| EvalError::Js(raise_eval_error!(format!("Invalid BigInt literal: {e}"))))?;
+            let bi = crate::js_bigint::parse_bigint_string(&s)?;
             Ok(Value::BigInt(Box::new(bi)))
         }
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
@@ -10518,37 +10493,22 @@ pub(crate) fn call_accessor<'gc>(
             // If the getter carried a home object, propagate it into call env so `super` resolves
             call_env.borrow_mut(mc).set_home_object(home_opt.clone());
             let body_clone = body.clone();
-            evaluate_statements(mc, &call_env, &body_clone)
+            match evaluate_statements_with_labels(mc, &call_env, &body_clone, &[], &[])? {
+                ControlFlow::Return(val) => Ok(val),
+                ControlFlow::Normal(_) => Ok(Value::Undefined),
+                ControlFlow::Throw(v, line, column) => Err(EvalError::Throw(v, line, column)),
+                ControlFlow::Break(_) => Err(raise_syntax_error!("break statement not in loop or switch").into()),
+                ControlFlow::Continue(_) => Err(raise_syntax_error!("continue statement not in loop").into()),
+            }
         }
-        Value::Closure(cl) => {
-            let cl_data = cl;
-            let call_env = crate::core::new_js_object_data(mc);
-            call_env.borrow_mut(mc).prototype = cl_data.env;
-            call_env.borrow_mut(mc).is_function_scope = true;
-            object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
-            // Propagate [[HomeObject]] if present on the closure
-            call_env.borrow_mut(mc).set_home_object(cl_data.home_object.clone());
-            let body_clone = cl_data.body.clone();
-            evaluate_statements(mc, &call_env, &body_clone)
-        }
+        Value::Closure(cl) => crate::core::call_closure(mc, cl, Some(Value::Object(*receiver)), &[], env, None),
         Value::Object(obj) => {
             // Check for internal closure
             let cl_val_opt = obj.borrow().get_closure();
             if let Some(cl_val) = cl_val_opt
                 && let Value::Closure(cl) = &*cl_val.borrow()
             {
-                // If the function object has a stored home object, propagate that into the call env
-                if let Some(home_obj) = obj.borrow().get_home_object() {
-                    let cl_data = cl;
-                    let call_env = crate::core::new_js_object_data(mc);
-                    call_env.borrow_mut(mc).prototype = cl_data.env;
-                    call_env.borrow_mut(mc).is_function_scope = true;
-                    object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
-                    call_env.borrow_mut(mc).set_home_object(Some(home_obj));
-                    let body_clone = cl_data.body.clone();
-                    return evaluate_statements(mc, &call_env, &body_clone);
-                }
-                return call_accessor(mc, env, receiver, &Value::Closure(*cl));
+                return crate::core::call_closure(mc, cl, Some(Value::Object(*receiver)), &[], env, Some(*obj));
             }
             Err(raise_type_error!("Accessor is not a function").into())
         }

@@ -32,7 +32,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 840 --focus language
+          node ci/runner.js --limit 870 --focus language
 
       - name: Upload results
         if: ${{ !cancelled() }}

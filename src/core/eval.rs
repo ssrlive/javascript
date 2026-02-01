@@ -11901,10 +11901,14 @@ fn evaluate_expr_array<'gc>(
                             && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                             && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
                             && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
-                            && let Some(iter_fn_val) = object_get_key_value(&obj, iter_sym)
                         {
+                            let iter_fn_val = get_property_with_accessors(mc, env, &obj, iter_sym)?;
+                            if matches!(iter_fn_val, Value::Undefined | Value::Null) {
+                                return Err(raise_type_error!("Spread target is not iterable").into());
+                            }
+
                             // Call iterator method on the object to get an iterator
-                            let iterator = match &*iter_fn_val.borrow() {
+                            let iterator = match iter_fn_val {
                                 Value::Function(name) => {
                                     let call_env = crate::js_class::prepare_call_env_with_this(
                                         mc,
@@ -11919,22 +11923,24 @@ fn evaluate_expr_array<'gc>(
                                     crate::core::evaluate_call_dispatch(
                                         mc,
                                         &call_env,
-                                        Value::Function(name.clone()),
+                                        Value::Function(name),
                                         Some(Value::Object(obj)),
                                         vec![],
                                     )?
                                 }
-                                Value::Closure(cl) => call_closure(mc, cl, Some(Value::Object(obj)), &[], env, None)?,
+                                Value::Closure(cl) => call_closure(mc, &cl, Some(Value::Object(obj)), &[], env, None)?,
+                                Value::Object(func_obj) => {
+                                    crate::core::evaluate_call_dispatch(mc, env, Value::Object(func_obj), Some(Value::Object(obj)), vec![])?
+                                }
                                 _ => return Err(raise_type_error!("Spread target is not iterable").into()),
                             };
 
                             // Consume iterator by repeatedly calling its next() method
                             if let Value::Object(iter_obj) = iterator {
                                 loop {
-                                    if let Some(next_val) = object_get_key_value(&iter_obj, "next") {
-                                        let next_fn = next_val.borrow().clone();
-
-                                        let res = match &next_fn {
+                                    let next_fn = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                                    if !matches!(next_fn, Value::Undefined | Value::Null) {
+                                        let res = match next_fn {
                                             Value::Function(name) => {
                                                 let call_env = crate::js_class::prepare_call_env_with_this(
                                                     mc,
@@ -11954,28 +11960,28 @@ fn evaluate_expr_array<'gc>(
                                                     vec![],
                                                 )?
                                             }
-                                            Value::Closure(cl) => call_closure(mc, cl, Some(Value::Object(iter_obj)), &[], env, None)?,
+                                            Value::Closure(cl) => call_closure(mc, &cl, Some(Value::Object(iter_obj)), &[], env, None)?,
+                                            Value::Object(func_obj) => crate::core::evaluate_call_dispatch(
+                                                mc,
+                                                env,
+                                                Value::Object(func_obj),
+                                                Some(Value::Object(iter_obj)),
+                                                vec![],
+                                            )?,
                                             _ => {
                                                 return Err(raise_type_error!("Iterator.next is not callable").into());
                                             }
                                         };
 
                                         if let Value::Object(res_obj) = res {
-                                            let done = if let Some(done_rc) = object_get_key_value(&res_obj, "done") {
-                                                if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
-                                            } else {
-                                                false
-                                            };
+                                            let done_val = get_property_with_accessors(mc, env, &res_obj, "done")?;
+                                            let done = matches!(done_val, Value::Boolean(true));
 
                                             if done {
                                                 break;
                                             }
 
-                                            let value = if let Some(val_rc) = object_get_key_value(&res_obj, "value") {
-                                                val_rc.borrow().clone()
-                                            } else {
-                                                Value::Undefined
-                                            };
+                                            let value = get_property_with_accessors(mc, env, &res_obj, "value")?;
 
                                             object_set_key_value(mc, &arr_obj, index, value)?;
                                             index += 1;

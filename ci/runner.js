@@ -133,8 +133,15 @@ const ordered = collectTests();
 
 // feature probe cache
 const FEATURE_SUPPORTED = {};
+// Hard-coded unsupported features: treat these as unsupported even if probes are absent
+const HARDCODED_UNSUPPORTED = new Set([]);
 function detectFeature(feat){
+  // Allow environment override to force running unsupported features
   if (process.env.FORCE_RUN_UNSUPPORTED_FEATURES && process.env.FORCE_RUN_UNSUPPORTED_FEATURES !== 'false') { FEATURE_SUPPORTED[feat] = true; return true; }
+
+  // Short-circuit for known-unsupported features
+  if (HARDCODED_UNSUPPORTED.has(feat)) { FEATURE_SUPPORTED[feat] = false; return false; }
+
   if (feat in FEATURE_SUPPORTED) return FEATURE_SUPPORTED[feat];
   const probeFile = path.join(__dirname, 'feature_probes', feat.replace(/\./g,'_') + '.js');
   if (fs.existsSync(probeFile) && BIN){

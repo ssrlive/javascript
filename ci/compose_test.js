@@ -20,6 +20,11 @@ function parseList(meta, key) {
   return inner.split(',').map(s => s.trim().replace(/^['\"]|['\"]$/g, '')).filter(Boolean);
 }
 
+function hasFeature(meta, name) {
+  const arr = parseList(meta, 'features');
+  return arr.includes(name);
+}
+
 function hasFlag(meta, name) {
   const re = /flags:\s*\[([\s\S]*?)\]/;
   const m = meta.match(re);
@@ -50,6 +55,56 @@ function ensureArrayDistinct(arr) {
     }
   }
   return out;
+}
+
+const realmMarker = '// Inject: minimal $262 shim for cross-realm tests - idempotent';
+function get262StubLines() {
+  // Minimal, idempotent shim for $262.createRealm to support simple cross-realm tests
+  return [
+    '// Inject: minimal $262 shim for cross-realm tests - idempotent',
+    'if (typeof $262 === "undefined") {',
+    '  var $262 = {',
+    '    createRealm: function() {',
+    '      var g = {};',
+    '      g.eval = function(src) {',
+    '        src = String(src);',
+    '        var transformed = "";',
+    '        var re = /\\bvar\\s+([^;]+)/g;',
+    '        var lastIndex = 0;',
+    '        var match;',
+    '        while ((match = re.exec(src)) !== null) {',
+    '          transformed += src.slice(lastIndex, match.index);',
+    '          var decls = match[1];',
+    '          var repl = decls.split(",").map(function(p) {',
+    '            var s = p.trim();',
+    '            var mm = s.match(/^([A-Za-z_$][\\w$]*)(\\s*=\\s*[\\s\\S]+)?$/);',
+    '            if (!mm) return "";',
+    '            var name = mm[1];',
+    '            var init = mm[2];',
+    '            if (init) return "this." + name + init;',
+    '            return "this." + name + " = undefined";',
+    '          }).join("; ");',
+    '          transformed += repl;',
+    '          lastIndex = re.lastIndex;',
+    '        }',
+    '        transformed += src.slice(lastIndex);',
+    '        // Execute with `this` bound to realm global; var->this.x replaced already',
+    '        return (new Function("with (this) { " + transformed + " }")).call(g);',
+    '      };',
+    '      return { global: g };',
+    '    }',
+    '  };',
+    '}',
+  ];
+}
+
+function verifyComposeStubMarkerCount(testPath, harnessIndex = {}, prependFiles = [], needStrict = true, expected = 1) {
+  // Compose the test and check the number of stub markers present
+  const { tmpPath } = composeTest({ testPath, repoDir: '.', harnessIndex, prependFiles, needStrict });
+  const src = fs.readFileSync(tmpPath, 'utf8');
+  const re = new RegExp(realmMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+  const count = (src.match(re) || []).length;
+  return count === expected;
 }
 
 function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needStrict = true}) {
@@ -145,6 +200,8 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   for (const p of PREPEND_FILES) {
     if (!p) continue;
     if (fs.existsSync(p)) {
+      const absP = path.resolve(p);
+      outLines.push(`// Inject: ${absP}`);
       outLines.push(fs.readFileSync(p, 'utf8'));
       outLines.push('');
     }
@@ -161,7 +218,17 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push('}');
   outLines.push('');
 
+  const meta = extractMeta(testPath);
+  if (hasFeature(meta, 'cross-realm')) {
+    if (!outLines.some(l => l.indexOf(realmMarker) !== -1)) {
+      outLines.push(...get262StubLines());
+      outLines.push('');
+    }
+  }
+
   // append test source
+  const absTest = path.resolve(testPath);
+  outLines.push(`// Inject: ${absTest}`);
   outLines.push(fs.readFileSync(testPath, 'utf8'));
 
   fs.writeFileSync(tmpName, outLines.join('\n'));
@@ -190,9 +257,25 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
     debug.push(`DEBUG PREPEND_FIXED ${fixedUnique.map(p => path.relative('.', p)).join(',')} , for ${testPath}`);
 
     for (const p of fixedUnique) {
+      if (!p) continue;
+      const absP = path.resolve(p);
+      lines2.push(`// Inject: ${absP}`);
       lines2.push(fs.readFileSync(p, 'utf8'));
       lines2.push('');
     }
+
+    // If the test requires cross-realm support, inject the minimal $262 shim into the rebuilt file as well
+    const metaFixed = extractMeta(testPath);
+    if (hasFeature(metaFixed, 'cross-realm')) {
+      if (!lines2.some(l => l.indexOf(realmMarker) !== -1)) {
+        lines2.push('');
+        lines2.push(...get262StubLines());
+        lines2.push('');
+      }
+    }
+
+    const absTest = path.resolve(testPath);
+    lines2.push(`// Inject: ${absTest}`);
     lines2.push(fs.readFileSync(testPath, 'utf8'));
     fs.writeFileSync(fixedTmp, lines2.join('\n'));
     return {testToRun: fixedTmp, tmpPath: fixedTmp, cleanupTmp: true, debug};
@@ -201,4 +284,4 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   return {testToRun: tmpName, tmpPath: tmpName, cleanupTmp: true, debug};
 }
 
-module.exports = {extractMeta, parseList, hasFlag, composeTest, referencesAssert};
+module.exports = {extractMeta, parseList, hasFlag, hasFeature, get262StubLines, composeTest, referencesAssert, verifyComposeStubMarkerCount};

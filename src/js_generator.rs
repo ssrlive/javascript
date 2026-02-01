@@ -22,6 +22,7 @@ pub fn handle_generator_function_call<'gc>(
     mc: &MutationContext<'gc>,
     closure: &crate::core::ClosureData<'gc>,
     args: &[Value<'gc>],
+    this_val: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, JSError> {
     // Create a new generator object (internal data)
     let generator = Gc::new(
@@ -30,6 +31,7 @@ pub fn handle_generator_function_call<'gc>(
             params: closure.params.clone(),
             body: closure.body.clone(),
             env: closure.env.expect("closure env must exist"),
+            this_val,
             // Store call-time arguments so parameter bindings can be created
             // when the generator actually starts executing on the first `next()`.
             args: args.to_vec(),
@@ -43,6 +45,8 @@ pub fn handle_generator_function_call<'gc>(
 
     // Store the actual generator data
     object_set_key_value(mc, &gen_obj, "__generator__", Value::Generator(generator))?;
+
+    object_set_key_value(mc, &gen_obj, "__in_generator", Value::Boolean(true))?;
 
     // Set prototype to Generator.prototype if available
     if let Some(gen_ctor_val) = crate::core::env_get(closure.env.as_ref().expect("Generator needs env"), "Generator")
@@ -745,12 +749,21 @@ pub fn generator_next<'gc>(
                 // Prepare the function activation environment with the captured
                 // call-time arguments so that parameter bindings exist even if the
                 // generator suspends before executing any pre-statements.
-                let func_env =
-                    prepare_function_call_env(mc, Some(&gen_obj.env), None, Some(&gen_obj.params[..]), &gen_obj.args, None, None)?;
+                let func_env = prepare_function_call_env(
+                    mc,
+                    Some(&gen_obj.env),
+                    gen_obj.this_val.clone(),
+                    Some(&gen_obj.params[..]),
+                    &gen_obj.args,
+                    None,
+                    None,
+                )?;
 
                 // Ensure `arguments` object exists for generator function body so
                 // parameter accesses (and `arguments.length`) reflect the passed args.
                 crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
+
+                object_set_key_value(mc, &func_env, "__in_generator", Value::Boolean(true))?;
 
                 // If the yield is inside a nested block/branch we may need to
                 // execute pre-statements that are inside that block before
@@ -792,10 +805,23 @@ pub fn generator_next<'gc>(
                 // can see bindings from the pre-stmts execution) and return that
                 // value as the yielded value.
                 if let Some(inner_expr_box) = yield_inner {
-                    // Use pre_env so the inner expression can access bindings created
-                    // in the function activation environment.
-                    let parent_env = pre_env_opt.as_ref().unwrap_or(&gen_obj.env);
-                    let func_env = prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
+                    // If the yield is inside a `for` loop body, ensure the loop
+                    // initializer and any body pre-statements execute so loop
+                    // bindings (e.g., `let i`) exist before evaluating the yield.
+                    if let StatementKind::For(for_stmt) = &*gen_obj.body[idx].kind {
+                        if let Some(init_stmt) = &for_stmt.init {
+                            crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(init_stmt))?;
+                        }
+                        if let Some(inner_idx) = inner_idx_opt
+                            && inner_idx > 0
+                        {
+                            let pre_stmts = for_stmt.body[0..inner_idx].to_vec();
+                            let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        }
+                    }
+
+                    // Evaluate inner expression in the current function env so
+                    // loop bindings are visible.
                     object_set_key_value(mc, &func_env, "__gen_throw_val", Value::Undefined)?;
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => {
@@ -814,8 +840,15 @@ pub fn generator_next<'gc>(
                 // prepared function activation environment using the captured
                 // call-time arguments, then complete the generator with the
                 // returned value.
-                let func_env =
-                    prepare_function_call_env(mc, Some(&gen_obj.env), None, Some(&gen_obj.params[..]), &gen_obj.args, None, None)?;
+                let func_env = prepare_function_call_env(
+                    mc,
+                    Some(&gen_obj.env),
+                    gen_obj.this_val.clone(),
+                    Some(&gen_obj.params[..]),
+                    &gen_obj.args,
+                    None,
+                    None,
+                )?;
                 // Ensure `arguments` exists for the no-yield completion path too.
                 crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
                 let res = crate::core::evaluate_statements(mc, &func_env, &gen_obj.body);
@@ -838,6 +871,12 @@ pub fn generator_next<'gc>(
             let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
             let mut replaced = false;
             log::trace!("DEBUG: tail[0] before: {:?}", tail[0]);
+            if pre_env.is_some()
+                && let Some(first_stmt) = tail.get_mut(0)
+                && let StatementKind::For(for_stmt) = first_stmt.kind.as_mut()
+            {
+                for_stmt.init = None;
+            }
             if let Some(first_stmt) = tail.get_mut(0) {
                 replace_first_yield_in_statement(first_stmt, &_send_value, &mut replaced);
             }
@@ -845,8 +884,11 @@ pub fn generator_next<'gc>(
 
             // Use the pre-execution environment if available so bindings created
             // by pre-statements remain visible when we resume execution.
-            let parent_env = if let Some(env) = pre_env.as_ref() { env } else { &gen_obj.env };
-            let func_env = prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
+            let func_env = if let Some(env) = pre_env.as_ref() {
+                *env
+            } else {
+                prepare_function_call_env(mc, Some(&gen_obj.env), gen_obj.this_val.clone(), None, &[], None, None)?
+            };
             // Prefer the cached initial yield value (if present) to avoid
             // re-evaluating the awaited expression in re-entry scenarios.
             // If the caller provided a concrete send value (e.g., the resolved
@@ -862,6 +904,55 @@ pub fn generator_next<'gc>(
             } else {
                 object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
             }
+
+            if let Some((idx, inner_idx_opt, yield_inner)) = find_first_yield_in_statements(&tail) {
+                let pre_env_opt: Option<JSObjectDataPtr> = if idx > 0 {
+                    let pre_stmts = tail[0..idx].to_vec();
+                    crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    Some(func_env)
+                } else if let Some(inner_idx) = inner_idx_opt {
+                    if inner_idx > 0
+                        && let StatementKind::Block(inner_stmts) = &*tail[idx].kind
+                    {
+                        let pre_stmts = inner_stmts[0..inner_idx].to_vec();
+                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    }
+                    Some(func_env)
+                } else {
+                    Some(func_env)
+                };
+
+                gen_obj.state = GeneratorState::Suspended {
+                    pc: pc_val + idx,
+                    stack: vec![],
+                    pre_env: pre_env_opt,
+                };
+
+                if let Some(inner_expr_box) = yield_inner {
+                    // If the yield is inside a `for` loop body, ensure the loop
+                    // initializer and any body pre-statements execute so loop
+                    // bindings (e.g., `let i`) exist before evaluating the yield.
+                    if let StatementKind::For(for_stmt) = &*tail[idx].kind
+                        && let Some(inner_idx) = inner_idx_opt
+                        && inner_idx > 0
+                    {
+                        let pre_stmts = for_stmt.body[0..inner_idx].to_vec();
+                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    }
+
+                    object_set_key_value(mc, &func_env, "__gen_throw_val", Value::Undefined)?;
+                    match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
+                        Ok(val) => {
+                            gen_obj.cached_initial_yield = Some(val.clone());
+                            return Ok(create_iterator_result(mc, val, false)?);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+
+                return Ok(create_iterator_result(mc, Value::Undefined, false)?);
+            }
+
             // Execute the (possibly modified) tail
             let result = crate::core::evaluate_statements(mc, &func_env, &tail);
             log::trace!("DEBUG: evaluate_statements result: {:?}", result);
@@ -924,7 +1015,7 @@ pub fn generator_throw<'gc>(
                 tail[0] = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None)).into();
             }
 
-            let func_env = prepare_function_call_env(mc, Some(&gen_obj.env), None, None, &[], None, None)?;
+            let func_env = prepare_function_call_env(mc, Some(&gen_obj.env), gen_obj.this_val.clone(), None, &[], None, None)?;
             object_set_key_value(mc, &func_env, "__gen_throw_val", throw_value.clone())?;
 
             // Execute the modified tail. If the throw is uncaught, evaluate_statements

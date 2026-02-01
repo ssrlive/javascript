@@ -39,6 +39,7 @@ pub struct JSGenerator<'gc> {
     pub params: Vec<DestructuringElement>,
     pub body: Vec<Statement>,
     pub env: JSObjectDataPtr<'gc>,
+    pub this_val: Option<Value<'gc>>,
     // Capture the call-time arguments so that parameter bindings can be
     // created when the generator starts executing.
     pub args: Vec<Value<'gc>>,

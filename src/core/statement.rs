@@ -305,7 +305,9 @@ pub enum ExportSpecifier {
 pub enum DestructuringElement {
     Variable(String, Option<Box<Expr>>),
     Property(String, Box<DestructuringElement>),
+    ComputedProperty(Expr, Box<DestructuringElement>),
     Rest(String),
+    RestPattern(Box<DestructuringElement>),
     Empty,
     NestedArray(Vec<DestructuringElement>, Option<Box<Expr>>),
     NestedObject(Vec<DestructuringElement>, Option<Box<Expr>>),
@@ -322,7 +324,14 @@ unsafe impl<'gc> Collect<'gc> for DestructuringElement {
             DestructuringElement::Property(_, elem) => {
                 elem.trace(cc);
             }
+            DestructuringElement::ComputedProperty(expr, elem) => {
+                expr.trace(cc);
+                elem.trace(cc);
+            }
             DestructuringElement::Rest(_) => {}
+            DestructuringElement::RestPattern(elem) => {
+                elem.trace(cc);
+            }
             DestructuringElement::Empty => {}
             DestructuringElement::NestedArray(arr, default_expr) => {
                 for elem in arr {

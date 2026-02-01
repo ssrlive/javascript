@@ -3,7 +3,6 @@ use crate::core::{
 };
 use crate::core::{Gc, GcPtr, MutationContext};
 use crate::error::JSError;
-use crate::js_generator::handle_generator_function_call;
 use crate::js_promise::{call_function_with_this, make_promise_js_object};
 use crate::unicode::utf8_to_utf16;
 
@@ -15,36 +14,24 @@ pub fn handle_async_closure_call<'gc>(
     env: &JSObjectDataPtr<'gc>,
     _fn_obj: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, JSError> {
-    // 1. Create a generator for the async function
-    // Pass the closure as is (containing the async body)
-    let generator_val = handle_generator_function_call(mc, closure, args)?;
-
-    // 2. Create the wrapper promise that will be returned
+    // Evaluate async function body synchronously (await will block via event loop)
+    // and wrap the result in a resolved/rejected promise.
     let (promise, resolve, reject) = crate::js_promise::create_promise_capability(mc, env)?;
 
-    // 3. Define the step function that drives the generator
-
-    // We need to keep the generator alive
-    let generator_root = if let Value::Object(obj) = generator_val {
-        if let Some(gen_ptr) = object_get_key_value(&obj, "__generator__") {
-            gen_ptr.borrow().clone()
-        } else {
-            return Err(crate::raise_eval_error!("Async function failed to create generator"));
+    match crate::core::call_closure(mc, closure, _this_val, args, env, _fn_obj) {
+        Ok(val) => {
+            crate::js_promise::call_function(mc, &resolve, &[val], env)?;
         }
-    } else {
-        return Err(crate::raise_eval_error!("Async function failed to create generator object"));
-    };
+        Err(crate::core::EvalError::Throw(v, ..)) => {
+            crate::js_promise::call_function(mc, &reject, &[v], env)?;
+        }
+        Err(e) => {
+            let msg = e.message();
+            let val = Value::String(utf8_to_utf16(&msg));
+            crate::js_promise::call_function(mc, &reject, &[val], env)?;
+        }
+    }
 
-    let generator_ref = if let Value::Generator(g) = generator_root {
-        g
-    } else {
-        return Err(crate::raise_eval_error!("Async function internal error"));
-    };
-
-    // Initial step
-    step(mc, generator_ref, resolve, reject, env, Ok(Value::Undefined))?;
-
-    // Return the JS-visible Promise object that wraps the internal promise
     let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
     Ok(Value::Object(promise_obj))
 }

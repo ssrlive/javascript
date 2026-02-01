@@ -228,9 +228,19 @@ fn format_value_pretty<'gc>(
                         s.push_str("...");
                         s.push_str(name);
                     }
+                    DestructuringElement::RestPattern(inner) => {
+                        s.push_str("...");
+                        match &**inner {
+                            DestructuringElement::Variable(name, _) => s.push_str(name),
+                            DestructuringElement::NestedObject(..) => s.push_str("{}"),
+                            DestructuringElement::NestedArray(..) => s.push_str("[]"),
+                            _ => {}
+                        }
+                    }
                     DestructuringElement::NestedObject(..) => s.push_str("{}"),
                     DestructuringElement::NestedArray(..) => s.push_str("[]"),
                     DestructuringElement::Property(name, _) => s.push_str(name),
+                    DestructuringElement::ComputedProperty(..) => s.push_str("[]"),
                     DestructuringElement::Empty => {}
                 }
             }

@@ -2462,6 +2462,18 @@ fn convert_array_pattern(elms: &[DestructuringElement]) -> Vec<Option<Expr>> {
             DestructuringElement::Rest(name) => {
                 out.push(Some(Expr::Spread(Box::new(Expr::Var(name.clone(), None, None)))));
             }
+            DestructuringElement::RestPattern(inner) => match &**inner {
+                DestructuringElement::Variable(name, _) => {
+                    out.push(Some(Expr::Spread(Box::new(Expr::Var(name.clone(), None, None)))));
+                }
+                DestructuringElement::NestedArray(sub, _) => {
+                    let inner_arr = convert_array_pattern(sub);
+                    out.push(Some(Expr::Spread(Box::new(Expr::Array(inner_arr)))));
+                }
+                _ => {
+                    out.push(Some(Expr::Var(String::new(), None, None)));
+                }
+            },
             DestructuringElement::NestedArray(inner, maybe_def) => {
                 let inner_arr = convert_array_pattern(inner);
                 let mut arr_expr = Expr::Array(inner_arr);
@@ -2478,6 +2490,9 @@ fn convert_array_pattern(elms: &[DestructuringElement]) -> Vec<Option<Expr>> {
             }
             DestructuringElement::Property(_, _) => {
                 // Property should be handled in object patterns, not arrays; push elision
+                out.push(None);
+            }
+            DestructuringElement::ComputedProperty(_, _) => {
                 out.push(None);
             }
         }

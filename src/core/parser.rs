@@ -1810,10 +1810,22 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 }
             } else if matches!(tokens[*index].token, Token::LBrace) {
                 let pattern = parse_object_destructuring_pattern(tokens, index)?;
-                params.push(DestructuringElement::NestedObject(pattern, None));
+                let mut default_expr: Option<Box<Expr>> = None;
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                    *index += 1;
+                    let expr = parse_assignment(tokens, index)?;
+                    default_expr = Some(Box::new(expr));
+                }
+                params.push(DestructuringElement::NestedObject(pattern, default_expr));
             } else if matches!(tokens[*index].token, Token::LBracket) {
                 let pattern = parse_array_destructuring_pattern(tokens, index)?;
-                params.push(DestructuringElement::NestedArray(pattern, None));
+                let mut default_expr: Option<Box<Expr>> = None;
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                    *index += 1;
+                    let expr = parse_assignment(tokens, index)?;
+                    default_expr = Some(Box::new(expr));
+                }
+                params.push(DestructuringElement::NestedArray(pattern, default_expr));
             } else if let Some(Token::Identifier(param)) = tokens.get(*index).map(|t| &t.token).cloned() {
                 *index += 1;
                 let mut default_expr: Option<Box<Expr>> = None;
@@ -4329,6 +4341,14 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
             if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                 *index += 1;
                 pattern.push(DestructuringElement::Rest(name));
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                let nested_pattern = parse_array_destructuring_pattern(tokens, index)?;
+                let inner = DestructuringElement::NestedArray(nested_pattern, None);
+                pattern.push(DestructuringElement::RestPattern(Box::new(inner)));
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+                let nested_pattern = parse_object_destructuring_pattern(tokens, index)?;
+                let inner = DestructuringElement::NestedObject(nested_pattern, None);
+                pattern.push(DestructuringElement::RestPattern(Box::new(inner)));
             } else {
                 return Err(raise_parse_error_at!(tokens.get(*index)));
             }
@@ -4513,14 +4533,52 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
             *index += 1; // consume }
             break;
         } else {
-            // Parse property
-            let key = if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+            // Parse property key (identifier, string, number, or computed)
+            let mut key_name: Option<String> = None;
+            let mut computed_key: Option<Expr> = None;
+            let mut is_identifier_key = false;
+
+            if matches!(tokens[*index].token, Token::LBracket) {
+                *index += 1; // consume [
+                let mut depth: i32 = 1;
+                let mut expr_tokens: Vec<TokenData> = Vec::new();
+                while *index < tokens.len() {
+                    match tokens[*index].token {
+                        Token::LBracket => {
+                            depth += 1;
+                            expr_tokens.push(tokens[*index].clone());
+                        }
+                        Token::RBracket => {
+                            depth -= 1;
+                            if depth == 0 {
+                                *index += 1; // consume ]
+                                break;
+                            }
+                            expr_tokens.push(tokens[*index].clone());
+                        }
+                        _ => expr_tokens.push(tokens[*index].clone()),
+                    }
+                    *index += 1;
+                }
+                if depth != 0 {
+                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                }
+                let expr = parse_expression(&expr_tokens, &mut 0)?;
+                computed_key = Some(expr);
+            } else if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                 *index += 1;
-                name
+                key_name = Some(name);
+                is_identifier_key = true;
+            } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
+                *index += 1;
+                key_name = Some(n.to_string());
+            } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
+                *index += 1;
+                key_name = Some(utf16_to_utf8(&s));
             } else {
-                log::trace!("expected Identifier for property key but got {:?}", tokens.get(*index));
+                log::trace!("expected property key but got {:?}", tokens.get(*index));
                 return Err(raise_parse_error_at!(tokens.get(*index)));
-            };
+            }
 
             let value = if *index < tokens.len() && matches!(tokens[*index].token, Token::Colon) {
                 *index += 1; // consume :
@@ -4611,6 +4669,9 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
             } else {
+                if !is_identifier_key {
+                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                }
                 // Shorthand: key is the same as variable name. Allow optional
                 // default initializer after the shorthand, e.g. `{a = 1}`.
                 let mut init_tokens: Vec<TokenData> = Vec::new();
@@ -4636,10 +4697,16 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                     let expr = parse_expression(&tmp, &mut 0)?;
                     default_expr = Some(Box::new(expr));
                 }
-                DestructuringElement::Variable(key.clone(), default_expr)
+                let key = key_name.clone().unwrap_or_default();
+                DestructuringElement::Variable(key, default_expr)
             };
 
-            pattern.push(DestructuringElement::Property(key, Box::new(value)));
+            if let Some(expr) = computed_key {
+                pattern.push(DestructuringElement::ComputedProperty(expr, Box::new(value)));
+            } else {
+                let key = key_name.unwrap_or_default();
+                pattern.push(DestructuringElement::Property(key, Box::new(value)));
+            }
         }
 
         // allow whitespace / blank lines before separators or closing brace

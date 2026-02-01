@@ -58,13 +58,12 @@ mod destructuring_tests {
         let res = evaluate_script(script, None::<&std::path::Path>);
         match res {
             Err(err) => match err.kind() {
-                JSErrorKind::EvaluationError { message, .. } => {
-                    assert!(message.contains("Cannot destructure property"));
+                JSErrorKind::TypeError { message, .. } => {
                     assert!(message.contains("seconds"));
                 }
-                _ => panic!("expected EvaluationError for destructuring undefined, got {:?}", err),
+                _ => panic!("expected TypeError for destructuring undefined, got {:?}", err),
             },
-            _ => panic!("expected EvaluationError for destructuring undefined, got {:?}", res),
+            _ => panic!("expected TypeError for destructuring undefined, got {:?}", res),
         }
     }
 

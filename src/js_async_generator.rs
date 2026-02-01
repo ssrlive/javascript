@@ -300,8 +300,11 @@ fn process_one_pending<'gc>(
 
                 // Use the pre-execution environment if available so bindings created
                 // by pre-statements remain visible when we resume execution.
-                let parent_env = if let Some(env) = pre_env.as_ref() { env } else { &gen_ptr_mut.env };
-                let func_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
+                let func_env = if let Some(env) = pre_env.as_ref() {
+                    *env
+                } else {
+                    crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                };
 
                 // Prefer the queued send value if it is concrete; otherwise fall back
                 // to the cached initially-yielded value if present.
@@ -350,8 +353,11 @@ fn process_one_pending<'gc>(
                     tail[0] = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None)).into();
                 }
 
-                let parent_env = if let Some(env) = pre_env.as_ref() { env } else { &gen_ptr_mut.env };
-                let func_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
+                let func_env = if let Some(env) = pre_env.as_ref() {
+                    *env
+                } else {
+                    crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                };
                 object_set_key_value(mc, &func_env, "__gen_throw_val", throw_val.clone())?;
 
                 match crate::core::evaluate_statements(mc, &func_env, &tail) {
@@ -392,8 +398,11 @@ fn process_one_pending<'gc>(
                     tail[0] = StatementKind::Return(Some(Expr::Var("__gen_throw_val".to_string(), None, None))).into();
                 }
 
-                let parent_env = if let Some(env) = pre_env.as_ref() { env } else { &gen_ptr_mut.env };
-                let func_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
+                let func_env = if let Some(env) = pre_env.as_ref() {
+                    *env
+                } else {
+                    crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                };
                 object_set_key_value(mc, &func_env, "__gen_throw_val", ret_val.clone())?;
 
                 match crate::core::evaluate_statements(mc, &func_env, &tail) {

@@ -8,8 +8,13 @@ pub fn trace_expr<'gc, T: GcTrace<'gc>>(context: &mut T, expr: &Expr) {
         match d {
             DestructuringElement::Variable(_, Some(e)) => trace_expr(cc, e),
             DestructuringElement::Property(_, inner) => trace_destructuring(cc, inner),
+            DestructuringElement::ComputedProperty(expr, inner) => {
+                trace_expr(cc, expr);
+                trace_destructuring(cc, inner);
+            }
             DestructuringElement::Variable(_, None) => {}
             DestructuringElement::Rest(_) => {}
+            DestructuringElement::RestPattern(inner) => trace_destructuring(cc, inner),
             DestructuringElement::Empty => {}
             DestructuringElement::NestedArray(arr, default_expr) => {
                 for a in arr {

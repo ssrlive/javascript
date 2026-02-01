@@ -1951,8 +1951,287 @@ fn contains_optional_chain(e: &Expr) -> bool {
     }
 }
 
+fn parse_array_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> Result<Vec<Option<Expr>>, JSError> {
+    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBracket) {
+        return Err(raise_parse_error_at!(tokens.get(*index)));
+    }
+    *index += 1; // consume [
+
+    let mut elements: Vec<Option<Expr>> = Vec::new();
+    if *index < tokens.len() && matches!(tokens[*index].token, Token::RBracket) {
+        *index += 1; // consume ]
+        return Ok(elements);
+    }
+
+    loop {
+        while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+
+        if *index >= tokens.len() {
+            return Err(raise_parse_error_at!(tokens.last()));
+        }
+        if matches!(tokens[*index].token, Token::RBracket) {
+            *index += 1; // consume ]
+            break;
+        }
+        if matches!(tokens[*index].token, Token::Comma) {
+            elements.push(None);
+            *index += 1;
+            continue;
+        }
+
+        if matches!(tokens[*index].token, Token::Spread) {
+            *index += 1; // consume ...
+            let rest_expr = if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                let inner = parse_array_assignment_pattern(tokens, index)?;
+                Expr::Array(inner)
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+                let inner = parse_object_assignment_pattern(tokens, index)?;
+                Expr::Object(inner)
+            } else {
+                parse_assignment(tokens, index)?
+            };
+            elements.push(Some(Expr::Spread(Box::new(rest_expr))));
+
+            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
+                return Err(raise_parse_error_at!(tokens.get(*index)));
+            }
+            *index += 1; // consume ]
+            break;
+        }
+
+        let mut elem_expr = if matches!(tokens[*index].token, Token::LBracket) {
+            let saved = *index;
+            let inner = parse_array_assignment_pattern(tokens, index)?;
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                *index = saved;
+                parse_assignment(tokens, index)?
+            } else {
+                Expr::Array(inner)
+            }
+        } else if matches!(tokens[*index].token, Token::LBrace) {
+            let saved = *index;
+            let inner = parse_object_assignment_pattern(tokens, index)?;
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                *index = saved;
+                parse_assignment(tokens, index)?
+            } else {
+                Expr::Object(inner)
+            }
+        } else {
+            parse_assignment(tokens, index)?
+        };
+
+        if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+            *index += 1; // consume '='
+            let default_expr = parse_assignment(tokens, index)?;
+            elem_expr = Expr::Assign(Box::new(elem_expr), Box::new(default_expr));
+        }
+
+        elements.push(Some(elem_expr));
+
+        while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+
+        if *index >= tokens.len() {
+            return Err(raise_parse_error_at!(tokens.last()));
+        }
+        if matches!(tokens[*index].token, Token::Comma) {
+            *index += 1;
+            continue;
+        }
+        if matches!(tokens[*index].token, Token::RBracket) {
+            *index += 1; // consume ]
+            break;
+        }
+        return Err(raise_parse_error_at!(tokens.get(*index)));
+    }
+
+    Ok(elements)
+}
+
+fn parse_object_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> Result<Vec<(Expr, Expr, bool)>, JSError> {
+    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+        return Err(raise_parse_error_at!(tokens.get(*index)));
+    }
+    *index += 1; // consume {
+
+    let mut properties: Vec<(Expr, Expr, bool)> = Vec::new();
+    if *index < tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
+        *index += 1; // consume }
+        return Ok(properties);
+    }
+
+    loop {
+        while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+
+        if *index >= tokens.len() {
+            return Err(raise_parse_error_at!(tokens.last()));
+        }
+        if matches!(tokens[*index].token, Token::RBrace) {
+            *index += 1; // consume }
+            break;
+        }
+
+        if matches!(tokens[*index].token, Token::Spread) {
+            *index += 1; // consume ...
+            let rest_expr = if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                let inner = parse_array_assignment_pattern(tokens, index)?;
+                Expr::Array(inner)
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+                let inner = parse_object_assignment_pattern(tokens, index)?;
+                Expr::Object(inner)
+            } else {
+                parse_assignment(tokens, index)?
+            };
+            properties.push((Expr::StringLit(Vec::new()), rest_expr, true));
+
+            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
+                return Err(raise_parse_error_at!(tokens.get(*index)));
+            }
+            *index += 1; // consume }
+            break;
+        }
+
+        let mut key_name: Option<String> = None;
+        let mut key_expr: Option<Expr> = None;
+        let mut is_identifier_key = false;
+
+        if matches!(tokens[*index].token, Token::LBracket) {
+            *index += 1; // consume [
+            let expr = parse_assignment(tokens, index)?;
+            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
+                return Err(raise_parse_error_at!(tokens.get(*index)));
+            }
+            *index += 1; // consume ]
+            key_expr = Some(expr);
+        } else if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+            *index += 1;
+            key_name = Some(name);
+            is_identifier_key = true;
+        } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
+            *index += 1;
+            key_name = Some(n.to_string());
+        } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
+            *index += 1;
+            key_name = Some(utf16_to_utf8(&s));
+        } else if let Some(tok) = tokens.get(*index).map(|t| t.token.clone()) {
+            if let Some(id) = tok.as_identifier_string() {
+                *index += 1;
+                key_name = Some(id);
+                is_identifier_key = true;
+            } else if let Some(Token::Default) = tokens.get(*index).map(|t| t.token.clone()) {
+                *index += 1;
+                key_name = Some("default".to_string());
+            } else {
+                return Err(raise_parse_error_at!(tokens.get(*index)));
+            }
+        } else {
+            return Err(raise_parse_error_at!(tokens.get(*index)));
+        }
+
+        let key_expr_final = if let Some(expr) = key_expr {
+            expr
+        } else if let Some(name) = key_name.clone() {
+            Expr::StringLit(crate::unicode::utf8_to_utf16(&name))
+        } else {
+            return Err(raise_parse_error_at!(tokens.get(*index)));
+        };
+
+        let target_expr = if *index < tokens.len() && matches!(tokens[*index].token, Token::Colon) {
+            *index += 1; // consume :
+            let mut value_expr = if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                let saved = *index;
+                let inner = parse_array_assignment_pattern(tokens, index)?;
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                    *index = saved;
+                    parse_assignment(tokens, index)?
+                } else {
+                    Expr::Array(inner)
+                }
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+                let saved = *index;
+                let inner = parse_object_assignment_pattern(tokens, index)?;
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                    *index = saved;
+                    parse_assignment(tokens, index)?
+                } else {
+                    Expr::Object(inner)
+                }
+            } else {
+                parse_assignment(tokens, index)?
+            };
+
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                *index += 1; // consume '='
+                let default_expr = parse_assignment(tokens, index)?;
+                value_expr = Expr::Assign(Box::new(value_expr), Box::new(default_expr));
+            }
+
+            value_expr
+        } else {
+            if !is_identifier_key {
+                return Err(raise_parse_error_at!(tokens.get(*index)));
+            }
+            let name = key_name.unwrap_or_default();
+            let mut expr = Expr::Var(name.clone(), None, None);
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                *index += 1; // consume '='
+                let default_expr = parse_assignment(tokens, index)?;
+                expr = Expr::Assign(Box::new(expr), Box::new(default_expr));
+            }
+            expr
+        };
+
+        properties.push((key_expr_final, target_expr, false));
+
+        while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+
+        if *index >= tokens.len() {
+            return Err(raise_parse_error_at!(tokens.last()));
+        }
+        if matches!(tokens[*index].token, Token::Comma) {
+            *index += 1;
+            continue;
+        }
+        if matches!(tokens[*index].token, Token::RBrace) {
+            *index += 1; // consume }
+            break;
+        }
+        return Err(raise_parse_error_at!(tokens.get(*index)));
+    }
+
+    Ok(properties)
+}
+
 pub fn parse_assignment(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
     log::trace!("parse_assignment: entry index={} token={:?}", *index, tokens.get(*index));
+    if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace | Token::LBracket) {
+        let mut idx = *index;
+        let pattern_expr_res = if matches!(tokens[idx].token, Token::LBracket) {
+            parse_array_assignment_pattern(tokens, &mut idx).map(Expr::Array)
+        } else {
+            parse_object_assignment_pattern(tokens, &mut idx).map(Expr::Object)
+        };
+
+        if let Ok(pattern_expr) = pattern_expr_res {
+            let mut idx2 = idx;
+            while idx2 < tokens.len() && matches!(tokens[idx2].token, Token::LineTerminator) {
+                idx2 += 1;
+            }
+            if idx2 < tokens.len() && matches!(tokens[idx2].token, Token::Assign) {
+                *index = idx2 + 1;
+                let right = parse_assignment(tokens, index)?;
+                return Ok(Expr::Assign(Box::new(pattern_expr), Box::new(right)));
+            }
+        }
+    }
     let left = parse_conditional(tokens, index)?;
     if *index >= tokens.len() {
         return Ok(left);

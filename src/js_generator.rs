@@ -1,11 +1,34 @@
 use crate::core::{Gc, GcCell, GeneratorState, MutationContext};
 use crate::{
     core::{
-        EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, Value, object_get_key_value, object_set_key_value,
-        prepare_function_call_env,
+        EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_call_dispatch, object_get_key_value,
+        object_set_key_value, prepare_function_call_env,
     },
     error::JSError,
 };
+
+fn close_pending_iterator<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    iter_obj: &JSObjectDataPtr<'gc>,
+) -> Result<(), EvalError<'gc>> {
+    let return_val = crate::core::get_property_with_accessors(mc, env, iter_obj, "return")?;
+    if matches!(return_val, Value::Undefined | Value::Null) {
+        return Ok(());
+    }
+
+    let is_callable = matches!(return_val, Value::Function(_) | Value::Closure(_) | Value::Object(_));
+    if !is_callable {
+        return Err(raise_type_error!("Iterator return property is not callable").into());
+    }
+
+    let call_res = crate::core::evaluate_call_dispatch(mc, env, return_val, Some(Value::Object(*iter_obj)), vec![])?;
+    if !matches!(call_res, Value::Object(_)) {
+        return Err(raise_type_error!("Iterator return did not return an object").into());
+    }
+
+    Ok(())
+}
 
 /// Handle generator function constructor (when called as `new GeneratorFunction(...)`)
 pub fn _handle_generator_function_constructor<'gc>(
@@ -37,6 +60,8 @@ pub fn handle_generator_function_call<'gc>(
             args: args.to_vec(),
             state: crate::core::GeneratorState::NotStarted,
             cached_initial_yield: None,
+            pending_iterator: None,
+            pending_iterator_done: false,
         }),
     );
 
@@ -610,7 +635,8 @@ fn find_yield_in_expr(e: &Expr) -> Option<Option<Box<Expr>>> {
         | Expr::Increment(a)
         | Expr::Decrement(a)
         | Expr::PostIncrement(a)
-        | Expr::PostDecrement(a) => find_yield_in_expr(a),
+        | Expr::PostDecrement(a)
+        | Expr::Spread(a) => find_yield_in_expr(a),
         Expr::LogicalAnd(a, b) | Expr::LogicalOr(a, b) | Expr::Comma(a, b) | Expr::Conditional(a, b, _) => {
             find_yield_in_expr(a).or_else(|| find_yield_in_expr(b))
         } // Conditional: a then b (if matched) or c? We just scan linearly for now
@@ -618,6 +644,123 @@ fn find_yield_in_expr(e: &Expr) -> Option<Option<Box<Expr>>> {
         Expr::OptionalIndex(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
         _ => None,
     }
+}
+
+fn find_array_assign(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    match expr {
+        Expr::Assign(lhs, rhs) => {
+            if matches!(&**lhs, Expr::Array(_)) {
+                Some((&**lhs, &**rhs))
+            } else {
+                find_array_assign(rhs)
+            }
+        }
+        Expr::Comma(_, rhs) => find_array_assign(rhs),
+        Expr::Conditional(_, then_expr, else_expr) => find_array_assign(then_expr).or_else(|| find_array_assign(else_expr)),
+        _ => None,
+    }
+}
+
+fn find_rightmost_assign_rhs(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Assign(_, rhs) => find_rightmost_assign_rhs(rhs).or(Some(&**rhs)),
+        Expr::Comma(_, rhs) => find_rightmost_assign_rhs(rhs),
+        Expr::Conditional(_, then_expr, else_expr) => find_rightmost_assign_rhs(then_expr).or_else(|| find_rightmost_assign_rhs(else_expr)),
+        _ => None,
+    }
+}
+
+fn prepare_pending_iterator_for_yield<'gc>(
+    mc: &MutationContext<'gc>,
+    eval_env: &JSObjectDataPtr<'gc>,
+    stmt: &Statement,
+) -> Result<Option<(JSObjectDataPtr<'gc>, bool)>, EvalError<'gc>> {
+    let expr = if let StatementKind::Expr(e) = &*stmt.kind {
+        e
+    } else {
+        return Ok(None);
+    };
+
+    let mut pre_steps: usize = 0;
+    let rhs = if let Some((lhs, rhs)) = find_array_assign(expr) {
+        if let Expr::Array(elements) = lhs {
+            let mut consumed = 0usize;
+            for elem_opt in elements.iter() {
+                match elem_opt {
+                    None => {
+                        consumed += 1;
+                    }
+                    Some(elem) => match elem {
+                        Expr::Spread(inner) => {
+                            if find_yield_in_expr(inner).is_some() {
+                                pre_steps = consumed;
+                            }
+                            break;
+                        }
+                        _ => {
+                            if find_yield_in_expr(elem).is_some() {
+                                pre_steps = consumed + 1;
+                                break;
+                            } else {
+                                consumed += 1;
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        rhs
+    } else if let Some(rhs) = find_rightmost_assign_rhs(expr) {
+        rhs
+    } else {
+        return Ok(None);
+    };
+
+    let rhs_val = crate::core::evaluate_expr(mc, eval_env, rhs)?;
+    if matches!(rhs_val, Value::Undefined | Value::Null) {
+        return Ok(None);
+    }
+
+    let mut iterator: Option<JSObjectDataPtr<'gc>> = None;
+    if let Some(sym_ctor) = crate::core::env_get(eval_env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+        && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+    {
+        let method = if let Value::Object(obj) = &rhs_val {
+            crate::core::get_property_with_accessors(mc, eval_env, obj, iter_sym_data)?
+        } else {
+            Value::Undefined
+        };
+        if !matches!(method, Value::Undefined | Value::Null) {
+            let res = crate::core::evaluate_call_dispatch(mc, eval_env, method, Some(rhs_val.clone()), vec![])?;
+            if let Value::Object(iter_obj) = res {
+                iterator = Some(iter_obj);
+            }
+        }
+    }
+
+    if let Some(iter_obj) = iterator {
+        let mut done = false;
+        if pre_steps > 0 {
+            let next_method = crate::core::get_property_with_accessors(mc, eval_env, &iter_obj, "next")?;
+            if !matches!(next_method, Value::Undefined | Value::Null) {
+                for _ in 0..pre_steps {
+                    let next_res_val = evaluate_call_dispatch(mc, eval_env, next_method.clone(), Some(Value::Object(iter_obj)), vec![])?;
+                    if let Value::Object(next_res) = next_res_val {
+                        let done_val = crate::core::get_property_with_accessors(mc, eval_env, &next_res, "done")?;
+                        if matches!(done_val, Value::Boolean(true)) {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(Some((iter_obj, done)));
+    }
+
+    Ok(None)
 }
 
 // Helper to find a yield expression within statements. Returns the
@@ -800,6 +943,17 @@ pub fn generator_next<'gc>(
                     pre_env: pre_env_opt,
                 };
 
+                // Prepare pending iterators for destructuring assignments that contain a yield.
+                // This is a narrow fix for assignment patterns that start iteration before
+                // the yield expression is evaluated.
+                if let Some((iter_obj, done)) = prepare_pending_iterator_for_yield(mc, &func_env, &gen_obj.body[idx])? {
+                    gen_obj.pending_iterator = Some(iter_obj);
+                    gen_obj.pending_iterator_done = done;
+                } else {
+                    gen_obj.pending_iterator = None;
+                    gen_obj.pending_iterator_done = false;
+                }
+
                 // If the yield has an inner expression, evaluate it in a fresh
                 // function-like frame whose prototype is the captured env (so it
                 // can see bindings from the pre-stmts execution) and return that
@@ -863,6 +1017,8 @@ pub fn generator_next<'gc>(
             // executing.
             let pc_val = pc;
             log::trace!("DEBUG: generator_next Suspended. pc={}, send_value={:?}", pc_val, _send_value);
+            gen_obj.pending_iterator = None;
+            gen_obj.pending_iterator_done = false;
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = GeneratorState::Completed;
                 return Ok(create_iterator_result(mc, Value::Undefined, true)?);
@@ -928,6 +1084,14 @@ pub fn generator_next<'gc>(
                     pre_env: pre_env_opt,
                 };
 
+                if let Some((iter_obj, done)) = prepare_pending_iterator_for_yield(mc, &func_env, &tail[idx])? {
+                    gen_obj.pending_iterator = Some(iter_obj);
+                    gen_obj.pending_iterator_done = done;
+                } else {
+                    gen_obj.pending_iterator = None;
+                    gen_obj.pending_iterator_done = false;
+                }
+
                 if let Some(inner_expr_box) = yield_inner {
                     // If the yield is inside a `for` loop body, ensure the loop
                     // initializer and any body pre-statements execute so loop
@@ -977,6 +1141,13 @@ fn generator_return<'gc>(
     return_value: Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut gen_obj = generator.borrow_mut(mc);
+    if let Some(iter_obj) = gen_obj.pending_iterator {
+        if !gen_obj.pending_iterator_done {
+            close_pending_iterator(mc, &gen_obj.env, &iter_obj)?;
+        }
+        gen_obj.pending_iterator = None;
+        gen_obj.pending_iterator_done = false;
+    }
     gen_obj.state = GeneratorState::Completed;
     Ok(create_iterator_result(mc, return_value, true)?)
 }

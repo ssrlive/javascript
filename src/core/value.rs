@@ -47,6 +47,8 @@ pub struct JSGenerator<'gc> {
     // Optionally cache the initially yielded value so that resume/re-entry
     // paths can avoid re-evaluating the inner expression.
     pub cached_initial_yield: Option<Value<'gc>>,
+    pub pending_iterator: Option<JSObjectDataPtr<'gc>>,
+    pub pending_iterator_done: bool,
 }
 
 #[derive(Clone, Collect)]
@@ -1380,7 +1382,17 @@ pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'
 pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: Value<'gc>) -> Result<(), JSError> {
     let mut current = *env;
     loop {
-        if current.borrow().properties.contains_key(&PropertyKey::String(key.to_string())) {
+        let existing = {
+            let borrowed = current.borrow();
+            borrowed.properties.get(&PropertyKey::String(key.to_string())).cloned()
+        };
+        if let Some(existing) = existing {
+            if matches!(*existing.borrow(), Value::Uninitialized) {
+                return Err(crate::raise_reference_error!(format!(
+                    "Cannot access '{}' before initialization",
+                    key
+                )));
+            }
             return env_set(mc, &current, key, val);
         }
         let parent_opt = current.borrow().prototype;

@@ -31,12 +31,16 @@ pub enum StatementKind {
     For(Box<ForStatement>),
     ForOf(Option<VarDeclKind>, String, Expr, Vec<Statement>), // decl kind, variable, iterable, body
     ForOfExpr(Expr, Expr, Vec<Statement>),                    // assignment-form for-of with expression LHS, iterable, body
+    ForAwaitOf(Option<VarDeclKind>, String, Expr, Vec<Statement>), // async for-await-of
+    ForAwaitOfExpr(Expr, Expr, Vec<Statement>),               // assignment-form for-await-of with expression LHS
     ForIn(Option<VarDeclKind>, String, Expr, Vec<Statement>), // decl kind (None = declaration), variable, object, body
     ForInExpr(Expr, Expr, Vec<Statement>),                    // assignment-form for-in with expression LHS, iterable, body
     ForInDestructuringObject(Option<VarDeclKind>, Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // decl kind, var { .. } in object
     ForInDestructuringArray(Option<VarDeclKind>, Vec<DestructuringElement>, Expr, Vec<Statement>), // decl kind, var [ .. ] in object
     ForOfDestructuringObject(Option<VarDeclKind>, Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // decl kind, var { .. } of iterable
     ForOfDestructuringArray(Option<VarDeclKind>, Vec<DestructuringElement>, Expr, Vec<Statement>), // decl kind, var [ .. ] of iterable
+    ForAwaitOfDestructuringObject(Option<VarDeclKind>, Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // async for-await-of {..}
+    ForAwaitOfDestructuringArray(Option<VarDeclKind>, Vec<DestructuringElement>, Expr, Vec<Statement>), // async for-await-of [..]
     While(Expr, Vec<Statement>),                                                                   // condition, body
     DoWhile(Vec<Statement>, Expr),                                                                 // body, condition
     Switch(Box<SwitchStatement>),
@@ -54,6 +58,10 @@ pub enum VarDeclKind {
     Var,
     Let,
     Const,
+}
+
+unsafe impl<'gc> Collect<'gc> for VarDeclKind {
+    fn trace<T: GcTrace<'gc>>(&self, _cc: &mut T) {}
 }
 
 #[derive(Clone, Debug)]

@@ -7,7 +7,7 @@ fn symbol_to_number_in_relational_should_throw() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Err(err) => match err.kind() {
-            JSErrorKind::TypeError { message, .. } => assert!(message.contains("Cannot convert Symbol")),
+            JSErrorKind::TypeError { message, .. } => assert!(message.contains("Cannot convert a Symbol value to a number")),
             _ => panic!("Expected TypeError for Symbol to number coercion, got {:?}", err),
         },
         Ok(v) => panic!("expected TypeError, got {:?}", v),
@@ -21,7 +21,9 @@ fn symbol_to_number_in_add_should_throw() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Err(err) => match err.kind() {
-            JSErrorKind::TypeError { message, .. } => assert!(message.contains("Cannot convert Symbol")),
+            JSErrorKind::TypeError { message, .. } => {
+                assert!(message.contains("Cannot convert a Symbol value to a number") || message.contains("Cannot convert Symbol"))
+            }
             _ => panic!("Expected TypeError for Symbol to number coercion, got {:?}", err),
         },
         Ok(v) => panic!("expected TypeError, got {:?}", v),

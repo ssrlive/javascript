@@ -63,14 +63,14 @@ function walkDir(dir){
   const out = [];
   // Read directory entries and sort by name for deterministic traversal
   let items = fs.readdirSync(dir, {withFileTypes:true});
-  items = items.sort((a,b)=>a.name.localeCompare(b.name));
+  items = items.sort((a,b)=>a.name.localeCompare(b.name, 'en', {numeric:true}));
   for (const it of items){
     const p = path.join(dir, it.name);
     if (it.isDirectory()) out.push(...walkDir(p));
     else out.push(p);
   }
   // Return sorted list of paths to ensure caller sees deterministic order
-  return out.sort();
+  return out.sort((a,b)=>a.localeCompare(b, 'en', {numeric:true}));
 }
 for (const p of walkDir(path.join(REPO_DIR,'harness'))){
   const b = path.basename(p);

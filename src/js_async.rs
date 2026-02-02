@@ -14,23 +14,17 @@ pub fn handle_async_closure_call<'gc>(
     env: &JSObjectDataPtr<'gc>,
     _fn_obj: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, JSError> {
-    // Evaluate async function body synchronously (await will block via event loop)
+    // Evaluate async function body asynchronously (via microtask queue)
     // and wrap the result in a resolved/rejected promise.
+    // This allows the caller to receive the promise immediately (pending)
+    // and facilitates interleaving of async tasks.
     let (promise, resolve, reject) = crate::js_promise::create_promise_capability(mc, env)?;
 
-    match crate::core::call_closure(mc, closure, _this_val, args, env, _fn_obj) {
-        Ok(val) => {
-            crate::js_promise::call_function(mc, &resolve, &[val], env)?;
-        }
-        Err(crate::core::EvalError::Throw(v, ..)) => {
-            crate::js_promise::call_function(mc, &reject, &[v], env)?;
-        }
-        Err(e) => {
-            let msg = e.message();
-            let val = Value::String(utf8_to_utf16(&msg));
-            crate::js_promise::call_function(mc, &reject, &[val], env)?;
-        }
-    }
+    // Create a new Closure wrapped in Value to pass to the task
+    // We clone the closure data because the task needs to own its reference/copy
+    let closure_val = Value::Closure(Gc::new(mc, closure.clone()));
+
+    crate::js_promise::schedule_async_closure_execution(mc, closure_val, args.to_vec(), resolve, reject, _this_val, *env);
 
     let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
     Ok(Value::Object(promise_obj))

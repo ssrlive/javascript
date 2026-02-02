@@ -246,8 +246,15 @@ fn test_for_with_try_while_inner_do() {
         t6();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"V0-0,V0-1,V1-0,V1-1\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"V0-0,V0-1,V1-0,V1-1\"");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -267,8 +274,15 @@ fn test_nested_try_do_for_try_deep_chain() {
         t7();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"P0;Q1;P2;END\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"P0;Q1;P2;END\"");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

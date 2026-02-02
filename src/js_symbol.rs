@@ -39,6 +39,16 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let iterator_sym = Value::Symbol(iterator_sym_data);
     object_set_key_value(mc, &symbol_ctor, "iterator", iterator_sym)?;
 
+    // Symbol.asyncIterator
+    let async_iterator_sym_data = Gc::new(
+        mc,
+        SymbolData {
+            description: Some("Symbol.asyncIterator".to_string()),
+        },
+    );
+    let async_iterator_sym = Value::Symbol(async_iterator_sym_data);
+    object_set_key_value(mc, &symbol_ctor, "asyncIterator", async_iterator_sym)?;
+
     // Symbol.toPrimitive
     let to_primitive_data = Gc::new(
         mc,

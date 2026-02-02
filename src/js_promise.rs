@@ -70,12 +70,27 @@ enum Task<'gc> {
         promise: GcPtr<'gc, JSPromise<'gc>>,
         callbacks: Vec<(Value<'gc>, GcPtr<'gc, JSPromise<'gc>>, Option<JSObjectDataPtr<'gc>>)>,
     },
+    /// Task to execute an async function body asynchronously
+    ExecuteClosure {
+        function: Value<'gc>,
+        args: Vec<Value<'gc>>,
+        resolve: Value<'gc>, // Promise resolve function
+        reject: Value<'gc>,  // Promise reject function
+        this_val: Option<Value<'gc>>,
+        env: JSObjectDataPtr<'gc>,
+    },
     /// Task to attach handlers to a promise when a direct borrow fails (deferral mechanism)
     AttachHandlers {
         promise: GcPtr<'gc, JSPromise<'gc>>,
         on_fulfilled: Option<Value<'gc>>,
         on_rejected: Option<Value<'gc>>,
         result_promise: Option<GcPtr<'gc, JSPromise<'gc>>>,
+        env: JSObjectDataPtr<'gc>,
+    },
+    /// Task to resolve a promise asynchronously with a value
+    ResolvePromise {
+        promise: GcPtr<'gc, JSPromise<'gc>>,
+        value: Value<'gc>,
         env: JSObjectDataPtr<'gc>,
     },
     /// Task to execute a setTimeout callback
@@ -304,6 +319,19 @@ pub fn clear_runtime_unhandled_for_promise<'gc>(mc: &MutationContext<'gc>, env: 
     Ok(())
 }
 
+/// Mark a promise as handled and clear any pending unhandled rejection checks.
+pub fn mark_promise_handled<'gc>(
+    mc: &MutationContext<'gc>,
+    promise: GcPtr<'gc, JSPromise<'gc>>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<(), JSError> {
+    let ptr = Gc::as_ptr(promise) as usize;
+    promise.borrow_mut(mc).handled = true;
+    remove_unhandled_checks_for_promise(ptr);
+    clear_runtime_unhandled_for_promise(mc, env, ptr)?;
+    Ok(())
+}
+
 pub fn pending_unhandled_count<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> usize {
     if let Ok(arr) = get_runtime_array(mc, env, "__pending_unhandled") {
         crate::core::object_get_length(&arr).unwrap_or(0)
@@ -480,6 +508,9 @@ pub fn reset_global_state() {
 /// When >1 we are in a nested/inline run and should defer UnhandledCheck
 /// processing to the outermost loop to avoid premature unhandled reports.
 static RUN_LOOP_NESTING: AtomicUsize = AtomicUsize::new(0);
+// Delay async function execution by one resolution/rejection task to improve
+// interleaving with already-queued promise microtasks.
+static EXECUTE_CLOSURE_DELAY: AtomicUsize = AtomicUsize::new(0);
 
 // If true, `evaluate_script` (CLI / examples) will keep the event loop alive
 // while there are active timers/intervals registered. Defaults to false so
@@ -544,6 +575,39 @@ fn queue_task<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
     let mut guard = lock.lock().unwrap();
     *guard = true;
     cv.notify_all();
+}
+
+pub fn schedule_async_closure_execution<'gc>(
+    mc: &MutationContext<'gc>,
+    function: Value<'gc>,
+    args: Vec<Value<'gc>>,
+    resolve: Value<'gc>,
+    reject: Value<'gc>,
+    this_val: Option<Value<'gc>>,
+    env: JSObjectDataPtr<'gc>,
+) {
+    // Defer execution by one promise resolution/rejection task when possible.
+    EXECUTE_CLOSURE_DELAY.store(1, Ordering::SeqCst);
+    queue_task(
+        mc,
+        Task::ExecuteClosure {
+            function,
+            args,
+            resolve,
+            reject,
+            this_val,
+            env,
+        },
+    );
+}
+
+pub fn queue_promise_resolution<'gc>(
+    mc: &MutationContext<'gc>,
+    promise: GcPtr<'gc, JSPromise<'gc>>,
+    value: Value<'gc>,
+    env: JSObjectDataPtr<'gc>,
+) {
+    queue_task(mc, Task::ResolvePromise { promise, value, env });
 }
 
 /// Remove any pending UnhandledCheck tasks for the given promise from the global queue.
@@ -768,6 +832,39 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                 }
             }
         }
+        Task::ExecuteClosure {
+            function,
+            args,
+            resolve,
+            reject,
+            this_val,
+            env,
+        } => {
+            log::trace!("Processing ExecuteClosure task");
+            // Call the closure/function
+            let result = match &function {
+                Value::Closure(cl) => crate::core::call_closure(mc, &cl, this_val, &args, &env, None),
+                Value::Function(_) => call_function_with_this(mc, &function, this_val, &args, &env),
+                _ => call_function_with_this(mc, &function, this_val, &args, &env),
+            };
+
+            match result {
+                Ok(val) => {
+                    let _ = call_function(mc, &resolve, &[val], &env);
+                }
+                Err(e) => {
+                    let val = match e {
+                        crate::core::EvalError::Throw(v, ..) => v,
+                        crate::core::EvalError::Js(j) => Value::String(crate::unicode::utf8_to_utf16(&j.message())),
+                    };
+                    let _ = call_function(mc, &reject, &[val], &env);
+                }
+            }
+        }
+        Task::ResolvePromise { promise, value, env } => {
+            log::trace!("Processing ResolvePromise task");
+            resolve_promise(mc, &promise, value, &env);
+        }
         Task::Timeout { id, callback, args, .. } => {
             log::trace!("Processing Timeout task");
             // Call the callback with the provided args
@@ -976,7 +1073,10 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                 }
                 PromiseState::Rejected(_) => {
                     state.handled = true;
+                    let ptr = Gc::as_ptr(promise.clone()) as usize;
                     drop(state);
+                    remove_unhandled_checks_for_promise(ptr);
+                    clear_runtime_unhandled_for_promise(mc, &env, ptr)?;
                     queue_task(
                         mc,
                         Task::Rejection {
@@ -1065,10 +1165,12 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
                 let k = match t {
                     Task::Resolution { .. } => "Resolution",
                     Task::Rejection { .. } => "Rejection",
+                    Task::ExecuteClosure { .. } => "ExecuteClosure",
                     Task::Timeout { .. } => "Timeout",
                     Task::Interval { .. } => "Interval",
                     Task::UnhandledCheck { .. } => "UnhandledCheck",
                     Task::AttachHandlers { .. } => "AttachHandlers",
+                    Task::ResolvePromise { .. } => "ResolvePromise",
                 };
                 *counts.entry(k).or_insert(0usize) += 1;
             }
@@ -1089,15 +1191,43 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
         let mut min_wait_time: Option<Duration> = None;
 
         // 1) look for microtasks
+        let mut first_resolution: Option<usize> = None;
+        let mut first_execute: Option<usize> = None;
         for (i, task) in queue_borrow.iter().enumerate() {
             match task {
                 Task::Resolution { .. } | Task::Rejection { .. } => {
-                    let t = queue_borrow.remove(i);
-                    let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
-                    return (Some(t_gc), None);
+                    if first_resolution.is_none() {
+                        first_resolution = Some(i);
+                    }
+                }
+                Task::ExecuteClosure { .. } => {
+                    if first_execute.is_none() {
+                        first_execute = Some(i);
+                    }
                 }
                 _ => {}
             }
+        }
+
+        if let Some(res_idx) = first_resolution {
+            if first_execute.is_some() && EXECUTE_CLOSURE_DELAY.load(Ordering::SeqCst) > 0 {
+                EXECUTE_CLOSURE_DELAY.fetch_sub(1, Ordering::SeqCst);
+                let t = queue_borrow.remove(res_idx);
+                let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
+                return (Some(t_gc), None);
+            }
+        }
+
+        if let Some(exec_idx) = first_execute {
+            let t = queue_borrow.remove(exec_idx);
+            let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
+            return (Some(t_gc), None);
+        }
+
+        if let Some(res_idx) = first_resolution {
+            let t = queue_borrow.remove(res_idx);
+            let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
+            return (Some(t_gc), None);
         }
 
         // 2) no immediate microtasks — find ready timers or compute min wait
@@ -1196,6 +1326,39 @@ pub fn run_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSEr
     // Leaving this run: decrement nesting
     RUN_LOOP_NESTING.fetch_sub(1, Ordering::SeqCst);
     Ok(result)
+}
+
+pub fn run_event_loop_prioritized<'gc>(mc: &MutationContext<'gc>, target: GcPtr<'gc, JSPromise<'gc>>) -> Result<PollResult, JSError> {
+    let target_ptr = Gc::as_ptr(target) as usize;
+    let task = GLOBAL_TASK_QUEUE.with(|queue| {
+        let mut queue_borrow = queue.borrow_mut();
+        let mut matched_index: Option<usize> = None;
+        for (i, task) in queue_borrow.iter().enumerate() {
+            let matches_target = match task {
+                Task::Resolution { promise, .. } | Task::Rejection { promise, .. } => (Gc::as_ptr(*promise) as usize) == target_ptr,
+                _ => false,
+            };
+            if matches_target {
+                matched_index = Some(i);
+                break;
+            }
+        }
+
+        if let Some(index) = matched_index {
+            let t = queue_borrow.remove(index);
+            let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
+            Some(t_gc)
+        } else {
+            None
+        }
+    });
+
+    if let Some(task) = task {
+        process_task(mc, task)?;
+        Ok(PollResult::Executed)
+    } else {
+        run_event_loop(mc)
+    }
 }
 
 /// Return the current run-loop nesting level. Used by other subsystems that

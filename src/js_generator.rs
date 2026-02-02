@@ -613,11 +613,18 @@ pub(crate) fn replace_first_yield_statement_with_return(stmt: &mut Statement) ->
     }
 }
 
-fn find_yield_in_expr(e: &Expr) -> Option<Option<Box<Expr>>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum YieldKind {
+    Yield,
+    YieldStar,
+    Await,
+}
+
+fn find_yield_in_expr(e: &Expr) -> Option<(YieldKind, Option<Box<Expr>>)> {
     match e {
-        Expr::Yield(inner) => Some(inner.clone()),
-        Expr::YieldStar(inner) => Some(Some(inner.clone())),
-        Expr::Await(inner) => Some(Some(inner.clone())),
+        Expr::Yield(inner) => Some((YieldKind::Yield, inner.clone())),
+        Expr::YieldStar(inner) => Some((YieldKind::YieldStar, Some(inner.clone()))),
+        Expr::Await(inner) => Some((YieldKind::Await, Some(inner.clone()))),
         Expr::Binary(a, _, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
         Expr::Assign(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
         Expr::Index(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
@@ -767,82 +774,88 @@ fn prepare_pending_iterator_for_yield<'gc>(
 // index of the containing top-level statement, an optional inner index if
 // the yield is found inside a nested block/body, and the inner yield
 // expression (the Expr inside the yield/await).
-pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<usize>, Option<Box<Expr>>)> {
+#[allow(clippy::type_complexity)]
+pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<usize>, YieldKind, Option<Box<Expr>>)> {
     for (i, s) in stmts.iter().enumerate() {
         match &*s.kind {
             StatementKind::Expr(e) => {
-                if let Some(inner) = find_yield_in_expr(e) {
-                    return Some((i, None, inner));
+                if let Some((kind, inner)) = find_yield_in_expr(e) {
+                    return Some((i, None, kind, inner));
                 }
             }
             StatementKind::Return(Some(e)) => {
-                if let Some(inner) = find_yield_in_expr(e) {
-                    return Some((i, None, inner));
+                if let Some((kind, inner)) = find_yield_in_expr(e) {
+                    return Some((i, None, kind, inner));
                 }
             }
             StatementKind::Let(decls) | StatementKind::Var(decls) => {
                 for (_, expr_opt) in decls {
                     if let Some(expr) = expr_opt
-                        && let Some(inner) = find_yield_in_expr(expr)
+                        && let Some((kind, inner)) = find_yield_in_expr(expr)
                     {
-                        return Some((i, None, inner));
+                        return Some((i, None, kind, inner));
                     }
                 }
             }
             StatementKind::Const(decls) => {
                 for (_, expr) in decls {
-                    if let Some(inner) = find_yield_in_expr(expr) {
-                        return Some((i, None, inner));
+                    if let Some((kind, inner)) = find_yield_in_expr(expr) {
+                        return Some((i, None, kind, inner));
                     }
                 }
             }
             StatementKind::Block(inner_stmts) => {
-                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(inner_stmts) {
-                    return Some((i, Some(inner_idx), found));
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(inner_stmts) {
+                    return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::If(if_stmt) => {
                 let if_stmt = if_stmt.as_ref();
-                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(&if_stmt.then_body) {
-                    return Some((i, Some(inner_idx), found));
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&if_stmt.then_body) {
+                    return Some((i, Some(inner_idx), kind, found));
                 }
                 if let Some(else_body) = &if_stmt.else_body
-                    && let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(else_body)
+                    && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(else_body)
                 {
-                    return Some((i, Some(inner_idx), found));
+                    return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::For(for_stmt) => {
-                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(&for_stmt.body) {
-                    return Some((i, Some(inner_idx), found));
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&for_stmt.body) {
+                    return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::TryCatch(tc_stmt) => {
-                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(&tc_stmt.try_body) {
-                    return Some((i, Some(inner_idx), found));
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&tc_stmt.try_body) {
+                    return Some((i, Some(inner_idx), kind, found));
                 }
                 if let Some(catch_body) = &tc_stmt.as_ref().catch_body
-                    && let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(catch_body)
+                    && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(catch_body)
                 {
-                    return Some((i, Some(inner_idx), found));
+                    return Some((i, Some(inner_idx), kind, found));
                 }
                 if let Some(finally_body) = &tc_stmt.as_ref().finally_body
-                    && let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(finally_body)
+                    && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(finally_body)
                 {
-                    return Some((i, Some(inner_idx), found));
+                    return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
-                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(body) {
-                    return Some((i, Some(inner_idx), found));
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body) {
+                    return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::ForOf(_, _, _, body)
             | StatementKind::ForIn(_, _, _, body)
             | StatementKind::ForOfDestructuringObject(_, _, _, body)
-            | StatementKind::ForOfDestructuringArray(_, _, _, body) => {
-                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(body) {
-                    return Some((i, Some(inner_idx), found));
+            | StatementKind::ForOfDestructuringArray(_, _, _, body)
+            | StatementKind::ForAwaitOf(_, _, _, body)
+            | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
+            | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
+            | StatementKind::ForAwaitOfExpr(_, _, body)
+            | StatementKind::ForOfExpr(_, _, body) => {
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body) {
+                    return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::FunctionDeclaration(..) => {
@@ -875,7 +888,7 @@ pub fn generator_next<'gc>(
                 pre_env: None,
             };
 
-            if let Some((idx, inner_idx_opt, yield_inner)) = find_first_yield_in_statements(&gen_obj.body) {
+            if let Some((idx, inner_idx_opt, _yield_kind, yield_inner)) = find_first_yield_in_statements(&gen_obj.body) {
                 log::debug!(
                     "generator_next: found first yield at idx={} inner_idx={:?} body_len={} func_env_pre={} ",
                     idx,
@@ -1061,7 +1074,7 @@ pub fn generator_next<'gc>(
                 object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
             }
 
-            if let Some((idx, inner_idx_opt, yield_inner)) = find_first_yield_in_statements(&tail) {
+            if let Some((idx, inner_idx_opt, _yield_kind, yield_inner)) = find_first_yield_in_statements(&tail) {
                 let pre_env_opt: Option<JSObjectDataPtr> = if idx > 0 {
                     let pre_stmts = tail[0..idx].to_vec();
                     crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;

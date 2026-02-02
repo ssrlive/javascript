@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-test262-subset:
+  run-test262-subset-1:
     strategy:
       fail-fast: false
     runs-on: ubuntu-latest
@@ -27,16 +27,86 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset
+      - name: Run a small test262 subset - "language/arguments-object" - "language/export"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 1330 --focus language
+          node ci/runner.js --limit 1000 --focus language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export
 
       - name: Upload results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: test262-results
+          name: test262-results-1
+          path: test262-results.log
+
+  run-test262-subset-2:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Build JavaScript engine
+        run: |
+          cargo build --all-features --example js
+
+      - name: Run a small test262 subset - "language/expressions/addition" - "language/expressions/assignment"
+        if: ${{ !cancelled() }}
+        env:
+          FAIL_ON_FAILURE: 'true'
+        run: |
+          node ci/runner.js --limit 1000 --focus language/expressions/addition,language/expressions/array,language/expressions/arrow-function,language/expressions/assignment
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-results-2
+          path: test262-results.log
+
+  run-test262-subset-3:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Build JavaScript engine
+        run: |
+          cargo build --all-features --example js
+
+      - name: Run a small test262 subset - "language/expressions/assignmenttargettype" - "language/expressions/async-generator"
+        if: ${{ !cancelled() }}
+        env:
+          FAIL_ON_FAILURE: 'true'
+        run: |
+          node ci/runner.js --limit 1000 --focus language/expressions/assignmenttargettype,language/expressions/async-arrow-function,language/expressions/async-function,language/expressions/async-generator
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-results-3
           path: test262-results.log

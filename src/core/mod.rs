@@ -100,6 +100,8 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     // Initialize generator prototype/constructor
     crate::js_generator::initialize_generator(mc, env)?;
+    // Initialize async generator prototype/constructor
+    crate::js_async_generator::initialize_async_generator(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     // Make global 'undefined', 'NaN', and 'Infinity' non-writable and non-configurable per ECMAScript

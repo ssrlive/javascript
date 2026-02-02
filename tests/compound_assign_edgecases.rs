@@ -29,26 +29,14 @@ fn test_exponent_literal_parsing() {
 
 #[test]
 fn test_div_assign_by_zero_error() {
-    let res = evaluate_script("let i = 5; i /= 0", None::<&std::path::Path>);
-    match res {
-        Err(err) => match err.kind() {
-            JSErrorKind::EvaluationError { message, .. } => assert!(message.contains("Division by zero") || message == "Division by zero"),
-            _ => panic!("Expected EvaluationError for Division by zero, got {:?}", err),
-        },
-        other => panic!("Expected Division by zero error, got {:?}", other),
-    }
+    let res = evaluate_script("let i = 5; i /= 0", None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "Infinity");
 }
 
 #[test]
 fn test_mod_assign_by_zero_error() {
-    let res = evaluate_script("let i = 5; i %= 0", None::<&std::path::Path>);
-    match res {
-        Err(err) => match err.kind() {
-            JSErrorKind::EvaluationError { message, .. } => assert!(message.contains("Division by zero") || message == "Division by zero"),
-            _ => panic!("Expected EvaluationError for Division by zero, got {:?}", err),
-        },
-        other => panic!("Expected Division by zero error, got {:?}", other),
-    }
+    let res = evaluate_script("let i = 5; i %= 0", None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "NaN");
 }
 
 #[test]
@@ -65,24 +53,12 @@ fn test_assign_to_const_error() {
 
 #[test]
 fn test_sub_assign_non_number_error() {
-    let res = evaluate_script("let s = 'a'; s -= 1", None::<&std::path::Path>);
-    match res {
-        Err(err) => match err.kind() {
-            JSErrorKind::EvaluationError { message, .. } => assert!(message.contains("Invalid operands") || message.contains("error")),
-            _ => panic!("Expected EvaluationError for non-number -=, got {:?}", err),
-        },
-        other => panic!("Expected EvaluationError for non-number -=, got {:?}", other),
-    }
+    let res = evaluate_script("let s = 'a'; s -= 1", None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "NaN");
 }
 
 #[test]
 fn test_mul_assign_non_number_error() {
-    let res = evaluate_script("let s = 'a'; s *= 2", None::<&std::path::Path>);
-    match res {
-        Err(err) => match err.kind() {
-            JSErrorKind::EvaluationError { message, .. } => assert!(message.contains("Invalid operands") || message.contains("error")),
-            _ => panic!("Expected EvaluationError for non-number *=, got {:?}", err),
-        },
-        other => panic!("Expected EvaluationError for non-number *=, got {:?}", other),
-    }
+    let res = evaluate_script("let s = 'a'; s *= 2", None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "NaN");
 }

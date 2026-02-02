@@ -93,6 +93,8 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     initialize_native_error(mc, env, "TypeError", error_ctor_val.clone(), error_proto_val.clone())?;
     initialize_native_error(mc, env, "SyntaxError", error_ctor_val.clone(), error_proto_val.clone())?;
     initialize_native_error(mc, env, "RangeError", error_ctor_val.clone(), error_proto_val.clone())?;
+    initialize_native_error(mc, env, "EvalError", error_ctor_val.clone(), error_proto_val.clone())?;
+    initialize_native_error(mc, env, "URIError", error_ctor_val.clone(), error_proto_val.clone())?;
 
     Ok(())
 }
@@ -160,6 +162,13 @@ pub fn create_error<'gc>(
     object_set_key_value(mc, &error_obj, "stack", Value::String(utf8_to_utf16(&stack_str)))?;
     // Make stack non-enumerable by default
     error_obj.borrow_mut(mc).set_non_enumerable("stack");
+
+    // If a prototype was provided, mirror its constructor onto the instance
+    if let Some(proto) = prototype
+        && let Some(ctor_val) = object_get_key_value(&proto, "constructor")
+    {
+        object_set_key_value(mc, &error_obj, "constructor", ctor_val.borrow().clone())?;
+    }
 
     // Internal marker to identify Error objects
     object_set_key_value(mc, &error_obj, "__is_error", Value::Boolean(true))?;

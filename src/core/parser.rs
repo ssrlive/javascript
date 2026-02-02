@@ -168,6 +168,19 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     let column = t[start].column;
     *index += 1; // consume for
 
+    // Optional `await` for for-await-of
+    let mut is_for_await = false;
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+    if *index < t.len() && matches!(t[*index].token, Token::Await) {
+        is_for_await = true;
+        *index += 1; // consume await
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+    }
+
     if !matches!(t[*index].token, Token::LParen) {
         return Err(raise_parse_error_at!(t.get(*index)));
     }
@@ -266,10 +279,18 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                             _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern", line, column)),
                         }
                     }
-                    StatementKind::ForOfDestructuringObject(decl_kind_mapped, obj_pattern, iterable, body_stmts)
+                    if is_for_await {
+                        StatementKind::ForAwaitOfDestructuringObject(decl_kind_mapped, obj_pattern, iterable, body_stmts)
+                    } else {
+                        StatementKind::ForOfDestructuringObject(decl_kind_mapped, obj_pattern, iterable, body_stmts)
+                    }
                 }
                 ForOfPattern::Array(arr_pattern) => {
-                    StatementKind::ForOfDestructuringArray(decl_kind_mapped, arr_pattern, iterable, body_stmts)
+                    if is_for_await {
+                        StatementKind::ForAwaitOfDestructuringArray(decl_kind_mapped, arr_pattern, iterable, body_stmts)
+                    } else {
+                        StatementKind::ForOfDestructuringArray(decl_kind_mapped, arr_pattern, iterable, body_stmts)
+                    }
                 }
             }
         } else {
@@ -279,14 +300,28 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     return Err(raise_parse_error!("Invalid for-of statement", line, column));
                 }
                 let var_name = decls[0].0.clone();
-                StatementKind::ForOf(decl_kind_mapped, var_name, iterable, body_stmts)
+                if is_for_await {
+                    StatementKind::ForAwaitOf(decl_kind_mapped, var_name, iterable, body_stmts)
+                } else {
+                    StatementKind::ForOf(decl_kind_mapped, var_name, iterable, body_stmts)
+                }
             } else if let Some(Expr::Var(s, _, _)) = init_expr {
-                StatementKind::ForOf(decl_kind_mapped, s, iterable, body_stmts)
+                if is_for_await {
+                    StatementKind::ForAwaitOf(decl_kind_mapped, s, iterable, body_stmts)
+                } else {
+                    StatementKind::ForOf(decl_kind_mapped, s, iterable, body_stmts)
+                }
             } else if let Some(expr) = init_expr {
                 // Allow property/index expressions (assignment form) as left-hand side
                 // e.g., `for (obj.prop of iterable) ...`
                 match expr {
-                    Expr::Property(_, _) | Expr::Index(_, _) => StatementKind::ForOfExpr(expr, iterable, body_stmts),
+                    Expr::Property(_, _) | Expr::Index(_, _) => {
+                        if is_for_await {
+                            StatementKind::ForAwaitOfExpr(expr, iterable, body_stmts)
+                        } else {
+                            StatementKind::ForOfExpr(expr, iterable, body_stmts)
+                        }
+                    }
                     _ => return Err(raise_parse_error!("Invalid for-of left-hand side", line, column)),
                 }
             } else {
@@ -3022,13 +3057,18 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             }
         }
         Token::Yield => {
-            // yield can be followed by an optional expression
-            if *index >= tokens.len()
+            // Handle `yield *` (with optional whitespace) as YieldStar.
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+                *index += 1; // consume '*'
+                let inner = parse_assignment(tokens, index)?;
+                Expr::YieldStar(Box::new(inner))
+            } else if *index >= tokens.len()
                 || matches!(
                     tokens[*index].token,
                     Token::Semicolon | Token::Comma | Token::RParen | Token::RBracket | Token::RBrace | Token::Colon
                 )
             {
+                // `yield` with no expression
                 Expr::Yield(None)
             } else {
                 let inner = parse_assignment(tokens, index)?;

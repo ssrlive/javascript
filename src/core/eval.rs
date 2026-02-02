@@ -3,7 +3,7 @@ use crate::js_array::{create_array, handle_array_static_method, is_array, set_ar
 use crate::js_async::handle_async_closure_call;
 use crate::js_async_generator::handle_async_generator_function_call;
 use crate::js_bigint::bigint_constructor;
-use crate::js_class::prepare_call_env_with_this;
+use crate::js_class::{create_class_object, prepare_call_env_with_this};
 use crate::js_date::{handle_date_method, handle_date_static_method, is_date_object};
 use crate::js_function::handle_function_prototype_method;
 use crate::js_generator::handle_generator_function_call;
@@ -15,9 +15,9 @@ use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
         BinaryOp, ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, ImportSpecifier, JSObjectDataPtr,
-        ObjectDestructuringElement, PromiseState, Statement, StatementKind, create_error, env_get, env_get_own, env_get_strictness,
-        env_set, env_set_recursive, env_set_strictness, get_own_property, is_error, new_js_object_data, object_get_key_value,
-        object_get_length, object_set_key_value, object_set_length, value_to_string,
+        ObjectDestructuringElement, Statement, StatementKind, create_error, env_get, env_get_own, env_get_strictness, env_set,
+        env_set_recursive, env_set_strictness, get_own_property, is_error, new_js_object_data, object_get_key_value, object_get_length,
+        object_set_key_value, object_set_length, value_to_string,
     },
     js_math::handle_math_call,
     raise_eval_error, raise_reference_error,
@@ -42,10 +42,32 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
         Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
         Value::Null => Ok(0.0),
         Value::Undefined | Value::Uninitialized => Ok(f64::NAN),
-        Value::String(s) => Ok(crate::js_number::string_to_f64(&utf16_to_utf8(s)).unwrap_or(f64::NAN)),
-        Value::BigInt(_) => Err(raise_type_error!("Cannot convert BigInt to number").into()),
-        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number").into()),
-        Value::Object(_) => Ok(f64::NAN),
+        Value::BigInt(b) => Ok(b.to_f64().unwrap_or(f64::NAN)),
+        Value::String(s) => {
+            let str_val = utf16_to_utf8(s);
+            let trimmed = str_val.trim();
+            if trimmed.is_empty() {
+                return Ok(0.0);
+            }
+            if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+                return i64::from_str_radix(hex, 16)
+                    .map(|n| n as f64)
+                    .map_err(|_| raise_range_error!("Invalid number").into());
+            }
+            if let Some(bin) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
+                return i64::from_str_radix(bin, 2)
+                    .map(|n| n as f64)
+                    .map_err(|_| raise_range_error!("Invalid number").into());
+            }
+            if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
+                return i64::from_str_radix(oct, 8)
+                    .map(|n| n as f64)
+                    .map_err(|_| raise_range_error!("Invalid number").into());
+            }
+            Ok(trimmed.parse::<f64>().unwrap_or(f64::NAN))
+        }
+        Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a number").into()),
+        Value::Object(_) => Err(raise_type_error!("Cannot convert object to number without context").into()),
         _ => Ok(f64::NAN),
     }
 }
@@ -54,33 +76,52 @@ fn loose_equal<'gc>(mc: &MutationContext<'gc>, l: Value<'gc>, r: Value<'gc>, env
     match (l, r) {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => Ok(true),
         (Value::Undefined, Value::Null) | (Value::Null, Value::Undefined) => Ok(true),
+        (Value::Boolean(l), Value::Boolean(r)) => Ok(l == r),
         (Value::Number(l), Value::Number(r)) => Ok(l == r),
         (Value::String(l), Value::String(r)) => Ok(l == r),
-        (Value::Boolean(l), r) => loose_equal(mc, Value::Number(if l { 1.0 } else { 0.0 }), r, env),
-        (l, Value::Boolean(r)) => loose_equal(mc, l, Value::Number(if r { 1.0 } else { 0.0 }), env),
-        (Value::String(s), Value::Number(n)) | (Value::Number(n), Value::String(s)) => {
-            let sn = crate::js_number::string_to_f64(&utf16_to_utf8(&s)).unwrap_or(f64::NAN);
-            Ok(n == sn)
+        (Value::BigInt(l), Value::BigInt(r)) => Ok(l == r),
+        (Value::Number(l), Value::String(r)) => {
+            let rn = to_number(&Value::String(r))?;
+            Ok(l == rn)
         }
-        (Value::BigInt(l), Value::String(r)) => {
-            let s = utf16_to_utf8(&r);
-            match crate::js_bigint::parse_bigint_string(&s) {
-                Ok(bn) => Ok(*l == bn),
-                Err(_) => Ok(false),
-            }
+        (Value::String(l), Value::Number(r)) => {
+            let ln = to_number(&Value::String(l))?;
+            Ok(ln == r)
         }
-        (Value::String(l), Value::BigInt(r)) => {
-            let s = utf16_to_utf8(&l);
-            match crate::js_bigint::parse_bigint_string(&s) {
-                Ok(bn) => Ok(bn == *r),
-                Err(_) => Ok(false),
-            }
+        (Value::Boolean(b), other) => {
+            let n = if b { 1.0 } else { 0.0 };
+            loose_equal(mc, Value::Number(n), other, env)
         }
-        (Value::BigInt(l), Value::Number(r)) | (Value::Number(r), Value::BigInt(l)) => {
+        (other, Value::Boolean(b)) => {
+            let n = if b { 1.0 } else { 0.0 };
+            loose_equal(mc, other, Value::Number(n), env)
+        }
+        (Value::BigInt(l), Value::Number(r)) => {
             if !r.is_finite() || r.is_nan() || r.fract() != 0.0 {
                 Ok(false)
             } else {
                 Ok(BigInt::from_f64(r).map(|rb| *l == rb).unwrap_or(false))
+            }
+        }
+        (Value::Number(l), Value::BigInt(r)) => {
+            if !l.is_finite() || l.is_nan() || l.fract() != 0.0 {
+                Ok(false)
+            } else {
+                Ok(BigInt::from_f64(l).map(|lb| lb == *r).unwrap_or(false))
+            }
+        }
+        (Value::String(l), Value::BigInt(r)) => {
+            let ls = utf16_to_utf8(&l);
+            match BigInt::parse_bytes(ls.trim().as_bytes(), 10) {
+                Some(lb) => Ok(lb == *r),
+                None => Ok(false),
+            }
+        }
+        (Value::BigInt(l), Value::String(r)) => {
+            let rs = utf16_to_utf8(&r);
+            match BigInt::parse_bytes(rs.trim().as_bytes(), 10) {
+                Some(rb) => Ok(*l == rb),
+                None => Ok(false),
             }
         }
         (Value::Symbol(l), Value::Symbol(r)) => Ok(Gc::as_ptr(l) == Gc::as_ptr(r)),
@@ -146,10 +187,6 @@ fn to_string_for_concat<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
     }
     Ok(value_to_string(&prim))
-}
-
-fn value_to_concat_string<'gc>(val: &Value<'gc>) -> String {
-    value_to_string(val)
 }
 
 fn maybe_set_function_name_for_default<'gc>(
@@ -1154,6 +1191,12 @@ fn hoist_var_declarations<'gc>(
                 }
                 hoist_var_declarations(mc, env, body, is_indirect_eval)?;
             }
+            StatementKind::ForAwaitOf(decl, name, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    hoist_name(mc, env, name, is_indirect_eval)?;
+                }
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
+            }
             StatementKind::ForOfDestructuringObject(decl, pattern, _, body) => {
                 if let Some(crate::core::VarDeclKind::Var) = decl {
                     let mut names = Vec::new();
@@ -1170,6 +1213,26 @@ fn hoist_var_declarations<'gc>(
                     let mut names = Vec::new();
                     collect_names_from_destructuring(pattern, &mut names);
                     // Use passed is_indirect_eval
+                    for name in names {
+                        hoist_name(mc, env, &name, is_indirect_eval)?;
+                    }
+                }
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
+            }
+            StatementKind::ForAwaitOfDestructuringObject(decl, pattern, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    let mut names = Vec::new();
+                    collect_names_from_object_destructuring(pattern, &mut names);
+                    for name in names {
+                        hoist_name(mc, env, &name, is_indirect_eval)?;
+                    }
+                }
+                hoist_var_declarations(mc, env, body, is_indirect_eval)?;
+            }
+            StatementKind::ForAwaitOfDestructuringArray(decl, pattern, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    let mut names = Vec::new();
+                    collect_names_from_destructuring(pattern, &mut names);
                     for name in names {
                         hoist_name(mc, env, &name, is_indirect_eval)?;
                     }
@@ -1670,7 +1733,7 @@ fn check_stmt_for_var_forbidden_names(stmt: &Statement) -> bool {
             }
             for_stmt.body.iter().any(check_stmt_for_var_forbidden_names)
         }
-        StatementKind::ForOf(_, name, _, body) | StatementKind::ForIn(_, name, _, body) => {
+        StatementKind::ForOf(_, name, _, body) | StatementKind::ForAwaitOf(_, name, _, body) | StatementKind::ForIn(_, name, _, body) => {
             if name == "eval" || name == "arguments" {
                 return true;
             }
@@ -1678,9 +1741,12 @@ fn check_stmt_for_var_forbidden_names(stmt: &Statement) -> bool {
         }
         StatementKind::ForOfDestructuringObject(_, _, _, body)
         | StatementKind::ForOfDestructuringArray(_, _, _, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
         | StatementKind::ForInDestructuringObject(_, _, _, body)
         | StatementKind::ForInDestructuringArray(_, _, _, body)
         | StatementKind::ForOfExpr(_, _, body)
+        | StatementKind::ForAwaitOfExpr(_, _, body)
         | StatementKind::ForInExpr(_, _, body)
         | StatementKind::While(_, body) => body.iter().any(check_stmt_for_var_forbidden_names),
         StatementKind::DoWhile(body, _) => body.iter().any(check_stmt_for_var_forbidden_names),
@@ -1807,11 +1873,15 @@ fn check_strict_mode_violations<'gc>(stmts: &[Statement]) -> Result<(), EvalErro
                 check_strict_mode_violations(&for_stmt.body)?;
             }
             StatementKind::ForOf(_, _, _, body)
+            | StatementKind::ForAwaitOf(_, _, _, body)
             | StatementKind::ForIn(_, _, _, body)
             | StatementKind::ForOfDestructuringObject(_, _, _, body)
             | StatementKind::ForOfDestructuringArray(_, _, _, body)
+            | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
+            | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
             | StatementKind::ForInDestructuringObject(_, _, _, body)
             | StatementKind::ForInDestructuringArray(_, _, _, body)
+            | StatementKind::ForAwaitOfExpr(_, _, body)
             | StatementKind::While(_, body)
             | StatementKind::DoWhile(body, _) => check_strict_mode_violations(body)?,
             StatementKind::Switch(sw) => {
@@ -3197,6 +3267,7 @@ fn eval_res<'gc>(
                 StatementKind::For(..)
                 | StatementKind::ForIn(..)
                 | StatementKind::ForOf(..)
+                | StatementKind::ForAwaitOf(..)
                 | StatementKind::While(..)
                 | StatementKind::DoWhile(..)
                 | StatementKind::Label(..) => {
@@ -3693,6 +3764,324 @@ fn eval_res<'gc>(
                                 ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                             }
                         }
+                    }
+                }
+                *last_value = v.clone();
+                return Ok(None);
+            }
+
+            Err(raise_type_error!("Value is not iterable").into())
+        }
+        StatementKind::ForAwaitOf(decl_kind_opt, var_name, iterable, body) => {
+            if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
+                let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval").is_some();
+                hoist_name(mc, env, var_name, is_indirect_eval)?;
+            }
+
+            let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
+            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                let he = new_js_object_data(mc);
+                he.borrow_mut(mc).prototype = Some(*env);
+                env_set(mc, &he, var_name, Value::Uninitialized)?;
+                head_env = Some(he);
+            }
+            let iter_eval_env = head_env.as_ref().unwrap_or(env);
+            let iter_val = evaluate_expr(mc, iter_eval_env, iterable)?;
+
+            let mut iterator: Option<JSObjectDataPtr<'gc>> = None;
+            let mut is_async_iter = false;
+
+            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(async_iter_sym) = object_get_key_value(sym_obj, "asyncIterator")
+                && let Value::Symbol(async_iter_sym_data) = &*async_iter_sym.borrow()
+            {
+                let method = if let Value::Object(obj) = &iter_val {
+                    if let Some(c) = object_get_key_value(obj, async_iter_sym_data) {
+                        c.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    }
+                } else {
+                    get_primitive_prototype_property(mc, env, &iter_val, async_iter_sym_data)?
+                };
+
+                if !matches!(method, Value::Undefined | Value::Null) {
+                    let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+                    let res = await_promise_value(mc, env, res)?;
+                    if let Value::Object(iter_obj) = res {
+                        iterator = Some(iter_obj);
+                        is_async_iter = true;
+                    }
+                }
+            }
+
+            if iterator.is_none()
+                && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+                && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+            {
+                let method = if let Value::Object(obj) = &iter_val {
+                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
+                        c.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    }
+                } else {
+                    get_primitive_prototype_property(mc, env, &iter_val, iter_sym_data)?
+                };
+
+                if !matches!(method, Value::Undefined | Value::Null) {
+                    let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+                    if let Value::Object(iter_obj) = res {
+                        iterator = Some(iter_obj);
+                        is_async_iter = false;
+                    }
+                }
+            }
+
+            if let Some(iter_obj) = iterator {
+                let is_async_gen = object_get_key_value(&iter_obj, "__async_generator__").is_some();
+                let mut first_async_gen_next = is_async_gen;
+                let mut v = Value::Undefined;
+                loop {
+                    let next_method = object_get_key_value(&iter_obj, "next")
+                        .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
+                        .borrow()
+                        .clone();
+
+                    let mut next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
+                    if is_async_iter {
+                        if first_async_gen_next {
+                            next_res_val = await_promise_value_if_pending(mc, env, next_res_val)?;
+                            first_async_gen_next = false;
+                        } else {
+                            next_res_val = await_promise_value(mc, env, next_res_val)?;
+                        }
+                    }
+
+                    if let Value::Object(next_res) = next_res_val {
+                        let done = if let Some(done_val) = object_get_key_value(&next_res, "done") {
+                            match &*done_val.borrow() {
+                                Value::Boolean(b) => *b,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+
+                        if done {
+                            break;
+                        }
+
+                        let mut value = if let Some(val) = object_get_key_value(&next_res, "value") {
+                            val.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        value = await_promise_value(mc, env, value)?;
+
+                        match decl_kind_opt {
+                            Some(crate::core::VarDeclKind::Var) | None => {
+                                crate::core::env_set_recursive(mc, env, var_name, value)?;
+                                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
+                                match res {
+                                    ControlFlow::Normal(_) => v = vbody.clone(),
+                                    ControlFlow::Break(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            v = vbody.clone();
+                                        }
+                                        *last_value = v.clone();
+                                        if label.is_none() {
+                                            break;
+                                        }
+                                        return Ok(Some(ControlFlow::Break(label)));
+                                    }
+                                    ControlFlow::Continue(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            v = vbody.clone();
+                                        }
+                                        if let Some(ref l) = label
+                                            && !own_labels.contains(l)
+                                        {
+                                            *last_value = v.clone();
+                                            return Ok(Some(ControlFlow::Continue(label)));
+                                        }
+                                    }
+                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                    ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
+                                }
+                            }
+                            Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                                let iter_env = new_js_object_data(mc);
+                                iter_env.borrow_mut(mc).prototype = Some(*env);
+                                env_set(mc, &iter_env, var_name, value)?;
+                                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
+                                match res {
+                                    ControlFlow::Normal(_) => v = vbody.clone(),
+                                    ControlFlow::Break(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            v = vbody.clone();
+                                        }
+                                        *last_value = v.clone();
+                                        if label.is_none() {
+                                            break;
+                                        }
+                                        return Ok(Some(ControlFlow::Break(label)));
+                                    }
+                                    ControlFlow::Continue(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            v = vbody.clone();
+                                        }
+                                        if let Some(ref l) = label
+                                            && !own_labels.contains(l)
+                                        {
+                                            *last_value = v.clone();
+                                            return Ok(Some(ControlFlow::Continue(label)));
+                                        }
+                                    }
+                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                    ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(raise_type_error!("Iterator result is not an object").into());
+                    }
+                }
+                *last_value = v.clone();
+                return Ok(None);
+            }
+
+            Err(raise_type_error!("Value is not iterable").into())
+        }
+        StatementKind::ForAwaitOfExpr(lhs, iterable, body) => {
+            let iter_val = evaluate_expr(mc, env, iterable)?;
+            let mut iterator: Option<JSObjectDataPtr<'gc>> = None;
+            let mut is_async_iter = false;
+
+            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(async_iter_sym) = object_get_key_value(sym_obj, "asyncIterator")
+                && let Value::Symbol(async_iter_sym_data) = &*async_iter_sym.borrow()
+            {
+                let method = if let Value::Object(obj) = &iter_val {
+                    if let Some(c) = object_get_key_value(obj, async_iter_sym_data) {
+                        c.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    }
+                } else {
+                    get_primitive_prototype_property(mc, env, &iter_val, async_iter_sym_data)?
+                };
+
+                if !matches!(method, Value::Undefined | Value::Null) {
+                    let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+                    let res = await_promise_value(mc, env, res)?;
+                    if let Value::Object(iter_obj) = res {
+                        iterator = Some(iter_obj);
+                        is_async_iter = true;
+                    }
+                }
+            }
+
+            if iterator.is_none()
+                && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+                && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+            {
+                let method = if let Value::Object(obj) = &iter_val {
+                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
+                        c.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    }
+                } else {
+                    get_primitive_prototype_property(mc, env, &iter_val, iter_sym_data)?
+                };
+
+                if !matches!(method, Value::Undefined | Value::Null) {
+                    let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+                    if let Value::Object(iter_obj) = res {
+                        iterator = Some(iter_obj);
+                        is_async_iter = false;
+                    }
+                }
+            }
+
+            if let Some(iter_obj) = iterator {
+                let is_async_gen = object_get_key_value(&iter_obj, "__async_generator__").is_some();
+                let mut first_async_gen_next = is_async_gen;
+                let mut v = Value::Undefined;
+                loop {
+                    let next_method = object_get_key_value(&iter_obj, "next")
+                        .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
+                        .borrow()
+                        .clone();
+
+                    let mut next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
+                    if is_async_iter {
+                        if first_async_gen_next {
+                            next_res_val = await_promise_value_if_pending(mc, env, next_res_val)?;
+                            first_async_gen_next = false;
+                        } else {
+                            next_res_val = await_promise_value(mc, env, next_res_val)?;
+                        }
+                    }
+
+                    if let Value::Object(next_res) = next_res_val {
+                        let done = if let Some(done_val) = object_get_key_value(&next_res, "done") {
+                            match &*done_val.borrow() {
+                                Value::Boolean(b) => *b,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+
+                        if done {
+                            break;
+                        }
+
+                        let mut value = if let Some(val) = object_get_key_value(&next_res, "value") {
+                            val.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        value = await_promise_value(mc, env, value)?;
+
+                        evaluate_assign_target_with_value(mc, env, lhs, value.clone())?;
+                        let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
+                        match res {
+                            ControlFlow::Normal(_) => v = vbody.clone(),
+                            ControlFlow::Break(label) => {
+                                if !matches!(&vbody, Value::Undefined) {
+                                    v = vbody.clone();
+                                }
+                                *last_value = v.clone();
+                                if label.is_none() {
+                                    break;
+                                }
+                                return Ok(Some(ControlFlow::Break(label)));
+                            }
+                            ControlFlow::Continue(label) => {
+                                if !matches!(&vbody, Value::Undefined) {
+                                    v = vbody.clone();
+                                }
+                                if let Some(ref l) = label
+                                    && !own_labels.contains(l)
+                                {
+                                    *last_value = v.clone();
+                                    return Ok(Some(ControlFlow::Continue(label)));
+                                }
+                            }
+                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                            ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
+                        }
+                    } else {
+                        return Err(raise_type_error!("Iterator result is not an object").into());
                     }
                 }
                 *last_value = v.clone();
@@ -4470,6 +4859,101 @@ fn eval_res<'gc>(
             }
             Err(raise_type_error!("ForInDestructuringArray only supports Objects currently").into())
         }
+        StatementKind::ForAwaitOfDestructuringObject(decl_kind_opt, pattern, iterable, body) => {
+            let mut names = Vec::new();
+            collect_names_from_object_destructuring(pattern, &mut names);
+            for name in names.iter() {
+                if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
+                    let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval").is_some();
+                    hoist_name(mc, env, name, is_indirect_eval)?;
+                }
+            }
+
+            let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
+            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                let he = new_js_object_data(mc);
+                he.borrow_mut(mc).prototype = Some(*env);
+                for name in names.iter() {
+                    env_set(mc, &he, name, Value::Uninitialized)?;
+                }
+                head_env = Some(he);
+            }
+            let iter_eval_env = head_env.as_ref().unwrap_or(env);
+
+            let iter_val = evaluate_expr(mc, iter_eval_env, iterable)?;
+            if let Value::Object(obj) = iter_val
+                && is_array(mc, &obj)
+            {
+                let len = object_get_length(&obj).unwrap_or(0);
+                for i in 0..len {
+                    let mut val = get_property_with_accessors(mc, env, &obj, i)?;
+                    val = await_promise_value(mc, env, val)?;
+
+                    let iter_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                        let e = new_js_object_data(mc);
+                        e.borrow_mut(mc).prototype = Some(*env);
+                        e
+                    } else {
+                        new_js_object_data(mc)
+                    };
+
+                    for elem in pattern {
+                        match elem {
+                            ObjectDestructuringElement::Property { key, value } => {
+                                let prop_val = if let Value::Object(o) = &val {
+                                    get_property_with_accessors(mc, env, o, key)?
+                                } else {
+                                    Value::Undefined
+                                };
+                                if let DestructuringElement::Variable(name, _) = value {
+                                    match decl_kind_opt {
+                                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                                            env_set(mc, &iter_env, name, prop_val)?;
+                                        }
+                                        _ => {
+                                            crate::core::env_set_recursive(mc, env, name, prop_val)?;
+                                        }
+                                    }
+                                }
+                            }
+                            ObjectDestructuringElement::Rest(_name) => {}
+                        }
+                    }
+
+                    let (res, vbody) = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                        evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?
+                    } else {
+                        evaluate_statements_with_context_and_last_value(mc, env, body, labels)?
+                    };
+                    match res {
+                        ControlFlow::Normal(_) => *last_value = vbody,
+                        ControlFlow::Break(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
+                            if label.is_none() {
+                                break;
+                            }
+                            return Ok(Some(ControlFlow::Break(label)));
+                        }
+                        ControlFlow::Continue(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
+                            if let Some(ref l) = label
+                                && !own_labels.contains(l)
+                            {
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
+                        }
+                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                    }
+                }
+                return Ok(None);
+            }
+            Err(raise_type_error!("ForAwaitOfDestructuringObject only supports Arrays currently").into())
+        }
         StatementKind::ForOfDestructuringObject(decl_kind_opt, pattern, iterable, body) => {
             // Hoist var declarations from destructuring pattern (var case)
             let mut names = Vec::new();
@@ -4817,6 +5301,57 @@ fn eval_res<'gc>(
                 return Ok(None);
             }
             Err(raise_type_error!("ForOfDestructuringArray only supports Arrays currently").into())
+        }
+        StatementKind::ForAwaitOfDestructuringArray(decl_kind_opt, pattern, iterable, body) => {
+            let iter_val = evaluate_expr(mc, env, iterable)?;
+            if let Value::Object(obj) = iter_val
+                && is_array(mc, &obj)
+            {
+                let len = object_get_length(&obj).unwrap_or(0);
+                for i in 0..len {
+                    let mut val = get_property_with_accessors(mc, env, &obj, i)?;
+                    val = await_promise_value(mc, env, val)?;
+
+                    let iter_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                        let e = new_js_object_data(mc);
+                        e.borrow_mut(mc).prototype = Some(*env);
+                        e
+                    } else {
+                        new_js_object_data(mc)
+                    };
+
+                    let pattern_expr = Expr::Array(convert_array_pattern_inner(pattern));
+                    evaluate_binding_target_with_value(mc, &iter_env, &pattern_expr, val.clone())?;
+
+                    let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
+                    match res {
+                        ControlFlow::Normal(_) => *last_value = vbody,
+                        ControlFlow::Break(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
+                            if label.is_none() {
+                                break;
+                            }
+                            return Ok(Some(ControlFlow::Break(label)));
+                        }
+                        ControlFlow::Continue(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
+                            if let Some(ref l) = label
+                                && !own_labels.contains(l)
+                            {
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
+                        }
+                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                    }
+                }
+                return Ok(None);
+            }
+            Err(raise_type_error!("ForAwaitOfDestructuringArray only supports Arrays currently").into())
         }
         StatementKind::Switch(sw_stmt) => {
             let sw_stmt = sw_stmt.as_ref();
@@ -6698,6 +7233,35 @@ pub(crate) fn evaluate_binding_target_with_value<'gc>(
     }
 }
 
+fn compute_add<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    l: Value<'gc>,
+    r: Value<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let l_prim = crate::core::to_primitive(mc, &l, "default", env)?;
+    let r_prim = crate::core::to_primitive(mc, &r, "default", env)?;
+
+    if matches!(l_prim, Value::String(_)) || matches!(r_prim, Value::String(_)) {
+        let mut res = match &l_prim {
+            Value::String(ls) => ls.clone(),
+            _ => utf8_to_utf16(&to_string_for_concat(mc, env, &l_prim)?),
+        };
+        match &r_prim {
+            Value::String(rs) => res.extend(rs.clone()),
+            _ => res.extend(utf8_to_utf16(&to_string_for_concat(mc, env, &r_prim)?)),
+        }
+        return Ok(Value::String(res));
+    }
+
+    match (l_prim, r_prim) {
+        (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln + *rn))),
+        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+        (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
+        (lprim, rprim) => Ok(Value::Number(to_number(&lprim)? + to_number(&rprim)?)),
+    }
+}
+
 fn evaluate_expr_add_assign<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -6708,32 +7272,7 @@ fn evaluate_expr_add_assign<'gc>(
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
-            let new_val = match (current, val) {
-                (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln + *rn)),
-                (Value::BigInt(_), other) | (other, Value::BigInt(_)) => {
-                    if matches!(other, Value::String(_)) {
-                        return Err(raise_type_error!("Cannot mix BigInt and other types in +=").into());
-                    }
-                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
-                }
-                (Value::Number(ln), Value::Number(rn)) => Value::Number(ln + rn),
-                (Value::String(ls), Value::String(rs)) => {
-                    let mut res = ls.clone();
-                    res.extend(rs);
-                    Value::String(res)
-                }
-                (Value::String(ls), other) => {
-                    let mut res = ls.clone();
-                    res.extend(utf8_to_utf16(&value_to_concat_string(&other)));
-                    Value::String(res)
-                }
-                (other, Value::String(rs)) => {
-                    let mut res = utf8_to_utf16(&value_to_concat_string(&other));
-                    res.extend(rs);
-                    Value::String(res)
-                }
-                _ => return Err(raise_eval_error!("AddAssign types invalid").into()),
-            };
+            let new_val = compute_add(mc, env, current, val)?;
             env_set_recursive(mc, env, name, new_val.clone())?;
             Ok(new_val)
         }
@@ -6741,32 +7280,7 @@ fn evaluate_expr_add_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
-                let new_val = match (current, val) {
-                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln + *rn)),
-                    (Value::BigInt(_), other) | (other, Value::BigInt(_)) => {
-                        if matches!(other, Value::String(_)) {
-                            return Err(raise_type_error!("Cannot mix BigInt and other types in +=").into());
-                        }
-                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
-                    }
-                    (Value::Number(ln), Value::Number(rn)) => Value::Number(ln + rn),
-                    (Value::String(ls), Value::String(rs)) => {
-                        let mut res = ls.clone();
-                        res.extend(rs);
-                        Value::String(res)
-                    }
-                    (Value::String(ls), other) => {
-                        let mut res = ls.clone();
-                        res.extend(utf8_to_utf16(&value_to_concat_string(&other)));
-                        Value::String(res)
-                    }
-                    (other, Value::String(rs)) => {
-                        let mut res = utf8_to_utf16(&value_to_concat_string(&other));
-                        res.extend(rs);
-                        Value::String(res)
-                    }
-                    _ => return Err(raise_eval_error!("AddAssign types invalid").into()),
-                };
+                let new_val = compute_add(mc, env, current, val)?;
                 set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
                 Ok(new_val)
             } else {
@@ -6779,32 +7293,7 @@ fn evaluate_expr_add_assign<'gc>(
             let key = value_to_string(&key_val);
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
-                let new_val = match (current, val) {
-                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln + *rn)),
-                    (Value::BigInt(_), other) | (other, Value::BigInt(_)) => {
-                        if matches!(other, Value::String(_)) {
-                            return Err(raise_type_error!("Cannot mix BigInt and other types in +=").into());
-                        }
-                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
-                    }
-                    (Value::Number(ln), Value::Number(rn)) => Value::Number(ln + rn),
-                    (Value::String(ls), Value::String(rs)) => {
-                        let mut res = ls.clone();
-                        res.extend(rs);
-                        Value::String(res)
-                    }
-                    (Value::String(ls), other) => {
-                        let mut res = ls.clone();
-                        res.extend(utf8_to_utf16(&value_to_concat_string(&other)));
-                        Value::String(res)
-                    }
-                    (other, Value::String(rs)) => {
-                        let mut res = utf8_to_utf16(&value_to_concat_string(&other));
-                        res.extend(rs);
-                        Value::String(res)
-                    }
-                    _ => return Err(raise_eval_error!("AddAssign types invalid").into()),
-                };
+                let new_val = compute_add(mc, env, current, val)?;
                 set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                 Ok(new_val)
             } else {
@@ -7283,29 +7772,71 @@ fn evaluate_expr_sub_assign<'gc>(
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = evaluate_expr(mc, env, value_expr)?;
-    if let Expr::Var(name, _, _) = target {
-        let current = evaluate_var(mc, env, name)?;
-        match (current, val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => {
-                let new_val = Value::BigInt(Box::new(*ln - *rn));
-                env_set_recursive(mc, env, name, new_val.clone())?;
-                Ok(new_val)
-            }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => {
-                // Coerce to numbers (perform ToPrimitive when needed) and validate not NaN
-                let ln = to_number_with_env(mc, env, &l)?;
-                let rn = to_number_with_env(mc, env, &r)?;
-                if ln.is_nan() || rn.is_nan() {
-                    return Err(raise_eval_error!("Invalid operands for subtraction").into());
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let new_val = Value::BigInt(Box::new(*ln - *rn));
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
                 }
-                let new_val = Value::Number(ln - rn);
-                env_set_recursive(mc, env, name, new_val.clone())?;
-                Ok(new_val)
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (l, r) => {
+                    // Coerce to numbers (perform ToPrimitive when needed) and validate not NaN
+                    let ln = to_number_with_env(mc, env, &l)?;
+                    let rn = to_number_with_env(mc, env, &r)?;
+                    let new_val = Value::Number(ln - rn);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
             }
         }
-    } else {
-        Err(raise_eval_error!("SubAssign only for variables").into())
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let new_val = match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln - *rn)),
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                    }
+                    (l, r) => {
+                        let ln = to_number_with_env(mc, env, &l)?;
+                        let rn = to_number_with_env(mc, env, &r)?;
+                        Value::Number(ln - rn)
+                    }
+                };
+                set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key = value_to_string(&key_val);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let new_val = match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln - *rn)),
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                    }
+                    (l, r) => {
+                        let ln = to_number_with_env(mc, env, &l)?;
+                        let rn = to_number_with_env(mc, env, &r)?;
+                        Value::Number(ln - rn)
+                    }
+                };
+                set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
+            }
+        }
+        _ => Err(raise_eval_error!("SubAssign only for variables, properties or indexes").into()),
     }
 }
 
@@ -7329,9 +7860,6 @@ fn evaluate_expr_mul_assign<'gc>(
                 (l, r) => {
                     let ln = to_number_with_env(mc, env, &l)?;
                     let rn = to_number_with_env(mc, env, &r)?;
-                    if ln.is_nan() || rn.is_nan() {
-                        return Err(raise_eval_error!("Invalid operands for multiplication").into());
-                    }
                     let new_val = Value::Number(ln * rn);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
@@ -7350,9 +7878,6 @@ fn evaluate_expr_mul_assign<'gc>(
                     (l, r) => {
                         let ln = to_number_with_env(mc, env, &l)?;
                         let rn = to_number_with_env(mc, env, &r)?;
-                        if ln.is_nan() || rn.is_nan() {
-                            return Err(raise_eval_error!("Invalid operands for multiplication").into());
-                        }
                         Value::Number(ln * rn)
                     }
                 };
@@ -7374,11 +7899,8 @@ fn evaluate_expr_mul_assign<'gc>(
                         return Err(raise_type_error!("Cannot mix BigInt and other types").into());
                     }
                     (l, r) => {
-                        let ln = to_number(&l)?;
-                        let rn = to_number(&r)?;
-                        if ln.is_nan() || rn.is_nan() {
-                            return Err(raise_eval_error!("Invalid operands for multiplication").into());
-                        }
+                        let ln = to_number_with_env(mc, env, &l)?;
+                        let rn = to_number_with_env(mc, env, &r)?;
                         Value::Number(ln * rn)
                     }
                 };
@@ -7399,35 +7921,83 @@ fn evaluate_expr_div_assign<'gc>(
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = evaluate_expr(mc, env, value_expr)?;
-    if let Expr::Var(name, _, _) = target {
-        let current = evaluate_var(mc, env, name)?;
-        let new_val = match (current, val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => {
-                if rn.is_zero() {
-                    return Err(raise_eval_error!("Division by zero").into());
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            let new_val = match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    if rn.is_zero() {
+                        return Err(raise_eval_error!("Division by zero").into());
+                    }
+                    Value::BigInt(Box::new(*ln / *rn))
                 }
-                Value::BigInt(Box::new(*ln / *rn))
-            }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(raise_type_error!("Cannot mix BigInt and other types").into());
-            }
-            (l, r) => {
-                let denom = to_number(&r)?;
-                if denom == 0.0 {
-                    return Err(raise_eval_error!("Division by zero").into());
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
                 }
-                let ln = to_number(&l)?;
-                let new = ln / denom;
-                if new.is_nan() {
-                    return Err(raise_eval_error!("Invalid operands for division").into());
+                (l, r) => {
+                    let denom = to_number_with_env(mc, env, &r)?;
+                    let ln = to_number_with_env(mc, env, &l)?;
+                    Value::Number(ln / denom)
                 }
-                Value::Number(new)
+            };
+            env_set_recursive(mc, env, name, new_val.clone())?;
+            Ok(new_val)
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let new_val = match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        if rn.is_zero() {
+                            return Err(raise_eval_error!("Division by zero").into());
+                        }
+                        Value::BigInt(Box::new(*ln / *rn))
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                    }
+                    (l, r) => {
+                        let denom = to_number_with_env(mc, env, &r)?;
+                        let ln = to_number_with_env(mc, env, &l)?;
+                        Value::Number(ln / denom)
+                    }
+                };
+                set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
-        };
-        env_set_recursive(mc, env, name, new_val.clone())?;
-        Ok(new_val)
-    } else {
-        Err(raise_eval_error!("DivAssign only for variables").into())
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key = value_to_string(&key_val);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let new_val = match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        if rn.is_zero() {
+                            return Err(raise_eval_error!("Division by zero").into());
+                        }
+                        Value::BigInt(Box::new(*ln / *rn))
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                    }
+                    (l, r) => {
+                        let denom = to_number_with_env(mc, env, &r)?;
+                        let ln = to_number_with_env(mc, env, &l)?;
+                        Value::Number(ln / denom)
+                    }
+                };
+                set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
+            }
+        }
+        _ => Err(raise_eval_error!("DivAssign only for variables, properties or indexes").into()),
     }
 }
 
@@ -7438,35 +8008,83 @@ fn evaluate_expr_mod_assign<'gc>(
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = evaluate_expr(mc, env, value_expr)?;
-    if let Expr::Var(name, _, _) = target {
-        let current = evaluate_var(mc, env, name)?;
-        let new_val = match (current, val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => {
-                if rn.is_zero() {
-                    return Err(raise_eval_error!("Division by zero").into());
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            let new_val = match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    if rn.is_zero() {
+                        return Err(raise_eval_error!("Division by zero").into());
+                    }
+                    Value::BigInt(Box::new(*ln % *rn))
                 }
-                Value::BigInt(Box::new(*ln % *rn))
-            }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(raise_type_error!("Cannot mix BigInt and other types").into());
-            }
-            (l, r) => {
-                let denom = to_number(&r)?;
-                if denom == 0.0 {
-                    return Err(raise_eval_error!("Division by zero").into());
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
                 }
-                let ln = to_number(&l)?;
-                let res = ln % denom;
-                if res.is_nan() {
-                    return Err(raise_eval_error!("Invalid operands for modulo").into());
+                (l, r) => {
+                    let denom = to_number_with_env(mc, env, &r)?;
+                    let ln = to_number_with_env(mc, env, &l)?;
+                    Value::Number(ln % denom)
                 }
-                Value::Number(res)
+            };
+            env_set_recursive(mc, env, name, new_val.clone())?;
+            Ok(new_val)
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let new_val = match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        if rn.is_zero() {
+                            return Err(raise_eval_error!("Division by zero").into());
+                        }
+                        Value::BigInt(Box::new(*ln % *rn))
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                    }
+                    (l, r) => {
+                        let denom = to_number_with_env(mc, env, &r)?;
+                        let ln = to_number_with_env(mc, env, &l)?;
+                        Value::Number(ln % denom)
+                    }
+                };
+                set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
-        };
-        env_set_recursive(mc, env, name, new_val.clone())?;
-        Ok(new_val)
-    } else {
-        Err(raise_eval_error!("ModAssign only for variables").into())
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key = value_to_string(&key_val);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let new_val = match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        if rn.is_zero() {
+                            return Err(raise_eval_error!("Division by zero").into());
+                        }
+                        Value::BigInt(Box::new(*ln % *rn))
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                    }
+                    (l, r) => {
+                        let denom = to_number_with_env(mc, env, &r)?;
+                        let ln = to_number_with_env(mc, env, &l)?;
+                        Value::Number(ln % denom)
+                    }
+                };
+                set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
+            }
+        }
+        _ => Err(raise_eval_error!("ModAssign only for variables, properties or indexes").into()),
     }
 }
 
@@ -7477,27 +8095,80 @@ fn evaluate_expr_pow_assign<'gc>(
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = evaluate_expr(mc, env, value_expr)?;
-    if let Expr::Var(name, _, _) = target {
-        let current = evaluate_var(mc, env, name)?;
-        let new_val = match (current, val) {
-            (Value::BigInt(base), Value::BigInt(exp)) => {
-                if exp.sign() == num_bigint::Sign::Minus {
-                    return Err(raise_range_error!("Exponent must be non-negative").into());
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            let new_val = match (current, val) {
+                (Value::BigInt(base), Value::BigInt(exp)) => {
+                    if exp.sign() == num_bigint::Sign::Minus {
+                        return Err(raise_range_error!("Exponent must be non-negative").into());
+                    }
+                    let e = exp
+                        .to_u32()
+                        .ok_or_else(|| EvalError::Js(raise_range_error!("Exponent too large")))?;
+                    Value::BigInt(Box::new(base.pow(e)))
                 }
-                let e = exp
-                    .to_u32()
-                    .ok_or_else(|| EvalError::Js(raise_range_error!("Exponent too large")))?;
-                Value::BigInt(Box::new(base.pow(e)))
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                }
+                (l, r) => Value::Number(to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?)),
+            };
+            env_set_recursive(mc, env, name, new_val.clone())?;
+            Ok(new_val)
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let new_val = match (current, val) {
+                    (Value::BigInt(base), Value::BigInt(exp)) => {
+                        if exp.sign() == num_bigint::Sign::Minus {
+                            return Err(raise_range_error!("Exponent must be non-negative").into());
+                        }
+                        let e = exp
+                            .to_u32()
+                            .ok_or_else(|| EvalError::Js(raise_range_error!("Exponent too large")))?;
+                        Value::BigInt(Box::new(base.pow(e)))
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                    }
+                    (l, r) => Value::Number(to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?)),
+                };
+                set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key = value_to_string(&key_val);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let new_val = match (current, val) {
+                    (Value::BigInt(base), Value::BigInt(exp)) => {
+                        if exp.sign() == num_bigint::Sign::Minus {
+                            return Err(raise_range_error!("Exponent must be non-negative").into());
+                        }
+                        let e = exp
+                            .to_u32()
+                            .ok_or_else(|| EvalError::Js(raise_range_error!("Exponent too large")))?;
+                        Value::BigInt(Box::new(base.pow(e)))
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                    }
+                    (l, r) => Value::Number(to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?)),
+                };
+                set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
-            (l, r) => Value::Number(to_number(&l)?.powf(to_number(&r)?)),
-        };
-        env_set_recursive(mc, env, name, new_val.clone())?;
-        Ok(new_val)
-    } else {
-        Err(raise_eval_error!("PowAssign only for variables").into())
+        }
+        _ => Err(raise_eval_error!("PowAssign only for variables, properties or indexes").into()),
     }
 }
 
@@ -7518,9 +8189,12 @@ pub fn check_top_level_return<'gc>(stmts: &[Statement]) -> Result<(), EvalError<
             StatementKind::DoWhile(body, _) => check_top_level_return(body)?,
             StatementKind::For(for_stmt) => check_top_level_return(&for_stmt.body)?,
             StatementKind::ForOf(_, _, _, body) => check_top_level_return(body)?,
+            StatementKind::ForAwaitOf(_, _, _, body) => check_top_level_return(body)?,
             StatementKind::ForIn(_, _, _, body) => check_top_level_return(body)?,
             StatementKind::ForOfDestructuringObject(_, _, _, body) => check_top_level_return(body)?,
             StatementKind::ForOfDestructuringArray(_, _, _, body) => check_top_level_return(body)?,
+            StatementKind::ForAwaitOfDestructuringObject(_, _, _, body) => check_top_level_return(body)?,
+            StatementKind::ForAwaitOfDestructuringArray(_, _, _, body) => check_top_level_return(body)?,
             StatementKind::Switch(sw) => {
                 for case in &sw.cases {
                     match case {
@@ -8115,7 +8789,7 @@ pub fn evaluate_call_dispatch<'gc>(
     match func_val {
         Value::Closure(cl) => call_closure(mc, &cl, this_val.clone(), &eval_args, env, None),
         Value::GeneratorFunction(_, cl) => Ok(handle_generator_function_call(mc, &cl, &eval_args, this_val.clone())?),
-        Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, &cl, &eval_args)?),
+        Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, &cl, &eval_args, None)?),
         Value::Function(name) => {
             if let Some(res) = call_native_function(mc, &name, this_val.clone(), &eval_args, env)? {
                 return Ok(res);
@@ -8545,7 +9219,7 @@ pub fn evaluate_call_dispatch<'gc>(
                     Value::AsyncClosure(cl) => Ok(handle_async_closure_call(mc, cl, this_val.clone(), &eval_args, env, Some(obj))?),
                     Value::GeneratorFunction(_, cl) => Ok(handle_generator_function_call(mc, cl, &eval_args, this_val.clone())?),
                     // Async generator functions: create AsyncGenerator instance
-                    Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, cl, &eval_args)?),
+                    Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, cl, &eval_args, Some(obj))?),
                     _ => Err(raise_type_error!("Not a function").into()),
                 }
             } else if obj.borrow().class_def.is_some() {
@@ -8574,6 +9248,8 @@ pub fn evaluate_call_dispatch<'gc>(
                             || name == &crate::unicode::utf8_to_utf16("ReferenceError")
                             || name == &crate::unicode::utf8_to_utf16("RangeError")
                             || name == &crate::unicode::utf8_to_utf16("SyntaxError")
+                            || name == &crate::unicode::utf8_to_utf16("EvalError")
+                            || name == &crate::unicode::utf8_to_utf16("URIError")
                         {
                             // For native Error constructors, calling them as a function
                             // should produce a new Error object with the provided message.
@@ -9031,6 +9707,98 @@ fn evaluate_expr_call<'gc>(
     }
 }
 
+fn await_promise_value<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    value: Value<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let promise_val = if let Value::Object(obj) = &value
+        && crate::js_promise::get_promise_from_js_object(obj).is_some()
+    {
+        value.clone()
+    } else {
+        // Wrap non-promise values in a resolved promise to ensure microtask interleaving
+        let (p, resolve, _) = crate::js_promise::create_promise_capability(mc, env)?;
+        crate::js_promise::call_function(mc, &resolve, std::slice::from_ref(&value), env)?;
+        let p_obj = crate::js_promise::make_promise_js_object(mc, p, Some(*env))?;
+        Value::Object(p_obj)
+    };
+
+    if let Value::Object(obj) = &promise_val
+        && let Some(promise_ref) = crate::js_promise::get_promise_from_js_object(obj)
+    {
+        crate::js_promise::mark_promise_handled(mc, promise_ref, env).expect("Marking promise as handled failed");
+        loop {
+            let state = promise_ref.borrow().state.clone();
+            match state {
+                crate::core::PromiseState::Pending => match crate::js_promise::run_event_loop(mc)? {
+                    crate::js_promise::PollResult::Executed => continue,
+                    crate::js_promise::PollResult::Wait(d) => {
+                        std::thread::sleep(d);
+                        continue;
+                    }
+                    crate::js_promise::PollResult::Empty => {
+                        std::thread::yield_now();
+                        continue;
+                    }
+                },
+                crate::core::PromiseState::Fulfilled(v) => {
+                    // Await always yields to the microtask queue once, even when already fulfilled.
+                    let _ = crate::js_promise::run_event_loop(mc);
+                    return Ok(v.clone());
+                }
+                crate::core::PromiseState::Rejected(r) => {
+                    let _ = crate::js_promise::run_event_loop(mc);
+                    return Err(EvalError::Throw(r.clone(), None, None));
+                }
+            }
+        }
+    }
+    Ok(value)
+}
+
+fn await_promise_value_if_pending<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    value: Value<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let promise_val = if let Value::Object(obj) = &value
+        && crate::js_promise::get_promise_from_js_object(obj).is_some()
+    {
+        value.clone()
+    } else {
+        let (p, resolve, _) = crate::js_promise::create_promise_capability(mc, env)?;
+        crate::js_promise::call_function(mc, &resolve, std::slice::from_ref(&value), env).expect("call_function failed");
+        let p_obj = crate::js_promise::make_promise_js_object(mc, p, Some(*env))?;
+        Value::Object(p_obj)
+    };
+
+    if let Value::Object(obj) = &promise_val
+        && let Some(promise_ref) = crate::js_promise::get_promise_from_js_object(obj)
+    {
+        crate::js_promise::mark_promise_handled(mc, promise_ref, env).expect("Marking promise as handled failed");
+        loop {
+            let state = promise_ref.borrow().state.clone();
+            match state {
+                crate::core::PromiseState::Pending => match crate::js_promise::run_event_loop(mc)? {
+                    crate::js_promise::PollResult::Executed => continue,
+                    crate::js_promise::PollResult::Wait(d) => {
+                        std::thread::sleep(d);
+                        continue;
+                    }
+                    crate::js_promise::PollResult::Empty => {
+                        std::thread::yield_now();
+                        continue;
+                    }
+                },
+                crate::core::PromiseState::Fulfilled(v) => return Ok(v.clone()),
+                crate::core::PromiseState::Rejected(r) => return Err(EvalError::Throw(r.clone(), None, None)),
+            }
+        }
+    }
+    Ok(value)
+}
+
 fn evaluate_expr_binary<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -9068,12 +9836,12 @@ fn evaluate_expr_binary<'gc>(
         BinaryOp::Sub => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln - *rn))),
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number(&l)? - to_number(&r)?)),
+            (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? - to_number_with_env(mc, env, &r)?)),
         },
         BinaryOp::Mul => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln * *rn))),
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number(&l)? * to_number(&r)?)),
+            (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? * to_number_with_env(mc, env, &r)?)),
         },
         BinaryOp::Div => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => {
@@ -9083,7 +9851,7 @@ fn evaluate_expr_binary<'gc>(
                 Ok(Value::BigInt(Box::new(*ln / *rn)))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number(&l)? / to_number(&r)?)),
+            (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? / to_number_with_env(mc, env, &r)?)),
         },
         BinaryOp::LeftShift => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => {
@@ -9186,17 +9954,17 @@ fn evaluate_expr_binary<'gc>(
             }
             (Value::BigInt(l), other) => {
                 let ln = l.to_f64().unwrap_or(f64::NAN);
-                let rn = to_number(&other)?;
+                let rn = to_number_with_env(mc, env, &other)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln > rn))
             }
             (other, Value::BigInt(r)) => {
-                let ln = to_number(&other)?;
+                let ln = to_number_with_env(mc, env, &other)?;
                 let rn = r.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln > rn))
             }
             (l, r) => {
-                let ln = to_number(&l)?;
-                let rn = to_number(&r)?;
+                let ln = to_number_with_env(mc, env, &l)?;
+                let rn = to_number_with_env(mc, env, &r)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln > rn))
             }
         },
@@ -9209,17 +9977,17 @@ fn evaluate_expr_binary<'gc>(
             }
             (Value::BigInt(l), other) => {
                 let ln = l.to_f64().unwrap_or(f64::NAN);
-                let rn = to_number(&other)?;
+                let rn = to_number_with_env(mc, env, &other)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln < rn))
             }
             (other, Value::BigInt(r)) => {
-                let ln = to_number(&other)?;
+                let ln = to_number_with_env(mc, env, &other)?;
                 let rn = r.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln < rn))
             }
             (l, r) => {
-                let ln = to_number(&l)?;
-                let rn = to_number(&r)?;
+                let ln = to_number_with_env(mc, env, &l)?;
+                let rn = to_number_with_env(mc, env, &r)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln < rn))
             }
         },
@@ -9232,17 +10000,17 @@ fn evaluate_expr_binary<'gc>(
             }
             (Value::BigInt(l), other) => {
                 let ln = l.to_f64().unwrap_or(f64::NAN);
-                let rn = to_number(&other)?;
+                let rn = to_number_with_env(mc, env, &other)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln >= rn))
             }
             (other, Value::BigInt(r)) => {
-                let ln = to_number(&other)?;
+                let ln = to_number_with_env(mc, env, &other)?;
                 let rn = r.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln >= rn))
             }
             (l, r) => {
-                let ln = to_number(&l)?;
-                let rn = to_number(&r)?;
+                let ln = to_number_with_env(mc, env, &l)?;
+                let rn = to_number_with_env(mc, env, &r)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln >= rn))
             }
         },
@@ -9255,17 +10023,17 @@ fn evaluate_expr_binary<'gc>(
             }
             (Value::BigInt(l), other) => {
                 let ln = l.to_f64().unwrap_or(f64::NAN);
-                let rn = to_number(&other)?;
+                let rn = to_number_with_env(mc, env, &other)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln <= rn))
             }
             (other, Value::BigInt(r)) => {
-                let ln = to_number(&other)?;
+                let ln = to_number_with_env(mc, env, &other)?;
                 let rn = r.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln <= rn))
             }
             (l, r) => {
-                let ln = to_number(&l)?;
-                let rn = to_number(&r)?;
+                let ln = to_number_with_env(mc, env, &l)?;
+                let rn = to_number_with_env(mc, env, &r)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln <= rn))
             }
         },
@@ -9277,7 +10045,7 @@ fn evaluate_expr_binary<'gc>(
                 Ok(Value::BigInt(Box::new(*ln % *rn)))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number(&l)? % to_number(&r)?)),
+            (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? % to_number_with_env(mc, env, &r)?)),
         },
         BinaryOp::Pow => match (l_val, r_val) {
             (Value::BigInt(base), Value::BigInt(exp)) => {
@@ -9290,7 +10058,9 @@ fn evaluate_expr_binary<'gc>(
                 Ok(Value::BigInt(Box::new(base.pow(e))))
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number(&l)?.powf(to_number(&r)?))),
+            (l, r) => Ok(Value::Number(
+                to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?),
+            )),
         },
         BinaryOp::BitAnd => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l & *r))),
@@ -9591,13 +10361,30 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
             // Create prototype object
             let proto_obj = crate::core::new_js_object_data(mc);
-            // Set prototype of prototype object to Object.prototype
-            if let Some(obj_val) = env_get(env, "Object")
+            // Set prototype of prototype object to Generator.prototype if available
+            // (fallback to Object.prototype otherwise).
+            if let Some(gen_val) = env_get(env, "Generator")
+                && let Value::Object(gen_ctor) = &*gen_val.borrow()
+                && let Some(gen_proto_val) = object_get_key_value(gen_ctor, "prototype")
+            {
+                let proto_value = match &*gen_proto_val.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                if let Value::Object(gen_proto) = proto_value {
+                    proto_obj.borrow_mut(mc).prototype = Some(gen_proto);
+                }
+            } else if let Some(obj_val) = env_get(env, "Object")
                 && let Value::Object(obj_ctor) = &*obj_val.borrow()
                 && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
             {
-                proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+                let proto_value = match &*obj_proto_val.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                if let Value::Object(obj_proto) = proto_value {
+                    proto_obj.borrow_mut(mc).prototype = Some(obj_proto);
+                }
             }
 
             // Set 'constructor' on prototype
@@ -9634,13 +10421,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             };
             let closure_val = Value::AsyncGeneratorFunction(name.clone(), Gc::new(mc, closure_data));
             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-            match name {
-                Some(n) if !n.is_empty() => {
-                    let desc = create_descriptor_object(mc, Value::String(utf8_to_utf16(n)), false, false, true)?;
-                    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
-                }
-                _ => {}
-            }
+            let name_val = match name {
+                Some(n) if !n.is_empty() => Value::String(utf8_to_utf16(n)),
+                _ => Value::String(vec![]),
+            };
+            let desc = create_descriptor_object(mc, name_val, false, false, true)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
 
             // Set 'length' property for async generator function
             let mut fn_length = 0_usize;
@@ -9665,13 +10451,34 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
             // Create prototype object
             let proto_obj = crate::core::new_js_object_data(mc);
-            // Set prototype of prototype object to Object.prototype
-            if let Some(obj_val) = env_get(env, "Object")
+            // Set prototype of prototype object to AsyncGenerator.prototype if available
+            // (fallback to Object.prototype otherwise).
+            if let Some(async_gen_val) = env_get(env, "AsyncGenerator")
+                && let Value::Object(async_gen_ctor) = &*async_gen_val.borrow()
+                && let Some(async_proto_val) = object_get_key_value(async_gen_ctor, "prototype")
+            {
+                let proto_value = match &*async_proto_val.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                if let Value::Object(async_proto) = proto_value {
+                    proto_obj.borrow_mut(mc).prototype = Some(async_proto);
+                }
+            } else if let Some(obj_val) = env_get(env, "Object")
                 && let Value::Object(obj_ctor) = &*obj_val.borrow()
                 && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
             {
-                proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+                let proto_value = match &*obj_proto_val.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                if let Value::Object(obj_proto) = proto_value {
+                    proto_obj.borrow_mut(mc).prototype = Some(obj_proto);
+                }
+            }
+            // Record the intrinsic async generator prototype (if any) for fallback
+            if let Some(proto) = proto_obj.borrow().prototype {
+                object_set_key_value(mc, &func_obj, "__async_generator_proto", Value::Object(proto))?;
             }
 
             // Set 'constructor' on prototype
@@ -9943,8 +10750,23 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             Ok(Value::String(result))
         }
         Expr::Class(class_def) => {
-            let class_obj = crate::js_class::create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, env, true)?;
-            Ok(class_obj)
+            if class_def.name.is_empty() {
+                let class_obj = create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, env, false)?;
+                Ok(class_obj)
+            } else {
+                // Create a class scope for the class name binding (lexical, immutable)
+                let class_scope = new_js_object_data(mc);
+                class_scope.borrow_mut(mc).prototype = Some(*env);
+                env_set(mc, &class_scope, &class_def.name, Value::Uninitialized)?;
+
+                let class_obj = create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, &class_scope, false)?;
+
+                // Initialize the class name binding to the class object and mark it immutable
+                env_set(mc, &class_scope, &class_def.name, class_obj.clone())?;
+                class_scope.borrow_mut(mc).set_const(class_def.name.clone());
+
+                Ok(class_obj)
+            }
         }
         Expr::UnaryNeg(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
@@ -10462,66 +11284,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::Await(expr) => {
             log::trace!("DEBUG: Evaluating Await");
-            // Evaluate the inner expression and normalize to a Promise using Promise.resolve
             let value = evaluate_expr(mc, env, expr)?;
-
-            // Obtain Promise.resolve from the current environment
-            let promise_resolve = if let Some(ctor) = crate::core::env_get(env, "Promise") {
-                if let Some(resolve_method) = object_get_key_value(
-                    &match ctor.borrow().clone() {
-                        Value::Object(o) => o,
-                        _ => return Err(raise_eval_error!("Promise not object").into()),
-                    },
-                    "resolve",
-                ) {
-                    resolve_method.borrow().clone()
-                } else {
-                    return Err(raise_eval_error!("Promise.resolve missing").into());
-                }
-            } else {
-                return Err(raise_eval_error!("Promise not found").into());
-            };
-
-            // Call Promise.resolve(value)
-            let p_val = crate::js_promise::call_function(mc, &promise_resolve, std::slice::from_ref(&value), env)?;
-
-            // If we got a real Promise object, wait until it settles by running the event loop
-            if let Value::Object(p_obj) = &p_val
-                && let Some(promise_ref) = crate::js_promise::get_promise_from_js_object(p_obj)
-            {
-                loop {
-                    // Check current state
-                    let state = promise_ref.borrow().state.clone();
-                    match state {
-                        PromiseState::Pending => {
-                            match crate::js_promise::run_event_loop(mc)? {
-                                crate::js_promise::PollResult::Executed => continue,
-                                // If event loop reports a timed wait, sleep briefly and then
-                                // continue polling so we wait for the promise to settle.
-                                crate::js_promise::PollResult::Wait(d) => {
-                                    std::thread::sleep(d);
-                                    continue;
-                                }
-                                // No tasks currently queued. Yield the thread briefly
-                                // and continue polling instead of returning early. This
-                                // ensures `await` blocks until the promise actually
-                                // settles (matching Node.js behavior) rather than
-                                // observing a still-pending promise when the loop is
-                                // momentarily idle.
-                                crate::js_promise::PollResult::Empty => {
-                                    std::thread::yield_now();
-                                    continue;
-                                }
-                            }
-                        }
-                        PromiseState::Fulfilled(v) => return Ok(v.clone()),
-                        PromiseState::Rejected(r) => return Err(EvalError::Throw(r.clone(), None, None)),
-                    }
-                }
-            }
-
-            // Not a promise object; return the resolved value
-            Ok(p_val)
+            await_promise_value(mc, env, value)
         }
         Expr::Yield(_) | Expr::YieldStar(_) => Err(raise_eval_error!("`yield` is only valid inside generator functions").into()),
         Expr::AsyncArrowFunction(params, body) => {
@@ -11042,13 +11806,6 @@ fn set_property_with_accessors<'gc>(
             // Owner is the receiver (own property)
             let prop_ptr = object_get_key_value(obj, key).unwrap();
             let prop = prop_ptr.borrow().clone();
-            log::debug!("DBG set_property: existing prop for key={:?} -> {:?}", key, prop);
-            log::debug!(
-                "DBG set_property: receiver_ptr={:p} non_writable_contains={} properties={:?}",
-                Gc::as_ptr(*obj),
-                obj.borrow().non_writable.contains(key),
-                obj.borrow().properties.keys().collect::<Vec<_>>()
-            );
             match prop {
                 Value::Property { setter, getter, .. } => {
                     if let Some(s) = setter {
@@ -11070,10 +11827,16 @@ fn set_property_with_accessors<'gc>(
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
                     }
                     // If the existing property is non-writable, TypeError should be thrown
-                    if !obj.borrow().is_writable(key) {
+                    let writable = { obj.borrow().is_writable(key) };
+                    if !writable {
                         return Err(raise_type_error!("Cannot assign to read-only property").into());
                     }
-                    object_set_key_value(mc, obj, key, val)?;
+                    let mut prop_mut = prop_ptr.borrow_mut(mc);
+                    if let Value::Property { value, .. } = &mut *prop_mut {
+                        *value = Some(new_gc_cell_ptr(mc, val));
+                    } else {
+                        *prop_mut = val;
+                    }
                     Ok(())
                 }
                 Value::Setter(params, body, captured_env, home_opt) => {
@@ -11087,10 +11850,12 @@ fn set_property_with_accessors<'gc>(
                 Value::Getter(..) => Err(raise_type_error!("Cannot set property which has only a getter").into()),
                 _ => {
                     // For plain existing properties, respect writability
-                    if !obj.borrow().is_writable(key) {
+                    let writable = { obj.borrow().is_writable(key) };
+                    if !writable {
                         return Err(raise_type_error!("Cannot assign to read-only property").into());
                     }
-                    object_set_key_value(mc, obj, key, val)?;
+                    let mut prop_mut = prop_ptr.borrow_mut(mc);
+                    *prop_mut = val;
                     Ok(())
                 }
             }
@@ -11139,6 +11904,12 @@ fn set_property_with_accessors<'gc>(
         }
     } else {
         // No owner found in chain: create own property
+        if !obj.borrow().is_extensible() {
+            if crate::core::env_get_strictness(_env) {
+                return Err(raise_type_error!("Cannot add property to non-extensible object").into());
+            }
+            return Ok(());
+        }
         object_set_key_value(mc, obj, key, val)?;
         Ok(())
     }
@@ -11206,6 +11977,15 @@ pub fn call_native_function<'gc>(
             }
         } else {
             return Err(raise_eval_error!("AsyncGenerator.prototype.return called on non-object").into());
+        }
+    }
+
+    if name == "AsyncGenerator.prototype.asyncIterator" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(Value::Object(obj)));
+        } else {
+            return Err(raise_eval_error!("AsyncGenerator.prototype.asyncIterator called on non-object").into());
         }
     }
 
@@ -11640,10 +12420,10 @@ fn call_setter_raw<'gc>(
     home_opt: Option<GcCell<JSObjectDataPtr<'gc>>>,
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
-    let call_env = crate::core::new_js_object_data(mc);
-    call_env.borrow_mut(mc).prototype = Some(*env);
-    call_env.borrow_mut(mc).is_function_scope = true;
-    object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
+    let params_env = crate::core::new_js_object_data(mc);
+    params_env.borrow_mut(mc).prototype = Some(*env);
+    params_env.borrow_mut(mc).is_function_scope = true;
+    object_set_key_value(mc, &params_env, "this", Value::Object(*receiver))?;
 
     // If the setter carried a home object, propagate it into call env so `super` resolves
     if let Some(home_obj) = &home_opt {
@@ -11654,13 +12434,28 @@ fn call_setter_raw<'gc>(
     } else {
         log::debug!("DBG call_setter_raw: no home_obj provided");
     }
-    call_env.borrow_mut(mc).set_home_object(home_opt);
+    params_env.borrow_mut(mc).set_home_object(home_opt.clone());
 
     if let Some(param) = params.first()
         && let DestructuringElement::Variable(name, _) = param
     {
-        crate::core::env_set(mc, &call_env, name, val)?;
+        crate::core::env_set(mc, &params_env, name, val)?;
     }
+
+    // If this setter has a parameter default initializer expression, evaluate it
+    // in the parameter environment to ensure it cannot see body declarations.
+    if let Some(param) = params.first()
+        && let DestructuringElement::Variable(_name, Some(default_expr)) = param
+    {
+        let _ = evaluate_expr(mc, &params_env, default_expr)?;
+    }
+
+    let call_env = crate::core::new_js_object_data(mc);
+    call_env.borrow_mut(mc).prototype = Some(params_env);
+    call_env.borrow_mut(mc).is_function_scope = true;
+    object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
+    call_env.borrow_mut(mc).set_home_object(home_opt);
+
     let body_clone = body.to_vec();
     evaluate_statements(mc, &call_env, &body_clone).map(|_| ())
 }
@@ -11686,14 +12481,16 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     // upwards for a constructor with the given name. Avoid climbing the object
     // prototype chain which may bypass the lexical/global environment.
     let mut found_proto: Option<JSObjectDataPtr<'gc>> = None;
+    let mut found_ctor: Option<JSObjectDataPtr<'gc>> = None;
     let mut search_env: Option<JSObjectDataPtr<'gc>> = Some(*env);
     while let Some(cur) = search_env {
-        if let Some(err_ctor_val) = object_get_key_value(&cur, name)
+        if let Some(err_ctor_val) = env_get_own(&cur, name)
             && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
             && let Value::Object(proto) = &*proto_val.borrow()
         {
             found_proto = Some(*proto);
+            found_ctor = Some(*err_ctor);
             break;
         }
         search_env = cur.borrow().prototype;
@@ -11702,12 +12499,13 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     // If not found in lexical chain, fallback to Error constructor's prototype via env or root
     if found_proto.is_none() {
         // try env's Error
-        if let Some(err_ctor_val) = object_get_key_value(env, "Error")
+        if let Some(err_ctor_val) = env_get(env, "Error")
             && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
             && let Value::Object(proto) = &*proto_val.borrow()
         {
             found_proto = Some(*proto);
+            found_ctor = Some(*err_ctor);
         } else {
             found_proto = None;
         }
@@ -11745,7 +12543,9 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
         // This ensures the instance's constructor matches the prototype's constructor
         // and avoids mismatches when the same named constructor is bound differently
         // higher in the global root chain.
-        if let Some(proto) = error_proto {
+        if let Some(ctor_obj) = found_ctor {
+            obj.borrow_mut(mc).set_property(mc, "constructor", Value::Object(ctor_obj));
+        } else if let Some(proto) = error_proto {
             if let Some(ctor_val) = object_get_key_value(&proto, "constructor") {
                 obj.borrow_mut(mc).set_property(mc, "constructor", ctor_val.borrow().clone());
             }
@@ -12324,7 +13124,7 @@ pub fn prepare_function_call_env<'gc>(
     args: &[Value<'gc>],
     _new_target: Option<Value<'gc>>,
     _caller_env: Option<&JSObjectDataPtr<'gc>>,
-) -> Result<JSObjectDataPtr<'gc>, JSError> {
+) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
     let call_env = new_js_object_data(mc);
 
     if let Some(c_env) = captured_env {
@@ -12337,10 +13137,28 @@ pub fn prepare_function_call_env<'gc>(
     }
 
     if let Some(params) = params_opt {
+        // Predeclare parameter bindings as Uninitialized so TDZ is enforced
+        // during evaluation of default initializers.
+        let mut param_names: Vec<String> = Vec::new();
+        for param in params.iter() {
+            collect_names_from_destructuring_element(param, &mut param_names);
+        }
+        for name in param_names {
+            if env_get_own(&call_env, &name).is_none() {
+                env_set(mc, &call_env, &name, Value::Uninitialized)?;
+            }
+        }
+
         for (i, param) in params.iter().enumerate() {
             match param {
-                DestructuringElement::Variable(name, _) => {
-                    let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                DestructuringElement::Variable(name, default_expr) => {
+                    let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                    if matches!(arg_val, Value::Undefined)
+                        && let Some(def) = default_expr
+                    {
+                        arg_val = evaluate_expr(mc, &call_env, def)?;
+                        maybe_set_function_name_for_default(mc, name, def, &arg_val)?;
+                    }
                     env_set(mc, &call_env, name, arg_val)?;
                 }
                 DestructuringElement::Rest(name) => {
@@ -12356,16 +13174,18 @@ pub fn prepare_function_call_env<'gc>(
                     // Handle simple object destructuring param like ({ type }) => type
                     if let DestructuringElement::Variable(name, default_expr) = &**boxed {
                         let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-                        let mut prop_val = Value::Undefined;
-                        if let Value::Object(o) = arg_val
-                            && let Some(cell) = object_get_key_value(&o, key)
-                        {
-                            prop_val = cell.borrow().clone();
+                        if matches!(arg_val, Value::Undefined | Value::Null) {
+                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
                         }
+                        let mut prop_val = match &arg_val {
+                            Value::Object(o) => get_property_with_accessors(mc, &call_env, o, key)?,
+                            _ => get_primitive_prototype_property(mc, &call_env, &arg_val, key)?,
+                        };
                         if matches!(prop_val, Value::Undefined)
                             && let Some(def) = default_expr
                         {
                             prop_val = evaluate_expr(mc, &call_env, def)?;
+                            maybe_set_function_name_for_default(mc, name, def, &prop_val)?;
                         }
                         env_set(mc, &call_env, name, prop_val)?;
                     }
@@ -12373,11 +13193,12 @@ pub fn prepare_function_call_env<'gc>(
                 DestructuringElement::NestedArray(inner, nested_default) => {
                     let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
                     // If arg is null/undefined and there is a parameter-level default, evaluate it
-                    if matches!(arg_val, Value::Undefined) || matches!(arg_val, Value::Null) {
+                    if matches!(arg_val, Value::Undefined | Value::Null) {
                         if let Some(def) = nested_default {
                             arg_val = evaluate_expr(mc, &call_env, def)?;
-                        } else {
-                            return Err(raise_type_error!("Cannot convert undefined or null to object"));
+                        }
+                        if matches!(arg_val, Value::Undefined | Value::Null) {
+                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
                         }
                     }
 
@@ -12395,52 +13216,20 @@ pub fn prepare_function_call_env<'gc>(
                     // Bind object destructuring parameters like ({ type }) directly
                     let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
                     // If arg is null/undefined and there is no parameter-level default, throw a TypeError
-                    if matches!(arg_val, Value::Undefined) || matches!(arg_val, Value::Null) {
+                    if matches!(arg_val, Value::Undefined | Value::Null) {
                         if let Some(def) = nested_default {
                             arg_val = evaluate_expr(mc, &call_env, def)?;
-                        } else {
-                            return Err(raise_type_error!("Cannot convert undefined or null to object"));
+                        }
+                        if matches!(arg_val, Value::Undefined | Value::Null) {
+                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
                         }
                     }
-                    if let Value::Object(o) = arg_val {
-                        for elem in inner.iter() {
-                            match elem {
-                                DestructuringElement::Property(key, boxed) => {
-                                    if let DestructuringElement::Variable(name, default_expr) = &**boxed {
-                                        let mut prop_val = Value::Undefined;
-                                        if let Some(cell) = object_get_key_value(&o, key) {
-                                            prop_val = cell.borrow().clone();
-                                        }
-                                        if matches!(prop_val, Value::Undefined)
-                                            && let Some(def) = default_expr
-                                        {
-                                            prop_val = evaluate_expr(mc, &call_env, def)?;
-                                        }
-                                        env_set(mc, &call_env, name, prop_val)?;
-                                    }
-                                }
-                                DestructuringElement::Rest(name) => {
-                                    // Collect remaining properties into an object (not fully implemented)
-                                    let rest_obj = new_js_object_data(mc);
-                                    env_set(mc, &call_env, name, Value::Object(rest_obj))?;
-                                }
-                                _ => {}
-                            }
-                        }
-                    } else {
-                        // if arg is not object, bind all mentioned names to undefined or defaults
-                        for elem in inner.iter() {
-                            if let DestructuringElement::Property(_, boxed) = elem
-                                && let DestructuringElement::Variable(name, default_expr) = &**boxed
-                            {
-                                let mut prop_val = Value::Undefined;
-                                if let Some(def) = default_expr {
-                                    prop_val = evaluate_expr(mc, &call_env, def)?;
-                                }
-                                env_set(mc, &call_env, name, prop_val)?;
-                            }
-                        }
+                    let pattern = Expr::Object(convert_object_pattern_inner(inner));
+                    let mut pattern_with_default = pattern;
+                    if let Some(d) = nested_default {
+                        pattern_with_default = Expr::Assign(Box::new(pattern_with_default), Box::new((**d).clone()));
                     }
+                    evaluate_binding_target_with_value(mc, &call_env, &pattern_with_default, arg_val)?;
                 }
                 _ => {}
             }
@@ -12454,9 +13243,9 @@ pub fn prepare_closure_call_env<'gc>(
     captured_env: Option<&JSObjectDataPtr<'gc>>,
     params_opt: Option<&[DestructuringElement]>,
     args: &[Value<'gc>],
-    _caller_env: Option<&JSObjectDataPtr<'gc>>,
-) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    prepare_function_call_env(mc, captured_env, None, params_opt, args, None, _caller_env)
+    caller_env: Option<&JSObjectDataPtr<'gc>>,
+) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+    prepare_function_call_env(mc, captured_env, None, params_opt, args, None, caller_env)
 }
 
 #[allow(dead_code)]
@@ -13257,9 +14046,12 @@ fn body_has_lexical(stmts: &[Statement]) -> bool {
                 }
             }
             StatementKind::ForOf(_, _, _, body)
+            | StatementKind::ForAwaitOf(_, _, _, body)
             | StatementKind::ForIn(_, _, _, body)
             | StatementKind::ForOfDestructuringObject(_, _, _, body)
             | StatementKind::ForOfDestructuringArray(_, _, _, body)
+            | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
+            | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
             | StatementKind::ForInDestructuringObject(_, _, _, body)
             | StatementKind::ForInDestructuringArray(_, _, _, body) => {
                 if body_has_lexical(body) {

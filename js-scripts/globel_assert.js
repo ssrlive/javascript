@@ -25,7 +25,7 @@ console.log('global typeof $DONE:', typeof $DONE);
 // Minimal $262 host object stub
 if (typeof $262 === 'undefined') {
     var $262 = {
-        createRealm: function() { return {}; },
+        createRealm: function() { return { global: globalThis }; },
         detachArrayBuffer: function(buf) { /* no-op for now */ },
         evalScript: function(s) { return eval(s); },
         // Add other shims as needed by tests

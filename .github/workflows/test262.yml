@@ -110,3 +110,38 @@ jobs:
         with:
           name: test262-results-3
           path: test262-results.log
+
+  run-test262-subset-4:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Build JavaScript engine
+        run: |
+          cargo build --all-features --example js
+
+      - name: Run a small test262 subset - "language/expressions/bitwise-and" - "language/expressions/call"
+        if: ${{ !cancelled() }}
+        env:
+          FAIL_ON_FAILURE: 'true'
+        run: |
+          node ci/runner.js --limit 1000 --focus language/expressions/bitwise-and,language/expressions/bitwise-not,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/call
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-results-4
+          path: test262-results.log

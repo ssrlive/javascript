@@ -148,6 +148,18 @@ fn to_number_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     }
 }
 
+fn to_numeric_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let prim = match val {
+        Value::Object(_) => crate::core::to_primitive(mc, val, "number", env)?,
+        _ => val.clone(),
+    };
+
+    match prim {
+        Value::BigInt(_) => Ok(prim),
+        _ => Ok(Value::Number(to_number(&prim)?)),
+    }
+}
+
 fn to_int32_value_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i32, EvalError<'gc>> {
     let n = to_number_with_env(mc, env, val)?;
     if n.is_nan() || n == 0.0 || !n.is_finite() {
@@ -7332,40 +7344,46 @@ fn evaluate_expr_bitand_assign<'gc>(
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
-            match (current, val) {
+            let current_num = to_numeric_with_env(mc, env, &current)?;
+            let val_num = to_numeric_with_env(mc, env, &val)?;
+            match (current_num, val_num) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let new_val = Value::BigInt(Box::new(*ln & *rn));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                (l, r) => {
-                    let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = to_int32_value_with_env(mc, env, &r)?;
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                     let new_val = Value::Number((l & r) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise AND assignment").into()),
             }
         }
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
-                match (current, val) {
+                let current_num = to_numeric_with_env(mc, env, &current)?;
+                let val_num = to_numeric_with_env(mc, env, &val)?;
+                match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln & *rn));
                         set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                    (l, r) => {
-                        let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = to_int32_value_with_env(mc, env, &r)?;
+                    (Value::Number(l), Value::Number(r)) => {
+                        let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                        let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l & r) as f64);
                         set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
                         Ok(new_val)
                     }
+                    _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise AND assignment").into()),
                 }
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -7377,20 +7395,23 @@ fn evaluate_expr_bitand_assign<'gc>(
             let key = value_to_string(&key_val);
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
-                match (current, val) {
+                let current_num = to_numeric_with_env(mc, env, &current)?;
+                let val_num = to_numeric_with_env(mc, env, &val)?;
+                match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln & *rn));
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                    (l, r) => {
-                        let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = to_int32_value_with_env(mc, env, &r)?;
+                    (Value::Number(l), Value::Number(r)) => {
+                        let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                        let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l & r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
+                    _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise AND assignment").into()),
                 }
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -7410,40 +7431,46 @@ fn evaluate_expr_bitor_assign<'gc>(
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
-            match (current, val) {
+            let current_num = to_numeric_with_env(mc, env, &current)?;
+            let val_num = to_numeric_with_env(mc, env, &val)?;
+            match (current_num, val_num) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let new_val = Value::BigInt(Box::new(*ln | *rn));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                (l, r) => {
-                    let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = to_int32_value_with_env(mc, env, &r)?;
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                     let new_val = Value::Number((l | r) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise OR assignment").into()),
             }
         }
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
-                match (current, val) {
+                let current_num = to_numeric_with_env(mc, env, &current)?;
+                let val_num = to_numeric_with_env(mc, env, &val)?;
+                match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln | *rn));
                         set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                    (l, r) => {
-                        let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = to_int32_value_with_env(mc, env, &r)?;
+                    (Value::Number(l), Value::Number(r)) => {
+                        let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                        let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l | r) as f64);
                         set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
                         Ok(new_val)
                     }
+                    _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise OR assignment").into()),
                 }
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -7455,20 +7482,23 @@ fn evaluate_expr_bitor_assign<'gc>(
             let key = value_to_string(&key_val);
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
-                match (current, val) {
+                let current_num = to_numeric_with_env(mc, env, &current)?;
+                let val_num = to_numeric_with_env(mc, env, &val)?;
+                match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln | *rn));
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                    (l, r) => {
-                        let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = to_int32_value_with_env(mc, env, &r)?;
+                    (Value::Number(l), Value::Number(r)) => {
+                        let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                        let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l | r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
+                    _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise OR assignment").into()),
                 }
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -7488,40 +7518,46 @@ fn evaluate_expr_bitxor_assign<'gc>(
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
-            match (current, val) {
+            let current_num = to_numeric_with_env(mc, env, &current)?;
+            let val_num = to_numeric_with_env(mc, env, &val)?;
+            match (current_num, val_num) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let new_val = Value::BigInt(Box::new(*ln ^ *rn));
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                (l, r) => {
-                    let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = to_int32_value_with_env(mc, env, &r)?;
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                     let new_val = Value::Number((l ^ r) as f64);
                     env_set_recursive(mc, env, name, new_val.clone())?;
                     Ok(new_val)
                 }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise XOR assignment").into()),
             }
         }
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
-                match (current, val) {
+                let current_num = to_numeric_with_env(mc, env, &current)?;
+                let val_num = to_numeric_with_env(mc, env, &val)?;
+                match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln ^ *rn));
                         set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                    (l, r) => {
-                        let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = to_int32_value_with_env(mc, env, &r)?;
+                    (Value::Number(l), Value::Number(r)) => {
+                        let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                        let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l ^ r) as f64);
                         set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
                         Ok(new_val)
                     }
+                    _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise XOR assignment").into()),
                 }
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -7533,20 +7569,23 @@ fn evaluate_expr_bitxor_assign<'gc>(
             let key = value_to_string(&key_val);
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
-                match (current, val) {
+                let current_num = to_numeric_with_env(mc, env, &current)?;
+                let val_num = to_numeric_with_env(mc, env, &val)?;
+                match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln ^ *rn));
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-                    (l, r) => {
-                        let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = to_int32_value_with_env(mc, env, &r)?;
+                    (Value::Number(l), Value::Number(r)) => {
+                        let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                        let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l ^ r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                         Ok(new_val)
                     }
+                    _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise XOR assignment").into()),
                 }
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -10088,33 +10127,48 @@ fn evaluate_expr_binary<'gc>(
                 to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?),
             )),
         },
-        BinaryOp::BitAnd => match (l_val, r_val) {
-            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l & *r))),
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => {
-                let l = to_int32_value_with_env(mc, env, &l)?;
-                let r = to_int32_value_with_env(mc, env, &r)?;
-                Ok(Value::Number((l & r) as f64))
+        BinaryOp::BitAnd => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l & *r))),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
+                    Ok(Value::Number((l & r) as f64))
+                }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise AND").into()),
             }
-        },
-        BinaryOp::BitOr => match (l_val, r_val) {
-            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l | *r))),
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => {
-                let l = to_int32_value_with_env(mc, env, &l)?;
-                let r = to_int32_value_with_env(mc, env, &r)?;
-                Ok(Value::Number((l | r) as f64))
+        }
+        BinaryOp::BitOr => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l | *r))),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
+                    Ok(Value::Number((l | r) as f64))
+                }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise OR").into()),
             }
-        },
-        BinaryOp::BitXor => match (l_val, r_val) {
-            (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l ^ *r))),
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => {
-                let l = to_int32_value_with_env(mc, env, &l)?;
-                let r = to_int32_value_with_env(mc, env, &r)?;
-                Ok(Value::Number((l ^ r) as f64))
+        }
+        BinaryOp::BitXor => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::BigInt(Box::new(*l ^ *r))),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
+                    Ok(Value::Number((l ^ r) as f64))
+                }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise XOR").into()),
             }
-        },
+        }
         BinaryOp::NullishCoalescing => {
             if l_val.is_null_or_undefined() {
                 Ok(r_val)
@@ -10807,12 +10861,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::BitNot(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
-            match val {
+            let num = to_numeric_with_env(mc, env, &val)?;
+            match num {
                 Value::BigInt(b) => Ok(Value::BigInt(Box::new(!*b))),
-                other => {
-                    let n = to_int32_value_with_env(mc, env, &other)?;
-                    Ok(Value::Number((!n) as f64))
+                Value::Number(n) => {
+                    let i = to_int32_value_with_env(mc, env, &Value::Number(n))?;
+                    Ok(Value::Number((!i) as f64))
                 }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise NOT").into()),
             }
         }
         Expr::Void(expr) => {

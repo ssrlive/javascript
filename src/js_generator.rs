@@ -129,14 +129,14 @@ pub fn handle_generator_instance_method<'gc>(
 
 // Helper to replace the first `yield` occurrence inside an Expr with a
 // provided `send_value`. `replaced` becomes true once a replacement is made.
-fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut bool) -> Expr {
+fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool) -> Expr {
     // log::trace!("replace_first_yield_in_expr visiting: {:?}, replaced={}", expr, replaced);
     match expr {
         Expr::Yield(_) => {
             if !*replaced {
                 log::trace!("Replacing Yield");
                 *replaced = true;
-                Expr::Var("__gen_throw_val".to_string(), None, None)
+                Expr::Var(var_name.to_string(), None, None)
             } else {
                 expr.clone()
             }
@@ -145,7 +145,7 @@ fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut 
             if !*replaced {
                 log::trace!("Replacing YieldStar");
                 *replaced = true;
-                Expr::Var("__gen_throw_val".to_string(), None, None)
+                Expr::Var(var_name.to_string(), None, None)
             } else {
                 expr.clone()
             }
@@ -154,29 +154,29 @@ fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut 
             if !*replaced {
                 log::trace!("Replacing Await");
                 *replaced = true;
-                Expr::Var("__gen_throw_val".to_string(), None, None)
+                Expr::Var(var_name.to_string(), None, None)
             } else {
                 expr.clone()
             }
         }
         Expr::Binary(a, op, b) => Expr::Binary(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
             *op,
-            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
         ),
         Expr::Assign(a, b) => Expr::Assign(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
+            Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
         ),
         Expr::Index(a, b) => Expr::Index(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
+            Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
         ),
-        Expr::Property(a, s) => Expr::Property(Box::new(replace_first_yield_in_expr(a, _send_value, replaced)), s.clone()),
+        Expr::Property(a, s) => Expr::Property(Box::new(replace_first_yield_in_expr(a, var_name, replaced)), s.clone()),
         Expr::Call(a, args) => Expr::Call(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
             args.iter()
-                .map(|arg| replace_first_yield_in_expr(arg, _send_value, replaced))
+                .map(|arg| replace_first_yield_in_expr(arg, var_name, replaced))
                 .collect(),
         ),
         Expr::Object(pairs) => Expr::Object(
@@ -184,8 +184,8 @@ fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut 
                 .iter()
                 .map(|(k, v, is_method)| {
                     (
-                        replace_first_yield_in_expr(k, _send_value, replaced),
-                        replace_first_yield_in_expr(v, _send_value, replaced),
+                        replace_first_yield_in_expr(k, var_name, replaced),
+                        replace_first_yield_in_expr(v, var_name, replaced),
                         *is_method,
                     )
                 })
@@ -194,82 +194,82 @@ fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut 
         Expr::Array(items) => Expr::Array(
             items
                 .iter()
-                .map(|it| it.as_ref().map(|e| replace_first_yield_in_expr(e, _send_value, replaced)))
+                .map(|it| it.as_ref().map(|e| replace_first_yield_in_expr(e, var_name, replaced)))
                 .collect(),
         ),
-        Expr::LogicalNot(a) => Expr::LogicalNot(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
-        Expr::TypeOf(a) => Expr::TypeOf(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
-        Expr::Delete(a) => Expr::Delete(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
-        Expr::Void(a) => Expr::Void(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
-        Expr::Increment(a) => Expr::Increment(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
-        Expr::Decrement(a) => Expr::Decrement(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
-        Expr::PostIncrement(a) => Expr::PostIncrement(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
-        Expr::PostDecrement(a) => Expr::PostDecrement(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::LogicalNot(a) => Expr::LogicalNot(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
+        Expr::TypeOf(a) => Expr::TypeOf(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
+        Expr::Delete(a) => Expr::Delete(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
+        Expr::Void(a) => Expr::Void(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
+        Expr::Increment(a) => Expr::Increment(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
+        Expr::Decrement(a) => Expr::Decrement(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
+        Expr::PostIncrement(a) => Expr::PostIncrement(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
+        Expr::PostDecrement(a) => Expr::PostDecrement(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
         Expr::LogicalAnd(a, b) => Expr::LogicalAnd(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
+            Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
         ),
         Expr::LogicalOr(a, b) => Expr::LogicalOr(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
+            Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
         ),
         Expr::Comma(a, b) => Expr::Comma(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
+            Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
         ),
-        Expr::Spread(a) => Expr::Spread(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::Spread(a) => Expr::Spread(Box::new(replace_first_yield_in_expr(a, var_name, replaced))),
         Expr::OptionalCall(a, args) => Expr::OptionalCall(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
             args.iter()
-                .map(|arg| replace_first_yield_in_expr(arg, _send_value, replaced))
+                .map(|arg| replace_first_yield_in_expr(arg, var_name, replaced))
                 .collect(),
         ),
         Expr::OptionalIndex(a, b) => Expr::OptionalIndex(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
+            Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
         ),
         Expr::Conditional(a, b, c) => Expr::Conditional(
-            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(c, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, var_name, replaced)),
+            Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
+            Box::new(replace_first_yield_in_expr(c, var_name, replaced)),
         ),
         _ => expr.clone(),
     }
 }
 
-pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, replaced: &mut bool) {
+pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, var_name: &str, replaced: &mut bool) {
     match stmt.kind.as_mut() {
         StatementKind::Expr(e) => {
-            *e = replace_first_yield_in_expr(e, send_value, replaced);
+            *e = replace_first_yield_in_expr(e, var_name, replaced);
         }
         StatementKind::Let(decls) | StatementKind::Var(decls) => {
             for (_, expr_opt) in decls.iter_mut() {
                 if let Some(expr) = expr_opt {
-                    *expr = replace_first_yield_in_expr(expr, send_value, replaced);
+                    *expr = replace_first_yield_in_expr(expr, var_name, replaced);
                 }
             }
         }
         StatementKind::Const(decls) => {
             for (_, expr) in decls.iter_mut() {
-                *expr = replace_first_yield_in_expr(expr, send_value, replaced);
+                *expr = replace_first_yield_in_expr(expr, var_name, replaced);
             }
         }
         StatementKind::Return(Some(expr)) => {
-            *expr = replace_first_yield_in_expr(expr, send_value, replaced);
+            *expr = replace_first_yield_in_expr(expr, var_name, replaced);
         }
         StatementKind::If(if_stmt) => {
             let if_stmt = if_stmt.as_mut();
             let cond = if_stmt.condition.clone();
-            if_stmt.condition = replace_first_yield_in_expr(&cond, send_value, replaced);
+            if_stmt.condition = replace_first_yield_in_expr(&cond, var_name, replaced);
             for s in if_stmt.then_body.iter_mut() {
-                replace_first_yield_in_statement(s, send_value, replaced);
+                replace_first_yield_in_statement(s, var_name, replaced);
                 if *replaced {
                     return;
                 }
             }
             if let Some(else_body) = if_stmt.else_body.as_mut() {
                 for s in else_body.iter_mut() {
-                    replace_first_yield_in_statement(s, send_value, replaced);
+                    replace_first_yield_in_statement(s, var_name, replaced);
                     if *replaced {
                         return;
                     }
@@ -279,34 +279,34 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, send_value:
         StatementKind::For(for_stmt) => {
             let for_stmt = for_stmt.as_mut();
             if let Some(init) = for_stmt.init.as_mut() {
-                replace_first_yield_in_statement(init, send_value, replaced);
+                replace_first_yield_in_statement(init, var_name, replaced);
                 if *replaced {
                     return;
                 }
             }
             if let Some(cond) = for_stmt.test.as_mut() {
-                *cond = replace_first_yield_in_expr(cond, send_value, replaced);
+                *cond = replace_first_yield_in_expr(cond, var_name, replaced);
                 if *replaced {
                     return;
                 }
             }
             if let Some(update) = for_stmt.update.as_mut() {
-                replace_first_yield_in_statement(update, send_value, replaced);
+                replace_first_yield_in_statement(update, var_name, replaced);
                 if *replaced {
                     return;
                 }
             }
             for s in for_stmt.body.iter_mut() {
-                replace_first_yield_in_statement(s, send_value, replaced);
+                replace_first_yield_in_statement(s, var_name, replaced);
                 if *replaced {
                     return;
                 }
             }
         }
         StatementKind::While(cond, body) => {
-            *cond = replace_first_yield_in_expr(cond, send_value, replaced);
+            *cond = replace_first_yield_in_expr(cond, var_name, replaced);
             for s in body.iter_mut() {
-                replace_first_yield_in_statement(s, send_value, replaced);
+                replace_first_yield_in_statement(s, var_name, replaced);
                 if *replaced {
                     return;
                 }
@@ -314,19 +314,19 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, send_value:
         }
         StatementKind::DoWhile(body, cond) => {
             for s in body.iter_mut() {
-                replace_first_yield_in_statement(s, send_value, replaced);
+                replace_first_yield_in_statement(s, var_name, replaced);
                 if *replaced {
                     return;
                 }
             }
-            *cond = replace_first_yield_in_expr(cond, send_value, replaced);
+            *cond = replace_first_yield_in_expr(cond, var_name, replaced);
         }
         StatementKind::ForOf(_, _, _, body)
         | StatementKind::ForIn(_, _, _, body)
         | StatementKind::ForOfDestructuringObject(_, _, _, body)
         | StatementKind::ForOfDestructuringArray(_, _, _, body) => {
             for s in body.iter_mut() {
-                replace_first_yield_in_statement(s, send_value, replaced);
+                replace_first_yield_in_statement(s, var_name, replaced);
                 if *replaced {
                     return;
                 }
@@ -334,7 +334,7 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, send_value:
         }
         StatementKind::Block(stmts) => {
             for s in stmts.iter_mut() {
-                replace_first_yield_in_statement(s, send_value, replaced);
+                replace_first_yield_in_statement(s, var_name, replaced);
                 if *replaced {
                     return;
                 }
@@ -343,14 +343,14 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, send_value:
         StatementKind::TryCatch(tc_stmt) => {
             let tc_stmt = tc_stmt.as_mut();
             for s in tc_stmt.try_body.iter_mut() {
-                replace_first_yield_in_statement(s, send_value, replaced);
+                replace_first_yield_in_statement(s, var_name, replaced);
                 if *replaced {
                     return;
                 }
             }
             if let Some(catch_body) = tc_stmt.catch_body.as_mut() {
                 for s in catch_body.iter_mut() {
-                    replace_first_yield_in_statement(s, send_value, replaced);
+                    replace_first_yield_in_statement(s, var_name, replaced);
                     if *replaced {
                         return;
                     }
@@ -358,7 +358,7 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, send_value:
             }
             if let Some(finally_body) = tc_stmt.finally_body.as_mut() {
                 for s in finally_body.iter_mut() {
-                    replace_first_yield_in_statement(s, send_value, replaced);
+                    replace_first_yield_in_statement(s, var_name, replaced);
                     if *replaced {
                         return;
                     }
@@ -1067,6 +1067,16 @@ pub fn generator_next<'gc>(
                 gen_obj.state = GeneratorState::Completed;
                 return Ok(create_iterator_result(mc, Value::Undefined, true)?);
             }
+            // Generate a unique variable name for this yield point (based on PC and count)
+            // This ensures that subsequent yields don't overwrite the value of this yield in the environment
+            let base_name = format!("__gen_yield_val_{}_", pc_val);
+            let next_idx = if let Some(s) = gen_obj.body.get(pc_val) {
+                count_yield_vars_in_statement(s, &base_name)
+            } else {
+                0
+            };
+            let var_name = format!("{}{}", base_name, next_idx);
+
             // Modify the AST in place to reflect progress (remove init, replace yield)
             let mut replaced = false;
             if let Some(first_stmt) = gen_obj.body.get_mut(pc_val) {
@@ -1075,7 +1085,7 @@ pub fn generator_next<'gc>(
                 {
                     for_stmt.init = None;
                 }
-                replace_first_yield_in_statement(first_stmt, &_send_value, &mut replaced);
+                replace_first_yield_in_statement(first_stmt, &var_name, &mut replaced);
                 log::debug!("DEBUG: body[{}] after: replaced={}, kind={:?}", pc_val, replaced, first_stmt.kind);
             }
 
@@ -1097,12 +1107,12 @@ pub fn generator_next<'gc>(
             // startup to avoid re-evaluation.
             if let Value::Undefined = _send_value {
                 if let Some(cached) = gen_obj.cached_initial_yield.as_ref() {
-                    object_set_key_value(mc, &func_env, "__gen_throw_val", cached.clone())?;
+                    object_set_key_value(mc, &func_env, &var_name, cached.clone())?;
                 } else {
-                    object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
+                    object_set_key_value(mc, &func_env, &var_name, _send_value.clone())?;
                 }
             } else {
-                object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
+                object_set_key_value(mc, &func_env, &var_name, _send_value.clone())?;
             }
 
             if let Some((idx, inner_idx_opt, _yield_kind, yield_inner)) = find_first_yield_in_statements(&tail) {
@@ -1347,4 +1357,111 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     object_set_key_value(mc, &gen_ctor, "prototype", Value::Object(gen_proto))?;
     crate::core::env_set(mc, env, "Generator", Value::Object(gen_ctor))?;
     Ok(())
+}
+
+pub(crate) fn count_yield_vars_in_statement(stmt: &Statement, prefix: &str) -> usize {
+    match &*stmt.kind {
+        StatementKind::Expr(e) => count_yield_vars_in_expr(e, prefix),
+        StatementKind::Let(decls) | StatementKind::Var(decls) => decls
+            .iter()
+            .map(|(_, expr_opt)| expr_opt.as_ref().map_or(0, |e| count_yield_vars_in_expr(e, prefix)))
+            .sum(),
+        StatementKind::Const(decls) => decls.iter().map(|(_, e)| count_yield_vars_in_expr(e, prefix)).sum(),
+        StatementKind::Return(Some(expr)) => count_yield_vars_in_expr(expr, prefix),
+        StatementKind::If(if_stmt) => {
+            count_yield_vars_in_expr(&if_stmt.condition, prefix)
+                + if_stmt
+                    .then_body
+                    .iter()
+                    .map(|s| count_yield_vars_in_statement(s, prefix))
+                    .sum::<usize>()
+                + if_stmt
+                    .else_body
+                    .as_ref()
+                    .map_or(0, |b| b.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum())
+        }
+        StatementKind::For(for_stmt) => {
+            for_stmt.init.as_ref().map_or(0, |s| count_yield_vars_in_statement(s, prefix))
+                + for_stmt.test.as_ref().map_or(0, |e| count_yield_vars_in_expr(e, prefix))
+                + for_stmt.update.as_ref().map_or(0, |s| count_yield_vars_in_statement(s, prefix))
+                + for_stmt
+                    .body
+                    .iter()
+                    .map(|s| count_yield_vars_in_statement(s, prefix))
+                    .sum::<usize>()
+        }
+        StatementKind::While(cond, body) => {
+            count_yield_vars_in_expr(cond, prefix) + body.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum::<usize>()
+        }
+        StatementKind::DoWhile(body, cond) => {
+            count_yield_vars_in_expr(cond, prefix) + body.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum::<usize>()
+        }
+        StatementKind::Block(stmts) => stmts.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum(),
+        StatementKind::TryCatch(tc) => {
+            tc.try_body.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum::<usize>()
+                + tc.catch_body
+                    .as_ref()
+                    .map_or(0, |b| b.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum())
+                + tc.finally_body
+                    .as_ref()
+                    .map_or(0, |b| b.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum())
+        }
+        StatementKind::ForOf(_, _, expr, body)
+        | StatementKind::ForIn(_, _, expr, body)
+        | StatementKind::ForOfDestructuringObject(_, _, expr, body)
+        | StatementKind::ForOfDestructuringArray(_, _, expr, body) => {
+            count_yield_vars_in_expr(expr, prefix) + body.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+fn count_yield_vars_in_expr(expr: &Expr, prefix: &str) -> usize {
+    let mut count = 0;
+    if let Expr::Var(name, _, _) = expr
+        && name.starts_with(prefix)
+    {
+        count = 1;
+    }
+    count
+        + match expr {
+            Expr::Binary(a, _, b)
+            | Expr::Assign(a, b)
+            | Expr::Index(a, b)
+            | Expr::LogicalAnd(a, b)
+            | Expr::LogicalOr(a, b)
+            | Expr::Comma(a, b)
+            | Expr::OptionalIndex(a, b) => count_yield_vars_in_expr(a, prefix) + count_yield_vars_in_expr(b, prefix),
+            Expr::UnaryNeg(a)
+            | Expr::UnaryPlus(a)
+            | Expr::LogicalNot(a)
+            | Expr::TypeOf(a)
+            | Expr::Void(a)
+            | Expr::Delete(a)
+            | Expr::BitNot(a)
+            | Expr::Increment(a)
+            | Expr::Decrement(a)
+            | Expr::PostIncrement(a)
+            | Expr::PostDecrement(a)
+            | Expr::Spread(a)
+            | Expr::Await(a)
+            | Expr::YieldStar(a) => count_yield_vars_in_expr(a, prefix),
+            Expr::Yield(opt) => opt.as_ref().map_or(0, |a| count_yield_vars_in_expr(a, prefix)),
+            Expr::Call(a, args) | Expr::New(a, args) | Expr::OptionalCall(a, args) => {
+                count_yield_vars_in_expr(a, prefix) + args.iter().map(|x| count_yield_vars_in_expr(x, prefix)).sum::<usize>()
+            }
+            Expr::Object(pairs) => pairs
+                .iter()
+                .map(|(k, v, _)| count_yield_vars_in_expr(k, prefix) + count_yield_vars_in_expr(v, prefix))
+                .sum(),
+            Expr::Array(items) => items
+                .iter()
+                .map(|i| i.as_ref().map_or(0, |x| count_yield_vars_in_expr(x, prefix)))
+                .sum(),
+            Expr::Conditional(a, b, c) => {
+                count_yield_vars_in_expr(a, prefix) + count_yield_vars_in_expr(b, prefix) + count_yield_vars_in_expr(c, prefix)
+            }
+            Expr::Property(a, _) => count_yield_vars_in_expr(a, prefix),
+            _ => 0,
+        }
 }

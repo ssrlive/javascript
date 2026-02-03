@@ -703,12 +703,20 @@ fn process_one_pending<'gc>(
                 };
                 let mut tail = original_tail.clone();
 
+                // Generate a unique variable name for this yield point (based on PC and count)
+                let base_name = format!("__gen_yield_val_{}_", pc_val);
+                let next_idx = if let Some(s) = tail.first() {
+                    crate::js_generator::count_yield_vars_in_statement(s, &base_name)
+                } else {
+                    0
+                };
+                let var_name = format!("{}{}", base_name, next_idx);
+
                 // Replace first yield occurrence in the first statement with the
-                // special variable `__gen_throw_val` so we can inject the send value
-                // into it when executing.
+                // special variable so we can inject the send value into it when executing.
                 let mut replaced = false;
                 if let Some(first_stmt) = tail.get_mut(0) {
-                    crate::js_generator::replace_first_yield_in_statement(first_stmt, &_send_value, &mut replaced);
+                    crate::js_generator::replace_first_yield_in_statement(first_stmt, &var_name, &mut replaced);
                 }
 
                 // Use the pre-execution environment if available so bindings created
@@ -723,12 +731,12 @@ fn process_one_pending<'gc>(
                 // to the cached initially-yielded value if present.
                 if let Value::Undefined = _send_value {
                     if let Some(cached) = gen_ptr_mut.cached_initial_yield.as_ref() {
-                        object_set_key_value(mc, &func_env, "__gen_throw_val", cached.clone())?;
+                        object_set_key_value(mc, &func_env, &var_name, cached.clone())?;
                     } else {
-                        object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
+                        object_set_key_value(mc, &func_env, &var_name, _send_value.clone())?;
                     }
                 } else {
-                    object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
+                    object_set_key_value(mc, &func_env, &var_name, _send_value.clone())?;
                 }
 
                 if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = crate::js_generator::find_first_yield_in_statements(&tail) {

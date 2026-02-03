@@ -164,24 +164,26 @@ fn step<'gc>(
         }
         Err(e) => {
             // Generator threw an error synchronously (or during processing), reject the promise
-            let msg = e.message();
-            let err_val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
-            if let Value::Object(obj) = &err_val {
-                let (line_opt, col_opt) = match &e {
-                    EvalError::Js(js_err) => (js_err.js_line(), js_err.js_column()),
-                    EvalError::Throw(_, l, c) => (*l, *c),
-                };
-                if let Some(line) = line_opt
-                    && let Err(e) = object_set_key_value(mc, obj, "__line__", Value::Number(line as f64))
-                {
-                    log::debug!("error setting __line__ on error object: {:?}", e);
+            let err_val = match e {
+                EvalError::Throw(v, _, _) => v,
+                EvalError::Js(j) => {
+                    let msg = j.message();
+                    let val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
+                    if let Value::Object(obj) = &val {
+                        if let Some(line) = j.js_line()
+                            && let Err(e) = object_set_key_value(mc, obj, "__line__", Value::Number(line as f64))
+                        {
+                            log::warn!("error setting __line__ on error object: {:?}", e);
+                        }
+                        if let Some(col) = j.js_column()
+                            && let Err(e) = object_set_key_value(mc, obj, "__column__", Value::Number(col as f64))
+                        {
+                            log::warn!("error setting __column__ on error object: {:?}", e);
+                        }
+                    }
+                    val
                 }
-                if let Some(col) = col_opt
-                    && let Err(e) = object_set_key_value(mc, obj, "__column__", Value::Number(col as f64))
-                {
-                    log::debug!("error setting __column__ on error object: {:?}", e);
-                }
-            }
+            };
             crate::js_promise::call_function(mc, &reject, &[err_val], env)?;
         }
     }

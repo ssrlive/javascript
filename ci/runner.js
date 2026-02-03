@@ -156,6 +156,23 @@ function detectFeature(feat){
 
 let pass=0, fail=0, skip=0, n=0;
 
+function shouldSkipPendingTest(meta, f) {
+  // Skip tests marked as pending via esid: pending, except tests under specific directories we are focusing on
+  const allowPending = [
+      path.join('language','expressions','async-arrow-function'),
+      path.join('language','expressions','async-function'),
+      path.join('language','expressions','await'),
+      path.join('language','expressions','object','method-definition'),
+      path.join('language','statements','async-function'),
+      path.join('language','statements','class','definition'),
+      path.join('language','statements','try'),
+      'built-ins',
+      'staging',
+  ];
+  // Do not force-skip files inside the allowed directories when their metadata contains `esid: pending`.
+  return /esid\s*:\s*pending\b/.test(meta) && !allowPending.some(p => f.includes(p));
+}
+
 /*
   Execution semantics:
   - --limit N controls the number of tests *executed* (pass+fail == N).
@@ -177,9 +194,8 @@ async function runAll(){
     // Skip raw tests (they require special raw-source handling)
     if (flagsBlock && flagsBlock.includes('raw')) { skip++; log(`SKIP (raw) ${f}`); continue; }
 
-    // Skip tests marked as pending via esid: pending, except tests under language/expressions/await
-    // Do not force-skip files inside the language/expressions/await directory when their metadata contains `esid: pending`.
-    if (/esid\s*:\s*pending\b/.test(meta) && !f.includes(path.join('language','expressions','await'))) { skip++; log(`SKIP (esid pending) ${f}`); continue; }
+    // Skip tests marked as pending via esid: pending, except tests under specific directories we are focusing on
+    if (shouldSkipPendingTest(meta, f)) { skip++; log(`SKIP (esid pending) ${f}`); continue; }
 
     if (/negative:/.test(meta)) { skip++; log(`SKIP (negative) ${f}`); continue; }
 

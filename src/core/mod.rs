@@ -247,6 +247,13 @@ where
                             }
                         }
                         crate::js_promise::PollResult::Empty => {
+                            // Before exiting, attempt to process any runtime-pending unhandled checks
+                            // (they may have matured and should be re-queued as UnhandledCheck tasks).
+                            if crate::js_promise::process_runtime_pending_unhandled(mc, &root.global_env)? {
+                                count += 1;
+                                continue;
+                            }
+
                             // If configured to wait for active handles (Node-like), and we have
                             // timers/intervals registered, keep the event loop alive until
                             // they are gone. We poll periodically and wait on the condvar

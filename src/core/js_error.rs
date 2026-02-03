@@ -54,6 +54,7 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     }
     object_set_key_value(mc, &error_ctor, "__is_constructor", Value::Boolean(true))?;
     object_set_key_value(mc, &error_ctor, "__native_ctor", Value::String(utf8_to_utf16("Error")))?;
+    object_set_key_value(mc, &error_ctor, "name", Value::String(utf8_to_utf16("Error")))?;
 
     // We need Object.prototype to set as the prototype of Error.prototype
     // If Object is not yet initialized, we might have an issue, but usually Object is init first.
@@ -117,6 +118,7 @@ fn initialize_native_error<'gc>(
     }
     object_set_key_value(mc, &ctor, "__is_constructor", Value::Boolean(true))?;
     object_set_key_value(mc, &ctor, "__native_ctor", Value::String(utf8_to_utf16(name)))?;
+    object_set_key_value(mc, &ctor, "name", Value::String(utf8_to_utf16(name)))?;
 
     // Set prototype of constructor to parent constructor (Error) so strict inheritance works if checked
     // However, usually Foo.__proto__ === Function.prototype.

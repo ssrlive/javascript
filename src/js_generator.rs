@@ -130,10 +130,11 @@ pub fn handle_generator_instance_method<'gc>(
 // Helper to replace the first `yield` occurrence inside an Expr with a
 // provided `send_value`. `replaced` becomes true once a replacement is made.
 fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut bool) -> Expr {
-    use crate::core::Expr;
+    // log::trace!("replace_first_yield_in_expr visiting: {:?}, replaced={}", expr, replaced);
     match expr {
         Expr::Yield(_) => {
             if !*replaced {
+                log::trace!("Replacing Yield");
                 *replaced = true;
                 Expr::Var("__gen_throw_val".to_string(), None, None)
             } else {
@@ -142,6 +143,7 @@ fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut 
         }
         Expr::YieldStar(_) => {
             if !*replaced {
+                log::trace!("Replacing YieldStar");
                 *replaced = true;
                 Expr::Var("__gen_throw_val".to_string(), None, None)
             } else {
@@ -150,6 +152,7 @@ fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut 
         }
         Expr::Await(_) => {
             if !*replaced {
+                log::trace!("Replacing Await");
                 *replaced = true;
                 Expr::Var("__gen_throw_val".to_string(), None, None)
             } else {
@@ -275,8 +278,23 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, send_value:
         }
         StatementKind::For(for_stmt) => {
             let for_stmt = for_stmt.as_mut();
+            if let Some(init) = for_stmt.init.as_mut() {
+                replace_first_yield_in_statement(init, send_value, replaced);
+                if *replaced {
+                    return;
+                }
+            }
             if let Some(cond) = for_stmt.test.as_mut() {
                 *cond = replace_first_yield_in_expr(cond, send_value, replaced);
+                if *replaced {
+                    return;
+                }
+            }
+            if let Some(update) = for_stmt.update.as_mut() {
+                replace_first_yield_in_statement(update, send_value, replaced);
+                if *replaced {
+                    return;
+                }
             }
             for s in for_stmt.body.iter_mut() {
                 replace_first_yield_in_statement(s, send_value, replaced);
@@ -644,9 +662,10 @@ fn find_yield_in_expr(e: &Expr) -> Option<(YieldKind, Option<Box<Expr>>)> {
         | Expr::PostIncrement(a)
         | Expr::PostDecrement(a)
         | Expr::Spread(a) => find_yield_in_expr(a),
-        Expr::LogicalAnd(a, b) | Expr::LogicalOr(a, b) | Expr::Comma(a, b) | Expr::Conditional(a, b, _) => {
-            find_yield_in_expr(a).or_else(|| find_yield_in_expr(b))
-        } // Conditional: a then b (if matched) or c? We just scan linearly for now
+        Expr::LogicalAnd(a, b) | Expr::LogicalOr(a, b) | Expr::Comma(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
+        Expr::Conditional(a, b, c) => find_yield_in_expr(a)
+            .or_else(|| find_yield_in_expr(b))
+            .or_else(|| find_yield_in_expr(c)),
         Expr::OptionalCall(a, args) => find_yield_in_expr(a).or_else(|| args.iter().find_map(find_yield_in_expr)),
         Expr::OptionalIndex(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
         _ => None,
@@ -810,38 +829,48 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
                 }
             }
             StatementKind::If(if_stmt) => {
-                let if_stmt = if_stmt.as_ref();
-                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&if_stmt.then_body) {
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&if_stmt.then_body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                {
                     return Some((i, Some(inner_idx), kind, found));
                 }
                 if let Some(else_body) = &if_stmt.else_body
                     && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(else_body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::For(for_stmt) => {
-                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&for_stmt.body) {
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&for_stmt.body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                {
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::TryCatch(tc_stmt) => {
-                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&tc_stmt.try_body) {
-                    return Some((i, Some(inner_idx), kind, found));
-                }
-                if let Some(catch_body) = &tc_stmt.as_ref().catch_body
-                    && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(catch_body)
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&tc_stmt.try_body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
-                if let Some(finally_body) = &tc_stmt.as_ref().finally_body
+                if let Some(catch_body) = &tc_stmt.catch_body
+                    && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(catch_body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                {
+                    return Some((i, Some(inner_idx), kind, found));
+                }
+                if let Some(finally_body) = &tc_stmt.finally_body
                     && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(finally_body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
-                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body) {
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                {
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
@@ -854,7 +883,9 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
             | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
             | StatementKind::ForAwaitOfExpr(_, _, body)
             | StatementKind::ForOfExpr(_, _, body) => {
-                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body) {
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                {
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
@@ -1029,27 +1060,27 @@ pub fn generator_next<'gc>(
             // first `yield` in that statement with the sent value before
             // executing.
             let pc_val = pc;
-            log::trace!("DEBUG: generator_next Suspended. pc={}, send_value={:?}", pc_val, _send_value);
+            log::debug!("DEBUG: generator_next Suspended. pc={}, send_value={:?}", pc_val, _send_value);
             gen_obj.pending_iterator = None;
             gen_obj.pending_iterator_done = false;
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = GeneratorState::Completed;
                 return Ok(create_iterator_result(mc, Value::Undefined, true)?);
             }
-            // Clone the tail and replace first yield in the first statement
-            let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
+            // Modify the AST in place to reflect progress (remove init, replace yield)
             let mut replaced = false;
-            log::trace!("DEBUG: tail[0] before: {:?}", tail[0]);
-            if pre_env.is_some()
-                && let Some(first_stmt) = tail.get_mut(0)
-                && let StatementKind::For(for_stmt) = first_stmt.kind.as_mut()
-            {
-                for_stmt.init = None;
-            }
-            if let Some(first_stmt) = tail.get_mut(0) {
+            if let Some(first_stmt) = gen_obj.body.get_mut(pc_val) {
+                if pre_env.is_some()
+                    && let StatementKind::For(for_stmt) = first_stmt.kind.as_mut()
+                {
+                    for_stmt.init = None;
+                }
                 replace_first_yield_in_statement(first_stmt, &_send_value, &mut replaced);
+                log::debug!("DEBUG: body[{}] after: replaced={}, kind={:?}", pc_val, replaced, first_stmt.kind);
             }
-            log::trace!("DEBUG: tail[0] after: replaced={}, stmt={:?}", replaced, tail[0]);
+
+            // Clone the tail for execution (now contains modifications)
+            let tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
 
             // Use the pre-execution environment if available so bindings created
             // by pre-statements remain visible when we resume execution.
@@ -1185,6 +1216,23 @@ pub fn generator_throw<'gc>(
                 return Err(EvalError::Throw(throw_value, None, None));
             }
             let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
+
+            // If resuming from a pre-executed environment, the enclosing `for`
+            // initializer may already have run. Prevent re-running it during
+            // throw handling by removing the init expression when present.
+            if let GeneratorState::Suspended { pre_env, .. } = &gen_obj.state
+                && pre_env.is_some()
+                && let Some(first_stmt) = tail.get_mut(0)
+                && let StatementKind::For(for_stmt) = first_stmt.kind.as_mut()
+            {
+                for_stmt.init = None;
+            }
+
+            // Record the location of the first yield so we can execute any
+            // pre-statements (those before the yield) in the function env
+            // prior to executing the modified tail with a thrown value.
+            let tail_before = tail.clone();
+
             // Attempt to replace the first nested statement containing a `yield`
             // with a Throw so that surrounding try/catch blocks can catch it.
             let mut replaced = false;
@@ -1199,7 +1247,27 @@ pub fn generator_throw<'gc>(
                 tail[0] = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None)).into();
             }
 
-            let func_env = prepare_function_call_env(mc, Some(&gen_obj.env), gen_obj.this_val.clone(), None, &[], None, None)?;
+            let func_env = if let GeneratorState::Suspended { pre_env: Some(env), .. } = &gen_obj.state {
+                *env
+            } else {
+                prepare_function_call_env(mc, Some(&gen_obj.env), gen_obj.this_val.clone(), None, &[], None, None)?
+            };
+
+            // Execute pre-statements in the function env so bindings created
+            // before the original yield are present when evaluating the throw.
+            if let Some((idx, inner_idx_opt, _yield_kind, _yield_inner)) = find_first_yield_in_statements(&tail_before) {
+                if idx > 0 {
+                    let pre_stmts = tail_before[0..idx].to_vec();
+                    crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                } else if let Some(inner_idx) = inner_idx_opt
+                    && inner_idx > 0
+                    && let StatementKind::Block(inner_stmts) = &*tail_before[idx].kind
+                {
+                    let pre_stmts = inner_stmts[0..inner_idx].to_vec();
+                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                }
+            }
+
             object_set_key_value(mc, &func_env, "__gen_throw_val", throw_value.clone())?;
 
             // Execute the modified tail. If the throw is uncaught, evaluate_statements

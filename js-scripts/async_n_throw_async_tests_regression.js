@@ -1,13 +1,8 @@
 "use strict";
 
-// Regression harness for async_n_throw_async_tests.js that exposes a
-// summary object on globalThis for test assertions.
+// Regression harness for async_n_throw_async_tests.js
 
-// (This file is a near copy of async_n_throw_async_tests.js but it
-// records `passed` / `failed` and `results` to
-// `globalThis.__async_regression_summary` before returning.)
-
-// Ensure a minimal `assert` function exists when running outside Test262
+// Ensure a minimal `assert` function exists
 if (typeof assert === 'undefined') {
   var assert = function (actual, expected, message) {
     function deepEqual(a, b) {
@@ -45,7 +40,18 @@ function Test262Error(message) {
 }
 Test262Error.prototype = Object.create(Error.prototype);
 
-// (Copy of async test harness with dispatcher)
+// Global handlers
+globalThis._async_regression_error = undefined;
+globalThis.onerror = function(msg, url, line, col, err) {
+  try { console.log('DBG GLOBAL onerror:', msg, err && err.message ? err.message : err); } catch (e) {}
+  globalThis._async_regression_error = err || msg;
+};
+globalThis.onunhandledrejection = function(ev) {
+  try { console.log('DBG GLOBAL onunhandledrejection:', ev && ev.reason && ev.reason.message ? ev.reason.message : ev.reason); } catch (e) {}
+  globalThis._async_regression_error = ev && ev.reason;
+};
+
+// Dispatcher
 if (!globalThis.__done_dispatcher_installed) {
   (function () {
     var handlers = [];
@@ -61,7 +67,9 @@ if (!globalThis.__done_dispatcher_installed) {
       for (var i = 0; i < handlers.length; i++) {
         if (!handlers[i].settled) {
           handlers[i].settled = true;
-          Promise.resolve().then(function() { try { handlers[i].fn(err); } catch (e) { /* swallow */ } });
+          Promise.resolve().then(function() {
+            try { handlers[i].fn(err); } catch (handler_err) { console.log('DBG: $DONE handler threw'); throw handler_err; }
+          });
           break;
         }
       }
@@ -90,6 +98,7 @@ function asyncTest(testFunc) {
 }
 
 function runSingleAsyncTest(name, testFunc, expectError) {
+  console.log('ENTER runSingleAsyncTest:', name);
   return new Promise((resolve) => {
     var settled = false;
     var doneId = globalThis.$register_done(function (err) {
@@ -114,7 +123,6 @@ function runSingleAsyncTest(name, testFunc, expectError) {
 }
 
 assert.throwsAsync = function (expectedErrorConstructor, func, message) {
-  // Validate arguments synchronously and return a rejected promise if invalid
   if (typeof expectedErrorConstructor !== "function") {
     return Promise.reject(new Test262Error("assert.throwsAsync called with an argument that is not an error constructor"));
   }
@@ -126,14 +134,11 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
     var pendingFailDetail;
     var onResFulfilled, onResRejected;
     var fail = function (detail) {
-      // If the resSettlementP's rejection handler is available, use it to reject
       if (typeof onResRejected === "function") {
         onResRejected(new Test262Error(message === undefined ? detail : (message + " " + detail)));
         return;
       }
-      // Otherwise, record the pending failure so it can be applied once resSettlementP is available
       pendingFailDetail = message === undefined ? detail : (message + " " + detail);
-      // Do not throw synchronously here; the pending failure will be applied to the promise
       return;
     };
     var expectedName = expectedErrorConstructor.name;
@@ -151,33 +156,38 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
       onResFulfilled = onFulfilled;
       onResRejected = onRejected;
     });
-    // If a fail was requested before resSettlementP existed, apply it now via onResRejected
     if (pendingFailDetail !== undefined && typeof onResRejected === "function") {
       onResRejected(new Test262Error(pendingFailDetail));
-      // clear pending detail after reporting
       pendingFailDetail = undefined;
     }
     try {
-      res.then(onResFulfilled, onResRejected)
+      res.then(function (v) {
+        onResFulfilled(v);
+      }, function (thrown) {
+        onResRejected(thrown);
+      });
     } catch (thrown) {
       fail(expectation + " but .then threw synchronously");
     }
-    resolve(resSettlementP.then(
-      function () { fail(expectation + " but no exception was thrown at all"); },
+    
+    var finalP = resSettlementP.then(
+      function () { console.log('DBG throwsAsync: resSettlementP fulfilled -> creating rejection'); throw new Test262Error(expectation + " but no exception was thrown at all"); },
       function (thrown) {
+        console.log('DBG throwsAsync: resSettlementP rejected -> thrown ->', thrown && thrown.message ? thrown.message : thrown);
         var actualName;
         if (thrown === null || typeof thrown !== "object") {
-          fail(expectation + " but thrown value was not an object");
+          throw new Test262Error(expectation + " but thrown value was not an object");
         } else if (thrown.constructor !== expectedErrorConstructor) {
           actualName = thrown.constructor.name;
           if (expectedName === actualName) {
-            fail(expectation +
+            throw new Test262Error(expectation +
               " but got a different error constructor with the same name");
           }
-          fail(expectation + " but got a " + actualName);
+          throw new Test262Error(expectation + " but got a " + actualName);
         }
       }
-    ));
+    );
+    resolve(finalP);
   });
 };
 
@@ -221,32 +231,51 @@ async function runThrowTests() {
   console.log('RUN: after syncThrowCase');
 }
 
+var regression_results = [];
+
+async function runRegressionTest() {
+  var p1;
+    p1 = runSingleAsyncTest('resolves', function () { return Promise.resolve(); }, false);
+    console.log('DBG: p1 created. p1 is:', JSON.stringify(p1), 'typeof:', typeof p1, 'isPromise:', p1 instanceof Promise);
+    var v1 = await p1;
+    console.log('DBG: p1 awaited. v1:', JSON.stringify(v1));
+    regression_results.push(v1);
+    
+    regression_results.push(await runSingleAsyncTest('rejects', function () { return Promise.reject(new Error('fail')); }, true));
+    regression_results.push(await runSingleAsyncTest('non-function', 'not-a-func', true));
+
+    await runThrowTests();
+
+    console.log('DBG: before resolution loop. results:', JSON.stringify(regression_results));
+
+    // Workaround: Manual unrolling to avoid potential engine bugs with loops/variables across await in async functions
+    if (regression_results.length > 0) regression_results[0] = await Promise.resolve(regression_results[0]);
+    if (regression_results.length > 1) regression_results[1] = await Promise.resolve(regression_results[1]);
+    if (regression_results.length > 2) regression_results[2] = await Promise.resolve(regression_results[2]);
+
+    console.log('DBG: after resolution loop. results:', JSON.stringify(regression_results));
+
+    try {
+      console.log('RESULTS JSON:', JSON.stringify(regression_results));
+    } catch (e) {
+      console.log('RESULTS (toString):', regression_results.map(r => String(r)));
+    }
+
+    const passed = regression_results.filter(r => r.ok).length;
+    const failed = regression_results.length - passed;
+
+    globalThis.__async_regression_summary = { passed: passed, failed: failed, results: regression_results };
+
+    console.log('\nSummary:', passed, 'passed,', failed, 'failed');
+
+    if (globalThis._async_regression_error !== undefined) {
+      try { console.log('DBG GLOBAL error at end:', globalThis._async_regression_error && globalThis._async_regression_error.message ? globalThis._async_regression_error.message : globalThis._async_regression_error); } catch (e) {}
+    }
+
+    return true;
+
+}
+
 (async function () {
-  const results = [];
-  results.push(await runSingleAsyncTest('resolves', function () { return Promise.resolve(); }, false));
-  results.push(await runSingleAsyncTest('rejects', function () { return Promise.reject(new Error('fail')); }, true));
-  results.push(await runSingleAsyncTest('non-function', 'not-a-func', true));
-
-  await runThrowTests();
-
-  for (let i = 0; i < results.length; i++) {
-    results[i] = await Promise.resolve(results[i]);
-  }
-
-  // Debug: print raw results to help diagnose ordering/err values
-  try {
-    console.log('RESULTS JSON:', JSON.stringify(results));
-  } catch (e) {
-    console.log('RESULTS (toString):', results.map(r => String(r)));
-  }
-
-  const passed = results.filter(r => r.ok).length;
-  const failed = results.length - passed;
-
-  // Expose summary for regression testing
-  globalThis.__async_regression_summary = { passed: passed, failed: failed, results: results };
-
-  console.log('\nSummary:', passed, 'passed,', failed, 'failed');
-
-  return true;
+  await runRegressionTest();
 })();

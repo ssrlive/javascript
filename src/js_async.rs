@@ -1,5 +1,5 @@
 use crate::core::{
-    ClosureData, DestructuringElement, Expr, JSGenerator, JSObjectDataPtr, Value, object_get_key_value, object_set_key_value,
+    ClosureData, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectDataPtr, Value, object_get_key_value, object_set_key_value,
 };
 use crate::core::{Gc, GcPtr, MutationContext};
 use crate::error::JSError;
@@ -22,10 +22,65 @@ pub fn handle_async_closure_call<'gc>(
 
     // Create a new Closure wrapped in Value to pass to the task
     // We clone the closure data because the task needs to own its reference/copy
-    let closure_val = Value::Closure(Gc::new(mc, closure.clone()));
+    // Instead of deferring the entire execution, synchronously start the generator
+    // so that the body runs up to the first `await` (per spec) before returning the Promise.
+    match crate::js_generator::handle_generator_function_call(mc, closure, args, _this_val) {
+        Ok(gen_val) => {
+            if let Value::Object(gen_obj) = gen_val
+                && let Some(gen_inner) = object_get_key_value(&gen_obj, "__generator__")
+                && let Value::Generator(gen_ptr) = &*gen_inner.borrow()
+            {
+                // Synchronously perform the initial step (like generator.next(undefined))
+                if let Err(e) = step(mc, *gen_ptr, resolve.clone(), reject.clone(), env, Ok(Value::Undefined)) {
+                    // If stepping threw synchronously, log full error for diagnosis
+                    log::debug!("sync step error: {:?}", e);
+                    // Create a JS Error object with message and (if available) line/column info
+                    let msg = e.message();
+                    // Use core::create_error to create an Error object preserving prototype/etc.
+                    let prototype = None; // use default Error prototype
+                    let err_val = crate::core::create_error(mc, prototype, (msg.clone()).into()).unwrap_or(Value::Undefined);
+                    if let Value::Object(err_obj) = &err_val {
+                        if let Some(line) = e.js_line()
+                            && let Err(e) = object_set_key_value(mc, err_obj, "__line__", Value::Number(line as f64))
+                        {
+                            log::debug!("error setting __line__ on error object: {:?}", e);
+                        }
+                        if let Some(col) = e.js_column()
+                            && let Err(e) = object_set_key_value(mc, err_obj, "__column__", Value::Number(col as f64))
+                        {
+                            log::debug!("error setting __column__ on error object: {:?}", e);
+                        }
+                    }
+                    // Reject with an Error object so unhandled reporting can include line info
+                    if let Err(e) = crate::js_promise::call_function(mc, &reject, &[err_val], env) {
+                        log::debug!("error calling reject on promise: {:?}", e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let msg = e.message();
+            // Create a JS Error object preserving message and attach line/column if present
+            let err_val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
+            if let Value::Object(obj) = &err_val {
+                if let Some(line) = e.js_line()
+                    && let Err(e) = object_set_key_value(mc, obj, "__line__", Value::Number(line as f64))
+                {
+                    log::debug!("error setting __line__ on error object: {:?}", e);
+                }
+                if let Some(col) = e.js_column()
+                    && let Err(e) = object_set_key_value(mc, obj, "__column__", Value::Number(col as f64))
+                {
+                    log::debug!("error setting __column__ on error object: {:?}", e);
+                }
+            }
+            if let Err(e) = crate::js_promise::call_function(mc, &reject, &[err_val], env) {
+                log::debug!("error calling reject on promise: {:?}", e);
+            }
+        }
+    }
 
-    crate::js_promise::schedule_async_closure_execution(mc, closure_val, args.to_vec(), resolve, reject, _this_val, *env);
-
+    // The rest of execution (after yields) will be handled via microtasks in step()
     let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
     Ok(Value::Object(promise_obj))
 }
@@ -110,8 +165,24 @@ fn step<'gc>(
         Err(e) => {
             // Generator threw an error synchronously (or during processing), reject the promise
             let msg = e.message();
-            let val = Value::String(utf8_to_utf16(&msg));
-            crate::js_promise::call_function(mc, &reject, &[val], env)?;
+            let err_val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
+            if let Value::Object(obj) = &err_val {
+                let (line_opt, col_opt) = match &e {
+                    EvalError::Js(js_err) => (js_err.js_line(), js_err.js_column()),
+                    EvalError::Throw(_, l, c) => (*l, *c),
+                };
+                if let Some(line) = line_opt
+                    && let Err(e) = object_set_key_value(mc, obj, "__line__", Value::Number(line as f64))
+                {
+                    log::debug!("error setting __line__ on error object: {:?}", e);
+                }
+                if let Some(col) = col_opt
+                    && let Err(e) = object_set_key_value(mc, obj, "__column__", Value::Number(col as f64))
+                {
+                    log::debug!("error setting __column__ on error object: {:?}", e);
+                }
+            }
+            crate::js_promise::call_function(mc, &reject, &[err_val], env)?;
         }
     }
     Ok(())
@@ -182,8 +253,24 @@ fn continue_async_step<'gc>(
     let reject_val = object_get_key_value(env, "__async_reject").unwrap().borrow().clone();
 
     if let Value::Generator(gen_ref) = generator_val {
-        let global_env = env.borrow().prototype.unwrap();
-        step(mc, gen_ref, resolve_val, reject_val, &global_env, result)?;
+        // Prefer the generator's stored pre-execution environment (pre_env)
+        // when available so bindings created before a yield/await are preserved
+        // across async resumption. Fall back to the generator's captured env
+        // if no pre_env is present.
+        let call_env = {
+            let gen_b = gen_ref.borrow();
+            match &gen_b.state {
+                crate::core::GeneratorState::Suspended { pre_env: Some(pre), .. } => {
+                    log::debug!("continue_async_step: using generator pre_env");
+                    *pre
+                }
+                _ => {
+                    log::debug!("continue_async_step: no pre_env, using gen.env");
+                    gen_b.env
+                }
+            }
+        };
+        step(mc, gen_ref, resolve_val, reject_val, &call_env, result)?;
     }
 
     Ok(Value::Undefined)

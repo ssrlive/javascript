@@ -5714,6 +5714,14 @@ fn put_temp<'gc>(
 ) -> Result<(), EvalError<'gc>> {
     match temp {
         TargetTemp::Var(name) => {
+            if name == "await" {
+                println!(
+                    "DEBUG: put_temp assign to 'await' in env ptr={:p} is_function_scope={} has_prop={}",
+                    env,
+                    env.borrow().is_function_scope,
+                    env.borrow().properties.contains_key(&PropertyKey::String("await".to_string()))
+                );
+            }
             env_set_recursive(mc, env, &name, value)?;
         }
         TargetTemp::PropBase(obj, static_key) => {
@@ -6625,6 +6633,16 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
                 if env.borrow().is_function_scope && caller_is_strict {
                     return Err(crate::raise_syntax_error!("Assignment to 'arguments' is not allowed in strict mode").into());
                 }
+            }
+
+            // DEBUG: log assignments to 'await' to diagnose nested async scoping issues
+            if name == "await" {
+                println!(
+                    "DEBUG: assign to 'await' in env ptr={:p} is_function_scope={} has_prop={}",
+                    env,
+                    env.borrow().is_function_scope,
+                    env.borrow().properties.contains_key(&PropertyKey::String("await".to_string()))
+                );
             }
 
             env_set_recursive(mc, env, name, val.clone())?;
@@ -9738,6 +9756,10 @@ fn await_promise_value<'gc>(
                         continue;
                     }
                     crate::js_promise::PollResult::Empty => {
+                        // Process any matured runtime pending unhandleds in this env
+                        if crate::js_promise::process_runtime_pending_unhandled(mc, env)? {
+                            continue;
+                        }
                         std::thread::yield_now();
                         continue;
                     }
@@ -9787,6 +9809,10 @@ fn await_promise_value_if_pending<'gc>(
                         continue;
                     }
                     crate::js_promise::PollResult::Empty => {
+                        // Process any matured runtime pending unhandleds in this env
+                        if crate::js_promise::process_runtime_pending_unhandled(mc, env)? {
+                            continue;
+                        }
                         std::thread::yield_now();
                         continue;
                     }

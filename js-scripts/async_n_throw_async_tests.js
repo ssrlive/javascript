@@ -256,7 +256,9 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
       console.log('assert.throwsAsync: invalid-arg -> PASS (rejected with:', e && e.message ? e.message : e, ')');
     }
 
+    console.log('DBG: passCase typeof before calling ->', typeof passCase);
     await passCase();
+    console.log('DBG: passCase typeof after calling ->', typeof passCase);
     await failCase();
 
     try {

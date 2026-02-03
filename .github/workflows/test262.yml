@@ -97,12 +97,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/assignmenttargettype" - "language/expressions/async-generator"
+      - name: Run a small test262 subset - "language/expressions/assignmenttargettype" - "language/expressions/await"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 1000 --focus language/expressions/assignmenttargettype,language/expressions/async-arrow-function,language/expressions/async-function,language/expressions/async-generator
+          node ci/runner.js --limit 1000 --focus language/expressions/assignmenttargettype,language/expressions/async-arrow-function,language/expressions/async-function,language/expressions/async-generator,language/expressions/await
 
       - name: Upload results
         if: ${{ !cancelled() }}

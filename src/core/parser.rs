@@ -662,6 +662,8 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
     }
     let name = if let Token::Identifier(name) = &t[*index].token {
         name.clone()
+    } else if matches!(t[*index].token, Token::Await) {
+        "await".to_string()
     } else {
         return Err(raise_parse_error_at!(t.get(*index)));
     };
@@ -1871,6 +1873,26 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                     default_expr = Some(Box::new(expr));
                 }
                 params.push(DestructuringElement::Variable(param, default_expr));
+            } else if matches!(tokens[*index].token, Token::Await) {
+                *index += 1;
+                let param = "await".to_string();
+                let mut default_expr: Option<Box<Expr>> = None;
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                    *index += 1;
+                    let expr = parse_assignment(tokens, index)?;
+                    default_expr = Some(Box::new(expr));
+                }
+                params.push(DestructuringElement::Variable(param, default_expr));
+            } else if matches!(tokens[*index].token, Token::Async) {
+                *index += 1;
+                let param = "async".to_string();
+                let mut default_expr: Option<Box<Expr>> = None;
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                    *index += 1;
+                    let expr = parse_assignment(tokens, index)?;
+                    default_expr = Some(Box::new(expr));
+                }
+                params.push(DestructuringElement::Variable(param, default_expr));
             } else {
                 return Err(raise_parse_error_at!(tokens.get(*index)));
             }
@@ -3046,14 +3068,51 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             Expr::Void(Box::new(inner))
         }
         Token::Await => {
-            // In some contexts `await` may be used as an identifier (e.g., `var await = 0; await = 1;`).
-            // If the next token is an assignment operator, treat this as an Identifier reference
-            // so the assignment parser can handle it. Otherwise parse an await expression.
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
-                Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
+            // `await` is a contextual keyword. In non-async/script contexts it can be used as an identifier.
+            // If the next token is an assignment operator, treat this as an identifier reference.
+            // Otherwise, only parse an await expression if the following token can start an expression;
+            // if not, treat it as an identifier reference so constructs like `await instanceof X`
+            // are parsed as `(await) instanceof X` rather than `await <missing-expression>`.
+            if *index < tokens.len() {
+                if matches!(tokens[*index].token, Token::Assign) {
+                    Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
+                } else {
+                    match &tokens[*index].token {
+                        Token::Number(_)
+                        | Token::BigInt(_)
+                        | Token::StringLit(_)
+                        | Token::True
+                        | Token::False
+                        | Token::Null
+                        | Token::TypeOf
+                        | Token::Delete
+                        | Token::Void
+                        | Token::Await
+                        | Token::Yield
+                        | Token::YieldStar
+                        | Token::LogicalNot
+                        | Token::Class
+                        | Token::Function
+                        | Token::FunctionStar
+                        | Token::Async
+                        | Token::LBracket
+                        | Token::LBrace
+                        | Token::Identifier(_)
+                        | Token::PrivateIdentifier(_)
+                        | Token::LParen
+                        | Token::New
+                        | Token::This
+                        | Token::Super
+                        | Token::Import
+                        | Token::Regex(_, _) => {
+                            let inner = parse_primary(tokens, index, true)?;
+                            Expr::Await(Box::new(inner))
+                        }
+                        _ => Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column)),
+                    }
+                }
             } else {
-                let inner = parse_primary(tokens, index, true)?;
-                Expr::Await(Box::new(inner))
+                Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
             }
         }
         Token::Yield => {
@@ -3867,22 +3926,38 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             // misinterpreting the first parameter as a name in the forgiving
             // case where the '(' may have been consumed earlier.
             let name = if *index < tokens.len() {
-                if let Token::Identifier(n) = &tokens[*index].token {
-                    // Look ahead for next non-LineTerminator token
-                    let mut lookahead = *index + 1;
-                    while lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LineTerminator) {
-                        lookahead += 1;
+                match &tokens[*index].token {
+                    Token::Identifier(n) => {
+                        // Look ahead for next non-LineTerminator token
+                        let mut lookahead = *index + 1;
+                        while lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LineTerminator) {
+                            lookahead += 1;
+                        }
+                        if lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LParen) {
+                            let name = n.clone();
+                            log::trace!("parse_primary: treating '{}' as function name", name);
+                            *index += 1;
+                            Some(name)
+                        } else {
+                            None
+                        }
                     }
-                    if lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LParen) {
-                        let name = n.clone();
-                        log::trace!("parse_primary: treating '{}' as function name", name);
-                        *index += 1;
-                        Some(name)
-                    } else {
-                        None
+                    Token::Await => {
+                        // Look ahead for next non-LineTerminator token (same rules as identifier)
+                        let mut lookahead = *index + 1;
+                        while lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LineTerminator) {
+                            lookahead += 1;
+                        }
+                        if lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LParen) {
+                            let name = "await".to_string();
+                            log::trace!("parse_primary: treating 'await' as function name");
+                            *index += 1;
+                            Some(name)
+                        } else {
+                            None
+                        }
                     }
-                } else {
-                    None
+                    _ => None,
                 }
             } else {
                 None

@@ -177,8 +177,9 @@ async function runAll(){
     // Skip raw tests (they require special raw-source handling)
     if (flagsBlock && flagsBlock.includes('raw')) { skip++; log(`SKIP (raw) ${f}`); continue; }
 
-    // Skip tests marked as pending via esid: pending
-    if (/esid\s*:\s*pending\b/.test(meta)) { skip++; log(`SKIP (esid pending) ${f}`); continue; }
+    // Skip tests marked as pending via esid: pending, except tests under language/expressions/await
+    // Do not force-skip files inside the language/expressions/await directory when their metadata contains `esid: pending`.
+    if (/esid\s*:\s*pending\b/.test(meta) && !f.includes(path.join('language','expressions','await'))) { skip++; log(`SKIP (esid pending) ${f}`); continue; }
 
     if (/negative:/.test(meta)) { skip++; log(`SKIP (negative) ${f}`); continue; }
 

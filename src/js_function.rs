@@ -279,38 +279,6 @@ pub fn handle_global_function<'gc>(
             return Err(raise_type_error!("Promise prototype method called without object this").into());
         }
 
-        /*
-        "Promise.prototype.then" => {
-            if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow().clone();
-                if let Value::Object(_obj) = this_val {
-                    // return crate::js_promise::handle_promise_then(mc, &obj, args, env);
-                    todo!()
-                }
-            }
-            return Err(raise_eval_error!("Promise.prototype.then called without a promise receiver").into());
-        }
-        "Promise.prototype.catch" => {
-            if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow().clone();
-                if let Value::Object(_obj) = this_val {
-                    // return crate::js_promise::handle_promise_catch(mc, &obj, args, env);
-                    todo!()
-                }
-            }
-            return Err(raise_eval_error!("Promise.prototype.catch called without a promise receiver").into());
-        }
-        "Promise.prototype.finally" => {
-            if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow().clone();
-                if let Value::Object(_obj) = this_val {
-                    // return crate::js_promise::handle_promise_finally(mc, &obj, args, env);
-                    todo!()
-                }
-            }
-            return Err(raise_eval_error!("Promise.prototype.finally called without a promise receiver").into());
-        }
-        // */
         "setTimeout" => return Ok(crate::js_promise::handle_set_timeout_val(mc, args, env)?),
         "clearTimeout" => return Ok(crate::js_promise::handle_clear_timeout_val(mc, args, env)?),
         "setInterval" => return Ok(crate::js_promise::handle_set_interval_val(mc, args, env)?),

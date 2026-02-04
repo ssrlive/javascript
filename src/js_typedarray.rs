@@ -2079,13 +2079,37 @@ pub fn handle_typedarray_accessor<'gc>(
     }
 }
 
-pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Value::Object(obj) = this_val {
         if let Some(ta_cell) = object_get_key_value(obj, "__typedarray_iterator")
             && let Value::TypedArray(ta) = &*ta_cell.borrow()
             && let Some(index_cell) = object_get_key_value(obj, "__index")
             && let Value::Number(index) = &*index_cell.borrow()
         {
+            // Check for detached buffer or out-of-bounds view (e.g. resizable buffer shrunk)
+            let buffer = ta.buffer.borrow();
+            if buffer.detached {
+                return Err(raise_type_error!("TypedArray buffer is detached").into());
+            }
+            if !ta.length_tracking {
+                let buf_len = buffer.data.lock().unwrap().len();
+                let element_size = ta.element_size();
+                if ta.byte_offset + ta.length * element_size > buf_len {
+                    return Err(raise_type_error!("TypedArray is out of bounds").into());
+                }
+            }
+            // For length-tracking views, if offset > buffer length, it is treated as length 0, not out-of-bounds error
+            // (unless we are accessing an index that is out of computed bounds, which is handled by bounds check below)
+            if ta.length_tracking {
+                let buf_len = buffer.data.lock().unwrap().len();
+                if ta.byte_offset > buf_len {
+                    // This is technically out of bounds for the start of the view?
+                    // Spec says IsTypedArrayOutOfBounds returns true if byteOffset > bufferByteLength
+                    // So we should check this too.
+                    return Err(raise_type_error!("TypedArray offset is out of bounds").into());
+                }
+            }
+
             let cur_len = if ta.length_tracking {
                 let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
                 if buf_len <= ta.byte_offset {
@@ -2145,14 +2169,10 @@ pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val:
                 Ok(Value::Object(result_obj))
             }
         } else {
-            Err(raise_eval_error!(
-                "TypedArrayIterator.prototype.next called on incompatible receiver"
-            ))
+            Err(raise_eval_error!("TypedArrayIterator.prototype.next called on incompatible receiver").into())
         }
     } else {
-        Err(raise_eval_error!(
-            "TypedArrayIterator.prototype.next called on incompatible receiver"
-        ))
+        Err(raise_eval_error!("TypedArrayIterator.prototype.next called on incompatible receiver").into())
     }
 }
 

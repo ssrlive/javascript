@@ -2278,6 +2278,206 @@ fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr:
     Ok(())
 }
 
+fn evaluate_destructuring_array_assignment<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    pattern: &[DestructuringElement],
+    val: Value<'gc>,
+    is_const: bool,
+    stmt_line: Option<usize>,
+    stmt_column: Option<usize>,
+) -> Result<(), EvalError<'gc>> {
+    if matches!(val, Value::Undefined | Value::Null) {
+        return Err(raise_type_error!("Cannot destructure undefined or null").into());
+    }
+
+    let mut iterator: Option<crate::core::JSObjectDataPtr<'gc>> = None;
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+        && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+    {
+        let method = if let Value::Object(obj) = &val {
+            get_property_with_accessors(mc, env, obj, iter_sym_data)?
+        } else {
+            get_primitive_prototype_property(mc, env, &val, iter_sym_data)?
+        };
+        if !matches!(method, Value::Undefined | Value::Null) {
+            let res = evaluate_call_dispatch(mc, env, method, Some(val.clone()), vec![])?;
+            if let Value::Object(iter_obj) = res {
+                iterator = Some(iter_obj);
+            }
+        }
+    }
+
+    let iter_obj = if let Some(i) = iterator {
+        i
+    } else {
+        return Err(raise_type_error!("Object is not iterable (or Symbol.iterator not found)").into());
+    };
+
+    let mut iterator_done = false;
+
+    for elem in pattern {
+        if matches!(elem, DestructuringElement::Empty) {
+            if !iterator_done {
+                let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                if matches!(next_method, Value::Undefined | Value::Null) {
+                    return Err(raise_type_error!("Iterator has no next method").into());
+                }
+                let next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
+                if let Value::Object(next_res) = next_res_val {
+                    let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
+                    if matches!(done_val, Value::Boolean(true)) {
+                        iterator_done = true;
+                    }
+                } else {
+                    return Err(raise_type_error!("Iterator result is not an object").into());
+                }
+            }
+            continue;
+        }
+
+        match elem {
+            DestructuringElement::Rest(name) => {
+                let rest_arr = create_array(mc, env)?;
+                let mut idx = 0;
+                if !iterator_done {
+                    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                    if matches!(next_method, Value::Undefined | Value::Null) {
+                        return Err(raise_type_error!("Iterator has no next method").into());
+                    }
+                    loop {
+                        let next_res_val = evaluate_call_dispatch(mc, env, next_method.clone(), Some(Value::Object(iter_obj)), vec![])?;
+                        if let Value::Object(next_res) = next_res_val {
+                            let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
+                            if matches!(done_val, Value::Boolean(true)) {
+                                iterator_done = true;
+                                break;
+                            }
+                            let value = get_property_with_accessors(mc, env, &next_res, "value")?;
+                            object_set_key_value(mc, &rest_arr, idx, value)?;
+                            idx += 1;
+                        } else {
+                            return Err(raise_type_error!("Iterator result is not an object").into());
+                        }
+                    }
+                }
+                env_set(mc, env, name, Value::Object(rest_arr))?;
+                if is_const {
+                    env.borrow_mut(mc).set_const(name.clone());
+                }
+            }
+            DestructuringElement::RestPattern(inner_elem) => {
+                let rest_arr = create_array(mc, env)?;
+                let mut idx = 0;
+                if !iterator_done {
+                    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                    if matches!(next_method, Value::Undefined | Value::Null) {
+                        return Err(raise_type_error!("Iterator has no next method").into());
+                    }
+                    loop {
+                        let next_res_val = evaluate_call_dispatch(mc, env, next_method.clone(), Some(Value::Object(iter_obj)), vec![])?;
+                        if let Value::Object(next_res) = next_res_val {
+                            let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
+                            if matches!(done_val, Value::Boolean(true)) {
+                                iterator_done = true;
+                                break;
+                            }
+                            let value = get_property_with_accessors(mc, env, &next_res, "value")?;
+                            object_set_key_value(mc, &rest_arr, idx, value)?;
+                            idx += 1;
+                        } else {
+                            return Err(raise_type_error!("Iterator result is not an object").into());
+                        }
+                    }
+                }
+                evaluate_destructuring_element_rec(mc, env, inner_elem, Value::Object(rest_arr), is_const, stmt_line, stmt_column)?;
+            }
+            other => {
+                let mut value = Value::Undefined;
+                if !iterator_done {
+                    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                    if matches!(next_method, Value::Undefined | Value::Null) {
+                        return Err(raise_type_error!("Iterator has no next method").into());
+                    }
+                    let next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
+                    if let Value::Object(next_res) = next_res_val {
+                        let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
+                        if matches!(done_val, Value::Boolean(true)) {
+                            iterator_done = true;
+                        } else {
+                            value = get_property_with_accessors(mc, env, &next_res, "value")?;
+                        }
+                    } else {
+                        return Err(raise_type_error!("Iterator result is not an object").into());
+                    }
+                }
+                evaluate_destructuring_element_rec(mc, env, other, value, is_const, stmt_line, stmt_column)?;
+            }
+        }
+    }
+
+    if !iterator_done {
+        iterator_close(mc, env, &iter_obj)?;
+    }
+    Ok(())
+}
+
+fn evaluate_destructuring_element_rec<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    elem: &DestructuringElement,
+    val: Value<'gc>,
+    is_const: bool,
+    stmt_line: Option<usize>,
+    stmt_column: Option<usize>,
+) -> Result<(), EvalError<'gc>> {
+    match elem {
+        DestructuringElement::Variable(name, default_expr) => {
+            let mut v = val;
+            if matches!(v, Value::Undefined)
+                && let Some(def_expr) = default_expr
+            {
+                v = evaluate_expr(mc, env, def_expr)?;
+                maybe_set_function_name_for_default(mc, name, def_expr, &v)?;
+            }
+            env_set(mc, env, name, v)?;
+            if is_const {
+                env.borrow_mut(mc).set_const(name.clone());
+            }
+        }
+        DestructuringElement::NestedArray(inner_pattern, default_expr) => {
+            let mut v = val;
+            if matches!(v, Value::Undefined)
+                && let Some(def_expr) = default_expr
+            {
+                v = evaluate_expr(mc, env, def_expr)?;
+            }
+            evaluate_destructuring_array_assignment(mc, env, inner_pattern, v, is_const, stmt_line, stmt_column)?;
+        }
+        DestructuringElement::NestedObject(inner_pattern, default_expr) => {
+            let mut v = val;
+            if matches!(v, Value::Undefined)
+                && let Some(def_expr) = default_expr
+            {
+                v = evaluate_expr(mc, env, def_expr)?;
+            }
+            if matches!(v, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot destructure undefined or null").into());
+            }
+            let obj_val = if let Value::Object(obj) = v {
+                obj
+            } else {
+                return Err(raise_type_error!("Expected object for nested destructuring").into());
+            };
+            bind_object_inner_for_letconst(mc, env, inner_pattern, &obj_val, is_const)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn eval_res<'gc>(
     mc: &MutationContext<'gc>,
     stmt: &Statement,
@@ -2512,75 +2712,8 @@ fn eval_res<'gc>(
                 Ok(v) => v,
                 Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
             };
-
-            // If there are any nested patterns in the array, delegate to helper that handles all cases
-            let has_nested = pattern.iter().any(|e| !matches!(e, DestructuringElement::Variable(_, _)));
-            if has_nested {
-                if let Value::Object(obj) = &val {
-                    if is_array(mc, obj) || is_typedarray(obj) {
-                        // For fixed-length TypedArrays, ensure the entire view still fits in the buffer.
-                        if is_typedarray(obj) {
-                            ensure_typedarray_in_bounds(mc, env, Some(stmt.line), Some(stmt.column), obj)?;
-                        }
-                        let is_const = matches!(*stmt.kind, StatementKind::ConstDestructuringArray(_, _));
-                        bind_array_inner_for_letconst(mc, env, pattern, obj, is_const, Some(stmt.line), Some(stmt.column))?;
-                        *last_value = Value::Undefined;
-                        return Ok(None);
-                    } else {
-                        return Err(raise_eval_error!("Cannot destructure non-array value").into());
-                    }
-                } else {
-                    return Err(raise_eval_error!("Cannot destructure non-array value").into());
-                }
-            }
-
-            // Simple variable-only destructuring
-            // Debug: log the kind of value we're destructuring
-            if let Value::Object(o) = &val {
-                log::trace!(
-                    "let simple destructure: target is Object is_array={} is_typedarray={}",
-                    is_array(mc, o),
-                    is_typedarray(o)
-                );
-            } else {
-                log::trace!("let simple destructure: target is NOT an object: {:?}", value_to_string(&val));
-            }
-            for (i, elem) in pattern.iter().enumerate() {
-                if let DestructuringElement::Variable(name, default_expr) = elem {
-                    // Get element at index i if array
-                    let mut elem_val = Value::Undefined;
-                    if let Value::Object(obj) = &val
-                        && (is_array(mc, obj) || is_typedarray(obj))
-                    {
-                        if is_typedarray(obj) {
-                            // Diagnostic trace to confirm we check bounds for each element
-                            if let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string()))
-                                && let Value::TypedArray(ta) = &*ta_cell.borrow()
-                            {
-                                log::trace!(
-                                    "simple destructure: idx={} ta.byte_offset={} ta.length_tracking={}",
-                                    i,
-                                    ta.byte_offset,
-                                    ta.length_tracking
-                                );
-                            }
-                            ensure_typedarray_in_bounds(mc, env, Some(stmt.line), Some(stmt.column), obj)?;
-                        }
-                        elem_val = get_array_like_element(mc, env, obj, i)?;
-                    }
-                    // Apply default if undefined and default_expr present
-                    if matches!(elem_val, Value::Undefined)
-                        && let Some(def) = default_expr
-                    {
-                        elem_val = evaluate_expr(mc, env, def)?;
-                    }
-                    // Bind to environment (let/const bind to current env)
-                    env_set(mc, env, name, elem_val.clone())?;
-                    if matches!(*stmt.kind, StatementKind::ConstDestructuringArray(_, _)) {
-                        env.borrow_mut(mc).set_const(name.clone());
-                    }
-                }
-            }
+            let is_const = matches!(stmt.kind.as_ref(), StatementKind::ConstDestructuringArray(..));
+            evaluate_destructuring_array_assignment(mc, env, pattern, val, is_const, Some(stmt.line), Some(stmt.column))?;
             *last_value = Value::Undefined;
             Ok(None)
         }
@@ -2590,186 +2723,17 @@ fn eval_res<'gc>(
                 Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
             };
 
-            // If there are any nested patterns in the array, delegate to helper that handles var semantics
-            let has_nested = pattern.iter().any(|e| !matches!(e, DestructuringElement::Variable(_, _)));
-            if has_nested {
-                if let Value::Object(obj) = &val {
-                    if is_array(mc, obj) || is_typedarray(obj) {
-                        if is_typedarray(obj) {
-                            ensure_typedarray_in_bounds(mc, env, Some(stmt.line), Some(stmt.column), obj)?;
-                        }
-                        bind_array_inner_for_var(mc, env, pattern, obj, None, None)?;
-                        *last_value = Value::Undefined;
-                        return Ok(None);
-                    } else {
-                        return Err(raise_eval_error!("Cannot destructure non-array value").into());
-                    }
+            // Find VariableEnvironment (function scope or global)
+            let mut var_env = *env;
+            while !var_env.borrow().is_function_scope {
+                if let Some(proto) = var_env.borrow().prototype {
+                    var_env = proto;
                 } else {
-                    return Err(raise_eval_error!("Cannot destructure non-array value").into());
+                    break;
                 }
             }
 
-            for (i, elem) in pattern.iter().enumerate() {
-                match elem {
-                    DestructuringElement::Variable(name, default_expr) => {
-                        let mut elem_val = Value::Undefined;
-                        if let Value::Object(obj) = &val
-                            && (is_array(mc, obj) || is_typedarray(obj))
-                        {
-                            if is_typedarray(obj) {
-                                ensure_typedarray_in_bounds(mc, env, Some(stmt.line), Some(stmt.column), obj)?;
-                            }
-                            elem_val = get_array_like_element(mc, env, obj, i)?;
-                        }
-                        if matches!(elem_val, Value::Undefined)
-                            && let Some(def) = default_expr
-                        {
-                            elem_val = evaluate_expr(mc, env, def)?;
-                        }
-                        // For var, bind in function scope
-                        let mut target_env = *env;
-                        while !target_env.borrow().is_function_scope {
-                            if let Some(proto) = target_env.borrow().prototype {
-                                target_env = proto;
-                            } else {
-                                break;
-                            }
-                        }
-                        env_set_recursive(mc, &target_env, name, elem_val)?;
-                    }
-
-                    DestructuringElement::NestedObject(inner_pattern, inner_default) => {
-                        // Nested object pattern (var binding)
-                        let mut elem_val = Value::Undefined;
-                        if let Value::Object(obj) = &val
-                            && is_array(mc, obj)
-                            && let Some(cell) = object_get_key_value(obj, i)
-                        {
-                            elem_val = cell.borrow().clone();
-                        }
-
-                        if matches!(elem_val, Value::Undefined)
-                            && let Some(def) = inner_default
-                        {
-                            elem_val = evaluate_expr(mc, env, def)?;
-                        }
-
-                        if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
-                            let prop_name = inner_pattern
-                                .iter()
-                                .find_map(|p| {
-                                    if let DestructuringElement::Property(k, _) = p {
-                                        Some(k.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or_else(|| "property".to_string());
-                            let val = if matches!(elem_val, Value::Null) { "null" } else { "undefined" };
-                            return Err(raise_type_error!(format!("Cannot destructure property '{prop_name}' of {val}",)).into());
-                        }
-
-                        if let Value::Object(obj) = &elem_val {
-                            for inner in inner_pattern.iter() {
-                                match inner {
-                                    DestructuringElement::Property(key, boxed) => {
-                                        match &**boxed {
-                                            DestructuringElement::Variable(name, default_expr) => {
-                                                let mut prop_val = Value::Undefined;
-                                                if let Some(cell) = object_get_key_value(obj, key) {
-                                                    prop_val = cell.borrow().clone();
-                                                }
-                                                if matches!(prop_val, Value::Undefined)
-                                                    && let Some(def) = default_expr
-                                                {
-                                                    prop_val = evaluate_expr(mc, env, def)?;
-                                                }
-                                                // Bind var in function scope
-                                                let mut target_env = *env;
-                                                while !target_env.borrow().is_function_scope {
-                                                    if let Some(proto) = target_env.borrow().prototype {
-                                                        target_env = proto;
-                                                    } else {
-                                                        break;
-                                                    }
-                                                }
-                                                env_set_recursive(mc, &target_env, name, prop_val)?;
-                                            }
-                                            _ => {
-                                                return Err(raise_syntax_error!("Nested object destructuring not implemented").into());
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        return Err(raise_syntax_error!("Nested object destructuring not implemented").into());
-                                    }
-                                }
-                            }
-                        } else {
-                            return Err(raise_eval_error!("Expected object for nested destructuring").into());
-                        }
-                    }
-                    DestructuringElement::Rest(name) => {
-                        let arr_obj = crate::js_array::create_array(mc, env)?;
-                        if let Value::Object(obj) = &val
-                            && is_array(mc, obj)
-                        {
-                            let len = if let Some(len_cell) = object_get_key_value(obj, "length") {
-                                if let Value::Number(n) = len_cell.borrow().clone() {
-                                    n as usize
-                                } else {
-                                    0
-                                }
-                            } else {
-                                0
-                            };
-                            let mut idx2 = 0_usize;
-                            for j in i..len {
-                                if let Some(cell) = object_get_key_value(obj, j) {
-                                    object_set_key_value(mc, &arr_obj, idx2, cell.borrow().clone())?;
-                                    idx2 += 1;
-                                }
-                            }
-                            object_set_key_value(mc, &arr_obj, "length", Value::Number(idx2 as f64))?;
-                        }
-                        // Bind var in function scope
-                        let mut target_env = *env;
-                        while !target_env.borrow().is_function_scope {
-                            if let Some(proto) = target_env.borrow().prototype {
-                                target_env = proto;
-                            } else {
-                                break;
-                            }
-                        }
-                        env_set_recursive(mc, &target_env, name, Value::Object(arr_obj))?;
-                    }
-                    DestructuringElement::Empty => {}
-                    DestructuringElement::NestedArray(inner, inner_default) => {
-                        let mut elem_val = Value::Undefined;
-                        if let Value::Object(obj) = &val
-                            && is_array(mc, obj)
-                            && let Some(cell) = object_get_key_value(obj, i)
-                        {
-                            elem_val = cell.borrow().clone();
-                        }
-                        if matches!(elem_val, Value::Undefined)
-                            && let Some(def) = inner_default
-                        {
-                            elem_val = evaluate_expr(mc, env, def)?;
-                        }
-                        if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
-                            return Err(raise_type_error!("Cannot destructure array from undefined/null").into());
-                        }
-                        if let Value::Object(oarr) = &elem_val {
-                            bind_array_inner_for_var(mc, env, inner, oarr, None, None)?;
-                        }
-                    }
-                    _ => {
-                        return Err(raise_syntax_error!("Nested array destructuring not implemented").into());
-                    }
-                }
-            }
-
+            evaluate_destructuring_array_assignment(mc, &var_env, pattern, val, false, Some(stmt.line), Some(stmt.column))?;
             *last_value = Value::Undefined;
             Ok(None)
         }
@@ -7105,66 +7069,8 @@ pub(crate) fn evaluate_binding_target_with_value<'gc>(
                     iterator_close(mc, env, &iter_obj)?;
                 }
                 Ok(val)
-            } else if let Value::Object(obj) = rhs {
-                for (i, elem_opt) in elements.iter().enumerate() {
-                    let val_at = if is_typedarray(&obj) {
-                        get_property_with_accessors(mc, env, &obj, i)?
-                    } else if let Some(cell) = object_get_key_value(&obj, i.to_string()) {
-                        cell.borrow().clone()
-                    } else {
-                        Value::Undefined
-                    };
-                    if let Some(elem_expr) = elem_opt {
-                        match elem_expr {
-                            Expr::Var(name, _, _) => {
-                                env_set(mc, env, name, val_at.clone())?;
-                            }
-                            Expr::Assign(_, _) => {
-                                evaluate_binding_target_with_value(mc, env, elem_expr, val_at.clone())?;
-                            }
-                            Expr::Spread(spread_expr) => {
-                                let rest_obj = crate::js_array::create_array(mc, env)?;
-                                let len = if let Some(len_cell) = object_get_key_value(&obj, "length") {
-                                    if let Value::Number(n) = len_cell.borrow().clone() {
-                                        n as usize
-                                    } else {
-                                        0
-                                    }
-                                } else {
-                                    0
-                                };
-                                let mut idx2 = 0_usize;
-                                for j in i..len {
-                                    let v = if is_typedarray(&obj) {
-                                        get_property_with_accessors(mc, env, &obj, j)?
-                                    } else if let Some(cell) = object_get_key_value(&obj, j.to_string()) {
-                                        cell.borrow().clone()
-                                    } else {
-                                        Value::Undefined
-                                    };
-                                    object_set_key_value(mc, &rest_obj, idx2, v)?;
-                                    idx2 += 1;
-                                }
-                                object_set_key_value(mc, &rest_obj, "length", Value::Number(idx2 as f64))?;
-                                match &**spread_expr {
-                                    Expr::Var(name, _, _) => {
-                                        env_set(mc, env, name, Value::Object(rest_obj))?;
-                                    }
-                                    other => {
-                                        evaluate_binding_target_with_value(mc, env, other, Value::Object(rest_obj))?;
-                                    }
-                                }
-                                break;
-                            }
-                            other => {
-                                evaluate_binding_target_with_value(mc, env, other, val_at.clone())?;
-                            }
-                        }
-                    }
-                }
-                Ok(val)
             } else {
-                Err(raise_type_error!("Cannot destructure non-object").into())
+                Err(raise_type_error!("Object is not iterable (or Symbol.iterator not found)").into())
             }
         }
         Expr::Object(properties) => {
@@ -10287,10 +10193,9 @@ fn is_truthy(val: &Value) -> bool {
         Value::Boolean(b) => *b,
         Value::Number(n) => *n != 0.0 && !n.is_nan(),
         Value::String(s) => !s.is_empty(),
-        Value::Null | Value::Undefined => false,
-        Value::Object(_) | Value::Symbol(_) => true,
+        Value::Null | Value::Undefined | Value::Uninitialized => false,
         Value::BigInt(b) => !b.is_zero(),
-        _ => false,
+        _ => true,
     }
 }
 
@@ -12918,42 +12823,18 @@ pub fn call_closure<'gc>(
                     object_set_key_value(mc, &array_obj, j, val.clone())?;
                 }
                 crate::js_array::set_array_length(mc, &array_obj, rest_args.len())?;
-
-                match &**inner {
-                    DestructuringElement::Variable(name, _) => {
-                        crate::core::env_set(mc, &param_env, name, Value::Object(array_obj))?;
-                    }
-                    DestructuringElement::NestedArray(inner_pattern, _) => {
-                        bind_array_inner_for_letconst(mc, &param_env, inner_pattern, &array_obj, false, None, None)?;
-                    }
-                    DestructuringElement::NestedObject(inner_pattern, _) => {
-                        bind_object_inner_for_letconst(mc, &param_env, inner_pattern, &array_obj, false)?;
-                    }
-                    _ => return Err(raise_syntax_error!("Invalid rest binding pattern").into()),
-                }
+                evaluate_destructuring_element_rec(mc, &param_env, inner, Value::Object(array_obj), false, None, None)?;
             }
             DestructuringElement::NestedArray(inner_pattern, inner_default) => {
                 let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-                // If arg is null/undefined and there is a parameter-level default, evaluate it
-                if matches!(arg_val, Value::Undefined) || matches!(arg_val, Value::Null) {
-                    if let Some(def) = inner_default {
-                        arg_val = evaluate_expr(mc, &param_env, def)?;
-                    } else {
-                        return Err(raise_type_error!("Cannot convert undefined or null to object").into());
-                    }
-                }
-                if matches!(arg_val, Value::Undefined) || matches!(arg_val, Value::Null) {
-                    return Err(raise_type_error!("Cannot convert undefined or null to object").into());
+                // If arg is undefined and there is a parameter-level default, evaluate it
+                if matches!(arg_val, Value::Undefined)
+                    && let Some(def) = inner_default
+                {
+                    arg_val = evaluate_expr(mc, &param_env, def)?;
                 }
 
-                let pattern = Expr::Array(convert_array_pattern_inner(inner_pattern));
-                let mut pattern_with_default = pattern.clone();
-                if let Some(d) = inner_default {
-                    pattern_with_default = Expr::Assign(Box::new(pattern_with_default), Box::new((**d).clone()));
-                }
-
-                // Use binding initialization helper so Uninitialized bindings can be initialized
-                evaluate_binding_target_with_value(mc, &param_env, &pattern_with_default, arg_val)?;
+                evaluate_destructuring_array_assignment(mc, &param_env, inner_pattern, arg_val, false, None, None)?;
             }
             DestructuringElement::NestedObject(inner_pattern, inner_default) => {
                 let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
@@ -13307,25 +13188,14 @@ pub fn prepare_function_call_env<'gc>(
                 }
                 DestructuringElement::NestedArray(inner, nested_default) => {
                     let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-                    // If arg is null/undefined and there is a parameter-level default, evaluate it
-                    if matches!(arg_val, Value::Undefined | Value::Null) {
-                        if let Some(def) = nested_default {
-                            arg_val = evaluate_expr(mc, &call_env, def)?;
-                        }
-                        if matches!(arg_val, Value::Undefined | Value::Null) {
-                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
-                        }
+
+                    if matches!(arg_val, Value::Undefined)
+                        && let Some(def) = nested_default
+                    {
+                        arg_val = evaluate_expr(mc, &call_env, def)?;
                     }
 
-                    let pattern = Expr::Array(convert_array_pattern_inner(inner));
-                    let mut pattern_with_default = pattern;
-                    // If the nested array as a whole has a default, wrap it
-                    if let Some(d) = nested_default {
-                        pattern_with_default = Expr::Assign(Box::new(pattern_with_default), Box::new((**d).clone()));
-                    }
-
-                    // Use binding initialization helper so Uninitialized bindings can be initialized
-                    evaluate_binding_target_with_value(mc, &call_env, &pattern_with_default, arg_val)?;
+                    evaluate_destructuring_array_assignment(mc, &call_env, inner, arg_val, false, None, None)?;
                 }
                 DestructuringElement::NestedObject(inner, nested_default) => {
                     // Bind object destructuring parameters like ({ type }) directly

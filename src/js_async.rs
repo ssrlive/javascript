@@ -59,22 +59,27 @@ pub fn handle_async_closure_call<'gc>(
             }
         }
         Err(e) => {
-            let msg = e.message();
-            // Create a JS Error object preserving message and attach line/column if present
-            let err_val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
-            if let Value::Object(obj) = &err_val {
-                if let Some(line) = e.js_line()
-                    && let Err(e) = object_set_key_value(mc, obj, "__line__", Value::Number(line as f64))
-                {
-                    log::debug!("error setting __line__ on error object: {:?}", e);
+            let rej_val = match e {
+                EvalError::Throw(v, _, _) => v,
+                EvalError::Js(je) => {
+                    let msg = je.message();
+                    let err_val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
+                    if let Value::Object(obj) = &err_val {
+                        if let Some(line) = je.js_line()
+                            && let Err(e) = object_set_key_value(mc, obj, "__line__", Value::Number(line as f64))
+                        {
+                            log::debug!("error setting __line__ on error object: {:?}", e);
+                        }
+                        if let Some(col) = je.js_column()
+                            && let Err(e) = object_set_key_value(mc, obj, "__column__", Value::Number(col as f64))
+                        {
+                            log::debug!("error setting __column__ on error object: {:?}", e);
+                        }
+                    }
+                    err_val
                 }
-                if let Some(col) = e.js_column()
-                    && let Err(e) = object_set_key_value(mc, obj, "__column__", Value::Number(col as f64))
-                {
-                    log::debug!("error setting __column__ on error object: {:?}", e);
-                }
-            }
-            if let Err(e) = crate::js_promise::call_function(mc, &reject, &[err_val], env) {
+            };
+            if let Err(e) = crate::js_promise::call_function(mc, &reject, &[rej_val], env) {
                 log::debug!("error calling reject on promise: {:?}", e);
             }
         }

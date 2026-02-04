@@ -46,14 +46,26 @@ pub fn handle_generator_function_call<'gc>(
     closure: &crate::core::ClosureData<'gc>,
     args: &[Value<'gc>],
     this_val: Option<Value<'gc>>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Eagerly initialize the function environment to enforce argument destructuring/defaults
+    // errors at call time (per spec), rather than delaying to the first .next() call.
+    let func_env = prepare_function_call_env(
+        mc,
+        closure.env.as_ref(),
+        this_val.clone(),
+        Some(&closure.params[..]),
+        args,
+        None,
+        None,
+    )?;
+
     // Create a new generator object (internal data)
     let generator = Gc::new(
         mc,
         GcCell::new(crate::core::JSGenerator {
             params: closure.params.clone(),
             body: closure.body.clone(),
-            env: closure.env.expect("closure env must exist"),
+            env: func_env,
             this_val,
             // Store call-time arguments so parameter bindings can be created
             // when the generator actually starts executing on the first `next()`.
@@ -936,15 +948,9 @@ pub fn generator_next<'gc>(
                 // Prepare the function activation environment with the captured
                 // call-time arguments so that parameter bindings exist even if the
                 // generator suspends before executing any pre-statements.
-                let func_env = prepare_function_call_env(
-                    mc,
-                    Some(&gen_obj.env),
-                    gen_obj.this_val.clone(),
-                    Some(&gen_obj.params[..]),
-                    &gen_obj.args,
-                    None,
-                    None,
-                )?;
+                // NOTE: We now create the environment eagerly in handle_generator_function_call,
+                // so we just use the stored environment.
+                let func_env = gen_obj.env;
 
                 // Ensure `arguments` object exists for generator function body so
                 // parameter accesses (and `arguments.length`) reflect the passed args.
@@ -1038,17 +1044,14 @@ pub fn generator_next<'gc>(
                 // prepared function activation environment using the captured
                 // call-time arguments, then complete the generator with the
                 // returned value.
-                let func_env = prepare_function_call_env(
-                    mc,
-                    Some(&gen_obj.env),
-                    gen_obj.this_val.clone(),
-                    Some(&gen_obj.params[..]),
-                    &gen_obj.args,
-                    None,
-                    None,
-                )?;
+                // NOTE: We now create the environment eagerly in handle_generator_function_call,
+                // so we just use the stored environment.
+                let func_env = gen_obj.env;
+
                 // Ensure `arguments` exists for the no-yield completion path too.
                 crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
+                object_set_key_value(mc, &func_env, "__in_generator", Value::Boolean(true))?;
+
                 let res = crate::core::evaluate_statements(mc, &func_env, &gen_obj.body);
                 gen_obj.state = GeneratorState::Completed;
                 Ok(create_iterator_result(mc, res?, true)?)

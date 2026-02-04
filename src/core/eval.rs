@@ -10711,6 +10711,30 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 && key == "length"
             {
                 Ok(Value::Number(s.len() as f64))
+            } else if key == "length"
+                && matches!(
+                    obj_val,
+                    Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..)
+                )
+            {
+                let params = match obj_val {
+                    Value::Closure(ref c) => &c.params,
+                    Value::AsyncClosure(ref c) => &c.params,
+                    Value::GeneratorFunction(_, ref c) => &c.params,
+                    Value::AsyncGeneratorFunction(_, ref c) => &c.params,
+                    _ => unreachable!(),
+                };
+                let mut len = 0.0;
+                for p in params {
+                    match p {
+                        DestructuringElement::Rest(_) | DestructuringElement::RestPattern(_) => break,
+                        DestructuringElement::Variable(_, Some(_)) => break,
+                        DestructuringElement::NestedArray(_, Some(_)) => break,
+                        DestructuringElement::NestedObject(_, Some(_)) => break,
+                        _ => len += 1.0,
+                    }
+                }
+                Ok(Value::Number(len))
             } else if matches!(obj_val, Value::Undefined | Value::Null) {
                 Err(raise_type_error!("Cannot read properties of null or undefined").into())
             } else {

@@ -6,7 +6,7 @@ use crate::core::{
     evaluate_statements, new_js_object_data,
 };
 use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
-use crate::core::{PropertyKey, object_get_key_value, object_set_key_value, value_to_string};
+use crate::core::{PropertyKey, object_get_key_value, object_set_key_value, remove_private_identifier_prefix, value_to_string};
 use crate::js_boolean::handle_boolean_constructor;
 use crate::js_typedarray::handle_typedarray_constructor;
 use crate::unicode::utf16_to_utf8;
@@ -50,11 +50,7 @@ pub(crate) fn get_class_proto_obj<'gc>(class_obj: &JSObjectDataPtr<'gc>) -> Resu
 #[allow(dead_code)]
 pub(crate) fn is_private_member_declared(class_def: &ClassDefinition, name: &str) -> bool {
     // Accept either '#name' or 'name' as input; normalize to the raw identifier
-    let key = if let Some(stripped) = name.strip_prefix('#') {
-        stripped
-    } else {
-        name
-    };
+    let key = remove_private_identifier_prefix(name);
     for member in &class_def.members {
         match member {
             ClassMember::PrivateProperty(n, _)
@@ -289,6 +285,55 @@ pub fn create_arguments_object<'gc>(
     Ok(())
 }
 
+fn initialize_instance_elements<'gc>(
+    mc: &MutationContext<'gc>,
+    instance: &JSObjectDataPtr<'gc>,
+    constructor: &JSObjectDataPtr<'gc>,
+) -> Result<(), EvalError<'gc>> {
+    let definition_env = if let Some(env) = constructor.borrow().definition_env {
+        env
+    } else {
+        return Ok(());
+    };
+
+    let class_def_ptr_opt = constructor.borrow().class_def;
+    if let Some(class_def_ptr) = class_def_ptr_opt {
+        let class_def = class_def_ptr.borrow();
+
+        let field_scope = prepare_call_env_with_this(
+            mc,
+            Some(&definition_env),
+            Some(Value::Object(*instance)),
+            None,
+            &[],
+            None,
+            None,
+            None,
+        )?;
+
+        for member in &class_def.members {
+            match member {
+                ClassMember::PrivateProperty(name, init_expr) => {
+                    let val = evaluate_expr(mc, &field_scope, init_expr)?;
+                    object_set_key_value(mc, instance, PropertyKey::Private(name.clone()), val)?;
+                }
+                ClassMember::Property(name, init_expr) => {
+                    let val = evaluate_expr(mc, &field_scope, init_expr)?;
+                    object_set_key_value(mc, instance, name.as_str(), val)?;
+                }
+                ClassMember::PropertyComputed(key_expr, init_expr) => {
+                    let key_val = evaluate_expr(mc, &field_scope, key_expr)?;
+                    let val = evaluate_expr(mc, &field_scope, init_expr)?;
+                    let key = PropertyKey::from(value_to_string(&key_val));
+                    object_set_key_value(mc, instance, &key, val)?;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn evaluate_new<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -379,6 +424,10 @@ pub(crate) fn evaluate_new<'gc>(
                     } else {
                         Some(Value::Object(instance))
                     };
+
+                    if !is_derived {
+                        initialize_instance_elements(mc, &instance, &class_obj)?;
+                    }
 
                     log::trace!(
                         "evaluate_new: calling prepare_call_env_with_this with instance = {:?}",
@@ -505,16 +554,9 @@ pub(crate) fn evaluate_new<'gc>(
                     }
                 }
 
-                // Set instance properties
-                for member in &class_def_ptr.borrow().members {
-                    if let ClassMember::Property(prop_name, value_expr) = member {
-                        let value = evaluate_expr(mc, env, value_expr)?;
-                        object_set_key_value(mc, &instance, prop_name, value)?;
-                    } else if let ClassMember::PrivateProperty(prop_name, value_expr) = member {
-                        // Store instance private fields under a key prefixed with '#'
-                        let value = evaluate_expr(mc, env, value_expr)?;
-                        object_set_key_value(mc, &instance, format!("#{}", prop_name), value)?;
-                    }
+                // Set instance properties block removed - moved to constructor logic
+                if class_def_ptr.borrow().extends.is_none() {
+                    initialize_instance_elements(mc, &instance, &class_obj)?;
                 }
 
                 // Call constructor if it exists
@@ -1597,42 +1639,29 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::PrivateMethod(method_name, params, body) => {
                 // Create a closure for the private method
-                let final_key = if method_name.starts_with('#') {
-                    method_name.clone()
-                } else {
-                    format!("#{method_name}")
-                };
-
+                let final_key = PropertyKey::Private(remove_private_identifier_prefix(method_name).to_string());
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &prototype_obj, &final_key, method_closure)?;
+                object_set_key_value(mc, &prototype_obj, final_key, method_closure)?;
             }
             ClassMember::PrivateMethodAsyncGenerator(method_name, params, body) => {
-                let final_key = if method_name.starts_with('#') {
-                    method_name.clone()
-                } else {
-                    format!("#{method_name}")
-                };
+                let final_key = PropertyKey::Private(remove_private_identifier_prefix(method_name).to_string());
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
-                object_set_key_value(mc, &prototype_obj, &final_key, async_gen_fn)?;
-                prototype_obj.borrow_mut(mc).set_non_enumerable(&final_key);
+                object_set_key_value(mc, &prototype_obj, final_key.clone(), async_gen_fn)?;
+                prototype_obj.borrow_mut(mc).set_non_enumerable(final_key);
             }
             ClassMember::PrivateStaticMethodAsyncGenerator(method_name, params, body) => {
-                let final_key = if method_name.starts_with('#') {
-                    method_name.clone()
-                } else {
-                    format!("#{method_name}")
-                };
+                let final_key = PropertyKey::Private(remove_private_identifier_prefix(method_name).to_string());
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, &final_key, async_gen_fn)?;
-                class_obj.borrow_mut(mc).set_non_enumerable(&final_key);
+                object_set_key_value(mc, &class_obj, final_key.clone(), async_gen_fn)?;
+                class_obj.borrow_mut(mc).set_non_enumerable(final_key);
             }
             ClassMember::PrivateGetter(getter_name, body) => {
-                let key = format!("#{}", getter_name);
+                let key = PropertyKey::Private(remove_private_identifier_prefix(getter_name).to_string());
                 // Merge into existing property descriptor if present
-                if let Some(existing_rc) = get_own_property(&prototype_obj, &key) {
+                if let Some(existing_rc) = get_own_property(&prototype_obj, key.clone()) {
                     match &*existing_rc.borrow() {
                         Value::Property {
                             value,
@@ -1644,7 +1673,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: setter.clone(),
                             };
-                            object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
+                            object_set_key_value(mc, &prototype_obj, key, new_prop)?;
                         }
                         _ => {
                             let new_prop = Value::Property {
@@ -1652,7 +1681,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: None,
                             };
-                            object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
+                            object_set_key_value(mc, &prototype_obj, key, new_prop)?;
                         }
                     }
                 } else {
@@ -1661,12 +1690,12 @@ pub(crate) fn create_class_object<'gc>(
                         getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                         setter: None,
                     };
-                    object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
+                    object_set_key_value(mc, &prototype_obj, key, new_prop)?;
                 }
             }
             ClassMember::PrivateSetter(setter_name, param, body) => {
-                let key = format!("#{}", setter_name);
-                if let Some(existing_rc) = get_own_property(&prototype_obj, &key) {
+                let key = PropertyKey::Private(remove_private_identifier_prefix(setter_name).to_string());
+                if let Some(existing_rc) = get_own_property(&prototype_obj, key.clone()) {
                     match &*existing_rc.borrow() {
                         Value::Property {
                             value,
@@ -1683,7 +1712,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
+                            object_set_key_value(mc, &prototype_obj, key, new_prop)?;
                         }
                         _ => {
                             let new_prop = Value::Property {
@@ -1696,7 +1725,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
+                            object_set_key_value(mc, &prototype_obj, key, new_prop)?;
                         }
                     }
                 } else {
@@ -1710,29 +1739,32 @@ pub(crate) fn create_class_object<'gc>(
                             Some(GcCell::new(prototype_obj)),
                         ))),
                     };
-                    object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
+                    object_set_key_value(mc, &prototype_obj, key, new_prop)?;
                 }
             }
             ClassMember::PrivateStaticProperty(prop_name, value_expr) => {
-                // Add private static property to class object using the '#name' key
+                // Add private static property to class object using the Private key
+                let key = PropertyKey::Private(remove_private_identifier_prefix(prop_name).to_string());
                 let value = evaluate_expr(mc, env, value_expr)?;
-                object_set_key_value(mc, &class_obj, format!("#{prop_name}"), value)?;
+                object_set_key_value(mc, &class_obj, key, value)?;
             }
             ClassMember::PrivateStaticGetter(getter_name, body) => {
-                let key = format!("#{}", getter_name);
+                let key = PropertyKey::Private(remove_private_identifier_prefix(getter_name).to_string());
                 let getter = Value::Getter(body.clone(), *env, Some(GcCell::new(class_obj)));
-                object_set_key_value(mc, &class_obj, &key, getter)?;
+                object_set_key_value(mc, &class_obj, key, getter)?;
             }
             ClassMember::PrivateStaticSetter(setter_name, param, body) => {
-                let key = format!("#{}", setter_name);
+                let key = PropertyKey::Private(remove_private_identifier_prefix(setter_name).to_string());
                 let setter = Value::Setter(param.clone(), body.clone(), *env, Some(GcCell::new(class_obj)));
-                object_set_key_value(mc, &class_obj, &key, setter)?;
+                object_set_key_value(mc, &class_obj, key, setter)?;
             }
             ClassMember::PrivateStaticMethod(method_name, params, body) => {
-                // Add private static method to class object using the '#name' key
+                // Add private static method to class object using the Private key
+                let key = PropertyKey::Private(remove_private_identifier_prefix(method_name).to_string());
+
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, format!("#{method_name}"), method_closure)?;
+                object_set_key_value(mc, &class_obj, key, method_closure)?;
             }
             ClassMember::StaticBlock(body) => {
                 let block_env = new_js_object_data(mc);
@@ -2012,6 +2044,9 @@ pub(crate) fn evaluate_super_call<'gc>(
             // Get the parent constructor's definition environment (internal slot)
             let parent_captured_env = parent_class_obj.borrow().definition_env;
 
+            // Initialize parent class members (fields/private slots) on the instance
+            initialize_instance_elements(mc, &instance, &parent_class_obj)?;
+
             for member in &parent_class_def_ptr.borrow().members {
                 if let ClassMember::Constructor(params, body) = member {
                     let func_env = prepare_call_env_with_this(
@@ -2031,6 +2066,9 @@ pub(crate) fn evaluate_super_call<'gc>(
                     let _ = evaluate_statements(mc, &func_env, body)?;
                     if already_initialized {
                         return Err(raise_reference_error!("super() called after this is initialized"));
+                    }
+                    if let Value::Object(ctor_obj) = &current_function {
+                        initialize_instance_elements(mc, &instance, ctor_obj)?;
                     }
                     log::debug!("evaluate_super_call: returning instance object from parent constructor");
                     return Ok(Value::Object(instance));
@@ -2074,10 +2112,16 @@ pub(crate) fn evaluate_super_call<'gc>(
                     if already_initialized {
                         return Err(raise_reference_error!("super() called after this is initialized"));
                     }
+                    if let Value::Object(ctor_obj) = &current_function {
+                        initialize_instance_elements(mc, &new_instance, ctor_obj)?;
+                    }
                     return Ok(Value::Object(new_instance));
                 }
                 if already_initialized {
                     return Err(raise_reference_error!("super() called after this is initialized"));
+                }
+                if let Value::Object(ctor_obj) = &current_function {
+                    initialize_instance_elements(mc, &instance, ctor_obj)?;
                 }
                 return Ok(Value::Object(instance));
             }

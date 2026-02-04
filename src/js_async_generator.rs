@@ -757,7 +757,7 @@ fn process_one_pending<'gc>(
                         && let StatementKind::While(while_stmt, _) = &*stmt.kind
                     {
                         let cond_val = crate::core::evaluate_expr(mc, &func_env, while_stmt)?;
-                        let cond_bool = crate::js_boolean::to_boolean(&cond_val);
+                        let cond_bool = cond_val.to_truthy();
                         if !cond_bool {
                             gen_ptr_mut.state = GeneratorState::Completed;
                             let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
@@ -840,7 +840,7 @@ fn process_one_pending<'gc>(
                         && let StatementKind::While(while_stmt, _) = &*stmt.kind
                     {
                         let cond_val = crate::core::evaluate_expr(mc, &func_env, while_stmt)?;
-                        let cond_bool = crate::js_boolean::to_boolean(&cond_val);
+                        let cond_bool = cond_val.to_truthy();
                         if !cond_bool {
                             gen_ptr_mut.state = GeneratorState::Completed;
                             let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;

@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell, MutationContext, SwitchCase, create_descriptor_object, new_gc_cell_ptr};
+use crate::core::{Gc, GcCell, MutationContext, SwitchCase, create_descriptor_object, new_gc_cell_ptr, remove_private_identifier_prefix};
 use crate::js_array::{create_array, handle_array_static_method, is_array, set_array_length};
 use crate::js_async::handle_async_closure_call;
 use crate::js_async_generator::handle_async_generator_function_call;
@@ -371,6 +371,7 @@ fn bind_object_inner_for_letconst<'gc>(
                 let prop_name = match &prop_key {
                     PropertyKey::String(s) => s.clone(),
                     PropertyKey::Symbol(_) => "<symbol>".to_string(),
+                    PropertyKey::Private(_) => unreachable!("Computed property cannot be private"),
                 };
                 match &**boxed {
                     DestructuringElement::Variable(name, default_expr) => {
@@ -554,6 +555,7 @@ fn bind_object_inner_for_var<'gc>(
                 let prop_name = match &prop_key {
                     PropertyKey::String(s) => s.clone(),
                     PropertyKey::Symbol(_) => "<symbol>".to_string(),
+                    PropertyKey::Private(_) => unreachable!("Computed property cannot be private"),
                 };
                 match &**boxed {
                     DestructuringElement::Variable(name, default_expr) => {
@@ -3091,15 +3093,7 @@ fn eval_res<'gc>(
         StatementKind::If(if_stmt) => {
             let if_stmt = if_stmt.as_ref();
             let cond_val = evaluate_expr(mc, env, &if_stmt.condition)?;
-            let is_true = match cond_val {
-                Value::Boolean(b) => b,
-                Value::Number(n) => n != 0.0 && !n.is_nan(),
-                Value::String(s) => !s.is_empty(),
-                Value::Null | Value::Undefined => false,
-                Value::Object(_) | Value::Symbol(_) => true,
-                Value::BigInt(b) => !b.is_zero(),
-                _ => false,
-            };
+            let is_true = cond_val.to_truthy();
 
             if is_true {
                 let stmts = if_stmt.then_body.clone();
@@ -3325,15 +3319,7 @@ fn eval_res<'gc>(
             loop {
                 if let Some(test_expr) = &for_stmt.test {
                     let cond_val = evaluate_expr(mc, &loop_env, test_expr)?;
-                    let is_true = match cond_val {
-                        Value::Boolean(b) => b,
-                        Value::Number(n) => n != 0.0 && !n.is_nan(),
-                        Value::String(s) => !s.is_empty(),
-                        Value::Null | Value::Undefined => false,
-                        Value::Object(_) | Value::Symbol(_) => true,
-                        Value::BigInt(b) => !b.is_zero(),
-                        _ => false,
-                    };
+                    let is_true = cond_val.to_truthy();
                     if !is_true {
                         break;
                     }
@@ -3389,15 +3375,7 @@ fn eval_res<'gc>(
             *last_value = Value::Undefined;
             loop {
                 let cond_val = evaluate_expr(mc, &loop_env, cond)?;
-                let is_true = match cond_val {
-                    Value::Boolean(b) => b,
-                    Value::Number(n) => n != 0.0 && !n.is_nan(),
-                    Value::String(s) => !s.is_empty(),
-                    Value::Null | Value::Undefined => false,
-                    Value::Object(_) | Value::Symbol(_) => true,
-                    Value::BigInt(b) => !b.is_zero(),
-                    _ => false,
-                };
+                let is_true = cond_val.to_truthy();
                 if !is_true {
                     break;
                 }
@@ -3473,15 +3451,7 @@ fn eval_res<'gc>(
                     ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                 }
                 let cond_val = evaluate_expr(mc, &loop_env, cond)?;
-                let is_true = match cond_val {
-                    Value::Boolean(b) => b,
-                    Value::Number(n) => n != 0.0 && !n.is_nan(),
-                    Value::String(s) => !s.is_empty(),
-                    Value::Null | Value::Undefined => false,
-                    Value::Object(_) | Value::Symbol(_) => true,
-                    Value::BigInt(b) => !b.is_zero(),
-                    _ => false,
-                };
+                let is_true = cond_val.to_truthy();
                 if !is_true {
                     break;
                 }
@@ -5679,7 +5649,8 @@ fn maybe_set_default_name<'gc>(
 enum TargetTemp<'gc> {
     Var(String),
     PropBase(JSObjectDataPtr<'gc>, String),
-    IndexBase(JSObjectDataPtr<'gc>, Value<'gc>),
+    PrivatePropBase(JSObjectDataPtr<'gc>, String),
+    IndexBase(JSObjectDataPtr<'gc>, Box<Value<'gc>>),
 }
 
 fn put_temp<'gc>(
@@ -5703,8 +5674,12 @@ fn put_temp<'gc>(
         TargetTemp::PropBase(obj, static_key) => {
             set_property_with_accessors(mc, env, &obj, &static_key, value)?;
         }
+        TargetTemp::PrivatePropBase(obj, name) => {
+            let key = PropertyKey::Private(name);
+            set_property_with_accessors(mc, env, &obj, &key, value)?;
+        }
         TargetTemp::IndexBase(obj, raw_key_val) => {
-            let key = match raw_key_val {
+            let key = match *raw_key_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
                 Value::Symbol(s) => PropertyKey::Symbol(s),
@@ -5744,9 +5719,17 @@ fn precompute_target<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let raw_key = evaluate_expr(mc, env, key_expr)?;
             if let Value::Object(obj) = obj_val {
-                Ok(TargetTemp::IndexBase(obj, raw_key))
+                Ok(TargetTemp::IndexBase(obj, Box::new(raw_key)))
             } else {
                 Err(raise_eval_error!("Cannot assign to property of non-object").into())
+            }
+        }
+        Expr::PrivateMember(obj_expr, name) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                Ok(TargetTemp::PrivatePropBase(obj, remove_private_identifier_prefix(name).to_string()))
+            } else {
+                Err(raise_type_error!("Cannot access private member of non-object").into())
             }
         }
         _ => Err(raise_eval_error!("Assignment target not supported").into()),
@@ -5790,10 +5773,11 @@ fn candidate_name_from_target<'gc>(env: &JSObjectDataPtr<'gc>, target: &Expr) ->
 // conversions until after the RHS is evaluated (per spec requirements).
 enum Precomputed<'gc> {
     Var(String),
-    Property(Value<'gc>, crate::core::PropertyKey<'gc>), // base value (may be null/primitive), static key
-    Index(Value<'gc>, Value<'gc>),                       // base value, raw key value (ToPropertyKey deferred)
-    SuperProperty(crate::core::PropertyKey<'gc>),        // super.prop (defer super base resolution)
-    SuperIndex(Value<'gc>),                              // super[raw_key]
+    Property(Box<Value<'gc>>, Box<PropertyKey<'gc>>), // base value (may be null/primitive), static key
+    Index(Box<Value<'gc>>, Box<Value<'gc>>),          // base value, raw key value (ToPropertyKey deferred)
+    SuperProperty(Box<PropertyKey<'gc>>),             // super.prop (defer super base resolution)
+    SuperIndex(Box<Value<'gc>>),                      // super[raw_key]
+    PrivateMember(Box<Value<'gc>>, String),
 }
 
 fn evaluate_expr_assign<'gc>(
@@ -6273,25 +6257,29 @@ fn evaluate_expr_assign<'gc>(
             // If this is a `super.prop` form, do not resolve `super` yet; defer
             // until PutValue. Otherwise evaluate base now.
             if let Expr::Super = &**obj_expr {
-                Precomputed::SuperProperty(key.into())
+                Precomputed::SuperProperty(Box::new(key.into()))
             } else {
                 let obj_val = evaluate_expr(mc, env, obj_expr)?;
                 // Do not error yet on null/undefined; defer ToObject until PutValue
-                Precomputed::Property(obj_val, key.into())
+                Precomputed::Property(Box::new(obj_val), Box::new(key.into()))
             }
         }
-        Expr::SuperProperty(key) => Precomputed::SuperProperty(key.into()),
+        Expr::SuperProperty(key) => Precomputed::SuperProperty(Box::new(key.into())),
+        Expr::PrivateMember(obj_expr, name) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            Precomputed::PrivateMember(Box::new(obj_val), remove_private_identifier_prefix(name).to_string())
+        }
         Expr::Index(obj_expr, key_expr) => {
             // If this is `super[... ]`, evaluate the raw key expression but defer
             // resolving `super` until PutValue.
             if let Expr::Super = &**obj_expr {
                 let raw_key = evaluate_expr(mc, env, key_expr)?; // raw value; ToPropertyKey deferred
-                Precomputed::SuperIndex(raw_key)
+                Precomputed::SuperIndex(Box::new(raw_key))
             } else {
                 let obj_val = evaluate_expr(mc, env, obj_expr)?;
                 let key_val_res = evaluate_expr(mc, env, key_expr)?;
                 // Defer ToPropertyKey conversion until after RHS evaluation
-                Precomputed::Index(obj_val, key_val_res)
+                Precomputed::Index(Box::new(obj_val), Box::new(key_val_res))
             }
         }
         _ => {
@@ -6397,7 +6385,7 @@ fn evaluate_expr_assign<'gc>(
         }
         Precomputed::Property(base_val, key) => {
             // ToObject semantics: throw on null/undefined, box primitives, or use object directly.
-            let obj = match base_val {
+            let obj = match *base_val {
                 Value::Object(o) => o,
                 Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
                 Value::Number(n) => {
@@ -6438,12 +6426,12 @@ fn evaluate_expr_assign<'gc>(
                 }
                 _ => return Err(raise_eval_error!("Cannot assign to property of non-object").into()),
             };
-            set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
+            set_property_with_accessors(mc, env, &obj, &*key, val.clone())?;
             Ok(val)
         }
         Precomputed::Index(base_val, raw_key) => {
             // Convert raw_key to PropertyKey now (ToPropertyKey may throw)
-            let key = match raw_key {
+            let key = match *raw_key {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
                 Value::Symbol(s) => PropertyKey::Symbol(s),
@@ -6459,7 +6447,7 @@ fn evaluate_expr_assign<'gc>(
                 _ => PropertyKey::String(value_to_string(&raw_key)),
             };
 
-            let obj = match base_val {
+            let obj = match *base_val {
                 Value::Object(o) => o,
                 Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
                 Value::Number(n) => {
@@ -6504,11 +6492,19 @@ fn evaluate_expr_assign<'gc>(
             set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
             Ok(val)
         }
+        Precomputed::PrivateMember(base_val, name) => {
+            if let Value::Object(obj) = *base_val {
+                set_property_with_accessors(mc, env, &obj, PropertyKey::Private(name), val.clone())?;
+                Ok(val)
+            } else {
+                Err(raise_type_error!("Cannot write private member to non-object").into())
+            }
+        }
         Precomputed::SuperProperty(key) => {
             // Resolve home object and its prototype now and throw if super is invalid
             if let Some(home_obj) = env.borrow().get_home_object() {
                 if let Some(super_obj) = home_obj.borrow().borrow().prototype {
-                    set_property_with_accessors(mc, env, &super_obj, &key, val.clone())?;
+                    set_property_with_accessors(mc, env, &super_obj, &*key, val.clone())?;
                     Ok(val)
                 } else {
                     Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -6518,7 +6514,7 @@ fn evaluate_expr_assign<'gc>(
             }
         }
         Precomputed::SuperIndex(raw_key) => {
-            let key = match raw_key {
+            let key = match *raw_key {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(n.to_string()),
                 Value::Symbol(s) => PropertyKey::Symbol(s),
@@ -6631,6 +6627,15 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
                 Ok(val)
             } else {
                 Err(raise_eval_error!("Cannot assign to property of non-object").into())
+            }
+        }
+        Expr::PrivateMember(obj_expr, name) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                set_property_with_accessors(mc, env, &obj, PropertyKey::Private(name.clone()), val.clone())?;
+                Ok(val)
+            } else {
+                Err(raise_type_error!("Cannot access private member of non-object").into())
             }
         }
         Expr::Index(obj_expr, key_expr) => {
@@ -9401,6 +9406,18 @@ fn evaluate_expr_call<'gc>(
 
             (f_val, Some(obj_val))
         }
+        Expr::PrivateMember(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_str = remove_private_identifier_prefix(key);
+            let f_val = if let Value::Object(obj) = &obj_val {
+                get_property_with_accessors(mc, env, obj, PropertyKey::Private(key_str.to_string()))?
+            } else if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot read properties of null or undefined").into());
+            } else {
+                return Err(raise_type_error!("Cannot access private field on non-object").into());
+            };
+            (f_val, Some(obj_val))
+        }
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -9891,6 +9908,14 @@ fn evaluate_expr_binary<'gc>(
         }
         BinaryOp::In => {
             if let Value::Object(obj) = r_val {
+                if let Value::PrivateName(name) = l_val {
+                    let key = PropertyKey::Private(name);
+                    // Check for existence of private property anywhere in the prototype chain
+                    // (though private fields/methods are usually own properties or on specific prototypes)
+                    let present = object_get_key_value(&obj, key).is_some();
+                    return Ok(Value::Boolean(present));
+                }
+
                 let key = match l_val {
                     Value::String(s) => utf16_to_utf8(&s),
                     Value::Number(n) => n.to_string(),
@@ -10114,8 +10139,8 @@ fn evaluate_expr_logical_assign<'gc>(
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
             let should_assign = match op {
-                LogicalAssignOp::And => is_truthy(&current),
-                LogicalAssignOp::Or => !is_truthy(&current),
+                LogicalAssignOp::And => current.to_truthy(),
+                LogicalAssignOp::Or => !current.to_truthy(),
                 LogicalAssignOp::Nullish => matches!(current, Value::Null | Value::Undefined),
             };
 
@@ -10137,8 +10162,8 @@ fn evaluate_expr_logical_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, key_str)?;
 
                 let should_assign = match op {
-                    LogicalAssignOp::And => is_truthy(&current),
-                    LogicalAssignOp::Or => !is_truthy(&current),
+                    LogicalAssignOp::And => current.to_truthy(),
+                    LogicalAssignOp::Or => !current.to_truthy(),
                     LogicalAssignOp::Nullish => matches!(current, Value::Null | Value::Undefined),
                 };
 
@@ -10168,8 +10193,8 @@ fn evaluate_expr_logical_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
 
                 let should_assign = match op {
-                    LogicalAssignOp::And => is_truthy(&current),
-                    LogicalAssignOp::Or => !is_truthy(&current),
+                    LogicalAssignOp::And => current.to_truthy(),
+                    LogicalAssignOp::Or => !current.to_truthy(),
                     LogicalAssignOp::Nullish => matches!(current, Value::Null | Value::Undefined),
                 };
 
@@ -10188,17 +10213,6 @@ fn evaluate_expr_logical_assign<'gc>(
     }
 }
 
-fn is_truthy(val: &Value) -> bool {
-    match val {
-        Value::Boolean(b) => *b,
-        Value::Number(n) => *n != 0.0 && !n.is_nan(),
-        Value::String(s) => !s.is_empty(),
-        Value::Null | Value::Undefined | Value::Uninitialized => false,
-        Value::BigInt(b) => !b.is_zero(),
-        _ => true,
-    }
-}
-
 pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     match expr {
         Expr::Number(n) => {
@@ -10214,6 +10228,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::Boolean(b) => Ok(Value::Boolean(*b)),
         Expr::Null => Ok(Value::Null),
         Expr::Undefined => Ok(Value::Undefined),
+        Expr::PrivateName(name) => Ok(Value::PrivateName(name.clone())),
         Expr::Var(name, _, _) => Ok(evaluate_var(mc, env, name)?),
         Expr::Comma(left, right) => {
             evaluate_expr(mc, env, left)?;
@@ -10263,11 +10278,11 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::Binary(left, op, right) => evaluate_expr_binary(mc, env, left, op, right),
         Expr::LogicalNot(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
-            Ok(Value::Boolean(!is_truthy(&val)))
+            Ok(Value::Boolean(!val.to_truthy()))
         }
         Expr::Conditional(cond, then_expr, else_expr) => {
             let val = evaluate_expr(mc, env, cond)?;
-            if is_truthy(&val) {
+            if val.to_truthy() {
                 let r = evaluate_expr(mc, env, then_expr)?;
                 Ok(r)
             } else {
@@ -10647,6 +10662,17 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 get_primitive_prototype_property(mc, env, &obj_val, key)
             }
         }
+        Expr::PrivateMember(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_str = remove_private_identifier_prefix(key);
+            if let Value::Object(obj) = &obj_val {
+                get_property_with_accessors(mc, env, obj, PropertyKey::Private(key_str.to_string()))
+            } else if matches!(obj_val, Value::Undefined | Value::Null) {
+                Err(raise_type_error!("Cannot read properties of null or undefined").into())
+            } else {
+                Err(raise_type_error!("Cannot access private field on non-object").into())
+            }
+        }
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -10868,40 +10894,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::LogicalAnd(left, right) => {
             let lhs = evaluate_expr(mc, env, left)?;
-            let is_truthy = match &lhs {
-                Value::Boolean(b) => *b,
-                Value::Number(n) => *n != 0.0 && !n.is_nan(),
-                Value::String(s) => !s.is_empty(),
-                Value::Null | Value::Undefined => false,
-                Value::Object(_)
-                | Value::Function(_)
-                | Value::Closure(_)
-                | Value::AsyncClosure(_)
-                | Value::GeneratorFunction(..)
-                | Value::ClassDefinition(_)
-                | Value::Symbol(_) => true,
-                Value::BigInt(b) => !b.is_zero(),
-                _ => false,
-            };
+            let is_truthy = lhs.to_truthy();
             if !is_truthy { Ok(lhs) } else { evaluate_expr(mc, env, right) }
         }
         Expr::LogicalOr(left, right) => {
             let lhs = evaluate_expr(mc, env, left)?;
-            let is_truthy = match &lhs {
-                Value::Boolean(b) => *b,
-                Value::Number(n) => *n != 0.0 && !n.is_nan(),
-                Value::String(s) => !s.is_empty(),
-                Value::Null | Value::Undefined => false,
-                Value::Object(_)
-                | Value::Function(_)
-                | Value::Closure(_)
-                | Value::AsyncClosure(_)
-                | Value::GeneratorFunction(..)
-                | Value::ClassDefinition(_)
-                | Value::Symbol(_) => true,
-                Value::BigInt(b) => !b.is_zero(),
-                _ => false,
-            };
+            let is_truthy = lhs.to_truthy();
             if is_truthy { Ok(lhs) } else { evaluate_expr(mc, env, right) }
         }
         Expr::This => Ok(crate::js_class::evaluate_this(mc, env)?),
@@ -11507,6 +11505,52 @@ pub(crate) fn get_property_with_accessors<'gc>(
     key: impl Into<PropertyKey<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let key = &key.into();
+
+    if let PropertyKey::Private(_) = key {
+        if let Some(val_ptr) = object_get_key_value(obj, key) {
+            let val = val_ptr.borrow().clone();
+            match val {
+                Value::Property { getter, value, .. } => {
+                    if let Some(g) = getter {
+                        return call_accessor(mc, env, obj, &g);
+                    } else if let Some(v) = value {
+                        return Ok(v.borrow().clone());
+                    } else {
+                        return Ok(Value::Undefined);
+                    }
+                }
+                Value::Getter(..) => return call_accessor(mc, env, obj, &val),
+                _ => return Ok(val),
+            }
+        } else {
+            return Err(raise_type_error!("accessed private field from an ordinary object").into());
+        }
+    }
+
+    if let PropertyKey::String(s) = key
+        && s.starts_with('#')
+    {
+        // Legacy/Fallback for string-based private keys if any remain
+        if let Some(val_ptr) = object_get_key_value(obj, key) {
+            let val = val_ptr.borrow().clone();
+            match val {
+                Value::Property { getter, value, .. } => {
+                    if let Some(g) = getter {
+                        return call_accessor(mc, env, obj, &g);
+                    } else if let Some(v) = value {
+                        return Ok(v.borrow().clone());
+                    } else {
+                        return Ok(Value::Undefined);
+                    }
+                }
+                Value::Getter(..) => return call_accessor(mc, env, obj, &val),
+                _ => return Ok(val),
+            }
+        } else {
+            return Err(raise_type_error!("accessed private field from an ordinary object").into());
+        }
+    }
+
     // If this object is a Proxy wrapper, delegate to proxy hooks
     if let Some(proxy_ptr) = get_own_property(obj, "__proxy__")
         && let Value::Proxy(p) = &*proxy_ptr.borrow()
@@ -11608,6 +11652,21 @@ fn set_property_with_accessors<'gc>(
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
     let key = &key.into();
+
+    if let PropertyKey::Private(_) = key {
+        // Check prototype chain for private property (fields are own, methods/accessors on prototype)
+        if object_get_key_value(obj, key).is_none() {
+            return Err(raise_type_error!("accessed private field from an ordinary object").into());
+        }
+    }
+
+    if let PropertyKey::String(s) = key
+        && s.starts_with('#')
+        && object_get_key_value(obj, key).is_none()
+    {
+        return Err(raise_type_error!("accessed private field from an ordinary object").into());
+    }
+
     // Locate owner (object on prototype chain that actually has the property)
     let mut owner_opt: Option<crate::core::JSObjectDataPtr> = None;
     {
@@ -12928,6 +12987,26 @@ fn evaluate_update_expression<'gc>(
                 (current, new_v)
             } else {
                 return Err(raise_type_error!("Cannot update property of non-object").into());
+            }
+        }
+        Expr::PrivateMember(obj_expr, name) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_str = remove_private_identifier_prefix(name);
+                let key = PropertyKey::Private(key_str.to_string());
+
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+
+                let current_num = match current {
+                    Value::Number(n) => n,
+                    _ => f64::NAN,
+                };
+                let new_num = current_num + delta;
+                let new_v = Value::Number(new_num);
+                set_property_with_accessors(mc, env, &obj, &key, new_v.clone())?;
+                (current, new_v)
+            } else {
+                return Err(raise_type_error!("Cannot update private member of non-object").into());
             }
         }
         _ => return Err(raise_eval_error!("Invalid L-value in update expression").into()),

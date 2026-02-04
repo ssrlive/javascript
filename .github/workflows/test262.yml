@@ -32,7 +32,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 1000 --focus language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export
+          node ci/runner.js --limit 10000 --focus language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export
 
       - name: Upload results
         if: ${{ !cancelled() }}
@@ -67,7 +67,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 1000 --focus language/expressions/addition,language/expressions/array,language/expressions/arrow-function,language/expressions/assignment
+          node ci/runner.js --limit 10000 --focus language/expressions/addition,language/expressions/array,language/expressions/arrow-function,language/expressions/assignment
 
       - name: Upload results
         if: ${{ !cancelled() }}
@@ -102,7 +102,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 1000 --focus language/expressions/assignmenttargettype,language/expressions/async-arrow-function,language/expressions/async-function,language/expressions/async-generator,language/expressions/await
+          node ci/runner.js --limit 10000 --focus language/expressions/assignmenttargettype,language/expressions/async-arrow-function,language/expressions/async-function,language/expressions/async-generator,language/expressions/await
 
       - name: Upload results
         if: ${{ !cancelled() }}
@@ -137,7 +137,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 1000 --focus language/expressions/bitwise-and,language/expressions/bitwise-not,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/call
+          node ci/runner.js --limit 10000 --focus language/expressions/bitwise-and,language/expressions/bitwise-not,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/call
 
       - name: Upload results
         if: ${{ !cancelled() }}

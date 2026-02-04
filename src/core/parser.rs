@@ -2872,6 +2872,13 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 name_str_opt = Some(name.clone());
                 is_private = true;
             }
+            Token::StringLit(raw) => {
+                name_str_opt = Some(utf16_to_utf8(raw));
+            }
+            Token::Number(n) => {
+                computed_key_expr = Some(Expr::Number(*n));
+                *index += 1;
+            }
             Token::LBracket => {
                 *index += 1; // consume [
                 let expr = parse_assignment(t, index)?;
@@ -3068,6 +3075,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             if let Expr::Property(_, prop_name) = &inner
                 && prop_name.starts_with('#')
             {
+                let msg = format!("Private field '{prop_name}' cannot be deleted");
+                return Err(raise_parse_error_with_token!(token_data, msg));
+            }
+            if let Expr::PrivateMember(_, prop_name) = &inner {
                 let msg = format!("Private field '{prop_name}' cannot be deleted");
                 return Err(raise_parse_error_with_token!(token_data, msg));
             }
@@ -3354,9 +3365,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             expr
         }
         Token::PrivateIdentifier(name) => {
-            // Represent a standalone private name as a string like "#name" so
-            // it can be used in contexts like `#name in obj`.
-            Expr::StringLit(crate::unicode::utf8_to_utf16(&format!("#{}", name)))
+            // Represent a standalone private name so it can be evaluated to a Value::PrivateName
+            // for use in contexts like `#name in obj`.
+            Expr::PrivateName(name.clone())
         }
         Token::Import => {
             if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
@@ -4481,15 +4492,18 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     // Private identifiers (e.g. `obj.#x`) are only syntactically
                     // valid inside class bodies and furthermore the referenced
                     // private name must have been *declared* in the *enclosing*
-                    // class. Check the top-most declared private-name set.
-                    let invalid = PRIVATE_NAME_STACK.with(|s| s.borrow().last().map(|rc| !rc.borrow().contains(prop)).unwrap_or(true));
+                    // class. Check the private-name stack for any matching declaration.
+                    let invalid = PRIVATE_NAME_STACK.with(|s| {
+                        let stack = s.borrow();
+                        !stack.iter().rev().any(|rc| rc.borrow().contains(prop))
+                    });
                     if invalid {
                         let msg = format!("Private field '#{}' must be declared in an enclosing class", prop);
                         return Err(raise_parse_error_with_token!(tokens[*index], msg));
                     }
                     let prop = format!("#{}", prop);
                     *index += 1;
-                    expr = Expr::Property(Box::new(expr), prop);
+                    expr = Expr::PrivateMember(Box::new(expr), prop);
                 } else {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }

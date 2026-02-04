@@ -561,6 +561,7 @@ pub enum Value<'gc> {
     ArrayBuffer(GcPtr<'gc, JSArrayBuffer>),
     DataView(Gc<'gc, JSDataView<'gc>>),
     TypedArray(Gc<'gc, JSTypedArray<'gc>>),
+    PrivateName(String),
 
     /// Internal property representation stored in an object's `properties` map.
     /// Contains either a concrete `value` or accessor `getter`/`setter` functions.
@@ -578,6 +579,17 @@ pub enum Value<'gc> {
 impl Value<'_> {
     pub fn is_null_or_undefined(&self) -> bool {
         matches!(self, Value::Null | Value::Undefined)
+    }
+
+    pub fn to_truthy(&self) -> bool {
+        match self {
+            Value::Boolean(b) => *b,
+            Value::Number(n) => *n != 0.0 && !n.is_nan(),
+            Value::String(s) => !s.is_empty(),
+            Value::Null | Value::Undefined | Value::Uninitialized => false,
+            Value::BigInt(b) => !num_traits::Zero::is_zero(&**b),
+            _ => true,
+        }
     }
 }
 
@@ -897,6 +909,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::ClassDefinition(..) => "class".to_string(),
         Value::Getter(..) => "[Getter]".to_string(),
         Value::Setter(..) => "[Setter]".to_string(),
+        Value::PrivateName(n) => format!("#{}", n),
         Value::Promise(_) => "[object Promise]".to_string(),
         Value::Map(_) => "[object Map]".to_string(),
         Value::Set(_) => "[object Set]".to_string(),
@@ -1078,6 +1091,7 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
                 string_keys.push(k.clone());
             }
             PropertyKey::Symbol(_) => symbol_keys.push(k.clone()),
+            PropertyKey::Private(_) => {}
         }
     }
 
@@ -1111,6 +1125,7 @@ pub fn object_set_key_value<'gc>(
     let key_desc = match &key {
         PropertyKey::String(s) => s.clone(),
         PropertyKey::Symbol(_) => "<symbol>".to_string(),
+        PropertyKey::Private(n) => format!("#{}", n),
     };
 
     // Intercept attempts to set the implementation-only key '__definition_env' and

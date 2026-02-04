@@ -1050,16 +1050,7 @@ fn boolean_constructor<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError
         return Ok(Value::Boolean(false));
     }
 
-    let arg_val = args[0].clone();
-    let bool_val = match arg_val {
-        Value::Boolean(b) => b,
-        Value::Number(n) => n != 0.0 && !n.is_nan(),
-        Value::String(s) => !s.is_empty(),
-        Value::Object(_) => true,
-        Value::Undefined => false,
-        Value::Null => false,
-        _ => false,
-    };
+    let bool_val = args[0].to_truthy();
     Ok(Value::Boolean(bool_val))
 }
 

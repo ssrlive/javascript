@@ -111,7 +111,7 @@ fn step<'gc>(
             // Check if done
             let done = if let Value::Object(obj) = &res_obj {
                 if let Some(d) = object_get_key_value(obj, "done") {
-                    crate::js_boolean::to_boolean(&d.borrow())
+                    d.borrow().to_truthy()
                 } else {
                     false
                 }

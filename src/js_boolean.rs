@@ -2,7 +2,6 @@ use crate::core::{EvalError, JSObjectDataPtr, MutationContext, Value, new_js_obj
 use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
-use num_bigint::BigInt;
 
 pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let boolean_ctor = new_js_object_data(mc);
@@ -46,15 +45,7 @@ pub(crate) fn handle_boolean_constructor<'gc>(
     let bool_val = if evaluated_args.is_empty() {
         false
     } else {
-        let arg_val = evaluated_args[0].clone();
-        match arg_val {
-            Value::Boolean(b) => b,
-            Value::Number(n) => n != 0.0 && !n.is_nan(),
-            Value::String(s) => !s.is_empty(),
-            Value::Undefined => false,
-            Value::Object(_) => true,
-            _ => false,
-        }
+        evaluated_args[0].to_truthy()
     };
     let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
@@ -88,37 +79,9 @@ pub fn boolean_prototype_value_of<'gc>(
     Err(crate::raise_eval_error!("Boolean.prototype.valueOf called without this"))
 }
 
-pub fn to_boolean(val: &Value<'_>) -> bool {
-    match val {
-        Value::Undefined | Value::Null => false,
-        Value::Boolean(b) => *b,
-        Value::Number(n) => *n != 0.0 && !n.is_nan(),
-        Value::String(s) => !s.is_empty(),
-        Value::BigInt(b) => **b != BigInt::from(0),
-        Value::Object(_)
-        | Value::Function(_)
-        | Value::Closure(_)
-        | Value::AsyncClosure(_)
-        | Value::GeneratorFunction(_, _)
-        | Value::ClassDefinition(_)
-        | Value::Promise(_)
-        | Value::Map(_)
-        | Value::Set(_)
-        | Value::WeakMap(_)
-        | Value::WeakSet(_)
-        | Value::Generator(_)
-        | Value::Proxy(_)
-        | Value::ArrayBuffer(_)
-        | Value::DataView(_)
-        | Value::TypedArray(_)
-        | Value::Symbol(_) => true,
-        _ => true,
-    }
-}
-
 pub fn boolean_constructor<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Some(arg) = args.first() {
-        Ok(Value::Boolean(to_boolean(arg)))
+        Ok(Value::Boolean(arg.to_truthy()))
     } else {
         Ok(Value::Boolean(false))
     }

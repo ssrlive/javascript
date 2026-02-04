@@ -150,6 +150,8 @@ pub enum Expr {
     OptionalIndex(Box<Expr>, Box<Expr>),
     OptionalCall(Box<Expr>, Vec<Expr>),
     Property(Box<Expr>, String),
+    PrivateName(String),
+    PrivateMember(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     BigInt(Vec<u16>),
     TypeOf(Box<Expr>),

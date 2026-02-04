@@ -833,16 +833,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             _ => return Err(raise_eval_error!("Array.filter expects a function").into()),
                         };
 
-                        // truthy check
-                        let include = match res {
-                            Value::Boolean(b) => b,
-                            Value::Number(n) => n != 0.0,
-                            Value::String(ref s) => !s.is_empty(),
-                            Value::Object(_) => true,
-                            Value::Undefined => false,
-                            _ => false,
-                        };
-                        if include {
+                        if res.to_truthy() {
                             object_set_key_value(mc, &new_array, idx, element_val)?;
                             idx += 1;
                         }
@@ -1028,15 +1019,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             _ => return Err(raise_eval_error!("Array.find expects a function").into()),
                         };
 
-                        let is_truthy = match res {
-                            Value::Boolean(b) => b,
-                            Value::Number(n) => n != 0.0,
-                            Value::String(ref s) => !s.is_empty(),
-                            Value::Object(_) => true,
-                            Value::Undefined => false,
-                            _ => false,
-                        };
-                        if is_truthy {
+                        if res.to_truthy() {
                             return Ok(element);
                         }
                     }
@@ -1053,27 +1036,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 for i in 0..current_len {
                     if let Some(value) = object_get_key_value(object, i) {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                        //     let element = value.borrow().clone();
-                        //     let index_val = Value::Number(i as f64);
-
-                        //     let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-
-                        //     let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        //     // truthy check
-                        //     let is_truthy = match res {
-                        //         Value::Boolean(b) => b,
-                        //         Value::Number(n) => n != 0.0,
-                        //         Value::String(ref s) => !s.is_empty(),
-                        //         Value::Object(_) => true,
-                        //         Value::Undefined => false,
-                        //         _ => false,
-                        //     };
-                        //     if is_truthy {
-                        //         return Ok(Value::Number(i as f64));
-                        //     }
-                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback {
                             if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
@@ -1093,15 +1055,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             _ => return Err(raise_eval_error!("Array.findIndex expects a function").into()),
                         };
 
-                        let is_truthy = match res {
-                            Value::Boolean(b) => b,
-                            Value::Number(n) => n != 0.0,
-                            Value::String(ref s) => !s.is_empty(),
-                            Value::Object(_) => true,
-                            Value::Undefined => false,
-                            _ => false,
-                        };
-                        if is_truthy {
+                        if res.to_truthy() {
                             return Ok(Value::Number(i as f64));
                         }
                     }
@@ -1118,27 +1072,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 for i in 0..current_len {
                     if let Some(value) = object_get_key_value(object, i) {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                        //     let element = value.borrow().clone();
-                        //     let index_val = Value::Number(i as f64);
-
-                        //     let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-
-                        //     let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        //     // truthy check
-                        //     let is_truthy = match res {
-                        //         Value::Boolean(b) => b,
-                        //         Value::Number(n) => n != 0.0,
-                        //         Value::String(ref s) => !s.is_empty(),
-                        //         Value::Object(_) => true,
-                        //         Value::Undefined => false,
-                        //         _ => false,
-                        //     };
-                        //     if is_truthy {
-                        //         return Ok(Value::Boolean(true));
-                        //     }
-                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback {
                             if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
@@ -1158,15 +1091,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             _ => return Err(raise_eval_error!("Array.some expects a function").into()),
                         };
 
-                        let is_truthy = match res {
-                            Value::Boolean(b) => b,
-                            Value::Number(n) => n != 0.0,
-                            Value::String(ref s) => !s.is_empty(),
-                            Value::Object(_) => true,
-                            Value::Undefined => false,
-                            _ => false,
-                        };
-                        if is_truthy {
+                        if res.to_truthy() {
                             return Ok(Value::Boolean(true));
                         }
                     }
@@ -1183,27 +1108,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 for i in 0..current_len {
                     if let Some(value) = object_get_key_value(object, i) {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                        //     let element = value.borrow().clone();
-                        //     let index_val = Value::Number(i as f64);
-
-                        //     let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-
-                        //     let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        //     // truthy check
-                        //     let is_truthy = match res {
-                        //         Value::Boolean(b) => b,
-                        //         Value::Number(n) => n != 0.0,
-                        //         Value::String(ref s) => !s.is_empty(),
-                        //         Value::Object(_) => true,
-                        //         Value::Undefined => false,
-                        //         _ => false,
-                        //     };
-                        //     if !is_truthy {
-                        //         return Ok(Value::Boolean(false));
-                        //     }
-                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback {
                             if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
@@ -1223,15 +1127,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             _ => return Err(raise_eval_error!("Array.every expects a function").into()),
                         };
 
-                        let is_truthy = match res {
-                            Value::Boolean(b) => b,
-                            Value::Number(n) => n != 0.0,
-                            Value::String(ref s) => !s.is_empty(),
-                            Value::Object(_) => true,
-                            Value::Undefined => false,
-                            _ => false,
-                        };
-                        if !is_truthy {
+                        if !res.to_truthy() {
                             return Ok(Value::Boolean(false));
                         }
                     }
@@ -1865,15 +1761,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             _ => return Err(raise_eval_error!("Array.findLast expects a function").into()),
                         };
 
-                        let is_truthy = match res {
-                            Value::Boolean(b) => b,
-                            Value::Number(n) => n != 0.0,
-                            Value::String(ref s) => !s.is_empty(),
-                            Value::Object(_) => true,
-                            Value::Undefined => false,
-                            _ => false,
-                        };
-                        if is_truthy {
+                        if res.to_truthy() {
                             return Ok(element);
                         }
                     }
@@ -1910,15 +1798,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             _ => return Err(raise_eval_error!("Array.findLastIndex expects a function").into()),
                         };
 
-                        let is_truthy = match res {
-                            Value::Boolean(b) => b,
-                            Value::Number(n) => n != 0.0,
-                            Value::String(ref s) => !s.is_empty(),
-                            Value::Object(_) => true,
-                            Value::Undefined => false,
-                            _ => false,
-                        };
-                        if is_truthy {
+                        if res.to_truthy() {
                             return Ok(Value::Number(i as f64));
                         }
                     }

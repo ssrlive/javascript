@@ -845,7 +845,7 @@ pub(crate) fn create_class_object<'gc>(
     members: &[ClassMember],
     env: &JSObjectDataPtr<'gc>,
     bind_name_during_creation: bool,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create a class object (function) that can be instantiated with 'new'
     let class_obj = new_js_object_data(mc);
 
@@ -1281,7 +1281,7 @@ pub(crate) fn create_class_object<'gc>(
             ClassMember::StaticMethod(method_name, params, body) => {
                 // Disallow static `prototype` property definitions
                 if method_name == "prototype" {
-                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
                 // Add static method to class object
                 let method_func = create_class_method_function_object(mc, env, params, body, class_obj, method_name)?;
@@ -1291,7 +1291,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::StaticMethodGenerator(method_name, params, body) => {
                 if method_name == "prototype" {
-                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
@@ -1300,7 +1300,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::StaticMethodAsync(method_name, params, body) => {
                 if method_name == "prototype" {
-                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
@@ -1309,7 +1309,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::StaticMethodAsyncGenerator(method_name, params, body) => {
                 if method_name == "prototype" {
-                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
@@ -1332,7 +1332,7 @@ pub(crate) fn create_class_object<'gc>(
                 // If the computed key coerces to the string 'prototype', it's disallowed for static members
                 if let crate::core::PropertyKey::String(s) = &pk {
                     if s == "prototype" {
-                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                     }
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
@@ -1353,7 +1353,7 @@ pub(crate) fn create_class_object<'gc>(
                 let pk = crate::core::PropertyKey::from(&key_prim);
                 if let crate::core::PropertyKey::String(s) = &pk {
                     if s == "prototype" {
-                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                     }
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
@@ -1373,7 +1373,7 @@ pub(crate) fn create_class_object<'gc>(
                 let pk = crate::core::PropertyKey::from(&key_prim);
                 if let crate::core::PropertyKey::String(s) = &pk {
                     if s == "prototype" {
-                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                     }
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
@@ -1393,7 +1393,7 @@ pub(crate) fn create_class_object<'gc>(
                 let pk = crate::core::PropertyKey::from(&key_prim);
                 if let crate::core::PropertyKey::String(s) = &pk {
                     if s == "prototype" {
-                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                     }
                 }
                 let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
@@ -1405,7 +1405,7 @@ pub(crate) fn create_class_object<'gc>(
             ClassMember::StaticProperty(prop_name, value_expr) => {
                 // Disallow static `prototype` property definitions
                 if prop_name == "prototype" {
-                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
                 // Add static property to class object
                 let value = evaluate_expr(mc, env, value_expr)?;
@@ -1425,7 +1425,7 @@ pub(crate) fn create_class_object<'gc>(
                 // If the computed key is the string 'prototype', throw
                 if let Value::String(s) = &key_prim {
                     if crate::unicode::utf16_to_utf8(s) == "prototype" {
-                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                     }
                 }
                 object_set_key_value(mc, &class_obj, key_prim, value)?;
@@ -1433,40 +1433,164 @@ pub(crate) fn create_class_object<'gc>(
             ClassMember::StaticGetter(getter_name, body) => {
                 // Disallow static `prototype` property definitions
                 if getter_name == "prototype" {
-                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
                 // Create a static getter for the class object
-                let getter = Value::Getter(body.clone(), *env, Some(GcCell::new(class_obj)));
-                object_set_key_value(mc, &class_obj, getter_name, getter)?;
+                let getter_value = Value::Getter(body.clone(), *env, Some(GcCell::new(class_obj)));
+
+                if let Some(existing_rc) = get_own_property(&class_obj, getter_name) {
+                    match &*existing_rc.borrow() {
+                        Value::Setter(params, body_set, set_env, home) => {
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some(Box::new(getter_value)),
+                                setter: Some(Box::new(Value::Setter(params.clone(), body_set.clone(), *set_env, home.clone()))),
+                            };
+                            object_set_key_value(mc, &class_obj, getter_name, new_prop)?;
+                            class_obj.borrow_mut(mc).set_non_enumerable(getter_name);
+                        }
+                        Value::Property { value, getter: _, setter } => {
+                            let new_prop = Value::Property {
+                                value: *value,
+                                getter: Some(Box::new(getter_value)),
+                                setter: setter.clone(),
+                            };
+                            object_set_key_value(mc, &class_obj, getter_name, new_prop)?;
+                            class_obj.borrow_mut(mc).set_non_enumerable(getter_name);
+                        }
+                        _ => {
+                            object_set_key_value(mc, &class_obj, getter_name, getter_value)?;
+                        }
+                    }
+                } else {
+                    object_set_key_value(mc, &class_obj, getter_name, getter_value)?;
+                }
             }
             ClassMember::StaticGetterComputed(key_expr, body) => {
                 let key_val = evaluate_expr(mc, env, key_expr)?;
-                if let Value::String(s) = &key_val {
-                    if crate::unicode::utf16_to_utf8(s) == "prototype" {
-                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                let key_prim = if let Value::Object(_) = &key_val {
+                    crate::core::to_primitive(mc, &key_val, "string", env)?
+                } else {
+                    key_val.clone()
+                };
+                let pk = crate::core::PropertyKey::from(&key_prim);
+
+                if let crate::core::PropertyKey::String(s) = &pk {
+                    if s == "prototype" {
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                     }
                 }
-                let getter = Value::Getter(body.clone(), *env, Some(GcCell::new(class_obj)));
-                object_set_key_value(mc, &class_obj, key_val, getter)?;
+
+                let getter_value = Value::Getter(body.clone(), *env, Some(GcCell::new(class_obj)));
+
+                if let Some(existing_rc) = get_own_property(&class_obj, pk.clone()) {
+                    match &*existing_rc.borrow() {
+                        Value::Setter(params, body_set, set_env, home) => {
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some(Box::new(getter_value)),
+                                setter: Some(Box::new(Value::Setter(params.clone(), body_set.clone(), *set_env, home.clone()))),
+                            };
+                            object_set_key_value(mc, &class_obj, &pk, new_prop)?;
+                            class_obj.borrow_mut(mc).set_non_enumerable(&pk);
+                        }
+                        Value::Property { value, getter: _, setter } => {
+                            let new_prop = Value::Property {
+                                value: *value,
+                                getter: Some(Box::new(getter_value)),
+                                setter: setter.clone(),
+                            };
+                            object_set_key_value(mc, &class_obj, &pk, new_prop)?;
+                            class_obj.borrow_mut(mc).set_non_enumerable(&pk);
+                        }
+                        _ => {
+                            object_set_key_value(mc, &class_obj, &pk, getter_value)?;
+                        }
+                    }
+                } else {
+                    object_set_key_value(mc, &class_obj, &pk, getter_value)?;
+                }
             }
             ClassMember::StaticSetter(setter_name, param, body) => {
                 // Disallow static `prototype` property definitions
                 if setter_name == "prototype" {
-                    return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                    return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
                 // Create a static setter for the class object
-                let setter = Value::Setter(param.clone(), body.clone(), *env, Some(GcCell::new(class_obj)));
-                object_set_key_value(mc, &class_obj, setter_name, setter)?;
+                let setter_value = Value::Setter(param.clone(), body.clone(), *env, Some(GcCell::new(class_obj)));
+
+                if let Some(existing_rc) = get_own_property(&class_obj, setter_name) {
+                    match &*existing_rc.borrow() {
+                        Value::Getter(body_get, get_env, home) => {
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some(Box::new(Value::Getter(body_get.clone(), *get_env, home.clone()))),
+                                setter: Some(Box::new(setter_value)),
+                            };
+                            object_set_key_value(mc, &class_obj, setter_name, new_prop)?;
+                            class_obj.borrow_mut(mc).set_non_enumerable(setter_name);
+                        }
+                        Value::Property { value, getter, setter: _ } => {
+                            let new_prop = Value::Property {
+                                value: *value,
+                                getter: getter.clone(),
+                                setter: Some(Box::new(setter_value)),
+                            };
+                            object_set_key_value(mc, &class_obj, setter_name, new_prop)?;
+                            class_obj.borrow_mut(mc).set_non_enumerable(setter_name);
+                        }
+                        _ => {
+                            object_set_key_value(mc, &class_obj, setter_name, setter_value)?;
+                        }
+                    }
+                } else {
+                    object_set_key_value(mc, &class_obj, setter_name, setter_value)?;
+                }
             }
             ClassMember::StaticSetterComputed(key_expr, param, body) => {
                 let key_val = evaluate_expr(mc, env, key_expr)?;
-                if let Value::String(s) = &key_val {
-                    if crate::unicode::utf16_to_utf8(s) == "prototype" {
-                        return Err(raise_type_error!("Cannot define static 'prototype' property on class"));
+                let key_prim = if let Value::Object(_) = &key_val {
+                    crate::core::to_primitive(mc, &key_val, "string", env)?
+                } else {
+                    key_val.clone()
+                };
+                let pk = crate::core::PropertyKey::from(&key_prim);
+
+                if let crate::core::PropertyKey::String(s) = &pk {
+                    if s == "prototype" {
+                        return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                     }
                 }
-                let setter = Value::Setter(param.clone(), body.clone(), *env, Some(GcCell::new(class_obj)));
-                object_set_key_value(mc, &class_obj, key_val, setter)?;
+
+                let setter_value = Value::Setter(param.clone(), body.clone(), *env, Some(GcCell::new(class_obj)));
+
+                if let Some(existing_rc) = get_own_property(&class_obj, pk.clone()) {
+                    match &*existing_rc.borrow() {
+                        Value::Getter(body_get, get_env, home) => {
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some(Box::new(Value::Getter(body_get.clone(), *get_env, home.clone()))),
+                                setter: Some(Box::new(setter_value)),
+                            };
+                            object_set_key_value(mc, &class_obj, &pk, new_prop)?;
+                            class_obj.borrow_mut(mc).set_non_enumerable(&pk);
+                        }
+                        Value::Property { value, getter, setter: _ } => {
+                            let new_prop = Value::Property {
+                                value: *value,
+                                getter: getter.clone(),
+                                setter: Some(Box::new(setter_value)),
+                            };
+                            object_set_key_value(mc, &class_obj, &pk, new_prop)?;
+                            class_obj.borrow_mut(mc).set_non_enumerable(&pk);
+                        }
+                        _ => {
+                            object_set_key_value(mc, &class_obj, &pk, setter_value)?;
+                        }
+                    }
+                } else {
+                    object_set_key_value(mc, &class_obj, &pk, setter_value)?;
+                }
             }
             ClassMember::PrivateProperty(_, _) => {
                 // Instance private properties handled during instantiation

@@ -2728,10 +2728,12 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             // get() {} -> method name 'get'
             // Also allow computed accessor: get [expr]() {}
             if let Some(next) = t.get(*index + 1) {
-                // Allow identifiers, private identifiers and computed keys immediately
+                // Allow identifiers, private identifiers, strings, numbers, and computed keys immediately
                 if matches!(next.token, Token::Identifier(_))
                     || matches!(next.token, Token::PrivateIdentifier(_))
                     || matches!(next.token, Token::LBracket)
+                    || matches!(next.token, Token::StringLit(_))
+                    || matches!(next.token, Token::Number(_))
                 {
                     is_accessor = true;
                     is_getter = kw == "get";
@@ -2759,6 +2761,14 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             match &t[*index].token {
                 Token::Identifier(name) => {
                     prop_name_str = Some(name.clone());
+                    *index += 1;
+                }
+                Token::StringLit(raw_s) => {
+                    prop_name_str = Some(utf16_to_utf8(raw_s));
+                    *index += 1;
+                }
+                Token::Number(n) => {
+                    prop_expr_opt = Some(Expr::Number(*n));
                     *index += 1;
                 }
                 Token::PrivateIdentifier(name) => {

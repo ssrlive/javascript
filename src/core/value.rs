@@ -784,7 +784,7 @@ pub fn to_primitive<'gc>(
             if effective_hint == "string" {
                 // toString -> valueOf
                 log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
-                let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), &[], env)?;
+                let to_s = call_to_string_strict(mc, env, obj)?;
                 log::debug!("DBG to_primitive: toString result = {:?}", to_s);
                 // Treat `Uninitialized` as a sentinel meaning "no callable toString" and
                 // therefore do not accept it as a primitive result. Only accept real
@@ -807,7 +807,7 @@ pub fn to_primitive<'gc>(
                     return Ok(val_of);
                 }
                 log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
-                let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), &[], env)?;
+                let to_s = call_to_string_strict(mc, env, obj)?;
                 log::debug!("DBG to_primitive: toString result = {:?}", to_s);
                 // See comment above: do not treat `Uninitialized` as a primitive sentinel
                 // result from a non-callable `toString` property.
@@ -819,6 +819,39 @@ pub fn to_primitive<'gc>(
             Err(raise_type_error!("Cannot convert object to primitive").into())
         }
         _ => Ok(val.clone()),
+    }
+}
+
+// Helper to call toString without fallback
+fn call_to_string_strict<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_ptr: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if let Some(method_rc) = object_get_key_value(obj_ptr, "toString") {
+        let method_val = method_rc.borrow().clone();
+        let callable = match method_val {
+            Value::Property { getter, value, .. } => {
+                if let Some(g) = getter {
+                    crate::core::call_accessor(mc, env, obj_ptr, &g)?
+                } else if let Some(v) = value {
+                    v.borrow().clone()
+                } else {
+                    Value::Undefined
+                }
+            }
+            v => v,
+        };
+        if matches!(
+            callable,
+            Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
+        ) {
+            crate::core::evaluate_call_dispatch(mc, env, callable, Some(Value::Object(*obj_ptr)), Vec::new())
+        } else {
+            Ok(Value::Uninitialized)
+        }
+    } else {
+        Ok(Value::Uninitialized)
     }
 }
 

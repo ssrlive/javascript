@@ -75,6 +75,39 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     Ok(())
 }
 
+pub fn define_properties<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, props: &Value<'gc>) -> Result<(), EvalError<'gc>> {
+    let props_obj = match props {
+        Value::Object(o) => *o,
+        _ => return Err(raise_type_error!("Property descriptors must be an object").into()),
+    };
+
+    let keys = crate::core::ordinary_own_property_keys(&props_obj);
+    let mut descriptors = Vec::new();
+
+    for key in keys {
+        let is_enumerable = {
+            let borrowed = props_obj.borrow();
+            borrowed.properties.contains_key(&key) && borrowed.is_enumerable(&key)
+        };
+
+        if is_enumerable {
+            let desc_val_rc = object_get_key_value(&props_obj, &key).unwrap();
+            let desc_val = desc_val_rc.borrow().clone();
+            if let Value::Object(desc_obj) = desc_val {
+                descriptors.push((key, desc_obj));
+            } else {
+                return Err(raise_type_error!("Property description must be an object").into());
+            }
+        }
+    }
+
+    for (key, desc_obj) in descriptors {
+        define_property_internal(mc, obj, key, &desc_obj)?;
+    }
+
+    Ok(())
+}
+
 pub(crate) fn define_property_internal<'gc>(
     mc: &MutationContext<'gc>,
     target_obj: &JSObjectDataPtr<'gc>,

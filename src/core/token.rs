@@ -613,6 +613,46 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     });
                     i += 3;
                     column += 3;
+                } else if i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
+                    // Fractional number literal starting with dot (e.g. .5, .1e-7)
+                    let start = i;
+                    i += 1; // consume '.'
+                    column += 1;
+                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
+                        i += 1;
+                        column += 1;
+                    }
+                    if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
+                        let mut j = i + 1;
+                        let mut col_j = column + 1;
+                        if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
+                            j += 1;
+                            col_j += 1;
+                        }
+                        if j < chars.len() && chars[j].is_ascii_digit() {
+                            while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '_') {
+                                j += 1;
+                                col_j += 1;
+                            }
+                            i = j;
+                            column = col_j;
+                        } else {
+                            // Invalid exponent, but we can't easily backtrack or fail gracefully
+                            // strict tokenization might fail here
+                            return Err(raise_tokenize_error!("Invalid exponent in number literal", line, column));
+                        }
+                    }
+
+                    let mut num_str: String = chars[start..i].iter().collect();
+                    num_str.retain(|c| c != '_');
+                    match num_str.parse::<f64>() {
+                        Ok(n) => tokens.push(TokenData {
+                            token: Token::Number(n),
+                            line,
+                            column: start_col,
+                        }),
+                        Err(_) => return Err(raise_tokenize_error!("Invalid number literal", line, column)),
+                    }
                 } else {
                     tokens.push(TokenData {
                         token: Token::Dot,

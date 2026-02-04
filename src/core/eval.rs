@@ -2363,7 +2363,7 @@ fn eval_res<'gc>(
             // Evaluate class definition and bind to environment
             // This initializes the class binding which was hoisted as Uninitialized
             if let Err(e) = crate::js_class::create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, env, true) {
-                return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()));
+                return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e));
             }
             // *last_value = Value::Undefined;
             Ok(None)
@@ -11450,21 +11450,9 @@ fn evaluate_var<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name
                 getter: _,
                 setter: _,
             } => return Ok(v.borrow().clone()),
-            Value::Property {
-                value: None,
-                getter: _,
-                setter: _,
-            } => return Ok(Value::Undefined),
-            Value::Getter(..) | Value::Setter(..) => {
-                // Unlikely for environment bindings, but support by delegating to accessor call
-                // Use helper to invoke accessor and return its result
-                if let Some(val_rc) = env_get(env, name)
-                    && let Value::Getter(..) = &*val_rc.borrow()
-                {
-                    // Call the getter accessor
-                    return Ok(get_property_with_accessors(mc, env, env, name)?);
-                }
-                return Err(raise_eval_error!("Accessor not supported on environment binding"));
+            // Handle accessor properties (Value::Property with no value) and raw accessors
+            Value::Property { value: None, .. } | Value::Getter(..) | Value::Setter(..) => {
+                return Ok(get_property_with_accessors(mc, env, env, name)?);
             }
             other => return Ok(other),
         }
@@ -12004,6 +11992,26 @@ pub fn call_native_function<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    if name == "Object.create" {
+        let proto = args.first().unwrap_or(&Value::Undefined);
+        let new_obj = crate::core::new_js_object_data(mc);
+        match proto {
+            Value::Object(obj) => {
+                new_obj.borrow_mut(mc).prototype = Some(*obj);
+            }
+            Value::Null => {
+                new_obj.borrow_mut(mc).prototype = None;
+            }
+            _ => return Err(raise_type_error!("Object prototype may only be an Object or null").into()),
+        }
+        if let Some(props) = args.get(1)
+            && !matches!(props, Value::Undefined)
+        {
+            crate::js_object::define_properties(mc, &new_obj, props)?;
+        }
+        return Ok(Some(Value::Object(new_obj)));
+    }
+
     // Special-case built-in iterator `next()` so iterator internal throws (EvalError::Throw)
     // propagate as JS-level throws without being converted to JSError.
     if name == "ArrayIterator.prototype.next" {

@@ -2137,6 +2137,26 @@ pub fn handle_function_prototype_method<'gc>(
                     enforce_strictness_inheritance: true,
                 };
                 Ok(Value::Closure(Gc::new(mc, new_closure_data)))
+            } else if let Value::AsyncClosure(closure_gc) = this_value {
+                let original = closure_gc;
+                let effective_bound_this = if original.bound_this.is_some() {
+                    original.bound_this.clone()
+                } else {
+                    Some(this_arg)
+                };
+                let new_closure_data = ClosureData {
+                    params: original.params.clone(),
+                    body: original.body.clone(),
+                    env: original.env,
+                    home_object: original.home_object.clone(),
+                    captured_envs: original.captured_envs.clone(),
+                    bound_this: effective_bound_this,
+                    is_arrow: original.is_arrow,
+                    is_strict: original.is_strict,
+                    native_target: None,
+                    enforce_strictness_inheritance: true,
+                };
+                Ok(Value::AsyncClosure(Gc::new(mc, new_closure_data)))
             } else if let Value::Object(obj) = this_value {
                 // Support calling bind on a function object wrapper (object with internal closure)
                 if let Some(cl_prop) = obj.borrow().get_closure()

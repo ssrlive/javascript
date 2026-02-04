@@ -167,12 +167,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/class/accessor-name-inst" - "language/expressions/class/async-gen-method-static"
+      - name: Run a small test262 subset - "language/expressions/class/accessor-name-inst" - "language/expressions/class/decorator"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/class/accessor-name-inst,language/expressions/class/accessor-name-static,language/expressions/class/async-gen-method,language/expressions/class/async-gen-method-static
+          node ci/runner.js --limit 10000 --focus language/expressions/class/accessor-name-inst,language/expressions/class/accessor-name-static,language/expressions/class/async-gen-method,language/expressions/class/async-gen-method-static,language/expressions/class/async-method,language/expressions/class/async-method-static,language/expressions/class/decorator
 
       - name: Upload results
         if: ${{ !cancelled() }}

@@ -8845,6 +8845,7 @@ pub fn evaluate_call_dispatch<'gc>(
     log::trace!("CALL_DISPATCH: func_val variant = {:?}", func_val);
     match func_val {
         Value::Closure(cl) => call_closure(mc, &cl, this_val.clone(), &eval_args, env, None),
+        Value::AsyncClosure(cl) => Ok(handle_async_closure_call(mc, &cl, this_val.clone(), &eval_args, env, None)?),
         Value::GeneratorFunction(_, cl) => Ok(handle_generator_function_call(mc, &cl, &eval_args, this_val.clone())?),
         Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, &cl, &eval_args, None)?),
         Value::Function(name) => {

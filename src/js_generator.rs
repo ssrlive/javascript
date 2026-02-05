@@ -1,8 +1,8 @@
 use crate::core::{Gc, GcCell, GeneratorState, MutationContext};
 use crate::{
     core::{
-        EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_call_dispatch, object_get_key_value,
-        object_set_key_value, prepare_function_call_env,
+        EvalError, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, VarDeclKind, env_get, env_set, env_set_recursive,
+        evaluate_call_dispatch, evaluate_expr, object_get_key_value, object_set_key_value, prepare_function_call_env,
     },
     error::JSError,
 };
@@ -30,14 +30,85 @@ fn close_pending_iterator<'gc>(
     Ok(())
 }
 
-/// Handle generator function constructor (when called as `new GeneratorFunction(...)`)
-pub fn _handle_generator_function_constructor<'gc>(
-    _mc: &MutationContext<'gc>,
-    _args: &[Expr],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    // Generator functions cannot be constructed with `new`
-    Err(raise_eval_error!("GeneratorFunction is not a constructor"))
+fn get_iterator<'gc>(
+    mc: &MutationContext<'gc>,
+    val: Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+    if let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor_val.borrow()
+        && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
+        && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+        && let Value::Object(o) = val
+    {
+        let method = crate::core::get_property_with_accessors(mc, env, &o, PropertyKey::Symbol(*iter_sym))?;
+        if !matches!(method, Value::Undefined | Value::Null) {
+            let iter = crate::core::evaluate_call_dispatch(mc, env, method, Some(val), vec![])?;
+            if let Value::Object(o) = iter {
+                return Ok(o);
+            }
+            return Err(raise_type_error!("Iterator is not an object").into());
+        }
+    }
+    Err(raise_type_error!("Value is not iterable").into())
+}
+
+fn get_for_await_iterator<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    iter_val: &Value<'gc>,
+) -> Result<(JSObjectDataPtr<'gc>, bool), EvalError<'gc>> {
+    let mut iterator: Option<JSObjectDataPtr<'gc>> = None;
+    let mut is_async_iter = false;
+
+    if let Some(sym_ctor) = crate::core::env_get(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(async_iter_sym_val) = object_get_key_value(sym_obj, "asyncIterator")
+        && let Value::Symbol(async_iter_sym) = &*async_iter_sym_val.borrow()
+        && let Value::Object(obj) = iter_val
+    {
+        let method = crate::core::get_property_with_accessors(mc, env, obj, async_iter_sym)?;
+        if !matches!(method, Value::Undefined | Value::Null) {
+            let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+            if let Value::Object(iter_obj) = res {
+                iterator = Some(iter_obj);
+                is_async_iter = true;
+            }
+        }
+    }
+
+    if iterator.is_none()
+        && let Some(sym_ctor) = crate::core::env_get(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
+        && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+        && let Value::Object(obj) = iter_val
+    {
+        let method = crate::core::get_property_with_accessors(mc, env, obj, iter_sym)?;
+        if !matches!(method, Value::Undefined | Value::Null) {
+            let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+            if let Value::Object(iter_obj) = res {
+                iterator = Some(iter_obj);
+                is_async_iter = false;
+            }
+        }
+    }
+
+    if let Some(iter_obj) = iterator {
+        return Ok((iter_obj, is_async_iter));
+    }
+
+    Err(raise_type_error!("Value is not iterable").into())
+}
+
+#[allow(clippy::type_complexity)]
+fn find_first_for_await_in_statements(stmts: &[Statement]) -> Option<(usize, Option<VarDeclKind>, String, Expr, Vec<Statement>)> {
+    for (i, s) in stmts.iter().enumerate() {
+        if let StatementKind::ForAwaitOf(decl_kind_opt, var_name, iterable, body) = &*s.kind {
+            return Some((i, *decl_kind_opt, var_name.clone(), iterable.clone(), body.clone()));
+        }
+    }
+    None
 }
 
 /// Handle generator function calls (creating generator objects)
@@ -74,6 +145,8 @@ pub fn handle_generator_function_call<'gc>(
             cached_initial_yield: None,
             pending_iterator: None,
             pending_iterator_done: false,
+            yield_star_iterator: None,
+            pending_for_await: None,
         }),
     );
 
@@ -144,31 +217,34 @@ pub fn handle_generator_instance_method<'gc>(
 fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool) -> Expr {
     // log::trace!("replace_first_yield_in_expr visiting: {:?}, replaced={}", expr, replaced);
     match expr {
-        Expr::Yield(_) => {
-            if !*replaced {
+        Expr::Yield(inner) => {
+            let new_inner = inner.as_ref().map(|i| Box::new(replace_first_yield_in_expr(i, var_name, replaced)));
+            if *replaced {
+                Expr::Yield(new_inner)
+            } else {
                 log::trace!("Replacing Yield");
                 *replaced = true;
                 Expr::Var(var_name.to_string(), None, None)
-            } else {
-                expr.clone()
             }
         }
-        Expr::YieldStar(_) => {
-            if !*replaced {
+        Expr::YieldStar(inner) => {
+            let new_inner = Box::new(replace_first_yield_in_expr(inner, var_name, replaced));
+            if *replaced {
+                *new_inner
+            } else {
                 log::trace!("Replacing YieldStar");
                 *replaced = true;
                 Expr::Var(var_name.to_string(), None, None)
-            } else {
-                expr.clone()
             }
         }
-        Expr::Await(_) => {
-            if !*replaced {
+        Expr::Await(inner) => {
+            let new_inner = Box::new(replace_first_yield_in_expr(inner, var_name, replaced));
+            if *replaced {
+                Expr::Await(new_inner)
+            } else {
                 log::trace!("Replacing Await");
                 *replaced = true;
                 Expr::Var(var_name.to_string(), None, None)
-            } else {
-                expr.clone()
             }
         }
         Expr::Binary(a, op, b) => Expr::Binary(
@@ -652,9 +728,19 @@ pub(crate) enum YieldKind {
 
 fn find_yield_in_expr(e: &Expr) -> Option<(YieldKind, Option<Box<Expr>>)> {
     match e {
-        Expr::Yield(inner) => Some((YieldKind::Yield, inner.clone())),
+        Expr::Yield(inner) => {
+            if let Some(res) = inner.as_ref().and_then(|i| find_yield_in_expr(i)) {
+                return Some(res);
+            }
+            Some((YieldKind::Yield, inner.clone()))
+        }
         Expr::YieldStar(inner) => Some((YieldKind::YieldStar, Some(inner.clone()))),
-        Expr::Await(inner) => Some((YieldKind::Await, Some(inner.clone()))),
+        Expr::Await(inner) => {
+            if let Some(res) = find_yield_in_expr(inner) {
+                return Some(res);
+            }
+            Some((YieldKind::Await, Some(inner.clone())))
+        }
         Expr::Binary(a, _, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
         Expr::Assign(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
         Expr::Index(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
@@ -705,6 +791,99 @@ fn find_rightmost_assign_rhs(expr: &Expr) -> Option<&Expr> {
         Expr::Comma(_, rhs) => find_rightmost_assign_rhs(rhs),
         Expr::Conditional(_, then_expr, else_expr) => find_rightmost_assign_rhs(then_expr).or_else(|| find_rightmost_assign_rhs(else_expr)),
         _ => None,
+    }
+}
+
+fn seed_simple_decl_bindings<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    stmts: &[Statement],
+) -> Result<(), EvalError<'gc>> {
+    for stmt in stmts {
+        match &*stmt.kind {
+            StatementKind::Const(decls) => {
+                for (name, expr) in decls {
+                    if env_get(env, name).is_none()
+                        && let Expr::Var(_, _, _) = expr
+                    {
+                        let val = evaluate_expr(mc, env, expr)?;
+                        env_set(mc, env, name, val)?;
+                    }
+                }
+            }
+            StatementKind::Let(decls) | StatementKind::Var(decls) => {
+                for (name, expr_opt) in decls {
+                    if env_get(env, name).is_none() {
+                        let expr = match expr_opt {
+                            Some(expr) => expr,
+                            None => continue,
+                        };
+                        if let Expr::Var(_, _, _) = expr {
+                            let val = evaluate_expr(mc, env, expr)?;
+                            env_set(mc, env, name, val)?;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn bind_replaced_yield_decl<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    stmt: &Statement,
+    yield_var: &str,
+) -> Result<(), EvalError<'gc>> {
+    match &*stmt.kind {
+        StatementKind::Const(decls) => {
+            for (name, expr) in decls {
+                if let Expr::Var(var_name, _, _) = expr
+                    && var_name == yield_var
+                    && env_get(env, name).is_none()
+                {
+                    let val = evaluate_expr(mc, env, expr)?;
+                    env_set(mc, env, name, val)?;
+                }
+            }
+        }
+        StatementKind::Let(decls) | StatementKind::Var(decls) => {
+            for (name, expr_opt) in decls {
+                let expr = match expr_opt {
+                    Some(expr) => expr,
+                    None => continue,
+                };
+                if let Expr::Var(var_name, _, _) = expr
+                    && var_name == yield_var
+                    && env_get(env, name).is_none()
+                {
+                    let val = evaluate_expr(mc, env, expr)?;
+                    env_set(mc, env, name, val)?;
+                }
+            }
+        }
+        StatementKind::TryCatch(tc_stmt) => {
+            for inner in &tc_stmt.try_body {
+                bind_replaced_yield_decl(mc, env, inner, yield_var)?;
+            }
+        }
+        StatementKind::Block(stmts) => {
+            for inner in stmts {
+                bind_replaced_yield_decl(mc, env, inner, yield_var)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn for_init_needs_execution<'gc>(env: &JSObjectDataPtr<'gc>, init_stmt: &Statement) -> bool {
+    match &*init_stmt.kind {
+        StatementKind::Let(decls) | StatementKind::Var(decls) => decls.iter().any(|(name, _)| object_get_key_value(env, name).is_none()),
+        StatementKind::Const(decls) => decls.iter().any(|(name, _)| object_get_key_value(env, name).is_none()),
+        _ => true,
     }
 }
 
@@ -842,46 +1021,46 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
             }
             StatementKind::If(if_stmt) => {
                 if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&if_stmt.then_body)
-                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
                 if let Some(else_body) = &if_stmt.else_body
                     && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(else_body)
-                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::For(for_stmt) => {
                 if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&for_stmt.body)
-                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::TryCatch(tc_stmt) => {
                 if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(&tc_stmt.try_body)
-                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
                 if let Some(catch_body) = &tc_stmt.catch_body
                     && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(catch_body)
-                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
                 if let Some(finally_body) = &tc_stmt.finally_body
                     && let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(finally_body)
-                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
             StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
                 if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
-                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
@@ -896,7 +1075,7 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
             | StatementKind::ForAwaitOfExpr(_, _, body)
             | StatementKind::ForOfExpr(_, _, body) => {
                 if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
-                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
                 }
@@ -931,7 +1110,46 @@ pub fn generator_next<'gc>(
                 pre_env: None,
             };
 
-            if let Some((idx, inner_idx_opt, _yield_kind, yield_inner)) = find_first_yield_in_statements(&gen_obj.body) {
+            let func_env = gen_obj.env;
+
+            // Ensure `arguments` object exists for generator function body so
+            // parameter accesses (and `arguments.length`) reflect the passed args.
+            crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
+
+            object_set_key_value(mc, &func_env, "__in_generator", Value::Boolean(true))?;
+
+            if let Some((idx, decl_kind_opt, var_name, iterable, body)) = find_first_for_await_in_statements(&gen_obj.body)
+                && idx == 0
+            {
+                let iter_val = evaluate_expr(mc, &func_env, &iterable)?;
+                let (iter_obj, is_async_iter) = get_for_await_iterator(mc, &func_env, &iter_val)?;
+
+                let next_method = object_get_key_value(&iter_obj, "next")
+                    .ok_or(raise_type_error!("Iterator has no next method"))?
+                    .borrow()
+                    .clone();
+                let next_res_val = evaluate_call_dispatch(mc, &func_env, next_method, Some(Value::Object(iter_obj)), vec![])?;
+
+                gen_obj.pending_for_await = Some(crate::core::GeneratorForAwaitState {
+                    iterator: iter_obj,
+                    is_async: is_async_iter,
+                    decl_kind: decl_kind_opt,
+                    var_name,
+                    body,
+                    resume_pc: idx + 1,
+                    awaiting_value: false,
+                });
+
+                gen_obj.state = GeneratorState::Suspended {
+                    pc: idx,
+                    stack: vec![],
+                    pre_env: Some(func_env),
+                };
+
+                return Ok(create_iterator_result(mc, next_res_val, false)?);
+            }
+
+            if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = find_first_yield_in_statements(&gen_obj.body) {
                 log::debug!(
                     "generator_next: found first yield at idx={} inner_idx={:?} body_len={} func_env_pre={} ",
                     idx,
@@ -948,16 +1166,6 @@ pub fn generator_next<'gc>(
                 // Prepare the function activation environment with the captured
                 // call-time arguments so that parameter bindings exist even if the
                 // generator suspends before executing any pre-statements.
-                // NOTE: We now create the environment eagerly in handle_generator_function_call,
-                // so we just use the stored environment.
-                let func_env = gen_obj.env;
-
-                // Ensure `arguments` object exists for generator function body so
-                // parameter accesses (and `arguments.length`) reflect the passed args.
-                crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
-
-                object_set_key_value(mc, &func_env, "__in_generator", Value::Boolean(true))?;
-
                 // If the yield is inside a nested block/branch we may need to
                 // execute pre-statements that are inside that block before
                 // evaluating the inner expression. For example, when the
@@ -972,10 +1180,24 @@ pub fn generator_next<'gc>(
                     Some(func_env)
                 } else if let Some(inner_idx) = inner_idx_opt {
                     if inner_idx > 0 {
-                        // Execute the inner block's pre-statements (those before the yield)
-                        if let StatementKind::Block(inner_stmts) = &*gen_obj.body[idx].kind {
-                            let pre_stmts = inner_stmts[0..inner_idx].to_vec();
-                            let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        let pre_key = format!("__gen_pre_exec_{}_{}", idx, inner_idx);
+                        if object_get_key_value(&func_env, &pre_key).is_none() {
+                            // Execute pre-statements before the yield for inner containers.
+                            match &*gen_obj.body[idx].kind {
+                                StatementKind::Block(inner_stmts) => {
+                                    let pre_stmts = inner_stmts[0..inner_idx].to_vec();
+                                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                }
+                                StatementKind::TryCatch(tc_stmt) => {
+                                    let pre_stmts = tc_stmt.try_body[0..inner_idx].to_vec();
+                                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                    seed_simple_decl_bindings(mc, &func_env, &pre_stmts)?;
+                                }
+                                _ => {}
+                            }
+                            if let Err(e) = object_set_key_value(mc, &func_env, &pre_key, Value::Boolean(true)) {
+                                log::warn!("Error setting pre-execution env key: {e}");
+                            }
                         }
                     }
                     Some(func_env)
@@ -1029,6 +1251,35 @@ pub fn generator_next<'gc>(
                     object_set_key_value(mc, &func_env, "__gen_throw_val", Value::Undefined)?;
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => {
+                            if matches!(yield_kind, YieldKind::YieldStar) {
+                                let iterator = get_iterator(mc, val, &func_env)?;
+                                let next_method = crate::core::get_property_with_accessors(mc, &func_env, &iterator, "next")?;
+                                let iter_res =
+                                    crate::core::evaluate_call_dispatch(mc, &func_env, next_method, Some(Value::Object(iterator)), vec![])?;
+
+                                if let Value::Object(res_obj) = iter_res {
+                                    let done_val = object_get_key_value(&res_obj, "done")
+                                        .map(|v| v.borrow().clone())
+                                        .unwrap_or(Value::Boolean(false));
+                                    let done = matches!(done_val, Value::Boolean(true));
+                                    let value = object_get_key_value(&res_obj, "value")
+                                        .map(|v| v.borrow().clone())
+                                        .unwrap_or(Value::Undefined);
+
+                                    if !done {
+                                        gen_obj.yield_star_iterator = Some(iterator);
+                                        gen_obj.cached_initial_yield = Some(value.clone());
+                                        return Ok(create_iterator_result(mc, value, false)?);
+                                    } else {
+                                        // Done immediately. Recurse with done value.
+                                        drop(gen_obj);
+                                        return generator_next(mc, generator, value);
+                                    }
+                                } else {
+                                    return Err(raise_type_error!("Iterator result is not an object").into());
+                                }
+                            }
+
                             // Cache the value so re-entry/resume paths can use it
                             gen_obj.cached_initial_yield = Some(val.clone());
                             return Ok(create_iterator_result(mc, val, false)?);
@@ -1058,6 +1309,124 @@ pub fn generator_next<'gc>(
             }
         }
         GeneratorState::Suspended { pc, stack: _, pre_env } => {
+            if let Some(mut for_await) = gen_obj.pending_for_await.take() {
+                let func_env = gen_obj.env;
+                let pc_val = pc;
+
+                if for_await.awaiting_value {
+                    let iter_env = if let Some(VarDeclKind::Let) | Some(VarDeclKind::Const) = for_await.decl_kind {
+                        let e = crate::core::new_js_object_data(mc);
+                        e.borrow_mut(mc).prototype = Some(func_env);
+                        env_set(mc, &e, &for_await.var_name, _send_value.clone())?;
+                        e
+                    } else {
+                        env_set_recursive(mc, &func_env, &for_await.var_name, _send_value.clone())?;
+                        func_env
+                    };
+
+                    crate::core::evaluate_statements(mc, &iter_env, &for_await.body)?;
+
+                    let next_method = object_get_key_value(&for_await.iterator, "next")
+                        .ok_or(raise_type_error!("Iterator has no next method"))?
+                        .borrow()
+                        .clone();
+                    let next_res_val = evaluate_call_dispatch(mc, &func_env, next_method, Some(Value::Object(for_await.iterator)), vec![])?;
+
+                    for_await.awaiting_value = false;
+                    gen_obj.pending_for_await = Some(for_await);
+                    gen_obj.state = GeneratorState::Suspended {
+                        pc: pc_val,
+                        stack: vec![],
+                        pre_env,
+                    };
+
+                    return Ok(create_iterator_result(mc, next_res_val, false)?);
+                }
+
+                let next_res = if let Value::Object(obj) = _send_value {
+                    obj
+                } else {
+                    return Err(raise_type_error!("Iterator result is not an object").into());
+                };
+
+                let done = if let Some(done_val) = object_get_key_value(&next_res, "done") {
+                    done_val.borrow().to_truthy()
+                } else {
+                    false
+                };
+
+                if done {
+                    gen_obj.pending_for_await = None;
+                    if for_await.resume_pc >= gen_obj.body.len() {
+                        gen_obj.state = GeneratorState::Completed;
+                        return Ok(create_iterator_result(mc, Value::Undefined, true)?);
+                    }
+                    gen_obj.state = GeneratorState::Suspended {
+                        pc: for_await.resume_pc,
+                        stack: vec![],
+                        pre_env: Some(func_env),
+                    };
+                    drop(gen_obj);
+                    return generator_next(mc, generator, Value::Undefined);
+                }
+
+                let value = if let Some(val) = object_get_key_value(&next_res, "value") {
+                    val.borrow().clone()
+                } else {
+                    Value::Undefined
+                };
+
+                for_await.awaiting_value = true;
+                gen_obj.pending_for_await = Some(for_await);
+                gen_obj.state = GeneratorState::Suspended {
+                    pc: pc_val,
+                    stack: vec![],
+                    pre_env,
+                };
+
+                return Ok(create_iterator_result(mc, value, false)?);
+            }
+
+            if let Some(iter) = gen_obj.yield_star_iterator {
+                let next_method = crate::core::get_property_with_accessors(mc, &gen_obj.env, &iter, "next")?;
+                let iter_res = crate::core::evaluate_call_dispatch(
+                    mc,
+                    &gen_obj.env,
+                    next_method,
+                    Some(Value::Object(iter)),
+                    vec![_send_value.clone()],
+                )?;
+                if let Value::Object(res_obj) = iter_res {
+                    let done_val = object_get_key_value(&res_obj, "done")
+                        .map(|v| v.borrow().clone())
+                        .unwrap_or(Value::Boolean(false));
+                    let done = matches!(done_val, Value::Boolean(true));
+                    let value = object_get_key_value(&res_obj, "value")
+                        .map(|v| v.borrow().clone())
+                        .unwrap_or(Value::Undefined);
+
+                    if !done {
+                        gen_obj.state = GeneratorState::Suspended {
+                            pc,
+                            stack: vec![],
+                            pre_env,
+                        };
+                        return Ok(create_iterator_result(mc, value, false)?);
+                    } else {
+                        gen_obj.yield_star_iterator = None;
+                        gen_obj.state = GeneratorState::Suspended {
+                            pc,
+                            stack: vec![],
+                            pre_env,
+                        };
+                        drop(gen_obj);
+                        return generator_next(mc, generator, value);
+                    }
+                } else {
+                    return Err(raise_type_error!("Iterator result is not an object").into());
+                }
+            }
+
             // On resume, execute from the suspended statement index. If a
             // `send_value` was provided to `next(value)`, substitute the
             // first `yield` in that statement with the sent value before
@@ -1083,17 +1452,12 @@ pub fn generator_next<'gc>(
             // Modify the AST in place to reflect progress (remove init, replace yield)
             let mut replaced = false;
             if let Some(first_stmt) = gen_obj.body.get_mut(pc_val) {
-                if pre_env.is_some()
-                    && let StatementKind::For(for_stmt) = first_stmt.kind.as_mut()
-                {
-                    for_stmt.init = None;
-                }
                 replace_first_yield_in_statement(first_stmt, &var_name, &mut replaced);
                 log::debug!("DEBUG: body[{}] after: replaced={}, kind={:?}", pc_val, replaced, first_stmt.kind);
             }
 
             // Clone the tail for execution (now contains modifications)
-            let tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
+            let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
 
             // Use the pre-execution environment if available so bindings created
             // by pre-statements remain visible when we resume execution.
@@ -1102,20 +1466,10 @@ pub fn generator_next<'gc>(
             } else {
                 prepare_function_call_env(mc, Some(&gen_obj.env), gen_obj.this_val.clone(), None, &[], None, None)?
             };
-            // Prefer the cached initial yield value (if present) to avoid
-            // re-evaluating the awaited expression in re-entry scenarios.
-            // If the caller provided a concrete send value (e.g., the resolved
-            // value from Promise resolution), prefer it. Otherwise fall back to
-            // the cached initially-yielded value captured during generator
-            // startup to avoid re-evaluation.
-            if let Value::Undefined = _send_value {
-                if let Some(cached) = gen_obj.cached_initial_yield.as_ref() {
-                    object_set_key_value(mc, &func_env, &var_name, cached.clone())?;
-                } else {
-                    object_set_key_value(mc, &func_env, &var_name, _send_value.clone())?;
-                }
-            } else {
-                object_set_key_value(mc, &func_env, &var_name, _send_value.clone())?;
+
+            object_set_key_value(mc, &func_env, &var_name, _send_value.clone())?;
+            if let Some(stmt) = gen_obj.body.get(pc_val) {
+                bind_replaced_yield_decl(mc, &func_env, stmt, &var_name)?;
             }
 
             if let Some((idx, inner_idx_opt, _yield_kind, yield_inner)) = find_first_yield_in_statements(&tail) {
@@ -1124,11 +1478,25 @@ pub fn generator_next<'gc>(
                     crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
                     Some(func_env)
                 } else if let Some(inner_idx) = inner_idx_opt {
-                    if inner_idx > 0
-                        && let StatementKind::Block(inner_stmts) = &*tail[idx].kind
-                    {
-                        let pre_stmts = inner_stmts[0..inner_idx].to_vec();
-                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    if inner_idx > 0 {
+                        let pre_key = format!("__gen_pre_exec_{}_{}", var_name, inner_idx);
+                        if object_get_key_value(&func_env, &pre_key).is_none() {
+                            match &*tail[idx].kind {
+                                StatementKind::Block(inner_stmts) => {
+                                    let pre_stmts = inner_stmts[0..inner_idx].to_vec();
+                                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                }
+                                StatementKind::TryCatch(tc_stmt) => {
+                                    let pre_stmts = tc_stmt.try_body[0..inner_idx].to_vec();
+                                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                    seed_simple_decl_bindings(mc, &func_env, &pre_stmts)?;
+                                }
+                                _ => {}
+                            }
+                            if let Err(e) = object_set_key_value(mc, &func_env, &pre_key, Value::Boolean(true)) {
+                                log::warn!("Error setting pre-execution env key: {e}");
+                            }
+                        }
                     }
                     Some(func_env)
                 } else {
@@ -1153,12 +1521,36 @@ pub fn generator_next<'gc>(
                     // If the yield is inside a `for` loop body, ensure the loop
                     // initializer and any body pre-statements execute so loop
                     // bindings (e.g., `let i`) exist before evaluating the yield.
-                    if let StatementKind::For(for_stmt) = &*tail[idx].kind
+                    if let StatementKind::For(for_stmt) = tail[idx].kind.as_mut() {
+                        if let Some(init_stmt) = for_stmt.init.clone() {
+                            if for_init_needs_execution(&func_env, &init_stmt) {
+                                crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(&init_stmt))?;
+                            }
+                            for_stmt.init = None;
+                            if let Some(body_stmt) = gen_obj.body.get_mut(pc_val + idx)
+                                && let StatementKind::For(body_for_stmt) = body_stmt.kind.as_mut()
+                            {
+                                body_for_stmt.init = None;
+                            }
+                        }
+
+                        if let Some(inner_idx) = inner_idx_opt
+                            && inner_idx > 0
+                        {
+                            let pre_stmts = for_stmt.body[0..inner_idx].to_vec();
+                            let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        }
+                    }
+                    if let StatementKind::TryCatch(tc_stmt) = tail[idx].kind.as_mut()
                         && let Some(inner_idx) = inner_idx_opt
                         && inner_idx > 0
                     {
-                        let pre_stmts = for_stmt.body[0..inner_idx].to_vec();
-                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        tc_stmt.try_body.drain(0..inner_idx);
+                        if let Some(body_stmt) = gen_obj.body.get_mut(pc_val + idx)
+                            && let StatementKind::TryCatch(body_tc_stmt) = body_stmt.kind.as_mut()
+                        {
+                            body_tc_stmt.try_body.drain(0..inner_idx);
+                        }
                     }
 
                     object_set_key_value(mc, &func_env, "__gen_throw_val", Value::Undefined)?;

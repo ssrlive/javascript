@@ -169,7 +169,7 @@ pub(crate) fn string_constructor<'gc>(
             Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
             Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
             Value::Uninitialized => Ok(Value::String(utf8_to_utf16("undefined"))),
-            Value::PrivateName(n) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
+            Value::PrivateName(n, _) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
         }
     } else {
         Ok(Value::String(Vec::new())) // String() with no args returns empty string

@@ -1,12 +1,19 @@
 use crate::core::{Collect, Gc};
 use crate::core::{SymbolData, Value};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
 pub enum PropertyKey<'gc> {
     String(String),
     Symbol(Gc<'gc, SymbolData>),
-    Private(String),
+    Private(String, u32),
+}
+
+static PRIVATE_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+pub fn next_private_id() -> u32 {
+    PRIVATE_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 pub(crate) fn remove_private_identifier_prefix(name: &str) -> &str {
@@ -40,7 +47,7 @@ impl<'gc> From<&PropertyKey<'gc>> for PropertyKey<'gc> {
         match pk {
             PropertyKey::String(s) => PropertyKey::String(s.clone()),
             PropertyKey::Symbol(sym) => PropertyKey::Symbol(*sym),
-            PropertyKey::Private(s) => PropertyKey::Private(s.clone()),
+            PropertyKey::Private(s, id) => PropertyKey::Private(s.clone(), *id),
         }
     }
 }
@@ -83,7 +90,7 @@ impl<'gc> PartialEq for PropertyKey<'gc> {
         match (self, other) {
             (PropertyKey::String(s1), PropertyKey::String(s2)) => s1 == s2,
             (PropertyKey::Symbol(sym1), PropertyKey::Symbol(sym2)) => Gc::ptr_eq(*sym1, *sym2),
-            (PropertyKey::Private(s1), PropertyKey::Private(s2)) => s1 == s2,
+            (PropertyKey::Private(s1, id1), PropertyKey::Private(s2, id2)) => s1 == s2 && id1 == id2,
             _ => false,
         }
     }
@@ -102,9 +109,10 @@ impl<'gc> std::hash::Hash for PropertyKey<'gc> {
                 1u8.hash(state);
                 Gc::as_ptr(*sym).hash(state);
             }
-            PropertyKey::Private(s) => {
+            PropertyKey::Private(s, id) => {
                 2u8.hash(state);
                 s.hash(state);
+                id.hash(state);
             }
         }
     }
@@ -113,9 +121,9 @@ impl<'gc> std::hash::Hash for PropertyKey<'gc> {
 impl<'gc> std::fmt::Display for PropertyKey<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PropertyKey::String(s) => write!(f, "{}", s),
+            PropertyKey::String(s) => write!(f, "{s}"),
             PropertyKey::Symbol(sym) => write!(f, "[symbol {:p}]", Gc::as_ptr(*sym)),
-            PropertyKey::Private(s) => write!(f, "#{}", s),
+            PropertyKey::Private(s, _) => write!(f, "#{s}"),
         }
     }
 }
@@ -125,7 +133,7 @@ impl<'gc> AsRef<str> for PropertyKey<'gc> {
         match self {
             PropertyKey::String(s) => s,
             PropertyKey::Symbol(_sym) => todo!("Cannot convert Symbol to &str"),
-            PropertyKey::Private(s) => s,
+            PropertyKey::Private(s, _) => s,
         }
     }
 }

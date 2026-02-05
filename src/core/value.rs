@@ -49,6 +49,20 @@ pub struct JSGenerator<'gc> {
     pub cached_initial_yield: Option<Value<'gc>>,
     pub pending_iterator: Option<JSObjectDataPtr<'gc>>,
     pub pending_iterator_done: bool,
+    pub yield_star_iterator: Option<JSObjectDataPtr<'gc>>,
+    pub pending_for_await: Option<GeneratorForAwaitState<'gc>>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct GeneratorForAwaitState<'gc> {
+    pub iterator: JSObjectDataPtr<'gc>,
+    pub is_async: bool,
+    pub decl_kind: Option<VarDeclKind>,
+    pub var_name: String,
+    pub body: Vec<Statement>,
+    pub resume_pc: usize,
+    pub awaiting_value: bool,
 }
 
 #[derive(Clone, Collect)]
@@ -67,6 +81,7 @@ pub struct JSAsyncGenerator<'gc> {
     // Queue of pending requests: tuple of (Promise cell, request kind)
     pub pending: Vec<(GcPtr<'gc, JSPromise<'gc>>, AsyncGeneratorRequest<'gc>)>,
     pub pending_for_await: Option<AsyncForAwaitState<'gc>>,
+    pub yield_star_iterator: Option<JSObjectDataPtr<'gc>>,
 }
 
 #[derive(Clone, Collect)]
@@ -192,11 +207,23 @@ pub struct JSObjectData<'gc> {
     pub home_object: Option<GcCell<JSObjectDataPtr<'gc>>>,
     /// Internal executable closure for function objects (previously stored as an internal property)
     closure: Option<GcPtr<'gc, Value<'gc>>>,
+    /// Map from ClassMember index to evaluated PropertyKey for computed fields.
+    pub comp_field_keys: std::collections::HashMap<usize, PropertyKey<'gc>>,
+    /// Cache of per-class private method functions so instances share the same object.
+    pub private_methods: std::collections::HashMap<PropertyKey<'gc>, Value<'gc>>,
 }
 
 unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
     fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         for (k, v) in &self.properties {
+            k.trace(cc);
+            v.trace(cc);
+        }
+        for (k, v) in &self.comp_field_keys {
+            k.trace(cc);
+            v.trace(cc);
+        }
+        for (k, v) in &self.private_methods {
             k.trace(cc);
             v.trace(cc);
         }
@@ -561,7 +588,7 @@ pub enum Value<'gc> {
     ArrayBuffer(GcPtr<'gc, JSArrayBuffer>),
     DataView(Gc<'gc, JSDataView<'gc>>),
     TypedArray(Gc<'gc, JSTypedArray<'gc>>),
-    PrivateName(String),
+    PrivateName(String, u32),
 
     /// Internal property representation stored in an object's `properties` map.
     /// Contains either a concrete `value` or accessor `getter`/`setter` functions.
@@ -909,7 +936,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::ClassDefinition(..) => "class".to_string(),
         Value::Getter(..) => "[Getter]".to_string(),
         Value::Setter(..) => "[Setter]".to_string(),
-        Value::PrivateName(n) => format!("#{}", n),
+        Value::PrivateName(n, _) => format!("#{n}"),
         Value::Promise(_) => "[object Promise]".to_string(),
         Value::Map(_) => "[object Map]".to_string(),
         Value::Set(_) => "[object Set]".to_string(),
@@ -1091,7 +1118,7 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
                 string_keys.push(k.clone());
             }
             PropertyKey::Symbol(_) => symbol_keys.push(k.clone()),
-            PropertyKey::Private(_) => {}
+            PropertyKey::Private(..) => {}
         }
     }
 
@@ -1125,7 +1152,7 @@ pub fn object_set_key_value<'gc>(
     let key_desc = match &key {
         PropertyKey::String(s) => s.clone(),
         PropertyKey::Symbol(_) => "<symbol>".to_string(),
-        PropertyKey::Private(n) => format!("#{}", n),
+        PropertyKey::Private(n, _) => format!("#{n}"),
     };
 
     // Intercept attempts to set the implementation-only key '__definition_env' and

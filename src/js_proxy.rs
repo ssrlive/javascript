@@ -260,7 +260,7 @@ fn property_key_to_value<'gc>(key: &PropertyKey<'gc>) -> Value<'gc> {
     match key {
         PropertyKey::String(s) => Value::String(utf8_to_utf16(s)),
         PropertyKey::Symbol(sd) => Value::Symbol(*sd),
-        PropertyKey::Private(_) => unreachable!("Private keys should not be passed to proxy traps"),
+        PropertyKey::Private(..) => unreachable!("Private keys should not be passed to proxy traps"),
     }
 }
 

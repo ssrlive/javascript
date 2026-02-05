@@ -44,8 +44,8 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
     // that set intervals or long timeouts to keep the process running like Node.
     set_wait_for_active_handles(cli.file.is_some());
 
-    let script_content = if let Some(script) = cli.eval {
-        script
+    let script_content = if let Some(ref script) = cli.eval {
+        script.clone()
     } else if let Some(ref file) = cli.file {
         match read_script_file(file) {
             Ok(content) => content,
@@ -64,7 +64,11 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
     let script_path = cli.file.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or(p.clone()));
 
     match evaluate_script(&script_content, script_path.as_ref()) {
-        Ok(result) => println!("{result}"),
+        Ok(result) => {
+            if cli.eval.is_some() {
+                println!("{result}");
+            }
+        }
         Err(err) => {
             if let Some(file_path) = script_path.as_ref()
                 && let Some(line) = err.js_line()

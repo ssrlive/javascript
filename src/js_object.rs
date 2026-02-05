@@ -64,6 +64,8 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
         "toLocaleString",
         "toString",
         "valueOf",
+        "__lookupGetter__",
+        "__lookupSetter__",
     ];
 
     for method in proto_methods {
@@ -749,7 +751,7 @@ pub fn handle_object_method<'gc>(
                                     let property_key = PropertyKey::Symbol(*sym_rc);
                                     object_set_key_value(mc, &result_obj, &property_key, Value::Object(desc_obj))?;
                                 }
-                                PropertyKey::Private(_) => {}
+                                PropertyKey::Private(..) => {}
                             }
                         }
                     }
@@ -958,7 +960,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::DataView(_) => "DataView",
                 Value::TypedArray(_) => "TypedArray",
                 Value::Uninitialized => "undefined",
-                Value::PrivateName(_) => "PrivateName",
+                Value::PrivateName(..) => "PrivateName",
             },
             args.len()
         ))
@@ -1098,7 +1100,7 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
         Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
         Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
-        Value::PrivateName(n) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
+        Value::PrivateName(n, _) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
     }
 }
 
@@ -1181,7 +1183,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                 &Value::DataView(_) => "DataView",
                 &Value::TypedArray(_) => "TypedArray",
                 Value::Uninitialized => "undefined",
-                Value::PrivateName(_) => "PrivateName",
+                Value::PrivateName(..) => "PrivateName",
             },
             args.len()
         ))
@@ -1340,7 +1342,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::DataView(data_view) => Ok(Value::DataView(*data_view)),
         Value::TypedArray(typed_array) => Ok(Value::TypedArray(*typed_array)),
         Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object").into()),
-        Value::PrivateName(_) => Err(raise_type_error!("Cannot convert private name to object").into()),
+        Value::PrivateName(..) => Err(raise_type_error!("Cannot convert private name to object").into()),
     }
 }
 
@@ -1391,6 +1393,72 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             let key_val = args[0].clone();
             let exists = crate::core::has_own_property_value(object, &key_val);
             Ok(Some(Value::Boolean(exists)))
+        }
+        "Object.prototype.__lookupGetter__" => {
+            let key_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let key = match key_val {
+                Value::Symbol(sym) => PropertyKey::Symbol(sym),
+                other => PropertyKey::String(crate::core::value_to_string(&other)),
+            };
+
+            if let PropertyKey::String(s) = &key
+                && s.starts_with('#')
+            {
+                return Ok(Some(Value::Undefined));
+            }
+
+            let mut cur = Some(*object);
+            while let Some(cur_obj) = cur {
+                if let Some(val_rc) = crate::core::get_own_property(&cur_obj, &key) {
+                    let val = val_rc.borrow().clone();
+                    return match val {
+                        Value::Property { getter, .. } => {
+                            if let Some(g) = getter {
+                                Ok(Some((*g).clone()))
+                            } else {
+                                Ok(Some(Value::Undefined))
+                            }
+                        }
+                        Value::Getter(..) => Ok(Some(val)),
+                        _ => Ok(Some(Value::Undefined)),
+                    };
+                }
+                cur = cur_obj.borrow().prototype;
+            }
+            Ok(Some(Value::Undefined))
+        }
+        "Object.prototype.__lookupSetter__" => {
+            let key_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let key = match key_val {
+                Value::Symbol(sym) => PropertyKey::Symbol(sym),
+                other => PropertyKey::String(crate::core::value_to_string(&other)),
+            };
+
+            if let PropertyKey::String(s) = &key
+                && s.starts_with('#')
+            {
+                return Ok(Some(Value::Undefined));
+            }
+
+            let mut cur = Some(*object);
+            while let Some(cur_obj) = cur {
+                if let Some(val_rc) = crate::core::get_own_property(&cur_obj, &key) {
+                    let val = val_rc.borrow().clone();
+                    return match val {
+                        Value::Property { setter, .. } => {
+                            if let Some(s) = setter {
+                                Ok(Some((*s).clone()))
+                            } else {
+                                Ok(Some(Value::Undefined))
+                            }
+                        }
+                        Value::Setter(..) => Ok(Some(val)),
+                        _ => Ok(Some(Value::Undefined)),
+                    };
+                }
+                cur = cur_obj.borrow().prototype;
+            }
+            Ok(Some(Value::Undefined))
         }
         "Object.prototype.toString" => Ok(Some(crate::js_object::handle_to_string_method(
             mc,

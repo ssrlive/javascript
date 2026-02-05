@@ -281,12 +281,10 @@ mod class_tests {
             class C { }
             Object.getOwnPropertyDescriptor(C, 'name')
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        assert!(result.is_ok(), "Script should execute");
-        // Expect the descriptor to have enumerable=false per spec
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(
-            result.unwrap(),
-            "{\"value\":\"C\",\"writable\":true,\"enumerable\":false,\"configurable\":true}"
+            result,
+            "{\"value\":\"C\",\"writable\":false,\"enumerable\":false,\"configurable\":true}"
         );
     }
 

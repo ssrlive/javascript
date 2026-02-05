@@ -249,7 +249,7 @@ where
                         crate::js_promise::PollResult::Empty => {
                             // Before exiting, attempt to process any runtime-pending unhandled checks
                             // (they may have matured and should be re-queued as UnhandledCheck tasks).
-                            if crate::js_promise::process_runtime_pending_unhandled(mc, &root.global_env)? {
+                            if crate::js_promise::process_runtime_pending_unhandled(mc, &root.global_env, false)? {
                                 count += 1;
                                 continue;
                             }
@@ -267,6 +267,13 @@ where
                                 count += 1;
                                 continue;
                             }
+
+                            // About to exit. Force flush any pending unhandled rejections as if the grace period expired.
+                            if crate::js_promise::process_runtime_pending_unhandled(mc, &root.global_env, true)? {
+                                count += 1;
+                                continue;
+                            }
+
                             break;
                         }
                     }

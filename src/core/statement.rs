@@ -147,6 +147,7 @@ pub enum Expr {
     RightShiftAssign(Box<Expr>, Box<Expr>),
     UnsignedRightShiftAssign(Box<Expr>, Box<Expr>),
     OptionalProperty(Box<Expr>, String),
+    OptionalPrivateMember(Box<Expr>, String),
     OptionalIndex(Box<Expr>, Box<Expr>),
     OptionalCall(Box<Expr>, Vec<Expr>),
     Property(Box<Expr>, String),
@@ -266,9 +267,13 @@ pub enum ClassMember {
     PrivateProperty(String, Expr),                                      // name, value
     PrivateStaticProperty(String, Expr),                                // name, value
     PrivateMethod(String, Vec<DestructuringElement>, Vec<Statement>),   // name, parameters, body
+    PrivateMethodAsync(String, Vec<DestructuringElement>, Vec<Statement>), // private async method
+    PrivateMethodGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
     PrivateMethodAsyncGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // private async generator method
     PrivateStaticMethodAsyncGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // private static async generator method
+    PrivateStaticMethodGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // private static generator method
     PrivateStaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
+    PrivateStaticMethodAsync(String, Vec<DestructuringElement>, Vec<Statement>), // private static async method
     PrivateGetter(String, Vec<Statement>),                              // name, body
     PrivateSetter(String, Vec<DestructuringElement>, Vec<Statement>),   // name, parameter, body
     PrivateStaticGetter(String, Vec<Statement>),                        // name, body

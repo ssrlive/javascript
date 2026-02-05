@@ -24,9 +24,9 @@
 //! Future refactoring will introduce dedicated Rust structures for better type safety.
 
 use crate::core::{
-    ClosureData, DestructuringElement, EvalError, Expr, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, Statement, StatementKind,
-    Value, env_set, evaluate_statements, extract_closure_from_value, generate_unique_id, object_get_key_value, object_set_key_value,
-    prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    ClosureData, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, Statement,
+    StatementKind, Value, env_set, evaluate_statements, extract_closure_from_value, generate_unique_id, object_get_key_value,
+    object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -75,6 +75,15 @@ enum Task<'gc> {
         value: Value<'gc>,
         env: JSObjectDataPtr<'gc>,
     },
+    /// Task to resume an async function generator step
+    AsyncStep {
+        generator: GcPtr<'gc, JSGenerator<'gc>>,
+        resolve: Value<'gc>,
+        reject: Value<'gc>,
+        result: Value<'gc>,
+        is_reject: bool,
+        env: JSObjectDataPtr<'gc>,
+    },
     /// Task to execute a setTimeout callback
     Timeout {
         id: usize,
@@ -97,6 +106,7 @@ enum Task<'gc> {
         reason: Value<'gc>,
         insertion_tick: usize,
         env: JSObjectDataPtr<'gc>,
+        force: bool,
     },
     // Previously this variant represented a queued unhandled-check task.
     // Unhandled checks are now tracked separately in `PENDING_UNHANDLED_CHECKS`.
@@ -322,7 +332,7 @@ pub fn runtime_remove_pending_unhandled_for_promise<'gc>(
 
 /// Process pending runtime unhandled checks and enqueue UnhandledCheck tasks when their grace window elapsed.
 /// Returns `Ok(true)` if at least one task was enqueued.
-pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<bool, JSError> {
+pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, force: bool) -> Result<bool, JSError> {
     let mut queued_any = false;
     if let Ok(runtime) = ensure_promise_runtime(mc, env)
         && let Some(rc) = object_get_key_value(&runtime, "__pending_unhandled")
@@ -343,7 +353,7 @@ pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &J
                     insertion_tick = *n as usize;
                 }
                 let current = CURRENT_TICK.load(Ordering::SeqCst);
-                if current >= insertion_tick + UNHANDLED_GRACE {
+                if force || current >= insertion_tick + UNHANDLED_GRACE {
                     // Enqueue UnhandledCheck task for this entry
                     if let Some(p_rc) = object_get_key_value(entry, "promise") {
                         if let Value::Promise(promise_gc) = &*p_rc.borrow() {
@@ -360,9 +370,10 @@ pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &J
                             };
 
                             log::debug!(
-                                "process_runtime_pending_unhandled: scheduling UnhandledCheck for promise ptr={:p} insertion_tick={}",
+                                "process_runtime_pending_unhandled: scheduling UnhandledCheck for promise ptr={:p} insertion_tick={} force={}",
                                 Gc::as_ptr(*promise_gc),
-                                insertion_tick
+                                insertion_tick,
+                                force
                             );
 
                             queue_task(
@@ -372,6 +383,7 @@ pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &J
                                     reason,
                                     insertion_tick,
                                     env: entry_env,
+                                    force,
                                 },
                             );
                             queued_any = true;
@@ -555,6 +567,9 @@ thread_local! {
     /// This enables proper asynchronous execution of promise callbacks.
     static GLOBAL_TASK_QUEUE: std::cell::RefCell<Vec<Task<'static>>> = const { std::cell::RefCell::new(Vec::new()) };
 
+    // Track consecutive Resolution/Rejection tasks to improve microtask fairness.
+    static RESOLUTION_STREAK: AtomicUsize = const { AtomicUsize::new(0) };
+
     /// Counter for generating unique timeout IDs
     static NEXT_TIMEOUT_ID: std::cell::RefCell<usize> = const { std::cell::RefCell::new(1) };
 
@@ -600,9 +615,6 @@ pub fn reset_global_state() {
 /// When >1 we are in a nested/inline run and should defer UnhandledCheck
 /// processing to the outermost loop to avoid premature unhandled reports.
 static RUN_LOOP_NESTING: AtomicUsize = AtomicUsize::new(0);
-// Delay async function execution by one resolution/rejection task to improve
-// interleaving with already-queued promise microtasks.
-static EXECUTE_CLOSURE_DELAY: AtomicUsize = AtomicUsize::new(0);
 
 // If true, `evaluate_script` (CLI / examples) will keep the event loop alive
 // while there are active timers/intervals registered. Defaults to false so
@@ -674,6 +686,9 @@ fn queue_task<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
         Task::ExecuteClosure { function, .. } => format!("ExecuteClosure function={:?}", function),
         Task::AttachHandlers { promise, .. } => format!("AttachHandlers promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::ResolvePromise { promise, .. } => format!("ResolvePromise promise_ptr={:p}", Gc::as_ptr(*promise)),
+        Task::AsyncStep { generator, is_reject, .. } => {
+            format!("AsyncStep gen_ptr={:p} is_reject={}", Gc::as_ptr(*generator), is_reject)
+        }
         Task::Timeout { id, .. } => format!("Timeout id={}", id),
         Task::Interval { id, .. } => format!("Interval id={}", id),
         Task::UnhandledCheck {
@@ -713,6 +728,83 @@ fn queue_task<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
     let mut guard = lock.lock().unwrap();
     *guard = true;
     cv.notify_all();
+}
+
+/// Add a task to the front of the global task queue for later execution.
+///
+/// This is used to ensure certain tasks (like initial async steps) run
+/// before already-queued promise reactions.
+fn queue_task_front<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
+    // Assign a compact task id to help correlate enqueue -> process logs
+    let task_id = TASK_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+    let task_key = match &task {
+        Task::Resolution { promise, callbacks } => {
+            format!("Resolution promise_ptr={:p} callbacks={}", Gc::as_ptr(*promise), callbacks.len())
+        }
+        Task::Rejection { promise, callbacks } => {
+            format!("Rejection promise_ptr={:p} callbacks={}", Gc::as_ptr(*promise), callbacks.len())
+        }
+        Task::ExecuteClosure { function, .. } => format!("ExecuteClosure function={:?}", function),
+        Task::AttachHandlers { promise, .. } => format!("AttachHandlers promise_ptr={:p}", Gc::as_ptr(*promise)),
+        Task::ResolvePromise { promise, .. } => format!("ResolvePromise promise_ptr={:p}", Gc::as_ptr(*promise)),
+        Task::AsyncStep { generator, is_reject, .. } => {
+            format!("AsyncStep gen_ptr={:p} is_reject={}", Gc::as_ptr(*generator), is_reject)
+        }
+        Task::Timeout { id, .. } => format!("Timeout id={}", id),
+        Task::Interval { id, .. } => format!("Interval id={}", id),
+        Task::UnhandledCheck {
+            promise, insertion_tick, ..
+        } => format!(
+            "UnhandledCheck promise_ptr={:p} insertion_tick={}",
+            Gc::as_ptr(*promise),
+            insertion_tick
+        ),
+    };
+
+    if let Ok(mut counters) = get_task_repetition_counters().lock() {
+        *counters.entry(task_key.clone()).or_insert(0) += 1;
+    }
+
+    let task_summary = format!("id={} {}", task_id, task_key);
+    log::debug!("queue_task_front: enqueuing task -> {}", task_summary);
+
+    GLOBAL_TASK_QUEUE.with(|q| {
+        q.borrow_mut().insert(0, {
+            let t = task;
+            unsafe { std::mem::transmute::<Task<'gc>, Task<'static>>(t) }
+        });
+        GLOBAL_TASK_ID_QUEUE.with(|ids| ids.borrow_mut().insert(0, task_id));
+        let len = q.borrow().len();
+        log::debug!("queue_task_front: id={} queue_len after insert = {}", task_id, len);
+    });
+
+    let (lock, cv) = get_event_loop_wake();
+    let mut guard = lock.lock().unwrap();
+    *guard = true;
+    cv.notify_all();
+}
+
+pub fn queue_async_step<'gc>(
+    mc: &MutationContext<'gc>,
+    generator: GcPtr<'gc, JSGenerator<'gc>>,
+    resolve: Value<'gc>,
+    reject: Value<'gc>,
+    result: Value<'gc>,
+    is_reject: bool,
+    env: &JSObjectDataPtr<'gc>,
+) {
+    queue_task_front(
+        mc,
+        Task::AsyncStep {
+            generator,
+            resolve,
+            reject,
+            result,
+            is_reject,
+            env: *env,
+        },
+    );
 }
 
 /// Remove any pending UnhandledCheck tasks for the given promise from the global queue.
@@ -796,18 +888,32 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
         Task::ExecuteClosure { function, .. } => format!("id={} ExecuteClosure function={:?}", task_id, function),
         Task::AttachHandlers { promise, .. } => format!("id={} AttachHandlers promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
         Task::ResolvePromise { promise, .. } => format!("id={} ResolvePromise promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
+        Task::AsyncStep { generator, is_reject, .. } => {
+            format!(
+                "id={} AsyncStep gen_ptr={:p} is_reject={}",
+                task_id,
+                Gc::as_ptr(*generator),
+                is_reject
+            )
+        }
         Task::Timeout { id, .. } => format!("id={} Timeout id={}", task_id, id),
         Task::Interval { id, .. } => format!("id={} Interval id={}", task_id, id),
         Task::UnhandledCheck {
-            promise, insertion_tick, ..
+            promise,
+            insertion_tick,
+            force,
+            ..
         } => format!(
-            "id={} UnhandledCheck promise_ptr={:p} insertion_tick={}",
+            "id={} UnhandledCheck promise_ptr={:p} insertion_tick={} force={}",
             task_id,
             Gc::as_ptr(*promise),
-            insertion_tick
+            insertion_tick,
+            force
         ),
     };
     log::debug!("process_task: executing task -> {}", task_summary);
+
+    let is_resolution_task = matches!(task, Task::Resolution { .. } | Task::Rejection { .. } | Task::AsyncStep { .. });
 
     match task {
         Task::Resolution { promise, callbacks } => {
@@ -822,6 +928,74 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                     callback,
                     caller_env_opt.as_ref().map(|e| e as *const _).unwrap_or(std::ptr::null())
                 );
+                let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
+
+                let mut handled = false;
+                match &callback {
+                    Value::Closure(cl) => {
+                        let tmp_env = new_js_object_data(mc);
+                        let call_env = caller_env_opt.as_ref().or(cl.env.as_ref()).unwrap_or(&tmp_env);
+                        handled = true;
+                        match crate::core::call_closure(mc, cl, None, &args, call_env, None) {
+                            Ok(result) => {
+                                resolve_promise(mc, &new_promise, result, call_env);
+                            }
+                            Err(e) => {
+                                if let crate::core::EvalError::Throw(value, ..) = e {
+                                    reject_promise(mc, &new_promise, value.clone(), call_env);
+                                } else {
+                                    reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))), call_env);
+                                }
+                            }
+                        }
+                    }
+                    Value::AsyncClosure(cl) => {
+                        let tmp_env = new_js_object_data(mc);
+                        let call_env = caller_env_opt.as_ref().or(cl.env.as_ref()).unwrap_or(&tmp_env);
+                        handled = true;
+                        match crate::js_async::handle_async_closure_call(mc, cl, None, &args, call_env, None) {
+                            Ok(result) => resolve_promise(mc, &new_promise, result, call_env),
+                            Err(e) => reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&e.message())), call_env),
+                        }
+                    }
+                    Value::Object(obj) => {
+                        if let Some(cl_ptr) = obj.borrow().get_closure() {
+                            match &*cl_ptr.borrow() {
+                                Value::Closure(cl) => {
+                                    let tmp_env = new_js_object_data(mc);
+                                    let call_env = caller_env_opt.as_ref().or(cl.env.as_ref()).unwrap_or(&tmp_env);
+                                    handled = true;
+                                    match crate::core::call_closure(mc, cl, None, &args, call_env, Some(*obj)) {
+                                        Ok(result) => resolve_promise(mc, &new_promise, result, call_env),
+                                        Err(e) => {
+                                            if let crate::core::EvalError::Throw(value, ..) = e {
+                                                reject_promise(mc, &new_promise, value.clone(), call_env);
+                                            } else {
+                                                reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&format!("{e:?}"))), call_env);
+                                            }
+                                        }
+                                    }
+                                }
+                                Value::AsyncClosure(cl) => {
+                                    let tmp_env = new_js_object_data(mc);
+                                    let call_env = caller_env_opt.as_ref().or(cl.env.as_ref()).unwrap_or(&tmp_env);
+                                    handled = true;
+                                    match crate::js_async::handle_async_closure_call(mc, cl, None, &args, call_env, Some(*obj)) {
+                                        Ok(result) => resolve_promise(mc, &new_promise, result, call_env),
+                                        Err(e) => reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&e.message())), call_env),
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if handled {
+                    continue;
+                }
+
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                     // Debug: show callback param count and captured_env pointer for diagnosis
@@ -830,7 +1004,6 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                         params.len(),
                         Gc::as_ptr(captured_env)
                     );
-                    let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
                     log::trace!("callback args={:?}", args);
                     let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &args, caller_env_opt.as_ref())?;
                     match evaluate_statements(mc, &func_env, &body) {
@@ -920,9 +1093,79 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
             }
 
             for (callback, new_promise, caller_env_opt) in callbacks {
+                let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
+
+                let mut handled = false;
+                match &callback {
+                    Value::Closure(cl) => {
+                        let tmp_env = new_js_object_data(mc);
+                        let call_env = caller_env_opt.as_ref().or(cl.env.as_ref()).unwrap_or(&tmp_env);
+                        handled = true;
+                        match crate::core::call_closure(mc, cl, None, &args, call_env, None) {
+                            Ok(result) => resolve_promise(mc, &new_promise, result, call_env),
+                            Err(e) => {
+                                if let crate::core::EvalError::Throw(value, ..) = e {
+                                    reject_promise(mc, &new_promise, value.clone(), call_env);
+                                } else {
+                                    reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))), call_env);
+                                }
+                            }
+                        }
+                    }
+                    Value::AsyncClosure(cl) => {
+                        let tmp_env = new_js_object_data(mc);
+                        let call_env = caller_env_opt.as_ref().or(cl.env.as_ref()).unwrap_or(&tmp_env);
+                        handled = true;
+                        match crate::js_async::handle_async_closure_call(mc, cl, None, &args, call_env, None) {
+                            Ok(result) => resolve_promise(mc, &new_promise, result, call_env),
+                            Err(e) => reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&e.message())), call_env),
+                        }
+                    }
+                    Value::Object(obj) => {
+                        if let Some(cl_ptr) = obj.borrow().get_closure() {
+                            match &*cl_ptr.borrow() {
+                                Value::Closure(cl) => {
+                                    let tmp_env = new_js_object_data(mc);
+                                    let call_env = caller_env_opt.as_ref().or(cl.env.as_ref()).unwrap_or(&tmp_env);
+                                    handled = true;
+                                    match crate::core::call_closure(mc, cl, None, &args, call_env, Some(*obj)) {
+                                        Ok(result) => resolve_promise(mc, &new_promise, result, call_env),
+                                        Err(e) => {
+                                            if let crate::core::EvalError::Throw(value, ..) = e {
+                                                reject_promise(mc, &new_promise, value.clone(), call_env);
+                                            } else {
+                                                reject_promise(
+                                                    mc,
+                                                    &new_promise,
+                                                    Value::String(utf8_to_utf16(&format!("{:?}", e))),
+                                                    call_env,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Value::AsyncClosure(cl) => {
+                                    let tmp_env = new_js_object_data(mc);
+                                    let call_env = caller_env_opt.as_ref().or(cl.env.as_ref()).unwrap_or(&tmp_env);
+                                    handled = true;
+                                    match crate::js_async::handle_async_closure_call(mc, cl, None, &args, call_env, Some(*obj)) {
+                                        Ok(result) => resolve_promise(mc, &new_promise, result, call_env),
+                                        Err(e) => reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&e.message())), call_env),
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if handled {
+                    continue;
+                }
+
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                    let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
                     let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &args, caller_env_opt.as_ref())?;
                     match evaluate_statements(mc, &func_env, &body) {
                         Ok(result) => {
@@ -1021,6 +1264,17 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
         Task::ResolvePromise { promise, value, env } => {
             log::trace!("Processing ResolvePromise task");
             resolve_promise(mc, &promise, value, &env);
+        }
+        Task::AsyncStep {
+            generator,
+            resolve,
+            reject,
+            result,
+            is_reject,
+            env,
+        } => {
+            let step_result = if is_reject { Err(result) } else { Ok(result) };
+            crate::js_async::continue_async_step_direct(mc, generator, resolve, reject, step_result, &env)?;
         }
         Task::Timeout { id, callback, args, .. } => {
             log::trace!("Processing Timeout task");
@@ -1136,11 +1390,13 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
             reason,
             insertion_tick,
             env,
+            force,
         } => {
             log::trace!(
-                "Processing UnhandledCheck task for promise ptr={:p} insertion_tick={}",
+                "Processing UnhandledCheck task for promise ptr={:p} insertion_tick={} force={}",
                 Gc::as_ptr(promise),
-                insertion_tick
+                insertion_tick,
+                force
             );
             // Check if the promise still has no rejection handlers
             let promise_borrow = promise.borrow();
@@ -1148,14 +1404,15 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                 // If the grace window has passed, record as unhandled
                 let current = CURRENT_TICK.load(Ordering::SeqCst);
                 log::trace!(
-                    "UnhandledCheck: current_tick={} insertion_tick={} grace={} on_rejected_empty=true",
+                    "UnhandledCheck: current_tick={} insertion_tick={} grace={} force={} on_rejected_empty=true",
                     current,
                     insertion_tick,
-                    UNHANDLED_GRACE
+                    UNHANDLED_GRACE,
+                    force
                 );
-                if current >= insertion_tick + UNHANDLED_GRACE {
+                if force || current >= insertion_tick + UNHANDLED_GRACE {
                     log::debug!(
-                        "UnhandledCheck: grace elapsed, recording unhandled rejection for promise ptr={:p}",
+                        "UnhandledCheck: grace elapsed (or forced), recording unhandled rejection for promise ptr={:p}",
                         Gc::as_ptr(promise)
                     );
                     // Store the stringified reason into runtime property for later pick-up
@@ -1233,6 +1490,16 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                 }
             }
         }
+    }
+
+    if is_resolution_task {
+        RESOLUTION_STREAK.with(|streak| {
+            streak.fetch_add(1, Ordering::SeqCst);
+        });
+    } else {
+        RESOLUTION_STREAK.with(|streak| {
+            streak.store(0, Ordering::SeqCst);
+        });
     }
     Ok(())
 }
@@ -1349,6 +1616,7 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
                     Task::UnhandledCheck { .. } => "UnhandledCheck",
                     Task::AttachHandlers { .. } => "AttachHandlers",
                     Task::ResolvePromise { .. } => "ResolvePromise",
+                    Task::AsyncStep { .. } => "AsyncStep",
                 };
                 *counts.entry(k).or_insert(0usize) += 1;
             }
@@ -1363,15 +1631,12 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
             return (None, None);
         }
 
-        // Prefer Resolution/Rejection tasks (microtasks) over timers.
-        // First scan for any Resolution or Rejection tasks and pick the
-        // first such task found. If none, fall back to finding the
-        // earliest ready timer (Timeout/Interval).
         let mut min_wait_time: Option<Duration> = None;
-
-        // 1) look for microtasks
+        let mut ready_index: Option<usize> = None;
         let mut first_resolution: Option<usize> = None;
-        let mut first_execute: Option<usize> = None;
+        let mut first_async_step: Option<usize> = None;
+        let mut first_resolve_promise: Option<usize> = None;
+
         for (i, task) in queue_borrow.iter().enumerate() {
             match task {
                 Task::Resolution { .. } | Task::Rejection { .. } => {
@@ -1379,77 +1644,53 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
                         first_resolution = Some(i);
                     }
                 }
-                Task::ExecuteClosure { .. } => {
-                    if first_execute.is_none() {
-                        first_execute = Some(i);
+                Task::AsyncStep { .. } => {
+                    if first_async_step.is_none() {
+                        first_async_step = Some(i);
                     }
                 }
-                _ => {}
-            }
-        }
-
-        if let Some(res_idx) = first_resolution
-            && first_execute.is_some()
-            && EXECUTE_CLOSURE_DELAY.load(Ordering::SeqCst) > 0
-        {
-            EXECUTE_CLOSURE_DELAY.fetch_sub(1, Ordering::SeqCst);
-            let t = queue_borrow.remove(res_idx);
-            let id = GLOBAL_TASK_ID_QUEUE.with(|ids| ids.borrow_mut().remove(res_idx));
-            let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
-            return (Some((id, t_gc)), None);
-        }
-
-        if let Some(exec_idx) = first_execute {
-            let t = queue_borrow.remove(exec_idx);
-            let id = GLOBAL_TASK_ID_QUEUE.with(|ids| ids.borrow_mut().remove(exec_idx));
-            let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
-            return (Some((id, t_gc)), None);
-        }
-
-        if let Some(res_idx) = first_resolution {
-            let t = queue_borrow.remove(res_idx);
-            let id = GLOBAL_TASK_ID_QUEUE.with(|ids| ids.borrow_mut().remove(res_idx));
-            let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
-            return (Some((id, t_gc)), None);
-        }
-
-        // 2) no immediate microtasks — find ready timers or compute min wait
-        let mut ready_timer_index: Option<usize> = None;
-        for (i, task) in queue_borrow.iter().enumerate() {
-            match task {
+                Task::ResolvePromise { .. } => {
+                    if first_resolve_promise.is_none() {
+                        first_resolve_promise = Some(i);
+                    }
+                }
                 Task::Timeout { target_time, .. } | Task::Interval { target_time, .. } => {
                     if *target_time <= now {
-                        ready_timer_index = Some(i);
-                        break;
+                        if ready_index.is_none() {
+                            ready_index = Some(i);
+                        }
                     } else {
                         let wait = *target_time - now;
                         min_wait_time = Some(min_wait_time.map_or(wait, |m| m.min(wait)));
                     }
                 }
+                Task::UnhandledCheck { insertion_tick, force, .. } => {
+                    let current = CURRENT_TICK.load(Ordering::SeqCst);
+                    if *force || current >= *insertion_tick + UNHANDLED_GRACE && ready_index.is_none() {
+                        ready_index = Some(i);
+                    }
+                }
                 _ => {
-                    // For UnhandledCheck tasks, only treat them as ready if their grace window has elapsed.
-                    match task {
-                        Task::UnhandledCheck { insertion_tick, .. } => {
-                            let current = CURRENT_TICK.load(Ordering::SeqCst);
-                            if current >= *insertion_tick + UNHANDLED_GRACE {
-                                ready_timer_index = Some(i);
-                                break;
-                            } else {
-                                // Not yet ready, skip for now and continue scanning
-                                continue;
-                            }
-                        }
-                        _ => {
-                            // other non-timer tasks are treated as ready
-                            ready_timer_index = Some(i);
-                            break;
-                        }
+                    if ready_index.is_none() {
+                        ready_index = Some(i);
                     }
                 }
             }
         }
 
-        if let Some(index) = ready_timer_index {
+        if let Some(async_idx) = first_async_step {
+            ready_index = Some(async_idx);
+        } else if let Some(resolve_idx) = first_resolve_promise
+            && RESOLUTION_STREAK.with(|streak| streak.load(Ordering::SeqCst)) >= 2
+        {
+            ready_index = Some(resolve_idx);
+        } else if let Some(res_idx) = first_resolution {
+            ready_index = Some(res_idx);
+        } else if let Some(resolve_idx) = first_resolve_promise {
+            ready_index = Some(resolve_idx);
+        }
+
+        if let Some(index) = ready_index {
             let t = queue_borrow.remove(index);
             let id = GLOBAL_TASK_ID_QUEUE.with(|ids| ids.borrow_mut().remove(index));
             let t_gc: Task<'gc> = unsafe { std::mem::transmute(t) };
@@ -1658,7 +1899,7 @@ pub fn get_promise_from_js_object<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<GcP
 ///
 /// # Returns
 /// * `Result<Value, JSError>` - New promise for chaining or error
-fn perform_promise_then<'gc>(
+pub fn perform_promise_then<'gc>(
     mc: &MutationContext<'gc>,
     promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     on_fulfilled: Option<Value<'gc>>,
@@ -1735,22 +1976,6 @@ fn perform_promise_then<'gc>(
     Ok(())
 }
 
-/// Resolve a promise with a value, transitioning it to fulfilled state.
-///
-/// This function changes the promise state from Pending to Fulfilled and
-/// queues all registered fulfillment callbacks for asynchronous execution.
-/// If the value is itself a promise, it adopts the state of that promise (flattening).
-///
-/// # Arguments
-/// * `promise` - The promise to resolve
-/// * `value` - The value to resolve the promise with
-///
-/// # Behavior
-/// - Only works if promise is currently in Pending state
-/// - If value is a promise object, adopts its state instead of resolving to the object
-/// - Sets promise state to Fulfilled and stores the value
-/// - Queues all on_fulfilled callbacks for async execution
-/// - Clears the callback list after queuing
 pub fn resolve_promise<'gc>(
     mc: &MutationContext<'gc>,
     promise: &Gc<'gc, GcCell<JSPromise<'gc>>>,
@@ -1985,22 +2210,11 @@ pub fn reject_promise<'gc>(
                     reason: reason.clone(),
                     insertion_tick: CURRENT_TICK.load(Ordering::SeqCst),
                     env: *env,
+                    force: false,
                 },
             );
         }
     }
-}
-
-/// Check if a JavaScript object represents a Promise.
-///
-/// # Arguments
-/// * `obj` - The object to check
-///
-/// # Returns
-/// * `bool` - True if the object contains a promise, false otherwise
-#[allow(dead_code)]
-pub fn is_promise(obj: &JSObjectDataPtr) -> bool {
-    get_promise_from_js_object(obj).is_some()
 }
 
 /// Internal function for Promise.allSettled resolve callback
@@ -2717,6 +2931,20 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         Value::Function("__internal_promise_finally_reject".to_string()),
     )?;
 
+    // Register Promise.all internal helpers
+    crate::core::env_set(
+        mc,
+        env,
+        "__internal_promise_all_resolve",
+        Value::Function("__internal_promise_all_resolve".to_string()),
+    )?;
+    crate::core::env_set(
+        mc,
+        env,
+        "__internal_promise_all_reject",
+        Value::Function("__internal_promise_all_reject".to_string()),
+    )?;
+
     Ok(())
 }
 
@@ -3053,8 +3281,8 @@ pub fn handle_promise_static_method_val<'gc>(
                                         ),
                                     ));
 
-                                    perform_promise_then(mc, promise_ref, Some(then_callback), None, Some(result_promise), env)?;
-                                    perform_promise_then(mc, promise_ref, None, Some(catch_callback), Some(result_promise), env)?;
+                                    perform_promise_then(mc, promise_ref, Some(then_callback), None, None, env)?;
+                                    perform_promise_then(mc, promise_ref, None, Some(catch_callback), None, env)?;
                                 }
                             }
                         } else {

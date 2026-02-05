@@ -1,3 +1,9 @@
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message || 'Assertion failed');
+  }
+}
+
 const actual = [];
 const expected = [
   'Promise: 6',
@@ -37,7 +43,12 @@ function countdown(counter) {
 const triggerPromise = trigger();
 countdown(iterations * 2).then(() => {
   triggerPromise.then(() => {
-    console.log('actual', actual);
-    console.log('expected', expected);
+    // console.log('expected', expected);
+    // console.log('  actual', actual);
+    assert(actual.length === expected.length, `Expected ${expected.length} entries, got ${actual.length}`);
+    for (let i = 0; i < expected.length; i++) {
+      assert(actual[i] === expected[i], `At index ${i}, expected "${expected[i]}", got "${actual[i]}"`);
+    }
+    // console.log('PASSED');
   });
 });

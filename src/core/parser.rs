@@ -2000,7 +2000,7 @@ fn get_assignment_ctor(token: &Token) -> Option<fn(Box<Expr>, Box<Expr>) -> Expr
 
 fn contains_optional_chain(e: &Expr) -> bool {
     match e {
-        Expr::OptionalProperty(_, _) | Expr::OptionalIndex(_, _) | Expr::OptionalCall(_, _) => true,
+        Expr::OptionalProperty(_, _) | Expr::OptionalPrivateMember(_, _) | Expr::OptionalIndex(_, _) | Expr::OptionalCall(_, _) => true,
         Expr::Property(obj, _) => contains_optional_chain(obj.as_ref()),
         Expr::Index(obj, idx) => contains_optional_chain(obj.as_ref()) || contains_optional_chain(idx.as_ref()),
         Expr::Call(obj, _) => contains_optional_chain(obj.as_ref()),
@@ -2888,7 +2888,13 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 *index += 1; // consume ]
                 computed_key_expr = Some(expr);
             }
-            _ => return Err(raise_parse_error_at!(t.get(*index))),
+            _ => {
+                if let Some(name) = t[*index].token.as_identifier_string() {
+                    name_str_opt = Some(name);
+                } else {
+                    return Err(raise_parse_error_at!(t.get(*index)));
+                }
+            }
         }
 
         // Check duplicate private
@@ -2947,14 +2953,22 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 } else if let Some(name) = name_str_opt {
                     if is_static {
                         if is_private {
-                            members.push(ClassMember::PrivateStaticMethodAsyncGenerator(name, params, body));
+                            if is_async_member {
+                                members.push(ClassMember::PrivateStaticMethodAsyncGenerator(name, params, body));
+                            } else {
+                                members.push(ClassMember::PrivateStaticMethodGenerator(name, params, body));
+                            }
                         } else if is_async_member {
                             members.push(ClassMember::StaticMethodAsyncGenerator(name, params, body));
                         } else {
                             members.push(ClassMember::StaticMethodGenerator(name, params, body));
                         }
                     } else if is_private {
-                        members.push(ClassMember::PrivateMethodAsyncGenerator(name, params, body));
+                        if is_async_member {
+                            members.push(ClassMember::PrivateMethodAsyncGenerator(name, params, body));
+                        } else {
+                            members.push(ClassMember::PrivateMethodGenerator(name, params, body));
+                        }
                     } else if is_async_member {
                         members.push(ClassMember::MethodAsyncGenerator(name, params, body));
                     } else {
@@ -2976,14 +2990,22 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             } else if let Some(name) = name_str_opt {
                 if is_static {
                     if is_private {
-                        members.push(ClassMember::PrivateStaticMethod(name, params, body));
+                        if is_async_member {
+                            members.push(ClassMember::PrivateStaticMethodAsync(name, params, body));
+                        } else {
+                            members.push(ClassMember::PrivateStaticMethod(name, params, body));
+                        }
                     } else if is_async_member {
                         members.push(ClassMember::StaticMethodAsync(name, params, body));
                     } else {
                         members.push(ClassMember::StaticMethod(name, params, body));
                     }
                 } else if is_private {
-                    members.push(ClassMember::PrivateMethod(name, params, body));
+                    if is_async_member {
+                        members.push(ClassMember::PrivateMethodAsync(name, params, body));
+                    } else {
+                        members.push(ClassMember::PrivateMethod(name, params, body));
+                    }
                 } else if is_async_member {
                     members.push(ClassMember::MethodAsync(name, params, body));
                 } else {
@@ -4575,6 +4597,19 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     } else {
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     }
+                } else if let Token::PrivateIdentifier(prop) = &tokens[*index].token {
+                    // Optional private access: obj?.#x
+                    let invalid = PRIVATE_NAME_STACK.with(|s| {
+                        let stack = s.borrow();
+                        !stack.iter().rev().any(|rc| rc.borrow().contains(prop))
+                    });
+                    if invalid {
+                        let msg = format!("Private field '#{prop}' must be declared in an enclosing class");
+                        return Err(raise_parse_error_with_token!(tokens[*index], msg));
+                    }
+                    let prop = format!("#{prop}");
+                    *index += 1;
+                    expr = Expr::OptionalPrivateMember(Box::new(expr), prop);
                 } else if matches!(tokens[*index].token, Token::LBracket) {
                     // Optional computed property access: obj?.[expr]
                     *index += 1; // consume '['

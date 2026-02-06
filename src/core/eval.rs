@@ -72,6 +72,45 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     }
 }
 
+fn string_to_bigint_for_eq(s: &str) -> Option<BigInt> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Some(BigInt::from(0));
+    }
+
+    let (sign, rest) = if let Some(stripped) = trimmed.strip_prefix('-') {
+        (-1, stripped)
+    } else if let Some(stripped) = trimmed.strip_prefix('+') {
+        (1, stripped)
+    } else {
+        (1, trimmed)
+    };
+
+    if rest.is_empty() {
+        return None;
+    }
+
+    let (radix, digits) = if rest.starts_with("0x") || rest.starts_with("0X") {
+        (16, &rest[2..])
+    } else if rest.starts_with("0b") || rest.starts_with("0B") {
+        (2, &rest[2..])
+    } else if rest.starts_with("0o") || rest.starts_with("0O") {
+        (8, &rest[2..])
+    } else {
+        (10, rest)
+    };
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    let mut value = BigInt::parse_bytes(digits.as_bytes(), radix)?;
+    if sign < 0 {
+        value = -value;
+    }
+    Some(value)
+}
+
 fn loose_equal<'gc>(mc: &MutationContext<'gc>, l: Value<'gc>, r: Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
     match (l, r) {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => Ok(true),
@@ -112,17 +151,11 @@ fn loose_equal<'gc>(mc: &MutationContext<'gc>, l: Value<'gc>, r: Value<'gc>, env
         }
         (Value::String(l), Value::BigInt(r)) => {
             let ls = utf16_to_utf8(&l);
-            match BigInt::parse_bytes(ls.trim().as_bytes(), 10) {
-                Some(lb) => Ok(lb == *r),
-                None => Ok(false),
-            }
+            Ok(string_to_bigint_for_eq(&ls).map(|lb| lb == *r).unwrap_or(false))
         }
         (Value::BigInt(l), Value::String(r)) => {
             let rs = utf16_to_utf8(&r);
-            match BigInt::parse_bytes(rs.trim().as_bytes(), 10) {
-                Some(rb) => Ok(*l == rb),
-                None => Ok(false),
-            }
+            Ok(string_to_bigint_for_eq(&rs).map(|rb| *l == rb).unwrap_or(false))
         }
         (Value::Symbol(l), Value::Symbol(r)) => Ok(Gc::as_ptr(l) == Gc::as_ptr(r)),
         (Value::Object(l), Value::Object(r)) => Ok(Gc::as_ptr(l) == Gc::as_ptr(r)),
@@ -10644,16 +10677,21 @@ fn evaluate_expr_binary<'gc>(
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
             (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? * to_number_with_env(mc, env, &r)?)),
         },
-        BinaryOp::Div => match (l_val, r_val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => {
-                if rn.is_zero() {
-                    return Err(raise_range_error!("Division by zero").into());
+        BinaryOp::Div => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    if rn.is_zero() {
+                        return Err(raise_range_error!("Division by zero").into());
+                    }
+                    Ok(Value::BigInt(Box::new(*ln / *rn)))
                 }
-                Ok(Value::BigInt(Box::new(*ln / *rn)))
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln / rn)),
+                (l, r) => Ok(Value::Number(to_number(&l)? / to_number(&r)?)),
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? / to_number_with_env(mc, env, &r)?)),
-        },
+        }
         BinaryOp::LeftShift => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => {
                 let shift = bigint_shift_count(&rn)?;
@@ -12030,6 +12068,19 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             }
         }
         Expr::Delete(target) => match &**target {
+            Expr::SuperProperty(_) => {
+                let _ = crate::js_class::evaluate_this(mc, env)?;
+                Err(raise_reference_error!("Cannot delete a super property").into())
+            }
+            Expr::Property(obj_expr, _key) if matches!(&**obj_expr, Expr::Super) => {
+                let _ = crate::js_class::evaluate_this(mc, env)?;
+                Err(raise_reference_error!("Cannot delete a super property").into())
+            }
+            Expr::Index(obj_expr, key_expr) if matches!(&**obj_expr, Expr::Super) => {
+                let _ = crate::js_class::evaluate_this(mc, env)?;
+                let _ = evaluate_expr(mc, env, key_expr)?;
+                Err(raise_reference_error!("Cannot delete a super property").into())
+            }
             Expr::Property(obj_expr, key) => {
                 let obj_val = evaluate_expr(mc, env, obj_expr)?;
                 if obj_val.is_null_or_undefined() {
@@ -12087,7 +12138,10 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             Expr::Var(name, _, _) => {
                 Err(raise_syntax_error!(format!("Delete of an unqualified identifier '{name}' in strict mode",)).into())
             }
-            _ => Ok(Value::Boolean(true)),
+            _ => {
+                let _ = evaluate_expr(mc, env, target)?;
+                Ok(Value::Boolean(true))
+            }
         },
         Expr::Getter(func_expr) => {
             let val = evaluate_expr(mc, env, func_expr)?;

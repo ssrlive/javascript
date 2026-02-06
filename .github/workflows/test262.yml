@@ -307,12 +307,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/coalesce" - "language/expressions/compound-assignment"
+      - name: Run a small test262 subset - "language/expressions/coalesce" - "language/expressions/does-not-equals"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/coalesce,language/expressions/comma,language/expressions/compound-assignment
+          node ci/runner.js --limit 10000 --focus language/expressions/coalesce,language/expressions/comma,language/expressions/compound-assignment,language/expressions/concatenation,language/expressions/conditional,language/expressions/delete,language/expressions/division,language/expressions/does-not-equals
 
       - name: Upload results
         if: ${{ !cancelled() }}

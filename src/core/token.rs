@@ -458,6 +458,8 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             | Token::RBrace
                             | Token::True
                             | Token::False
+                            | Token::Null
+                            | Token::This
                             | Token::Increment
                             | Token::Decrement => {
                                 prev_end_expr = true;

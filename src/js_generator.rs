@@ -1,8 +1,9 @@
 use crate::core::{Gc, GcCell, GeneratorState, MutationContext};
 use crate::{
     core::{
-        EvalError, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, VarDeclKind, env_get, env_set, env_set_recursive,
-        evaluate_call_dispatch, evaluate_expr, object_get_key_value, object_set_key_value, prepare_function_call_env,
+        ClassDefinition, ClassMember, EvalError, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, VarDeclKind, env_get,
+        env_get_strictness, env_set, env_set_recursive, env_set_strictness, evaluate_call_dispatch, evaluate_expr, new_js_object_data,
+        object_get_key_value, object_set_key_value, prepare_function_call_env,
     },
     error::JSError,
 };
@@ -118,17 +119,77 @@ pub fn handle_generator_function_call<'gc>(
     args: &[Value<'gc>],
     this_val: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    let has_param_expressions = closure.params.iter().any(|p| match p {
+        crate::core::DestructuringElement::Variable(_, default_opt) => default_opt.is_some(),
+        crate::core::DestructuringElement::NestedArray(_, default_opt) => default_opt.is_some(),
+        crate::core::DestructuringElement::NestedObject(_, default_opt) => default_opt.is_some(),
+        _ => false,
+    });
+
     // Eagerly initialize the function environment to enforce argument destructuring/defaults
     // errors at call time (per spec), rather than delaying to the first .next() call.
-    let func_env = prepare_function_call_env(
-        mc,
-        closure.env.as_ref(),
-        this_val.clone(),
-        Some(&closure.params[..]),
-        args,
-        None,
-        None,
-    )?;
+    let func_env = if has_param_expressions {
+        // Build a separate parameter environment so default initializers do not
+        // capture body-level declarations.
+        let param_env = prepare_function_call_env(
+            mc,
+            closure.env.as_ref(),
+            this_val.clone(),
+            Some(&closure.params[..]),
+            args,
+            None,
+            None,
+        )?;
+
+        let var_env = new_js_object_data(mc);
+        var_env.borrow_mut(mc).prototype = Some(param_env);
+        var_env.borrow_mut(mc).is_function_scope = true;
+        crate::core::object_set_key_value(mc, &var_env, "__is_arrow_function", Value::Boolean(false))?;
+
+        let mut env_strict_ancestor = false;
+        if closure.enforce_strictness_inheritance {
+            let mut proto_iter = closure.env;
+            while let Some(cur) = proto_iter {
+                if env_get_strictness(&cur) {
+                    env_strict_ancestor = true;
+                    break;
+                }
+                proto_iter = cur.borrow().prototype;
+            }
+        }
+        let fn_is_strict = closure.is_strict || env_strict_ancestor;
+        env_set_strictness(mc, &param_env, fn_is_strict)?;
+        env_set_strictness(mc, &var_env, fn_is_strict)?;
+
+        if let Some(tv) = this_val.clone() {
+            object_set_key_value(mc, &var_env, "this", tv.clone())?;
+            object_set_key_value(
+                mc,
+                &var_env,
+                "__this_initialized",
+                Value::Boolean(!matches!(tv, Value::Uninitialized)),
+            )?;
+        }
+
+        if let Some(home_obj) = &closure.home_object {
+            var_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
+        }
+
+        // Ensure the body environment has its own arguments object.
+        crate::js_class::create_arguments_object(mc, &var_env, args, None)?;
+
+        var_env
+    } else {
+        prepare_function_call_env(
+            mc,
+            closure.env.as_ref(),
+            this_val.clone(),
+            Some(&closure.params[..]),
+            args,
+            None,
+            None,
+        )?
+    };
 
     // Create a new generator object (internal data)
     let generator = Gc::new(
@@ -321,7 +382,62 @@ fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool)
             Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
             Box::new(replace_first_yield_in_expr(c, var_name, replaced)),
         ),
+        Expr::Class(class_def) => Expr::Class(Box::new(replace_first_yield_in_class_def(class_def, var_name, replaced))),
         _ => expr.clone(),
+    }
+}
+
+fn replace_first_yield_in_class_def(class_def: &ClassDefinition, var_name: &str, replaced: &mut bool) -> ClassDefinition {
+    let mut def = class_def.clone();
+
+    if let Some(extends_expr) = def.extends.as_mut() {
+        let replaced_extends = replace_first_yield_in_expr(extends_expr, var_name, replaced);
+        *extends_expr = replaced_extends;
+        if *replaced {
+            return def;
+        }
+    }
+
+    for member in def.members.iter_mut() {
+        replace_first_yield_in_class_member(member, var_name, replaced);
+        if *replaced {
+            break;
+        }
+    }
+
+    def
+}
+
+fn replace_first_yield_in_class_member(member: &mut ClassMember, var_name: &str, replaced: &mut bool) {
+    match member {
+        ClassMember::MethodComputed(key_expr, ..)
+        | ClassMember::MethodComputedGenerator(key_expr, ..)
+        | ClassMember::MethodComputedAsync(key_expr, ..)
+        | ClassMember::MethodComputedAsyncGenerator(key_expr, ..)
+        | ClassMember::StaticMethodComputed(key_expr, ..)
+        | ClassMember::StaticMethodComputedGenerator(key_expr, ..)
+        | ClassMember::StaticMethodComputedAsync(key_expr, ..)
+        | ClassMember::StaticMethodComputedAsyncGenerator(key_expr, ..)
+        | ClassMember::GetterComputed(key_expr, ..)
+        | ClassMember::SetterComputed(key_expr, ..)
+        | ClassMember::StaticGetterComputed(key_expr, ..)
+        | ClassMember::StaticSetterComputed(key_expr, ..)
+        | ClassMember::PropertyComputed(key_expr, ..)
+        | ClassMember::StaticPropertyComputed(key_expr, ..) => {
+            *key_expr = replace_first_yield_in_expr(key_expr, var_name, replaced);
+        }
+        ClassMember::StaticProperty(_, value_expr) | ClassMember::PrivateStaticProperty(_, value_expr) => {
+            *value_expr = replace_first_yield_in_expr(value_expr, var_name, replaced);
+        }
+        ClassMember::StaticBlock(body) => {
+            for stmt in body.iter_mut() {
+                replace_first_yield_in_statement(stmt, var_name, replaced);
+                if *replaced {
+                    break;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -453,6 +569,10 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, var_name: &
                 }
             }
         }
+        StatementKind::Class(class_def) => {
+            let replaced_def = replace_first_yield_in_class_def(class_def, var_name, replaced);
+            **class_def = replaced_def;
+        }
         _ => {}
     }
 }
@@ -481,6 +601,39 @@ fn expr_contains_yield(e: &Expr) -> bool {
         }
         Expr::OptionalCall(a, args) => expr_contains_yield(a) || args.iter().any(expr_contains_yield),
         Expr::OptionalIndex(a, b) => expr_contains_yield(a) || expr_contains_yield(b),
+        Expr::Class(class_def) => expr_contains_yield_in_class_def(class_def),
+        _ => false,
+    }
+}
+
+fn expr_contains_yield_in_class_def(class_def: &ClassDefinition) -> bool {
+    if let Some(extends_expr) = &class_def.extends
+        && expr_contains_yield(extends_expr)
+    {
+        return true;
+    }
+
+    class_def.members.iter().any(expr_contains_yield_in_class_member)
+}
+
+fn expr_contains_yield_in_class_member(member: &ClassMember) -> bool {
+    match member {
+        ClassMember::MethodComputed(key_expr, ..)
+        | ClassMember::MethodComputedGenerator(key_expr, ..)
+        | ClassMember::MethodComputedAsync(key_expr, ..)
+        | ClassMember::MethodComputedAsyncGenerator(key_expr, ..)
+        | ClassMember::StaticMethodComputed(key_expr, ..)
+        | ClassMember::StaticMethodComputedGenerator(key_expr, ..)
+        | ClassMember::StaticMethodComputedAsync(key_expr, ..)
+        | ClassMember::StaticMethodComputedAsyncGenerator(key_expr, ..)
+        | ClassMember::GetterComputed(key_expr, ..)
+        | ClassMember::SetterComputed(key_expr, ..)
+        | ClassMember::StaticGetterComputed(key_expr, ..)
+        | ClassMember::StaticSetterComputed(key_expr, ..)
+        | ClassMember::PropertyComputed(key_expr, ..)
+        | ClassMember::StaticPropertyComputed(key_expr, ..) => expr_contains_yield(key_expr),
+        ClassMember::StaticProperty(_, value_expr) | ClassMember::PrivateStaticProperty(_, value_expr) => expr_contains_yield(value_expr),
+        ClassMember::StaticBlock(body) => find_first_yield_in_statements(body).is_some(),
         _ => false,
     }
 }
@@ -518,6 +671,13 @@ pub(crate) fn replace_first_yield_statement_with_throw(stmt: &mut Statement, _th
         }
         StatementKind::Return(Some(expr)) => {
             if expr_contains_yield(expr) {
+                *stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
+                return true;
+            }
+            false
+        }
+        StatementKind::Class(class_def) => {
+            if expr_contains_yield_in_class_def(class_def) {
                 *stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
                 return true;
             }
@@ -635,6 +795,13 @@ pub(crate) fn replace_first_yield_statement_with_return(stmt: &mut Statement) ->
         }
         StatementKind::Return(Some(expr)) => {
             if expr_contains_yield(expr) {
+                *stmt.kind = StatementKind::Return(Some(Expr::Var("__gen_throw_val".to_string(), None, None)));
+                return true;
+            }
+            false
+        }
+        StatementKind::Class(class_def) => {
+            if expr_contains_yield_in_class_def(class_def) {
                 *stmt.kind = StatementKind::Return(Some(Expr::Var("__gen_throw_val".to_string(), None, None)));
                 return true;
             }
@@ -766,6 +933,45 @@ fn find_yield_in_expr(e: &Expr) -> Option<(YieldKind, Option<Box<Expr>>)> {
             .or_else(|| find_yield_in_expr(c)),
         Expr::OptionalCall(a, args) => find_yield_in_expr(a).or_else(|| args.iter().find_map(find_yield_in_expr)),
         Expr::OptionalIndex(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
+        Expr::Class(class_def) => find_yield_in_class_def(class_def),
+        _ => None,
+    }
+}
+
+fn find_yield_in_class_def(class_def: &ClassDefinition) -> Option<(YieldKind, Option<Box<Expr>>)> {
+    if let Some(extends_expr) = &class_def.extends
+        && let Some(found) = find_yield_in_expr(extends_expr)
+    {
+        return Some(found);
+    }
+
+    for member in &class_def.members {
+        if let Some(found) = find_yield_in_class_member(member) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn find_yield_in_class_member(member: &ClassMember) -> Option<(YieldKind, Option<Box<Expr>>)> {
+    match member {
+        ClassMember::MethodComputed(key_expr, ..)
+        | ClassMember::MethodComputedGenerator(key_expr, ..)
+        | ClassMember::MethodComputedAsync(key_expr, ..)
+        | ClassMember::MethodComputedAsyncGenerator(key_expr, ..)
+        | ClassMember::StaticMethodComputed(key_expr, ..)
+        | ClassMember::StaticMethodComputedGenerator(key_expr, ..)
+        | ClassMember::StaticMethodComputedAsync(key_expr, ..)
+        | ClassMember::StaticMethodComputedAsyncGenerator(key_expr, ..)
+        | ClassMember::GetterComputed(key_expr, ..)
+        | ClassMember::SetterComputed(key_expr, ..)
+        | ClassMember::StaticGetterComputed(key_expr, ..)
+        | ClassMember::StaticSetterComputed(key_expr, ..)
+        | ClassMember::PropertyComputed(key_expr, ..)
+        | ClassMember::StaticPropertyComputed(key_expr, ..) => find_yield_in_expr(key_expr),
+        ClassMember::StaticProperty(_, value_expr) | ClassMember::PrivateStaticProperty(_, value_expr) => find_yield_in_expr(value_expr),
+        ClassMember::StaticBlock(body) => find_first_yield_in_statements(body).map(|(_, _, kind, inner)| (kind, inner)),
         _ => None,
     }
 }
@@ -785,6 +991,7 @@ fn find_array_assign(expr: &Expr) -> Option<(&Expr, &Expr)> {
     }
 }
 
+#[allow(dead_code)]
 fn find_rightmost_assign_rhs(expr: &Expr) -> Option<&Expr> {
     match expr {
         Expr::Assign(_, rhs) => find_rightmost_assign_rhs(rhs).or(Some(&**rhs)),
@@ -927,8 +1134,6 @@ fn prepare_pending_iterator_for_yield<'gc>(
             }
         }
         rhs
-    } else if let Some(rhs) = find_rightmost_assign_rhs(expr) {
-        rhs
     } else {
         return Ok(None);
     };
@@ -1056,6 +1261,11 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
                     && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
                     return Some((i, Some(inner_idx), kind, found));
+                }
+            }
+            StatementKind::Class(class_def) => {
+                if let Some((kind, inner)) = find_yield_in_class_def(class_def) {
+                    return Some((i, None, kind, inner));
                 }
             }
             StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
@@ -1249,6 +1459,11 @@ pub fn generator_next<'gc>(
                     // Evaluate inner expression in the current function env so
                     // loop bindings are visible.
                     object_set_key_value(mc, &func_env, "__gen_throw_val", Value::Undefined)?;
+                    if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
+                        gen_obj.cached_initial_yield = Some(Value::Undefined);
+                        return Ok(create_iterator_result(mc, Value::Undefined, false)?);
+                    }
+
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => {
                             if matches!(yield_kind, YieldKind::YieldStar) {
@@ -1472,7 +1687,7 @@ pub fn generator_next<'gc>(
                 bind_replaced_yield_decl(mc, &func_env, stmt, &var_name)?;
             }
 
-            if let Some((idx, inner_idx_opt, _yield_kind, yield_inner)) = find_first_yield_in_statements(&tail) {
+            if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = find_first_yield_in_statements(&tail) {
                 let pre_env_opt: Option<JSObjectDataPtr> = if idx > 0 {
                     let pre_stmts = tail[0..idx].to_vec();
                     crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
@@ -1554,6 +1769,11 @@ pub fn generator_next<'gc>(
                     }
 
                     object_set_key_value(mc, &func_env, "__gen_throw_val", Value::Undefined)?;
+                    if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
+                        gen_obj.cached_initial_yield = Some(Value::Undefined);
+                        return Ok(create_iterator_result(mc, Value::Undefined, false)?);
+                    }
+
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => {
                             gen_obj.cached_initial_yield = Some(val.clone());
@@ -1723,6 +1943,8 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     }
 
     let gen_proto = crate::core::new_js_object_data(mc);
+    // Ensure Generator.prototype inherits from Object.prototype so ToPrimitive works.
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &gen_proto, env, "Object");
 
     // Attach prototype methods as named functions that dispatch to the generator handler
     let val = Value::Function("Generator.prototype.next".to_string());
@@ -1807,6 +2029,7 @@ pub(crate) fn count_yield_vars_in_statement(stmt: &Statement, prefix: &str) -> u
         | StatementKind::ForOfDestructuringArray(_, _, expr, body) => {
             count_yield_vars_in_expr(expr, prefix) + body.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum::<usize>()
         }
+        StatementKind::Class(class_def) => count_yield_vars_in_class_def(class_def, prefix),
         _ => 0,
     }
 }
@@ -1857,6 +2080,44 @@ fn count_yield_vars_in_expr(expr: &Expr, prefix: &str) -> usize {
                 count_yield_vars_in_expr(a, prefix) + count_yield_vars_in_expr(b, prefix) + count_yield_vars_in_expr(c, prefix)
             }
             Expr::Property(a, _) => count_yield_vars_in_expr(a, prefix),
+            Expr::Class(class_def) => count_yield_vars_in_class_def(class_def, prefix),
             _ => 0,
         }
+}
+
+fn count_yield_vars_in_class_def(class_def: &ClassDefinition, prefix: &str) -> usize {
+    let mut count = 0;
+    if let Some(extends_expr) = &class_def.extends {
+        count += count_yield_vars_in_expr(extends_expr, prefix);
+    }
+
+    for member in &class_def.members {
+        count += count_yield_vars_in_class_member(member, prefix);
+    }
+
+    count
+}
+
+fn count_yield_vars_in_class_member(member: &ClassMember, prefix: &str) -> usize {
+    match member {
+        ClassMember::MethodComputed(key_expr, ..)
+        | ClassMember::MethodComputedGenerator(key_expr, ..)
+        | ClassMember::MethodComputedAsync(key_expr, ..)
+        | ClassMember::MethodComputedAsyncGenerator(key_expr, ..)
+        | ClassMember::StaticMethodComputed(key_expr, ..)
+        | ClassMember::StaticMethodComputedGenerator(key_expr, ..)
+        | ClassMember::StaticMethodComputedAsync(key_expr, ..)
+        | ClassMember::StaticMethodComputedAsyncGenerator(key_expr, ..)
+        | ClassMember::GetterComputed(key_expr, ..)
+        | ClassMember::SetterComputed(key_expr, ..)
+        | ClassMember::StaticGetterComputed(key_expr, ..)
+        | ClassMember::StaticSetterComputed(key_expr, ..)
+        | ClassMember::PropertyComputed(key_expr, ..)
+        | ClassMember::StaticPropertyComputed(key_expr, ..) => count_yield_vars_in_expr(key_expr, prefix),
+        ClassMember::StaticProperty(_, value_expr) | ClassMember::PrivateStaticProperty(_, value_expr) => {
+            count_yield_vars_in_expr(value_expr, prefix)
+        }
+        ClassMember::StaticBlock(body) => body.iter().map(|s| count_yield_vars_in_statement(s, prefix)).sum(),
+        _ => 0,
+    }
 }

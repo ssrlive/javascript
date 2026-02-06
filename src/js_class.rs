@@ -297,6 +297,32 @@ pub(crate) fn evaluate_this<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataP
         last_seen = env_ptr;
         if let Some(this_val_rc) = object_get_key_value(&env_ptr, "this") {
             let val = this_val_rc.borrow().clone();
+            if matches!(val, Value::Uninitialized) {
+                return Err(raise_reference_error!(
+                    "Must call super constructor in derived class before accessing 'this'"
+                ));
+            }
+            return Ok(val);
+        }
+        env_opt = env_ptr.borrow().prototype;
+    }
+    Ok(Value::Object(last_seen))
+}
+
+pub(crate) fn evaluate_this_allow_uninitialized<'gc>(
+    _mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    // Like evaluate_this, but do not throw on uninitialized `this`.
+    // This is used for arrow function calls in derived constructors so
+    // `super()` can run before `this` is initialized.
+    let mut env_opt: Option<JSObjectDataPtr> = Some(*env);
+    let mut last_seen: JSObjectDataPtr = *env;
+
+    while let Some(env_ptr) = env_opt {
+        last_seen = env_ptr;
+        if let Some(this_val_rc) = object_get_key_value(&env_ptr, "this") {
+            let val = this_val_rc.borrow().clone();
             return Ok(val);
         }
         env_opt = env_ptr.borrow().prototype;
@@ -485,6 +511,17 @@ fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr:
         crate::js_object::define_property_internal(mc, func_obj, "name", &desc)?;
     }
     Ok(())
+}
+
+fn property_key_to_name_string<'gc>(key: &PropertyKey<'gc>) -> String {
+    match key {
+        PropertyKey::String(s) => s.clone(),
+        PropertyKey::Symbol(sym) => {
+            let desc = sym.description.clone().unwrap_or_default();
+            format!("[{desc}]")
+        }
+        PropertyKey::Private(s, _) => format!("#{s}"),
+    }
 }
 
 fn initialize_instance_elements<'gc>(
@@ -1390,23 +1427,49 @@ pub(crate) fn create_class_object<'gc>(
         let parent_val = evaluate_expr(mc, env, parent_expr)?;
         log::debug!("create_class_object class={} parent_val={:?}", name, parent_val);
 
-        if let Value::Object(parent_class_obj) = parent_val {
-            // Get the parent class's prototype
-            if let Some(parent_proto_val) = object_get_key_value(&parent_class_obj, "prototype") {
-                log::debug!(
-                    "create_class_object class={} found parent prototype {:?}",
-                    name,
-                    parent_proto_val.borrow()
-                );
-                if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
-                    prototype_obj.borrow_mut(mc).prototype = Some(*parent_proto_obj);
-                }
-            } else {
-                log::debug!("create_class_object class={} parent has no prototype property", name);
+        match parent_val {
+            Value::Null => {
+                // extends null -> proto parent is null, constructor parent is Function.prototype
+                prototype_obj.borrow_mut(mc).prototype = None;
             }
+            Value::Object(parent_class_obj) => {
+                let is_constructor = if parent_class_obj.borrow().class_def.is_some() {
+                    true
+                } else if let Some(flag_rc) = get_own_property(&parent_class_obj, "__is_constructor") {
+                    matches!(*flag_rc.borrow(), Value::Boolean(true))
+                } else if let Some(cl_ptr) = parent_class_obj.borrow().get_closure() {
+                    match &*cl_ptr.borrow() {
+                        Value::Closure(cl) => !cl.is_arrow,
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
 
-            // Set the class object's internal prototype to the parent class object so static properties are inherited
-            class_obj.borrow_mut(mc).prototype = Some(parent_class_obj);
+                if !is_constructor {
+                    return Err(raise_type_error!("Class extends value is not a constructor").into());
+                }
+
+                // Get the parent class's prototype
+                if let Some(parent_proto_val) = object_get_key_value(&parent_class_obj, "prototype") {
+                    log::debug!(
+                        "create_class_object class={} found parent prototype {:?}",
+                        name,
+                        parent_proto_val.borrow()
+                    );
+                    if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
+                        prototype_obj.borrow_mut(mc).prototype = Some(*parent_proto_obj);
+                    }
+                } else {
+                    log::debug!("create_class_object class={} parent has no prototype property", name);
+                }
+
+                // Set the class object's internal prototype to the parent class object so static properties are inherited
+                class_obj.borrow_mut(mc).prototype = Some(parent_class_obj);
+            }
+            _ => {
+                return Err(raise_type_error!("Class extends value is not a constructor").into());
+            }
         }
     } else {
         // No `extends`: link prototype.__proto__ to `Object.prototype` if available so
@@ -1474,8 +1537,8 @@ pub(crate) fn create_class_object<'gc>(
                     key_val.clone()
                 };
                 let pk = crate::core::PropertyKey::from(&key_prim);
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(prototype_obj));
-                let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
+                let method_name = property_key_to_name_string(&pk);
+                let gen_fn = create_class_generator_method_function_object(mc, &class_env, params, body, prototype_obj, &method_name)?;
                 object_set_key_value(mc, &prototype_obj, &pk, gen_fn)?;
                 prototype_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
@@ -1487,10 +1550,10 @@ pub(crate) fn create_class_object<'gc>(
                     key_val.clone()
                 };
                 let pk = crate::core::PropertyKey::from(&key_prim);
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(prototype_obj));
-                // Async generators not implemented yet; fallback to generator function for now
-                let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
-                object_set_key_value(mc, &prototype_obj, pk.clone(), gen_fn)?;
+                let method_name = property_key_to_name_string(&pk);
+                let async_gen_fn =
+                    create_class_async_generator_method_function_object(mc, &class_env, params, body, prototype_obj, &method_name)?;
+                object_set_key_value(mc, &prototype_obj, pk.clone(), async_gen_fn)?;
                 prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
             }
             ClassMember::MethodComputedAsync(key_expr, params, body) => {
@@ -1508,8 +1571,7 @@ pub(crate) fn create_class_object<'gc>(
                 prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
             }
             ClassMember::MethodGenerator(method_name, params, body) => {
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(prototype_obj));
-                let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
+                let gen_fn = create_class_generator_method_function_object(mc, &class_env, params, body, prototype_obj, method_name)?;
                 object_set_key_value(mc, &prototype_obj, method_name, gen_fn)?;
                 prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
@@ -1520,9 +1582,8 @@ pub(crate) fn create_class_object<'gc>(
                 prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::MethodAsyncGenerator(method_name, params, body) => {
-                // Create an AsyncGeneratorFunction value for async generator methods
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(prototype_obj));
-                let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
+                let async_gen_fn =
+                    create_class_async_generator_method_function_object(mc, &class_env, params, body, prototype_obj, method_name)?;
                 object_set_key_value(mc, &prototype_obj, method_name, async_gen_fn)?;
                 prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
@@ -1798,8 +1859,7 @@ pub(crate) fn create_class_object<'gc>(
                 if method_name == "prototype" {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(class_obj));
-                let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
+                let gen_fn = create_class_generator_method_function_object(mc, &class_env, params, body, class_obj, method_name)?;
                 object_set_key_value(mc, &class_obj, method_name, gen_fn)?;
                 class_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
@@ -1816,8 +1876,8 @@ pub(crate) fn create_class_object<'gc>(
                 if method_name == "prototype" {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(class_obj));
-                let async_gen_fn = Value::AsyncGeneratorFunction(None, Gc::new(mc, closure_data));
+                let async_gen_fn =
+                    create_class_async_generator_method_function_object(mc, &class_env, params, body, class_obj, method_name)?;
                 object_set_key_value(mc, &class_obj, method_name, async_gen_fn)?;
                 class_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
@@ -1857,8 +1917,8 @@ pub(crate) fn create_class_object<'gc>(
                 {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(class_obj));
-                let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
+                let method_name = property_key_to_name_string(&pk);
+                let gen_fn = create_class_generator_method_function_object(mc, &class_env, params, body, class_obj, &method_name)?;
                 object_set_key_value(mc, &class_obj, &pk, gen_fn)?;
                 class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
@@ -1893,10 +1953,10 @@ pub(crate) fn create_class_object<'gc>(
                 {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(class_obj));
-                // Async generators not implemented yet; fallback to generator function for now
-                let gen_fn = Value::GeneratorFunction(None, Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, &pk, gen_fn)?;
+                let method_name = property_key_to_name_string(&pk);
+                let async_gen_fn =
+                    create_class_async_generator_method_function_object(mc, &class_env, params, body, class_obj, &method_name)?;
+                object_set_key_value(mc, &class_obj, &pk, async_gen_fn)?;
                 class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticProperty(prop_name, value_expr) => {
@@ -2515,22 +2575,23 @@ pub(crate) fn evaluate_super_call<'gc>(
         Value::Undefined
     };
 
-    // Initialize this in the lexical environment
-    crate::core::object_set_key_value(mc, &lexical_env, "this", Value::Object(instance))?;
-    // Mark this as initialized
-    crate::core::object_set_key_value(mc, &lexical_env, "__this_initialized", Value::Boolean(true))?;
+    let bind_this_after_super = |mc: &MutationContext<'gc>| -> Result<(), JSError> {
+        crate::core::object_set_key_value(mc, &lexical_env, "this", Value::Object(instance))?;
+        crate::core::object_set_key_value(mc, &lexical_env, "__this_initialized", Value::Boolean(true))?;
 
-    // Update ALL environments between current env and lexical_env to have initialized status
-    let mut cur = Some(*env);
-    while let Some(env_ptr) = cur {
-        log::debug!("evaluate_super_call: updating env={:p}", env_ptr.as_ptr());
-        crate::core::object_set_key_value(mc, &env_ptr, "__this_initialized", Value::Boolean(true))?;
-        crate::core::object_set_key_value(mc, &env_ptr, "this", Value::Object(instance))?;
-        if Gc::ptr_eq(env_ptr, lexical_env) {
-            break;
+        let mut cur = Some(*env);
+        while let Some(env_ptr) = cur {
+            log::debug!("evaluate_super_call: updating env={:p}", env_ptr.as_ptr());
+            crate::core::object_set_key_value(mc, &env_ptr, "__this_initialized", Value::Boolean(true))?;
+            crate::core::object_set_key_value(mc, &env_ptr, "this", Value::Object(instance))?;
+            if Gc::ptr_eq(env_ptr, lexical_env) {
+                break;
+            }
+            cur = env_ptr.borrow().prototype;
         }
-        cur = env_ptr.borrow().prototype;
-    }
+
+        Ok(())
+    };
 
     if let Value::Object(parent_class_obj) = parent_class {
         // If parent class has an internal class_def slot, use it
@@ -2558,6 +2619,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                     // Create the arguments object
                     create_arguments_object(mc, &func_env, evaluated_args, None)?;
                     let _ = evaluate_statements(mc, &func_env, body)?;
+                    bind_this_after_super(mc)?;
                     if already_initialized {
                         return Err(raise_reference_error!("super() called after this is initialized"));
                     }
@@ -2603,6 +2665,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                     cur_update = env_ptr.borrow().prototype;
                 }
 
+                bind_this_after_super(mc)?;
                 if already_initialized {
                     return Err(raise_reference_error!("super() called after this is initialized"));
                 }
@@ -2611,6 +2674,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                 }
                 return Ok(Value::Object(new_instance));
             }
+            bind_this_after_super(mc)?;
             if already_initialized {
                 return Err(raise_reference_error!("super() called after this is initialized"));
             }
@@ -3181,11 +3245,20 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
     }
 
     if let Some(ps) = params {
+        if crate::core::get_own_property(&new_env, "arguments").is_none() {
+            let callee = fn_obj.map(Value::Object);
+            create_arguments_object(mc, &new_env, args, callee)?;
+        }
         for (i, p) in ps.iter().enumerate() {
             log::trace!("DEBUG-PARAM-SIG: index={} param={:?}", i, p);
             match p {
-                DestructuringElement::Variable(name, _) => {
-                    let v = args.get(i).cloned().unwrap_or(Value::Undefined);
+                DestructuringElement::Variable(name, default_expr) => {
+                    let mut v = args.get(i).cloned().unwrap_or(Value::Undefined);
+                    if matches!(v, Value::Undefined)
+                        && let Some(def) = default_expr
+                    {
+                        v = evaluate_expr(mc, &new_env, def)?;
+                    }
                     crate::core::env_set(mc, &new_env, name, v)?;
                 }
                 DestructuringElement::Rest(name) => {

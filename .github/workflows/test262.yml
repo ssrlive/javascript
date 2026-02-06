@@ -272,12 +272,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/class/gen-method" - "language/expressions/class/subclass-builtins"
+      - name: Run a small test262 subset - "language/expressions/class/gen-method" - "language/expressions/class/(filesonly)"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/class/gen-method,language/expressions/class/gen-method-static,language/expressions/class/method,language/expressions/class/method-static,language/expressions/class/subclass-builtins
+          node ci/runner.js --limit 10000 --focus language/expressions/class/gen-method,language/expressions/class/gen-method-static,language/expressions/class/method,language/expressions/class/method-static,language/expressions/class/subclass-builtins,"language/expressions/class/(filesonly)"
 
       - name: Upload results
         if: ${{ !cancelled() }}

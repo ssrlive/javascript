@@ -1,6 +1,6 @@
 use crate::core::{
-    ClosureData, Gc, JSObjectDataPtr, MutationContext, PropertyKey, Value, new_gc_cell_ptr, new_js_object_data, object_get_key_value,
-    object_set_key_value,
+    ClosureData, DestructuringElement, Gc, JSObjectDataPtr, MutationContext, PropertyKey, Value, new_gc_cell_ptr, new_js_object_data,
+    object_get_key_value, object_set_key_value,
 };
 use crate::{JSError, raise_type_error};
 
@@ -18,6 +18,33 @@ pub struct PropertyDescriptor<'gc> {
     // Common flags
     pub enumerable: Option<bool>,
     pub configurable: Option<bool>,
+}
+
+fn compute_function_length(params: &[DestructuringElement]) -> usize {
+    let mut fn_length = 0_usize;
+    for p in params.iter() {
+        match p {
+            DestructuringElement::Variable(_, default_opt) => {
+                if default_opt.is_some() {
+                    break;
+                }
+                fn_length += 1;
+            }
+            DestructuringElement::Rest(_) => break,
+            DestructuringElement::NestedArray(..) | DestructuringElement::NestedObject(..) => {
+                fn_length += 1;
+            }
+            DestructuringElement::Empty => {}
+            _ => {}
+        }
+    }
+    fn_length
+}
+
+fn define_function_length<'gc>(mc: &MutationContext<'gc>, func_obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
+    let desc = create_descriptor_object(mc, Value::Number(length as f64), false, false, true)?;
+    crate::js_object::define_property_internal(mc, func_obj, "length", &desc)?;
+    Ok(())
 }
 
 impl<'gc> PropertyDescriptor<'gc> {
@@ -153,6 +180,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                             };
                             let closure_val = Value::Closure(Gc::new(mc, closure_data));
                             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+                            let _ = define_function_length(mc, &func_obj, 0);
                             pd.get = Some(Value::Object(func_obj));
                         }
                         other => {
@@ -173,6 +201,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                             };
                             let closure_val = Value::Closure(Gc::new(mc, closure_data));
                             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+                            let _ = define_function_length(mc, &func_obj, compute_function_length(params));
                             pd.set = Some(Value::Object(func_obj));
                         }
                         other => {
@@ -194,6 +223,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                 };
                 let closure_val = Value::Closure(Gc::new(mc, closure_data));
                 func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+                let _ = define_function_length(mc, &func_obj, 0);
                 PropertyDescriptor::new_accessor(
                     Some(Value::Object(func_obj)),
                     None,
@@ -212,6 +242,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                 };
                 let closure_val = Value::Closure(Gc::new(mc, closure_data));
                 func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+                let _ = define_function_length(mc, &func_obj, compute_function_length(params));
                 PropertyDescriptor::new_accessor(
                     None,
                     Some(Value::Object(func_obj)),

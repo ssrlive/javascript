@@ -647,6 +647,8 @@ fn make_typedarray_constructor<'gc>(
 
     object_set_key_value(mc, &obj, "__kind", Value::Number(kind_value as f64))?;
     object_set_key_value(mc, &obj, "__native_ctor", Value::String(utf8_to_utf16("TypedArray")))?;
+    object_set_key_value(mc, &obj, "__is_constructor", Value::Boolean(true))?;
+    obj.borrow_mut(mc).set_non_enumerable("__is_constructor");
 
     // 22.2.5.1 TypedArray.BYTES_PER_ELEMENT - create constructor and prototype
     let bytes_per_element = match kind {

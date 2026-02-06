@@ -190,6 +190,8 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     }
 
     let async_gen_proto = crate::core::new_js_object_data(mc);
+    // Ensure AsyncGenerator.prototype inherits from Object.prototype so ToPrimitive works.
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &async_gen_proto, env, "Object");
 
     // Attach prototype methods as named functions that dispatch to the async generator handler
     let val = Value::Function("AsyncGenerator.prototype.next".to_string());

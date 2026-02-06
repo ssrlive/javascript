@@ -11033,9 +11033,6 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 func_obj.borrow_mut(mc).prototype = Some(*proto);
             }
 
-            // Capture current `this` value for lexical this
-            let captured_this = crate::js_class::evaluate_this(mc, env)?;
-
             let is_strict = body.first()
                 .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
                 .unwrap_or(false);
@@ -11044,7 +11041,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 params: params.to_vec(),
                 body: body.clone(),
                 env: Some(*env),
-                bound_this: Some(captured_this),
+                bound_this: None,
                 is_arrow: true,
                 is_strict,
                 enforce_strictness_inheritance: true,
@@ -11845,9 +11842,6 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 func_obj.borrow_mut(mc).prototype = Some(*proto);
             }
 
-            // Capture current `this` value for lexical this
-            let captured_this = crate::js_class::evaluate_this(mc, env)?;
-
             let is_strict = body.first()
                 .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
                 .unwrap_or(false);
@@ -11855,7 +11849,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 params: params.to_vec(),
                 body: body.clone(),
                 env: Some(*env),
-                bound_this: Some(captured_this),
+                bound_this: None,
                 is_arrow: true,
                 is_strict,
                 enforce_strictness_inheritance: true,
@@ -13318,12 +13312,15 @@ pub fn call_closure<'gc>(
     }
 
     // Determine the [[This]] binding for the call.
-    // If the closure has a bound_this (from bind() or arrow capture), use it.
+    // If the closure has a bound_this (from bind()), use it.
     // Otherwise, if a caller supplied an explicit this_val, use it.
     // If no this_val was supplied (bare call), we must default according to the function's strictness:
     // - strict functions: undefined
     // - non-strict functions: global object
-    let effective_this = if let Some(bound) = &cl.bound_this {
+    let effective_this = if cl.is_arrow {
+        let lexical_env = cl.env.as_ref().unwrap_or(env);
+        Some(crate::js_class::evaluate_this_allow_uninitialized(mc, lexical_env).map_err(EvalError::Js)?)
+    } else if let Some(bound) = &cl.bound_this {
         Some(bound.clone())
     } else if let Some(tv) = this_val {
         Some(tv)
@@ -13429,8 +13426,12 @@ pub fn call_closure<'gc>(
         // }
 
         let callee_val = fn_obj.map(Value::Object);
-        // Place the arguments object into the var_env (the function body env)
-        crate::js_class::create_arguments_object(mc, &var_env, args, callee_val)?;
+        // Place the arguments object into the var_env (function body env)
+        crate::js_class::create_arguments_object(mc, &var_env, args, callee_val.clone())?;
+        // Ensure parameter defaults can access `arguments` via the parameter env chain.
+        if crate::core::get_own_property(&param_env, "arguments").is_none() {
+            crate::js_class::create_arguments_object(mc, &param_env, args, callee_val)?;
+        }
 
         // env_set(mc, &call_env, "arguments", Value::Object(args_obj))?;
     }
@@ -13793,6 +13794,12 @@ pub fn prepare_function_call_env<'gc>(
 
     if let Some(tv) = this_val {
         object_set_key_value(mc, &call_env, "this", tv)?;
+    }
+
+    // Create the arguments object before default parameter evaluation so
+    // defaults can reference `arguments` correctly.
+    if crate::core::get_own_property(&call_env, "arguments").is_none() {
+        crate::js_class::create_arguments_object(mc, &call_env, args, None)?;
     }
 
     if let Some(params) = params_opt {

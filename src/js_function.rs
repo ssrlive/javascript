@@ -2110,7 +2110,7 @@ pub fn handle_function_prototype_method<'gc>(
             // function.bind(thisArg, ...args)
             if let Value::Closure(closure_gc) = this_value {
                 let original = closure_gc;
-                let effective_bound_this = if original.bound_this.is_some() {
+                let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
                     original.bound_this.clone()
                 } else {
                     Some(this_arg)
@@ -2130,7 +2130,7 @@ pub fn handle_function_prototype_method<'gc>(
                 Ok(Value::Closure(Gc::new(mc, new_closure_data)))
             } else if let Value::AsyncClosure(closure_gc) = this_value {
                 let original = closure_gc;
-                let effective_bound_this = if original.bound_this.is_some() {
+                let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
                     original.bound_this.clone()
                 } else {
                     Some(this_arg)
@@ -2153,7 +2153,7 @@ pub fn handle_function_prototype_method<'gc>(
                 if let Some(cl_prop) = obj.borrow().get_closure()
                     && let Value::Closure(original) = &*cl_prop.borrow()
                 {
-                    let effective_bound_this = if original.bound_this.is_some() {
+                    let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
                         original.bound_this.clone()
                     } else {
                         Some(this_arg)

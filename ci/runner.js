@@ -30,7 +30,11 @@ for (let i=0;i<argv.length;i++){
   else if (a === '--focus') { const val = argv[++i]; FOCUS_LIST.push(...String(val).split(',').map(s=>s.trim()).filter(Boolean)); }
   else if (a === '--timeout') { TIMEOUT_SECS = Number(argv[++i]); }
   else if (a === '--keep-tmp') { KEEP_TMP = true; }
-  else if (a === '--help') { console.log('Usage: node ci/runner.js [--keep-tmp] --limit N --focus name[,name2] (multiple --focus allowed)'); process.exit(0);} 
+  else if (a === '--help') {
+    console.log('Usage: node ci/runner.js [--keep-tmp] --limit N --focus name[,name2] (multiple --focus allowed)');
+    console.log('  Append (filesonly) to a focus token to collect only top-level files, e.g. "a/(filesonly)",b/c');
+    process.exit(0);
+  }
 }
 
 function log(line){ fs.appendFileSync(RESULTS_FILE, line + '\n'); }
@@ -78,38 +82,73 @@ for (const p of walkDir(path.join(REPO_DIR,'harness'))){
 }
 
 // Collect tests under focus
+const FILES_ONLY_MARKER = '(filesonly)';
 const SEARCH_DIRS = [];
+
+function stripFilesOnlyMarker(raw){
+  let text = String(raw || '').trim();
+  let filesOnly = false;
+  if (text.endsWith(FILES_ONLY_MARKER)) {
+    filesOnly = true;
+    text = text.slice(0, -FILES_ONLY_MARKER.length).trim();
+    while (text.endsWith('/') || text.endsWith('\\')) {
+      text = text.slice(0, -1);
+    }
+  }
+  return {text, filesOnly};
+}
+
 if (FOCUS_LIST.length){
   const toks = FOCUS_LIST;
-  for (const tok of toks){
-    if (tok === 'language') SEARCH_DIRS.push(path.join(REPO_DIR,'test','language'));
-    else if (tok === 'built-ins' || tok === 'builtins') SEARCH_DIRS.push(path.join(REPO_DIR,'test','built-ins'));
-    else if (tok === 'intl') SEARCH_DIRS.push(path.join(REPO_DIR,'test','intl402'));
-    else if (tok === 'all') SEARCH_DIRS.push(path.join(REPO_DIR,'test'));
-    else if (fs.existsSync(path.join(REPO_DIR,'test',tok))) SEARCH_DIRS.push(path.join(REPO_DIR,'test',tok));
-    else if (fs.existsSync(tok)) SEARCH_DIRS.push(tok);
+  for (const tokRaw of toks){
+    const {text: tok, filesOnly} = stripFilesOnlyMarker(tokRaw);
+    if (!tok) continue;
+    if (tok === 'language') SEARCH_DIRS.push({path: path.join(REPO_DIR,'test','language'), filesOnly});
+    else if (tok === 'built-ins' || tok === 'builtins') SEARCH_DIRS.push({path: path.join(REPO_DIR,'test','built-ins'), filesOnly});
+    else if (tok === 'intl') SEARCH_DIRS.push({path: path.join(REPO_DIR,'test','intl402'), filesOnly});
+    else if (tok === 'all') SEARCH_DIRS.push({path: path.join(REPO_DIR,'test'), filesOnly});
+    else if (fs.existsSync(path.join(REPO_DIR,'test',tok))) SEARCH_DIRS.push({path: path.join(REPO_DIR,'test',tok), filesOnly});
+    else if (fs.existsSync(tok)) SEARCH_DIRS.push({path: tok, filesOnly});
   }
 } else {
-  SEARCH_DIRS.push(path.join(REPO_DIR,'test'));
+  SEARCH_DIRS.push({path: path.join(REPO_DIR,'test'), filesOnly: false});
 }
 
 const CAP = LIMIT * CAP_MULTIPLIER;
-console.log(`Collecting up to ${CAP} candidate tests (LIMIT=${LIMIT}, CAP_MULTIPLIER=${CAP_MULTIPLIER}). Search dirs: ${SEARCH_DIRS}`);
+const searchDirsLabel = SEARCH_DIRS
+  .map(entry => `${entry.path}${entry.filesOnly ? FILES_ONLY_MARKER : ''}`)
+  .join(',');
+console.log(`Collecting up to ${CAP} candidate tests (LIMIT=${LIMIT}, CAP_MULTIPLIER=${CAP_MULTIPLIER}). Search dirs: ${searchDirsLabel}`);
+
+function listFilesOnly(dir){
+  let items = fs.readdirSync(dir, {withFileTypes:true});
+  items = items.sort((a,b)=>a.name.localeCompare(b.name, 'en', {numeric:true}));
+  return items
+    .filter(it => it.isFile())
+    .map(it => path.join(dir, it.name))
+    .sort((a,b)=>a.localeCompare(b, 'en', {numeric:true}));
+}
 
 function collectTests(){
   const basic = [];
   const other = [];
   const intl = [];
-  for (const dir of SEARCH_DIRS){
+  for (const entry of SEARCH_DIRS){
+    const dir = entry.path;
     if (!fs.existsSync(dir)) continue;
     // Support both directories and single-file focus entries. If `dir` is a file,
-    // treat it as the sole candidate; if it's a directory, walk it recursively.
+    // treat it as the sole candidate; if it's a directory, walk it recursively
+    // unless (filesonly) is specified for that entry.
     let files = [];
     const stat = fs.statSync(dir);
     if (stat.isFile()) {
       if (dir.endsWith('.js')) files = [dir];
     } else if (stat.isDirectory()) {
-      files = walkDir(dir).filter(p=>p.endsWith('.js')).sort();
+      if (entry.filesOnly) {
+        files = listFilesOnly(dir).filter(p=>p.endsWith('.js')).sort();
+      } else {
+        files = walkDir(dir).filter(p=>p.endsWith('.js')).sort();
+      }
     }
 
     for (const f of files){

@@ -250,3 +250,39 @@ jobs:
         with:
           name: test262-results-7
           path: test262-results.log
+
+  run-test262-subset-8:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Build JavaScript engine
+        run: |
+          cargo build --all-features --example js
+
+      - name: Run a small test262 subset - "language/expressions/class/gen-method" - "language/expressions/class/subclass-builtins"
+        if: ${{ !cancelled() }}
+        env:
+          FAIL_ON_FAILURE: 'true'
+        run: |
+          node ci/runner.js --limit 10000 --focus language/expressions/class/gen-method,language/expressions/class/gen-method-static,language/expressions/class/method,language/expressions/class/method-static,language/expressions/class/subclass-builtins
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-results-8
+          path: test262-results.log
+

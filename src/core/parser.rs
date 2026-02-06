@@ -1513,6 +1513,7 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
 
     let mut specifiers = Vec::new();
     let mut inner_stmt = None;
+    let mut source = None;
 
     if *index < t.len() && matches!(t[*index].token, Token::Default) {
         *index += 1; // consume default
@@ -1532,6 +1533,8 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
 
             let name = if let Token::Identifier(n) = &t[*index].token {
                 n.clone()
+            } else if matches!(t[*index].token, Token::Default) {
+                "default".to_string()
             } else {
                 return Err(raise_parse_error!("Expected identifier in export specifier"));
             };
@@ -1561,6 +1564,24 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 *index += 1;
             }
         }
+        if *index < t.len() {
+            let is_from = if let Token::Identifier(from_kw) = &t[*index].token {
+                from_kw == "from"
+            } else {
+                false
+            };
+            if is_from {
+                *index += 1;
+                if *index < t.len() {
+                    if let Token::StringLit(s) = &t[*index].token {
+                        source = Some(utf16_to_utf8(s));
+                        *index += 1;
+                    } else {
+                        return Err(raise_parse_error!("Expected module specifier"));
+                    }
+                }
+            }
+        }
         if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
             *index += 1;
         }
@@ -1581,7 +1602,7 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     }
 
     Ok(Statement {
-        kind: Box::new(StatementKind::Export(specifiers, inner_stmt)),
+        kind: Box::new(StatementKind::Export(specifiers, inner_stmt, source)),
         line: t[start].line,
         column: t[start].column,
     })

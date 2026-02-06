@@ -324,7 +324,8 @@ async function runAll(){
     // Only force a strict wrapper if the test explicitly requests it via the Test262
     // metadata flag 'onlyStrict'. For legacy tests that expect sloppy semantics, do
     // not inject a global "use strict" which can change eval semantics.
-    const needStrict = hasFlag(meta, 'onlyStrict');
+    const isModule = hasFlag(meta, 'module');
+    const needStrict = !isModule && hasFlag(meta, 'onlyStrict');
     const {testToRun, tmpPath, cleanupTmp, debug} = composeTest({testPath: f, repoDir: REPO_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict});
     // Only emit detailed debug lines when explicitly requested via TEST262_LOG_LEVEL=debug
     if (process.env.TEST262_LOG_LEVEL === 'debug') {
@@ -338,10 +339,14 @@ async function runAll(){
       let res;
       if (BIN) {
         // call the built engine binary directly with the composed test file
-        res = spawnSync(BIN, [tmpPath], {timeout: TIMEOUT_SECS*1000, encoding:'utf8'});
+        const binArgs = isModule ? ['--module', tmpPath] : [tmpPath];
+        res = spawnSync(BIN, binArgs, {timeout: TIMEOUT_SECS*1000, encoding:'utf8'});
       } else {
         // fall back to cargo run with appropriate args
-        res = spawnSync('cargo', ['run', '--all-features', '--example', 'js', '--', tmpPath], {timeout: TIMEOUT_SECS*1000, encoding:'utf8'});
+        const cargoArgs = ['run', '--all-features', '--example', 'js', '--'];
+        if (isModule) cargoArgs.push('--module');
+        cargoArgs.push(tmpPath);
+        res = spawnSync('cargo', cargoArgs, {timeout: TIMEOUT_SECS*1000, encoding:'utf8'});
       }
 
       if (res && res.status === 0) {

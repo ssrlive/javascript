@@ -91,7 +91,7 @@ pub fn handle_global_function<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Handle functions that expect unevaluated expressions
     match func_name {
-        "import" => return dynamic_import_function(mc, args),
+        "import" => return dynamic_import_function(mc, args, env),
         "Function" => return function_constructor(mc, args, env),
         "new" => return evaluate_new_expression(mc, args, env),
         "eval" => return evalute_eval_function(mc, args, env),
@@ -611,7 +611,11 @@ pub fn handle_global_function<'gc>(
     }
 }
 
-fn dynamic_import_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn dynamic_import_function<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Dynamic import() function
     if args.len() != 1 {
         return Err(raise_type_error!("import() requires exactly one argument").into());
@@ -622,26 +626,22 @@ fn dynamic_import_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) 
         _ => return Err(raise_type_error!("import() argument must be a string").into()),
     };
 
+    let base_path = if let Some(cell) = crate::core::env_get(env, "__filepath")
+        && let Value::String(s) = cell.borrow().clone()
+    {
+        Some(utf16_to_utf8(&s))
+    } else {
+        None
+    };
+
     // Load the module dynamically
-    let _module_value = crate::js_module::load_module(mc, &module_name, None)?;
+    let module_value = crate::js_module::load_module(mc, &module_name, base_path.as_deref())?;
 
-    // Return a Promise that resolves to the module
-    // let promise = Gc::new(
-    //     mc,
-    //     GcCell::new(crate::js_promise::JSPromise {
-    //         state: crate::js_promise::PromiseState::Fulfilled(module_value.clone()),
-    //         value: Some(module_value),
-    //         on_fulfilled: Vec::new(),
-    //         on_rejected: Vec::new(),
-    //     }),
-    // );
-
-    // let promise_obj = Value::Object(new_js_object_data(mc));
-    // if let Value::Object(obj) = &promise_obj {
-    //     object_set_key_value(mc, obj, &"__promise".into(), Value::Promise(promise))?;
-    // }
-    // Ok(promise_obj)
-    todo!()
+    // Return a Promise that resolves to the module value
+    let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
+    let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+    crate::js_promise::resolve_promise(mc, &promise, module_value, env);
+    Ok(Value::Object(promise_obj))
 }
 
 #[allow(dead_code)]

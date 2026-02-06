@@ -13,6 +13,10 @@ struct Cli {
     /// Milliseconds threshold for short timers which `evaluate_script` will wait for
     #[arg(long, default_value_t = 20)]
     timer_wait_ms: u64,
+
+    /// Execute as an ES module (enables import/export handling)
+    #[arg(long, default_value_t = false)]
+    module: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
@@ -63,7 +67,13 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
     let script_path = cli.file.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or(p.clone()));
 
-    match evaluate_script(&script_content, script_path.as_ref()) {
+    let result = if cli.module {
+        evaluate_module(&script_content, script_path.as_ref())
+    } else {
+        evaluate_script(&script_content, script_path.as_ref())
+    };
+
+    match result {
         Ok(result) => {
             if cli.eval.is_some() {
                 println!("{result}");

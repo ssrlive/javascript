@@ -83,7 +83,7 @@ fn load_module_from_file<'gc>(mc: &MutationContext<'gc>, module_name: &str, base
     execute_module(mc, &content, &module_path)
 }
 
-fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<String, JSError> {
+pub(crate) fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<String, JSError> {
     let path = Path::new(module_name);
 
     // If it's an absolute path or starts with ./ or ../, treat as file path

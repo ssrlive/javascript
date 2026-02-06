@@ -169,7 +169,13 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     Ok(())
 }
 
-pub fn evaluate_script<T, P>(script: T, script_path: Option<P>) -> Result<String, JSError>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgramKind {
+    Script,
+    Module,
+}
+
+fn evaluate_program<T, P>(script: T, script_path: Option<P>, kind: ProgramKind) -> Result<String, JSError>
 where
     T: AsRef<str>,
     P: AsRef<std::path::Path>,
@@ -198,6 +204,14 @@ where
         initialize_global_constructors(mc, &root.global_env)?;
         env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env))?;
         object_set_key_value(mc, &root.global_env, "this", Value::Object(root.global_env))?;
+
+        if kind == ProgramKind::Module {
+            let module_exports = new_js_object_data(mc);
+            object_set_key_value(mc, &root.global_env, "exports", Value::Object(module_exports))?;
+            let module_obj = new_js_object_data(mc);
+            object_set_key_value(mc, &module_obj, "exports", Value::Object(module_exports))?;
+            object_set_key_value(mc, &root.global_env, "module", Value::Object(module_obj))?;
+        }
 
         // Bind promise runtime lifecycle to this JsArena by resetting global
         // promise state so tests / repeated evaluate_script runs are isolated.
@@ -514,6 +528,22 @@ where
             },
         }
     })
+}
+
+pub fn evaluate_script<T, P>(script: T, script_path: Option<P>) -> Result<String, JSError>
+where
+    T: AsRef<str>,
+    P: AsRef<std::path::Path>,
+{
+    evaluate_program(script, script_path, ProgramKind::Script)
+}
+
+pub fn evaluate_module<T, P>(script: T, script_path: Option<P>) -> Result<String, JSError>
+where
+    T: AsRef<str>,
+    P: AsRef<std::path::Path>,
+{
+    evaluate_program(script, script_path, ProgramKind::Module)
 }
 
 // Helper to resolve a constructor's prototype object if present in `env`.

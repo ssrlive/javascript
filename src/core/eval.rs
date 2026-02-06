@@ -1339,7 +1339,7 @@ fn hoist_var_declarations<'gc>(
                 // We need to wrap it in a slice to recurse
                 hoist_var_declarations(mc, env, std::slice::from_ref(stmt), is_indirect_eval)?;
             }
-            StatementKind::Export(_, Some(decl)) => {
+            StatementKind::Export(_, Some(decl), _) => {
                 hoist_var_declarations(mc, env, std::slice::from_ref(decl), is_indirect_eval)?;
             }
             _ => {}
@@ -2677,7 +2677,68 @@ fn eval_res<'gc>(
             }
             Ok(None)
         }
-        StatementKind::Export(specifiers, inner_stmt) => {
+        StatementKind::Export(specifiers, inner_stmt, source) => {
+            if let Some(source) = source {
+                let base_path = if let Some(cell) = env_get(env, "__filepath")
+                    && let Value::String(s) = cell.borrow().clone()
+                {
+                    Some(utf16_to_utf8(&s))
+                } else {
+                    None
+                };
+
+                let mut resolved_self = false;
+                let mut self_exports = None;
+                if let Some(base) = base_path.as_deref() {
+                    let current_path = std::path::Path::new(base).canonicalize().ok();
+                    let source_path = crate::js_module::resolve_module_path(source, base_path.as_deref())
+                        .ok()
+                        .and_then(|p| std::path::Path::new(&p).canonicalize().ok());
+                    if let (Some(current), Some(target)) = (current_path, source_path)
+                        && current == target
+                        && let Some(cell) = env_get(env, "exports")
+                        && let Value::Object(exports_obj) = cell.borrow().clone()
+                    {
+                        resolved_self = true;
+                        self_exports = Some(exports_obj);
+                    }
+                }
+
+                let exports = if resolved_self {
+                    let exports_obj = match self_exports {
+                        Some(obj) => obj,
+                        None => return Err(raise_type_error!("Module is not an object").into()),
+                    };
+                    Value::Object(exports_obj)
+                } else {
+                    crate::js_module::load_module(mc, source, base_path.as_deref())
+                        .map_err(|e| EvalError::Throw(Value::String(utf8_to_utf16(&e.message())), Some(stmt.line), Some(stmt.column)))?
+                };
+
+                if let Value::Object(exports_obj) = exports {
+                    for spec in specifiers {
+                        match spec {
+                            ExportSpecifier::Named(name, alias) => {
+                                let export_name = alias.as_ref().unwrap_or(name);
+                                let val_ptr_res = object_get_key_value(&exports_obj, name);
+                                let val = if let Some(cell) = val_ptr_res {
+                                    cell.borrow().clone()
+                                } else {
+                                    Value::Undefined
+                                };
+                                export_value(mc, env, export_name, val)?;
+                            }
+                            ExportSpecifier::Default(_) => {
+                                return Err(raise_syntax_error!("Unexpected default export in re-export clause").into());
+                            }
+                        }
+                    }
+                } else {
+                    return Err(raise_type_error!("Module is not an object").into());
+                }
+                return Ok(None);
+            }
+
             // 1. Evaluate inner statement if present, to bind variables in current env
             if let Some(stmt) = inner_stmt {
                 // Recursively evaluate inner statement
@@ -8661,7 +8722,7 @@ pub fn check_top_level_return<'gc>(stmts: &[Statement]) -> Result<(), EvalError<
                 }
             }
             StatementKind::Label(_, s) => check_top_level_return(std::slice::from_ref(s))?,
-            StatementKind::Export(_, Some(s)) => check_top_level_return(std::slice::from_ref(s))?,
+            StatementKind::Export(_, Some(s), _) => check_top_level_return(std::slice::from_ref(s))?,
             _ => {}
         }
     }
@@ -11461,6 +11522,28 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::Call(func_expr, args) => evaluate_expr_call(mc, env, func_expr, args),
         Expr::New(ctor, args) => evaluate_expr_new(mc, env, ctor, args),
+        Expr::DynamicImport(specifier) => {
+            let spec_val = evaluate_expr(mc, env, specifier)?;
+            let module_name = match spec_val {
+                Value::String(s) => utf16_to_utf8(&s),
+                _ => return Err(raise_type_error!("import() argument must be a string").into()),
+            };
+
+            let base_path = if let Some(cell) = env_get(env, "__filepath")
+                && let Value::String(s) = cell.borrow().clone()
+            {
+                Some(utf16_to_utf8(&s))
+            } else {
+                None
+            };
+
+            let module_value = crate::js_module::load_module(mc, &module_name, base_path.as_deref())
+                .map_err(|e| EvalError::Throw(Value::String(utf8_to_utf16(&e.message())), None, None))?;
+            let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
+            let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+            crate::js_promise::resolve_promise(mc, &promise, module_value, env);
+            Ok(Value::Object(promise_obj))
+        }
 
         Expr::Property(obj_expr, key) => {
             let obj_val = if is_optional_chain_expr(obj_expr) {

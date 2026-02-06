@@ -49,8 +49,8 @@ pub enum StatementKind {
     Continue(Option<String>),
     Debugger,
     Label(String, Box<Statement>),
-    Import(Vec<ImportSpecifier>, String),                 // import specifiers, module name
-    Export(Vec<ExportSpecifier>, Option<Box<Statement>>), // export specifiers, optional inner declaration
+    Import(Vec<ImportSpecifier>, String), // import specifiers, module name
+    Export(Vec<ExportSpecifier>, Option<Box<Statement>>, Option<String>), // export specifiers, optional inner declaration, optional source
 }
 
 #[derive(Clone, Copy, Debug)]

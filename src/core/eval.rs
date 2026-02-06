@@ -7281,16 +7281,60 @@ fn compute_add<'gc>(
     }
 }
 
+fn to_property_key_for_assignment<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    key_val: Value<'gc>,
+) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
+    Ok(match key_val {
+        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+        Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+        Value::Symbol(s) => PropertyKey::Symbol(s),
+        Value::Object(_) => {
+            let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+            match prim {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                other => PropertyKey::String(value_to_string(&other)),
+            }
+        }
+        _ => PropertyKey::String(value_to_string(&key_val)),
+    })
+}
+
+fn eval_private_member_ref<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_expr: &Expr,
+    name: &str,
+) -> Result<(JSObjectDataPtr<'gc>, PropertyKey<'gc>), EvalError<'gc>> {
+    let obj_val = evaluate_expr(mc, env, obj_expr)?;
+    let obj = match obj_val {
+        Value::Object(obj) => obj,
+        Value::Undefined | Value::Null => {
+            return Err(raise_type_error!("Cannot read properties of null or undefined").into());
+        }
+        _ => return Err(raise_type_error!("Cannot access private field on non-object").into()),
+    };
+    let pv = evaluate_var(mc, env, name)?;
+    if let Value::PrivateName(n, id) = pv {
+        Ok((obj, PropertyKey::Private(n, id)))
+    } else {
+        Err(raise_syntax_error!(format!("Private field '{name}' must be declared in an enclosing class")).into())
+    }
+}
+
 fn evaluate_expr_add_assign<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             let new_val = compute_add(mc, env, current, val)?;
             env_set_recursive(mc, env, name, new_val.clone())?;
             Ok(new_val)
@@ -7306,6 +7350,7 @@ fn evaluate_expr_add_assign<'gc>(
             };
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = compute_add(mc, env, current, val)?;
                 set_property_with_accessors(mc, env, &obj, key, new_val.clone())?;
                 Ok(new_val)
@@ -7323,15 +7368,27 @@ fn evaluate_expr_add_assign<'gc>(
                 evaluate_expr(mc, env, obj_expr)?
             };
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = compute_add(mc, env, current, val)?;
                 set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
+        }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let new_val = compute_add(mc, env, current, val)?;
+            set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+            Ok(new_val)
         }
         _ => Err(raise_eval_error!("AddAssign only for variables, properties or indexes").into()),
     }
@@ -7343,10 +7400,10 @@ fn evaluate_expr_bitand_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             let current_num = to_numeric_with_env(mc, env, &current)?;
             let val_num = to_numeric_with_env(mc, env, &val)?;
             match (current_num, val_num) {
@@ -7377,6 +7434,7 @@ fn evaluate_expr_bitand_assign<'gc>(
             };
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let current_num = to_numeric_with_env(mc, env, &current)?;
                 let val_num = to_numeric_with_env(mc, env, &val)?;
                 match (current_num, val_num) {
@@ -7402,9 +7460,13 @@ fn evaluate_expr_bitand_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let current_num = to_numeric_with_env(mc, env, &current)?;
                 let val_num = to_numeric_with_env(mc, env, &val)?;
                 match (current_num, val_num) {
@@ -7427,6 +7489,29 @@ fn evaluate_expr_bitand_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let current_num = to_numeric_with_env(mc, env, &current)?;
+            let val_num = to_numeric_with_env(mc, env, &val)?;
+            match (current_num, val_num) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let new_val = Value::BigInt(Box::new(*ln & *rn));
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
+                    let new_val = Value::Number((l & r) as f64);
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise AND assignment").into()),
+            }
+        }
         _ => Err(raise_eval_error!("BitAndAssign only for variables, properties or indexes").into()),
     }
 }
@@ -7437,10 +7522,10 @@ fn evaluate_expr_bitor_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             let current_num = to_numeric_with_env(mc, env, &current)?;
             let val_num = to_numeric_with_env(mc, env, &val)?;
             match (current_num, val_num) {
@@ -7471,6 +7556,7 @@ fn evaluate_expr_bitor_assign<'gc>(
             };
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let current_num = to_numeric_with_env(mc, env, &current)?;
                 let val_num = to_numeric_with_env(mc, env, &val)?;
                 match (current_num, val_num) {
@@ -7496,9 +7582,13 @@ fn evaluate_expr_bitor_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let current_num = to_numeric_with_env(mc, env, &current)?;
                 let val_num = to_numeric_with_env(mc, env, &val)?;
                 match (current_num, val_num) {
@@ -7521,6 +7611,29 @@ fn evaluate_expr_bitor_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let current_num = to_numeric_with_env(mc, env, &current)?;
+            let val_num = to_numeric_with_env(mc, env, &val)?;
+            match (current_num, val_num) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let new_val = Value::BigInt(Box::new(*ln | *rn));
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
+                    let new_val = Value::Number((l | r) as f64);
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise OR assignment").into()),
+            }
+        }
         _ => Err(raise_eval_error!("BitOrAssign only for variables, properties or indexes").into()),
     }
 }
@@ -7531,10 +7644,10 @@ fn evaluate_expr_bitxor_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             let current_num = to_numeric_with_env(mc, env, &current)?;
             let val_num = to_numeric_with_env(mc, env, &val)?;
             match (current_num, val_num) {
@@ -7558,6 +7671,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let current_num = to_numeric_with_env(mc, env, &current)?;
                 let val_num = to_numeric_with_env(mc, env, &val)?;
                 match (current_num, val_num) {
@@ -7583,9 +7697,13 @@ fn evaluate_expr_bitxor_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let current_num = to_numeric_with_env(mc, env, &current)?;
                 let val_num = to_numeric_with_env(mc, env, &val)?;
                 match (current_num, val_num) {
@@ -7608,6 +7726,29 @@ fn evaluate_expr_bitxor_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let current_num = to_numeric_with_env(mc, env, &current)?;
+            let val_num = to_numeric_with_env(mc, env, &val)?;
+            match (current_num, val_num) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let new_val = Value::BigInt(Box::new(*ln ^ *rn));
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(l), Value::Number(r)) => {
+                    let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
+                    let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
+                    let new_val = Value::Number((l ^ r) as f64);
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise XOR assignment").into()),
+            }
+        }
         _ => Err(raise_eval_error!("BitXorAssign only for variables, properties or indexes").into()),
     }
 }
@@ -7618,10 +7759,10 @@ fn evaluate_expr_leftshift_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let shift = bigint_shift_count(&rn)?;
@@ -7643,6 +7784,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
@@ -7666,9 +7808,13 @@ fn evaluate_expr_leftshift_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
@@ -7689,6 +7835,27 @@ fn evaluate_expr_leftshift_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let shift = bigint_shift_count(&rn)?;
+                    let new_val = Value::BigInt(Box::new(*ln << shift));
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (l, r) => {
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let new_val = Value::Number(((l << r) as i32) as f64);
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+            }
+        }
         _ => Err(raise_eval_error!("LeftShiftAssign only for variables, properties or indexes").into()),
     }
 }
@@ -7699,10 +7866,10 @@ fn evaluate_expr_rightshift_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let shift = bigint_shift_count(&rn)?;
@@ -7724,6 +7891,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
@@ -7747,9 +7915,13 @@ fn evaluate_expr_rightshift_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
@@ -7770,6 +7942,27 @@ fn evaluate_expr_rightshift_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let shift = bigint_shift_count(&rn)?;
+                    let new_val = Value::BigInt(Box::new(*ln >> shift));
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (l, r) => {
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let new_val = Value::Number((l >> r) as f64);
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+            }
+        }
         _ => Err(raise_eval_error!("RightShiftAssign only for variables, properties or indexes").into()),
     }
 }
@@ -7780,10 +7973,10 @@ fn evaluate_expr_urightshift_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             match (current, val) {
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Unsigned right shift").into()),
                 (l, r) => {
@@ -7799,6 +7992,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 if let Value::BigInt(_) = current {
                     return Err(raise_type_error!("Unsigned right shift").into());
                 }
@@ -7817,9 +8011,13 @@ fn evaluate_expr_urightshift_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 if let Value::BigInt(_) = current {
                     return Err(raise_type_error!("Unsigned right shift").into());
                 }
@@ -7835,6 +8033,20 @@ fn evaluate_expr_urightshift_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            if let Value::BigInt(_) = current {
+                return Err(raise_type_error!("Unsigned right shift").into());
+            }
+            let (l, r) = (current, val);
+            let l = to_uint32_value_with_env(mc, env, &l)?;
+            let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+            let new_val = Value::Number((l >> r) as f64);
+            set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+            Ok(new_val)
+        }
         _ => Err(raise_eval_error!("UnsignedRightShiftAssign only for variables, properties or indexes").into()),
     }
 }
@@ -7845,10 +8057,10 @@ fn evaluate_expr_sub_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let new_val = Value::BigInt(Box::new(*ln - *rn));
@@ -7870,6 +8082,7 @@ fn evaluate_expr_sub_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln - *rn)),
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
@@ -7890,9 +8103,13 @@ fn evaluate_expr_sub_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln - *rn)),
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
@@ -7910,6 +8127,24 @@ fn evaluate_expr_sub_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let new_val = match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln - *rn)),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                }
+                (l, r) => {
+                    let ln = to_number_with_env(mc, env, &l)?;
+                    let rn = to_number_with_env(mc, env, &r)?;
+                    Value::Number(ln - rn)
+                }
+            };
+            set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+            Ok(new_val)
+        }
         _ => Err(raise_eval_error!("SubAssign only for variables, properties or indexes").into()),
     }
 }
@@ -7920,10 +8155,10 @@ fn evaluate_expr_mul_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let new_val = Value::BigInt(Box::new(*ln * *rn));
@@ -7944,6 +8179,7 @@ fn evaluate_expr_mul_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln * *rn)),
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
@@ -7964,9 +8200,13 @@ fn evaluate_expr_mul_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key_str = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key_str = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key_str)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln * *rn)),
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
@@ -7984,6 +8224,24 @@ fn evaluate_expr_mul_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let new_val = match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => Value::BigInt(Box::new(*ln * *rn)),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                }
+                (l, r) => {
+                    let ln = to_number_with_env(mc, env, &l)?;
+                    let rn = to_number_with_env(mc, env, &r)?;
+                    Value::Number(ln * rn)
+                }
+            };
+            set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+            Ok(new_val)
+        }
         _ => Err(raise_eval_error!("MulAssign only for variables, properties or indexes").into()),
     }
 }
@@ -7994,10 +8252,10 @@ fn evaluate_expr_div_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             let new_val = match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     if rn.is_zero() {
@@ -8021,6 +8279,7 @@ fn evaluate_expr_div_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         if rn.is_zero() {
@@ -8046,9 +8305,13 @@ fn evaluate_expr_div_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         if rn.is_zero() {
@@ -8071,6 +8334,29 @@ fn evaluate_expr_div_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let new_val = match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    if rn.is_zero() {
+                        return Err(raise_eval_error!("Division by zero").into());
+                    }
+                    Value::BigInt(Box::new(*ln / *rn))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                }
+                (l, r) => {
+                    let denom = to_number_with_env(mc, env, &r)?;
+                    let ln = to_number_with_env(mc, env, &l)?;
+                    Value::Number(ln / denom)
+                }
+            };
+            set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+            Ok(new_val)
+        }
         _ => Err(raise_eval_error!("DivAssign only for variables, properties or indexes").into()),
     }
 }
@@ -8081,10 +8367,10 @@ fn evaluate_expr_mod_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             let new_val = match (current, val) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     if rn.is_zero() {
@@ -8108,6 +8394,7 @@ fn evaluate_expr_mod_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         if rn.is_zero() {
@@ -8133,9 +8420,13 @@ fn evaluate_expr_mod_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         if rn.is_zero() {
@@ -8158,6 +8449,29 @@ fn evaluate_expr_mod_assign<'gc>(
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let new_val = match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    if rn.is_zero() {
+                        return Err(raise_eval_error!("Division by zero").into());
+                    }
+                    Value::BigInt(Box::new(*ln % *rn))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                }
+                (l, r) => {
+                    let denom = to_number_with_env(mc, env, &r)?;
+                    let ln = to_number_with_env(mc, env, &l)?;
+                    Value::Number(ln % denom)
+                }
+            };
+            set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+            Ok(new_val)
+        }
         _ => Err(raise_eval_error!("ModAssign only for variables, properties or indexes").into()),
     }
 }
@@ -8168,10 +8482,10 @@ fn evaluate_expr_pow_assign<'gc>(
     target: &Expr,
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
             let new_val = match (current, val) {
                 (Value::BigInt(base), Value::BigInt(exp)) => {
                     if exp.sign() == num_bigint::Sign::Minus {
@@ -8194,6 +8508,7 @@ fn evaluate_expr_pow_assign<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(base), Value::BigInt(exp)) => {
                         if exp.sign() == num_bigint::Sign::Minus {
@@ -8218,9 +8533,13 @@ fn evaluate_expr_pow_assign<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = value_to_string(&key_val);
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot assign to property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, key_val)?;
             if let Value::Object(obj) = obj_val {
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = match (current, val) {
                     (Value::BigInt(base), Value::BigInt(exp)) => {
                         if exp.sign() == num_bigint::Sign::Minus {
@@ -8241,6 +8560,28 @@ fn evaluate_expr_pow_assign<'gc>(
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
+        }
+        Expr::PrivateMember(obj_expr, name) => {
+            let (obj, key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+            let current = get_property_with_accessors(mc, env, &obj, &key)?;
+            let val = evaluate_expr(mc, env, value_expr)?;
+            let new_val = match (current, val) {
+                (Value::BigInt(base), Value::BigInt(exp)) => {
+                    if exp.sign() == num_bigint::Sign::Minus {
+                        return Err(raise_range_error!("Exponent must be non-negative").into());
+                    }
+                    let e = exp
+                        .to_u32()
+                        .ok_or_else(|| EvalError::Js(raise_range_error!("Exponent too large")))?;
+                    Value::BigInt(Box::new(base.pow(e)))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    return Err(raise_type_error!("Cannot mix BigInt and other types").into());
+                }
+                (l, r) => Value::Number(to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?)),
+            };
+            set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+            Ok(new_val)
         }
         _ => Err(raise_eval_error!("PowAssign only for variables, properties or indexes").into()),
     }
@@ -11434,6 +11775,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let is_truthy = lhs.to_truthy();
             if is_truthy { Ok(lhs) } else { evaluate_expr(mc, env, right) }
         }
+        Expr::NullishCoalescing(left, right) => {
+            let lhs = evaluate_expr(mc, env, left)?;
+            if lhs.is_null_or_undefined() {
+                evaluate_expr(mc, env, right)
+            } else {
+                Ok(lhs)
+            }
+        }
         Expr::This => Ok(crate::js_class::evaluate_this(mc, env)?),
         Expr::NewTarget => {
             // Runtime runtime for `new.target`: walk environment chain to find the nearest
@@ -13547,12 +13896,10 @@ fn evaluate_update_expression<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let k_val = evaluate_expr(mc, env, key_expr)?;
-            let key = match k_val {
-                Value::Symbol(s) => PropertyKey::Symbol(s),
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::Number(n) => PropertyKey::from(n.to_string()),
-                _ => PropertyKey::from(value_to_string(&k_val)),
-            };
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot update property of non-object").into());
+            }
+            let key = to_property_key_for_assignment(mc, env, k_val)?;
 
             if let Value::Object(obj) = obj_val {
                 // Use get_property_with_accessors so getters are invoked for reads

@@ -2398,7 +2398,7 @@ fn parse_nullish(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSErro
     if matches!(tokens[*index].token, Token::NullishCoalescing) {
         *index += 1;
         let right = parse_nullish(tokens, index)?;
-        Ok(Expr::Binary(Box::new(left), BinaryOp::NullishCoalescing, Box::new(right)))
+        Ok(Expr::NullishCoalescing(Box::new(left), Box::new(right)))
     } else {
         Ok(left)
     }

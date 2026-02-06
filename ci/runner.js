@@ -174,6 +174,21 @@ const ordered = collectTests();
 const FEATURE_SUPPORTED = {};
 // Hard-coded unsupported features: treat these as unsupported even if probes are absent
 const HARDCODED_UNSUPPORTED = new Set([]);
+
+function findProbeFile(feat) {
+  const names = new Set([
+    feat,
+    feat.replace(/\./g, '_'),
+    // feat.replace(/-/g, '_'),
+    // feat.replace(/[.-]/g, '_'),
+  ]);
+  for (const name of names) {
+    const probeFile = path.join(__dirname, 'feature_probes', `${name}.js`);
+    if (fs.existsSync(probeFile)) return probeFile;
+  }
+  return null;
+}
+
 function detectFeature(feat){
   // Allow environment override to force running unsupported features
   if (process.env.FORCE_RUN_UNSUPPORTED_FEATURES && process.env.FORCE_RUN_UNSUPPORTED_FEATURES !== 'false') { FEATURE_SUPPORTED[feat] = true; return true; }
@@ -182,8 +197,8 @@ function detectFeature(feat){
   if (HARDCODED_UNSUPPORTED.has(feat)) { FEATURE_SUPPORTED[feat] = false; return false; }
 
   if (feat in FEATURE_SUPPORTED) return FEATURE_SUPPORTED[feat];
-  const probeFile = path.join(__dirname, 'feature_probes', feat.replace(/\./g,'_') + '.js');
-  if (fs.existsSync(probeFile) && BIN){
+  const probeFile = findProbeFile(feat);
+  if (probeFile && BIN){
     const res = spawnSync(BIN, [probeFile], {timeout:2000});
     const out = (res.stdout||Buffer.from('')).toString();
     if (out.includes('OK')) FEATURE_SUPPORTED[feat] = true; else FEATURE_SUPPORTED[feat] = false;

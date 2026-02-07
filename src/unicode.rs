@@ -9,6 +9,24 @@ pub fn utf16_to_utf8(v: &[u16]) -> String {
     String::from_utf16_lossy(v)
 }
 
+use std::cmp::Ordering;
+
+/// Compare two UTF-16 code unit sequences lexicographically by their code units.
+/// This matches ECMAScript string relational comparison semantics which are
+/// based on UTF-16 code unit order and must not replace isolated surrogates.
+pub fn utf16_cmp(a: &[u16], b: &[u16]) -> Ordering {
+    let min_len = a.len().min(b.len());
+    for i in 0..min_len {
+        if a[i] < b[i] {
+            return Ordering::Less;
+        }
+        if a[i] > b[i] {
+            return Ordering::Greater;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 pub fn utf16_len(v: &[u16]) -> usize {
     v.len()
 }

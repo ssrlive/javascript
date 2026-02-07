@@ -129,8 +129,15 @@ fn test_complex_nested_chain() {
         h();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"0-0:1X:1-0:2X\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"0-0:1X:1-0:2X\"");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

@@ -2,7 +2,7 @@ use crate::core::{Gc, GcCell, MutationContext, SwitchCase, create_descriptor_obj
 use crate::js_array::{create_array, handle_array_static_method, is_array, set_array_length};
 use crate::js_async::handle_async_closure_call;
 use crate::js_async_generator::handle_async_generator_function_call;
-use crate::js_bigint::bigint_constructor;
+use crate::js_bigint::{bigint_constructor, compare_bigint_and_number, string_to_bigint_for_eq};
 use crate::js_class::{create_class_object, prepare_call_env_with_this};
 use crate::js_date::{handle_date_method, handle_date_static_method, is_date_object};
 use crate::js_function::handle_function_prototype_method;
@@ -70,45 +70,6 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
         Value::Object(_) => Err(raise_type_error!("Cannot convert object to number without context").into()),
         _ => Ok(f64::NAN),
     }
-}
-
-fn string_to_bigint_for_eq(s: &str) -> Option<BigInt> {
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return Some(BigInt::from(0));
-    }
-
-    let (sign, rest) = if let Some(stripped) = trimmed.strip_prefix('-') {
-        (-1, stripped)
-    } else if let Some(stripped) = trimmed.strip_prefix('+') {
-        (1, stripped)
-    } else {
-        (1, trimmed)
-    };
-
-    if rest.is_empty() {
-        return None;
-    }
-
-    let (radix, digits) = if rest.starts_with("0x") || rest.starts_with("0X") {
-        (16, &rest[2..])
-    } else if rest.starts_with("0b") || rest.starts_with("0B") {
-        (2, &rest[2..])
-    } else if rest.starts_with("0o") || rest.starts_with("0O") {
-        (8, &rest[2..])
-    } else {
-        (10, rest)
-    };
-
-    if digits.is_empty() {
-        return None;
-    }
-
-    let mut value = BigInt::parse_bytes(digits.as_bytes(), radix)?;
-    if sign < 0 {
-        value = -value;
-    }
-    Some(value)
 }
 
 fn loose_equal<'gc>(mc: &MutationContext<'gc>, l: Value<'gc>, r: Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
@@ -11108,92 +11069,242 @@ fn evaluate_expr_binary<'gc>(
         BinaryOp::GreaterThan => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::Boolean(l > r)),
             (Value::String(l), Value::String(r)) => {
-                let ls = crate::unicode::utf16_to_utf8(&l);
-                let rs = crate::unicode::utf16_to_utf8(&r);
-                Ok(Value::Boolean(ls > rs))
+                // Compare UTF-16 code unit sequences directly per ECMAScript
+                // relational comparison rules (do NOT lossily convert to UTF-8).
+                Ok(Value::Boolean(crate::unicode::utf16_cmp(&l, &r) == std::cmp::Ordering::Greater))
             }
             (Value::BigInt(l), other) => {
-                let ln = l.to_f64().unwrap_or(f64::NAN);
+                // If the other operand is a string, attempt to parse it as an
+                // integer decimal BigInt literal (no fractional/exponent parts).
+                // If parsing fails, the comparison is undefined per Test262 and
+                // should yield false for relational comparisons between BigInt
+                // and an incomparable string.
+                if let Value::String(s) = other {
+                    let ss = crate::unicode::utf16_to_utf8(&s);
+                    return Ok(string_to_bigint_for_eq(&ss).map(|rb| *l > rb).unwrap_or(false).into());
+                }
+
+                // For other cases (numbers, etc.) perform spec-aligned
+                // BigInt/Number relational comparison:
+                // - If the RHS (after ToNumber) is NaN -> false
+                // - If the RHS is a finite integer value, attempt to convert it to
+                //   a BigInt and compare as BigInt; otherwise compare by
+                //   converting BigInt to f64 and comparing as numbers.
                 let rn = to_number_with_env(mc, env, &other)?;
-                Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln > rn))
+                if let Some(ord) = compare_bigint_and_number(&l, rn) {
+                    return Ok(Value::Boolean(ord == std::cmp::Ordering::Greater));
+                }
+                Ok(Value::Boolean(false))
             }
             (other, Value::BigInt(r)) => {
+                // If the left operand is a string, try parsing it as an integer
+                // decimal BigInt. If parsing fails, the comparison yields false.
+                if let Value::String(s) = other {
+                    let ss = crate::unicode::utf16_to_utf8(&s);
+                    return Ok(string_to_bigint_for_eq(&ss).map(|lb| lb > *r).unwrap_or(false).into());
+                }
+
+                // For other cases, attempt to convert LHS to Number and then
+                // perform the symmetric BigInt/Number comparison rules used above.
                 let ln = to_number_with_env(mc, env, &other)?;
-                let rn = r.to_f64().unwrap_or(f64::NAN);
-                Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln > rn))
+                if let Some(ord) = compare_bigint_and_number(&r, ln) {
+                    return Ok(Value::Boolean(ord == std::cmp::Ordering::Less));
+                }
+                Ok(Value::Boolean(false))
             }
             (l, r) => {
-                let ln = to_number_with_env(mc, env, &l)?;
-                let rn = to_number_with_env(mc, env, &r)?;
+                // If either side is an object, ToPrimitive with hint "number" must
+                // be applied first. If both primitives are strings, compare using
+                // UTF-16 code unit sequence comparison per ECMAScript string
+                // relational comparison rules.
+                let lprim = if let Value::Object(_) = l {
+                    crate::core::to_primitive(mc, &l, "number", env)?
+                } else {
+                    l.clone()
+                };
+                let rprim = if let Value::Object(_) = r {
+                    crate::core::to_primitive(mc, &r, "number", env)?
+                } else {
+                    r.clone()
+                };
+                if let (Value::String(ls), Value::String(rs)) = (&lprim, &rprim) {
+                    return Ok(Value::Boolean(crate::unicode::utf16_cmp(ls, rs) == std::cmp::Ordering::Greater));
+                }
+                let ln = to_number_with_env(mc, env, &lprim)?;
+                let rn = to_number_with_env(mc, env, &rprim)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln > rn))
             }
         },
         BinaryOp::LessThan => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::Boolean(l < r)),
-            (Value::String(l), Value::String(r)) => {
-                let ls = crate::unicode::utf16_to_utf8(&l);
-                let rs = crate::unicode::utf16_to_utf8(&r);
-                Ok(Value::Boolean(ls < rs))
-            }
+            (Value::String(l), Value::String(r)) => Ok(Value::Boolean(crate::unicode::utf16_cmp(&l, &r) == std::cmp::Ordering::Less)),
             (Value::BigInt(l), other) => {
-                let ln = l.to_f64().unwrap_or(f64::NAN);
+                if let Value::String(s) = other {
+                    let ss = crate::unicode::utf16_to_utf8(&s);
+                    return Ok(string_to_bigint_for_eq(&ss).map(|rb| *l < rb).unwrap_or(false).into());
+                }
+
                 let rn = to_number_with_env(mc, env, &other)?;
-                Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln < rn))
+                if let Some(ord) = compare_bigint_and_number(&l, rn) {
+                    return Ok(Value::Boolean(ord == std::cmp::Ordering::Less));
+                }
+                Ok(Value::Boolean(false))
             }
             (other, Value::BigInt(r)) => {
+                if let Value::String(s) = other {
+                    let ss = crate::unicode::utf16_to_utf8(&s);
+                    return Ok(string_to_bigint_for_eq(&ss).map(|lb| lb < *r).unwrap_or(false).into());
+                }
+
                 let ln = to_number_with_env(mc, env, &other)?;
+                if ln.is_nan() {
+                    return Ok(Value::Boolean(false));
+                }
+                if ln.is_finite()
+                    && ln.fract() == 0.0
+                    && let Some(lb) = num_bigint::BigInt::from_f64(ln)
+                {
+                    return Ok(Value::Boolean(lb < *r));
+                }
                 let rn = r.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln < rn))
             }
             (l, r) => {
-                let ln = to_number_with_env(mc, env, &l)?;
-                let rn = to_number_with_env(mc, env, &r)?;
+                let lprim = if let Value::Object(_) = l {
+                    crate::core::to_primitive(mc, &l, "number", env)?
+                } else {
+                    l.clone()
+                };
+                let rprim = if let Value::Object(_) = r {
+                    crate::core::to_primitive(mc, &r, "number", env)?
+                } else {
+                    r.clone()
+                };
+                if let (Value::String(ls), Value::String(rs)) = (&lprim, &rprim) {
+                    return Ok(Value::Boolean(crate::unicode::utf16_cmp(ls, rs) == std::cmp::Ordering::Less));
+                }
+                let ln = to_number_with_env(mc, env, &lprim)?;
+                let rn = to_number_with_env(mc, env, &rprim)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln < rn))
             }
         },
         BinaryOp::GreaterEqual => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::Boolean(l >= r)),
-            (Value::String(l), Value::String(r)) => {
-                let ls = crate::unicode::utf16_to_utf8(&l);
-                let rs = crate::unicode::utf16_to_utf8(&r);
-                Ok(Value::Boolean(ls >= rs))
-            }
+            (Value::String(l), Value::String(r)) => Ok(Value::Boolean(crate::unicode::utf16_cmp(&l, &r) != std::cmp::Ordering::Less)),
             (Value::BigInt(l), other) => {
-                let ln = l.to_f64().unwrap_or(f64::NAN);
+                if let Value::String(s) = other {
+                    let ss = crate::unicode::utf16_to_utf8(&s);
+                    return Ok(string_to_bigint_for_eq(&ss).map(|rb| *l >= rb).unwrap_or(false).into());
+                }
+
                 let rn = to_number_with_env(mc, env, &other)?;
+                if rn.is_nan() {
+                    return Ok(Value::Boolean(false));
+                }
+                if rn.is_finite()
+                    && rn.fract() == 0.0
+                    && let Some(rb) = num_bigint::BigInt::from_f64(rn)
+                {
+                    return Ok(Value::Boolean(*l >= rb));
+                }
+                let ln = l.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln >= rn))
             }
             (other, Value::BigInt(r)) => {
+                if let Value::String(s) = other {
+                    let ss = crate::unicode::utf16_to_utf8(&s);
+                    return Ok(string_to_bigint_for_eq(&ss).map(|lb| lb >= *r).unwrap_or(false).into());
+                }
+
                 let ln = to_number_with_env(mc, env, &other)?;
+                if ln.is_nan() {
+                    return Ok(Value::Boolean(false));
+                }
+                if ln.is_finite()
+                    && ln.fract() == 0.0
+                    && let Some(lb) = num_bigint::BigInt::from_f64(ln)
+                {
+                    return Ok(Value::Boolean(lb >= *r));
+                }
                 let rn = r.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln >= rn))
             }
             (l, r) => {
-                let ln = to_number_with_env(mc, env, &l)?;
-                let rn = to_number_with_env(mc, env, &r)?;
+                let lprim = if let Value::Object(_) = l {
+                    crate::core::to_primitive(mc, &l, "number", env)?
+                } else {
+                    l.clone()
+                };
+                let rprim = if let Value::Object(_) = r {
+                    crate::core::to_primitive(mc, &r, "number", env)?
+                } else {
+                    r.clone()
+                };
+                if let (Value::String(ls), Value::String(rs)) = (&lprim, &rprim) {
+                    return Ok(Value::Boolean(crate::unicode::utf16_cmp(ls, rs) != std::cmp::Ordering::Less));
+                }
+                let ln = to_number_with_env(mc, env, &lprim)?;
+                let rn = to_number_with_env(mc, env, &rprim)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln >= rn))
             }
         },
         BinaryOp::LessEqual => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::Boolean(l <= r)),
-            (Value::String(l), Value::String(r)) => {
-                let ls = crate::unicode::utf16_to_utf8(&l);
-                let rs = crate::unicode::utf16_to_utf8(&r);
-                Ok(Value::Boolean(ls <= rs))
-            }
+            (Value::String(l), Value::String(r)) => Ok(Value::Boolean(crate::unicode::utf16_cmp(&l, &r) != std::cmp::Ordering::Greater)),
             (Value::BigInt(l), other) => {
-                let ln = l.to_f64().unwrap_or(f64::NAN);
+                if let Value::String(s) = other {
+                    let ss = crate::unicode::utf16_to_utf8(&s);
+                    return Ok(string_to_bigint_for_eq(&ss).map(|rb| *l <= rb).unwrap_or(false).into());
+                }
+
                 let rn = to_number_with_env(mc, env, &other)?;
+                if rn.is_nan() {
+                    return Ok(Value::Boolean(false));
+                }
+                if rn.is_finite()
+                    && rn.fract() == 0.0
+                    && let Some(rb) = num_bigint::BigInt::from_f64(rn)
+                {
+                    return Ok(Value::Boolean(*l <= rb));
+                }
+                let ln = l.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln <= rn))
             }
             (other, Value::BigInt(r)) => {
+                if let Value::String(s) = other {
+                    let ss = crate::unicode::utf16_to_utf8(&s);
+                    return Ok(string_to_bigint_for_eq(&ss).map(|lb| lb <= *r).unwrap_or(false).into());
+                }
+
                 let ln = to_number_with_env(mc, env, &other)?;
+                if ln.is_nan() {
+                    return Ok(Value::Boolean(false));
+                }
+                if ln.is_finite()
+                    && ln.fract() == 0.0
+                    && let Some(lb) = num_bigint::BigInt::from_f64(ln)
+                {
+                    return Ok(Value::Boolean(lb <= *r));
+                }
                 let rn = r.to_f64().unwrap_or(f64::NAN);
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln <= rn))
             }
             (l, r) => {
-                let ln = to_number_with_env(mc, env, &l)?;
-                let rn = to_number_with_env(mc, env, &r)?;
+                let lprim = if let Value::Object(_) = l {
+                    crate::core::to_primitive(mc, &l, "number", env)?
+                } else {
+                    l.clone()
+                };
+                let rprim = if let Value::Object(_) = r {
+                    crate::core::to_primitive(mc, &r, "number", env)?
+                } else {
+                    r.clone()
+                };
+                if let (Value::String(ls), Value::String(rs)) = (&lprim, &rprim) {
+                    return Ok(Value::Boolean(crate::unicode::utf16_cmp(ls, rs) != std::cmp::Ordering::Greater));
+                }
+                let ln = to_number_with_env(mc, env, &lprim)?;
+                let rn = to_number_with_env(mc, env, &rprim)?;
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln <= rn))
             }
         },

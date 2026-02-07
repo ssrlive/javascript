@@ -4,6 +4,7 @@ use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use num_bigint::BigInt;
 use num_bigint::Sign;
+use num_traits::{FromPrimitive, ToPrimitive};
 
 pub(crate) fn bigint_constructor<'gc>(
     mc: &MutationContext<'gc>,
@@ -210,6 +211,93 @@ pub fn parse_bigint_string(raw: &str) -> Result<BigInt, JSError> {
         (10, s)
     };
     BigInt::parse_bytes(num_str.as_bytes(), radix).ok_or(raise_eval_error!("invalid bigint"))
+}
+
+/// Parse a string (trimmed) into a BigInt for equality/relational comparisons
+/// following the heuristic used by Test262 (accepts optional leading +/- and
+/// radix prefixes, rejects malformed digits like "++0" or "0."). Returns
+/// `None` when the string is not a valid integer literal for BigInt comparison.
+pub fn string_to_bigint_for_eq(s: &str) -> Option<BigInt> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Some(BigInt::from(0));
+    }
+
+    let (sign, rest) = if let Some(stripped) = trimmed.strip_prefix('-') {
+        (-1, stripped)
+    } else if let Some(stripped) = trimmed.strip_prefix('+') {
+        (1, stripped)
+    } else {
+        (1, trimmed)
+    };
+
+    if rest.is_empty() {
+        return None;
+    }
+
+    let (radix, digits) = if rest.starts_with("0x") || rest.starts_with("0X") {
+        (16, &rest[2..])
+    } else if rest.starts_with("0b") || rest.starts_with("0B") {
+        (2, &rest[2..])
+    } else if rest.starts_with("0o") || rest.starts_with("0O") {
+        (8, &rest[2..])
+    } else {
+        (10, rest)
+    };
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    // Reject digits that begin with an extra sign or contain invalid chars
+    if digits.starts_with('+') || digits.starts_with('-') {
+        return None;
+    }
+
+    let valid = match radix {
+        10 => digits.chars().all(|c| c.is_ascii_digit()),
+        16 => digits.chars().all(|c| c.is_ascii_hexdigit()),
+        8 => digits.chars().all(|c| ('0'..='7').contains(&c)),
+        2 => digits.chars().all(|c| c == '0' || c == '1'),
+        _ => false,
+    };
+    if !valid {
+        return None;
+    }
+
+    let mut value = BigInt::parse_bytes(digits.as_bytes(), radix)?;
+    if sign < 0 {
+        value = -value;
+    }
+    Some(value)
+}
+
+/// Compare a BigInt and a JS Number for relational operators.
+/// Returns `Some(Ordering)` when a deterministic comparison can be made, or
+/// `None` when the comparison is undefined (e.g., due to NaN).
+pub fn compare_bigint_and_number(b: &BigInt, n: f64) -> Option<std::cmp::Ordering> {
+    if n.is_nan() {
+        return None;
+    }
+    // If the number is an integer and can be converted to BigInt, compare as BigInt
+    if n.is_finite()
+        && n.fract() == 0.0
+        && let Some(rb) = BigInt::from_f64(n)
+    {
+        return Some(b.cmp(&rb));
+    }
+    // Otherwise fall back to floating-point comparison using BigInt -> f64
+    let bf = b.to_f64().unwrap_or(f64::NAN);
+    if bf.is_nan() {
+        return None;
+    }
+    if bf < n {
+        Some(std::cmp::Ordering::Less)
+    } else if bf > n {
+        Some(std::cmp::Ordering::Greater)
+    } else {
+        Some(std::cmp::Ordering::Equal)
+    }
 }
 
 pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {

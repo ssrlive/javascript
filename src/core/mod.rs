@@ -205,12 +205,14 @@ where
         env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env))?;
         object_set_key_value(mc, &root.global_env, "this", Value::Object(root.global_env))?;
 
+        let mut entry_module_exports: Option<JSObjectDataPtr<'_>> = None;
         if kind == ProgramKind::Module {
             let module_exports = new_js_object_data(mc);
             object_set_key_value(mc, &root.global_env, "exports", Value::Object(module_exports))?;
             let module_obj = new_js_object_data(mc);
             object_set_key_value(mc, &module_obj, "exports", Value::Object(module_exports))?;
             object_set_key_value(mc, &root.global_env, "module", Value::Object(module_obj))?;
+            entry_module_exports = Some(module_exports);
         }
 
         // Bind promise runtime lifecycle to this JsArena by resetting global
@@ -222,8 +224,31 @@ where
             // Store __filepath
             object_set_key_value(mc, &root.global_env, "__filepath", Value::String(utf8_to_utf16(&p_str)))?;
         }
+
+        if kind == ProgramKind::Script {
+            object_set_key_value(mc, &root.global_env, "__suppress_dynamic_import_result", Value::Boolean(true))?;
+        }
+
+        if kind == ProgramKind::Module
+            && let (Some(exports_obj), Some(p)) = (entry_module_exports, script_path.as_ref())
+        {
+            let module_path = std::fs::canonicalize(p.as_ref()).unwrap_or_else(|_| p.as_ref().to_path_buf());
+            let module_path_str = module_path.to_string_lossy().to_string();
+            let cache = crate::js_module::get_or_create_module_cache(mc, &root.global_env)?;
+            object_set_key_value(mc, &cache, module_path_str.as_str(), Value::Object(exports_obj))?;
+            let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
+            object_set_key_value(mc, &loading, module_path_str.as_str(), Value::Boolean(true))?;
+        }
         match evaluate_statements(mc, &root.global_env, &statements) {
             Ok(mut result) => {
+                if kind == ProgramKind::Module
+                    && let (Some(_exports_obj), Some(p)) = (entry_module_exports, script_path.as_ref())
+                {
+                    let module_path = std::fs::canonicalize(p.as_ref()).unwrap_or_else(|_| p.as_ref().to_path_buf());
+                    let module_path_str = module_path.to_string_lossy().to_string();
+                    let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
+                    object_set_key_value(mc, &loading, module_path_str.as_str(), Value::Boolean(false))?;
+                }
                 let mut count = 0;
                 loop {
                     match crate::js_promise::run_event_loop(mc)? {
@@ -403,28 +428,74 @@ where
                 if let Some(promise) = promise_ref {
                     match &promise.borrow().state {
                         crate::core::PromiseState::Fulfilled(val) => result = val.clone(),
-                        crate::core::PromiseState::Rejected(val) => result = val.clone(),
+                        crate::core::PromiseState::Rejected(val) => {
+                            let mut is_error_like = false;
+                            if let Value::Object(obj) = val {
+                                if let Some(is_err_rc) = object_get_key_value(obj, "__is_error")
+                                    && let Value::Boolean(true) = *is_err_rc.borrow()
+                                {
+                                    is_error_like = true;
+                                }
+                                if !is_error_like && object_get_key_value(obj, "__line__").is_some() {
+                                    is_error_like = true;
+                                }
+                            }
+
+                            if !is_error_like {
+                                result = val.clone();
+                            } else {
+                                let mut err = crate::raise_throw_error!(val.clone());
+                                if let Value::Object(obj) = val {
+                                    if let Some(line_rc) = object_get_key_value(obj, "__line__")
+                                        && let Value::Number(line) = *line_rc.borrow()
+                                    {
+                                        let mut column = 0usize;
+                                        if let Some(col_rc) = object_get_key_value(obj, "__column__")
+                                            && let Value::Number(col) = *col_rc.borrow()
+                                        {
+                                            column = col as usize;
+                                        }
+                                        err.set_js_location(line as usize, column);
+                                    }
+                                    if let Some(stack_str) = obj.borrow().get_property("stack") {
+                                        let lines: Vec<String> = stack_str
+                                            .lines()
+                                            .map(|s| s.trim().to_string())
+                                            .filter(|s| s.starts_with("at "))
+                                            .collect();
+                                        err.inner.stack = lines;
+                                    }
+                                }
+                                return Err(err);
+                            }
+                        }
                         _ => {}
                     }
                 }
 
-                // Prefer to consume any runtime `__unhandled_rejection` string which is set
-                // only after the UnhandledCheck grace window has elapsed.
-                if let Some(val) = crate::js_promise::take_unhandled_rejection(mc, &root.global_env)
-                    && let crate::core::Value::String(s) = val
-                {
-                    let msg = crate::unicode::utf16_to_utf8(&s);
-                    let err = crate::make_js_error!(crate::JSErrorKind::Throw(msg));
-                    return Err(err);
-                }
+                let report_unhandled = std::env::var("JS_REPORT_UNHANDLED_REJECTIONS")
+                    .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE"))
+                    .unwrap_or(false);
 
-                // Fallback: peek pending unhandled checks whose grace window has elapsed and report them
-                if let Some((msg, loc_opt)) = crate::js_promise::peek_pending_unhandled_info(mc, &root.global_env) {
-                    let mut err = crate::make_js_error!(crate::JSErrorKind::Throw(msg));
-                    if let Some((line, col)) = loc_opt {
-                        err.set_js_location(line, col);
+                if report_unhandled {
+                    // Prefer to consume any runtime `__unhandled_rejection` string which is set
+                    // only after the UnhandledCheck grace window has elapsed.
+                    if let Some(val) = crate::js_promise::take_unhandled_rejection(mc, &root.global_env)
+                        && let crate::core::Value::String(s) = val
+                    {
+                        let msg = crate::unicode::utf16_to_utf8(&s);
+                        let err = crate::make_js_error!(crate::JSErrorKind::Throw(msg));
+                        return Err(err);
                     }
-                    return Err(err);
+
+                    // Fallback: peek pending unhandled checks whose grace window has elapsed and report them
+                    if let Some((msg, loc_opt)) = crate::js_promise::peek_pending_unhandled_info(mc, &root.global_env) {
+                        let mut err = crate::make_js_error!(crate::JSErrorKind::Throw(msg));
+                        if let Some((line, col)) = loc_opt {
+                            err.set_js_location(line, col);
+                        }
+                        return Err(err);
+                    }
                 }
 
                 let out = match &result {

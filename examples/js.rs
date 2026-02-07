@@ -67,7 +67,16 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
     let script_path = cli.file.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or(p.clone()));
 
-    let result = if cli.module {
+    let file_ext_is_mjs = cli
+        .file
+        .as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("mjs"))
+        .unwrap_or(false);
+    let run_as_module = cli.module || file_ext_is_mjs;
+
+    let result = if run_as_module {
         evaluate_module(&script_content, script_path.as_ref())
     } else {
         evaluate_script(&script_content, script_path.as_ref())

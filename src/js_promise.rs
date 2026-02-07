@@ -1831,6 +1831,11 @@ pub fn __internal_promise_reject_captured<'gc>(
 
 // Look up Promise.prototype
 fn get_promise_prototype_from_env<'gc>(env: JSObjectDataPtr<'gc>) -> Option<JSObjectDataPtr<'gc>> {
+    if let Some(proto_val) = crate::core::env_get(&env, "__intrinsic_promise_proto")
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        return Some(*proto_obj);
+    }
     if let Some(ctor_val) = crate::core::env_get(&env, "Promise")
         && let Value::Object(ctor_obj) = &*ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(ctor_obj, "prototype")
@@ -1841,10 +1846,10 @@ fn get_promise_prototype_from_env<'gc>(env: JSObjectDataPtr<'gc>) -> Option<JSOb
     None
 }
 
-/// Create a new JavaScript Promise object with prototype methods.
+/// Create a new JavaScript Promise object linked to Promise.prototype.
 ///
 /// This function creates a JS object that wraps a JSPromise instance and
-/// attaches the standard Promise prototype methods (then, catch, finally).
+/// relies on the prototype chain for standard Promise methods.
 ///
 /// # Returns
 /// * `Result<JSObjectDataPtr, JSError>` - The promise object or creation error
@@ -1861,17 +1866,6 @@ pub fn make_promise_js_object<'gc>(
     {
         promise_obj.borrow_mut(mc).prototype = Some(proto);
     }
-
-    // Add then method
-    let then_func = Value::Function("Promise.prototype.then".to_string());
-    object_set_key_value(mc, &promise_obj, "then", then_func)?;
-
-    // Add catch method
-    let catch_func = Value::Function("Promise.prototype.catch".to_string());
-    object_set_key_value(mc, &promise_obj, "catch", catch_func)?;
-    // Add finally method
-    let finally_func = Value::Function("Promise.prototype.finally".to_string());
-    object_set_key_value(mc, &promise_obj, "finally", finally_func)?;
 
     // Assign a stable object-side id for debugging/tracking
     let id = generate_unique_id();
@@ -2877,6 +2871,8 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 
     // Setup prototype
     let promise_proto = new_js_object_data(mc);
+    // Ensure Promise.prototype inherits from Object.prototype so ToPrimitive works.
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &promise_proto, env, "Object");
     object_set_key_value(mc, &promise_ctor, "prototype", Value::Object(promise_proto))?;
     object_set_key_value(mc, &promise_proto, "constructor", Value::Object(promise_ctor))?;
 
@@ -2902,6 +2898,11 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     }
 
     crate::core::env_set(mc, env, "Promise", Value::Object(promise_ctor))?;
+
+    // Preserve the intrinsic Promise constructor/prototype for internal uses
+    // like dynamic import, even if the global Promise binding is later replaced.
+    object_set_key_value(mc, env, "__intrinsic_promise_ctor", Value::Object(promise_ctor))?;
+    object_set_key_value(mc, env, "__intrinsic_promise_proto", Value::Object(promise_proto))?;
 
     // Internal helpers for resolution/rejection captures
     crate::core::env_set(

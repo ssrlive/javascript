@@ -225,6 +225,12 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push('}');
   outLines.push('');
 
+  // Ensure dynamic import resolves relative to the original test file path,
+  // not the ephemeral /tmp composed file.
+  outLines.push('// Inject: stabilize __filepath for module resolution');
+  outLines.push(`globalThis.__filepath = ${JSON.stringify(path.resolve(testPath))};`);
+  outLines.push('');
+
   const meta = extractMeta(testPath);
   if (hasFeature(meta, 'cross-realm')) {
     if (!outLines.some(l => l.indexOf(realmMarker) !== -1)) {

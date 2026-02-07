@@ -1523,6 +1523,62 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
             *index += 1;
         }
+    } else if *index < t.len() && matches!(t[*index].token, Token::Multiply) {
+        // export * from "module";
+        // export * as name from "module";
+        *index += 1; // consume '*'
+        let is_as = if *index < t.len() {
+            match &t[*index].token {
+                Token::Identifier(s) if s == "as" => true,
+                Token::As => true,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if is_as {
+            *index += 1; // consume 'as'
+            let name = if *index < t.len() {
+                match &t[*index].token {
+                    Token::Identifier(n) => {
+                        *index += 1;
+                        n.clone()
+                    }
+                    Token::Default => {
+                        *index += 1;
+                        "default".to_string()
+                    }
+                    _ => return Err(raise_parse_error!("Expected identifier after 'as' in export statement")),
+                }
+            } else {
+                return Err(raise_parse_error!("Expected identifier after 'as' in export statement"));
+            };
+            specifiers.push(ExportSpecifier::Namespace(name));
+        } else {
+            specifiers.push(ExportSpecifier::Star);
+        }
+        if *index < t.len() {
+            let is_from = if let Token::Identifier(from_kw) = &t[*index].token {
+                from_kw == "from"
+            } else {
+                false
+            };
+            if !is_from {
+                return Err(raise_parse_error!("Expected 'from' after export '*'"));
+            }
+            *index += 1;
+            if *index < t.len() {
+                if let Token::StringLit(s) = &t[*index].token {
+                    source = Some(utf16_to_utf8(s));
+                    *index += 1;
+                } else {
+                    return Err(raise_parse_error!("Expected module specifier"));
+                }
+            }
+        }
+        if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+            *index += 1;
+        }
     } else if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
         *index += 1; // consume {
         loop {
@@ -1549,11 +1605,16 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 };
                 if is_as {
                     *index += 1;
-                    if let Token::Identifier(a) = &t[*index].token {
-                        alias = Some(a.clone());
-                        *index += 1;
-                    } else {
-                        return Err(raise_parse_error!("Expected identifier after as"));
+                    match &t[*index].token {
+                        Token::Identifier(a) => {
+                            alias = Some(a.clone());
+                            *index += 1;
+                        }
+                        Token::Default => {
+                            alias = Some("default".to_string());
+                            *index += 1;
+                        }
+                        _ => return Err(raise_parse_error!("Expected identifier after as")),
                     }
                 }
             }
@@ -1591,11 +1652,8 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             Token::Var => parse_var_statement(t, index)?,
             Token::Let => parse_let_statement(t, index)?,
             Token::Const => parse_const_statement(t, index)?,
-            Token::Function => parse_function_declaration(t, index)?,
-            Token::Class => {
-                // TODO: parse_class_declaration
-                return Err(raise_parse_error!("Export class not implemented"));
-            }
+            Token::Function | Token::FunctionStar | Token::Async => parse_function_declaration(t, index)?,
+            Token::Class => parse_class_declaration(t, index)?,
             _ => return Err(raise_parse_error!("Unexpected token in export statement")),
         };
         inner_stmt = Some(Box::new(stmt));

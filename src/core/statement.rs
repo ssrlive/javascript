@@ -313,6 +313,8 @@ pub enum ImportSpecifier {
 #[derive(Clone, Debug)]
 pub enum ExportSpecifier {
     Named(String, Option<String>), // export { name as alias }
+    Namespace(String),             // export * as name from "module"
+    Star,                          // export * from "module"
     Default(Expr),                 // export default value
 }
 

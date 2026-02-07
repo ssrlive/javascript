@@ -2536,7 +2536,19 @@ fn eval_res<'gc>(
             );
             match evaluate_expr(mc, env, expr) {
                 Ok(val) => {
-                    *last_value = val;
+                    let suppress_dynamic_import = env_get(env, "__suppress_dynamic_import_result")
+                        .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+                        .unwrap_or(false);
+                    let allow_dynamic_import = env_get(env, "__allow_dynamic_import_result")
+                        .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+                        .unwrap_or(false);
+
+                    // Do not treat top-level dynamic import() as the script result unless eval opted in.
+                    if matches!(expr, Expr::DynamicImport(_)) && suppress_dynamic_import && !allow_dynamic_import {
+                        *last_value = Value::Undefined;
+                    } else {
+                        *last_value = val;
+                    }
                     Ok(None)
                 }
                 Err(e) => Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
@@ -2643,8 +2655,8 @@ fn eval_res<'gc>(
                 None
             };
 
-            let exports = crate::js_module::load_module(mc, source, base_path.as_deref())
-                .map_err(|e| EvalError::Throw(Value::String(utf8_to_utf16(&e.message())), Some(stmt.line), Some(stmt.column)))?;
+            let exports = crate::js_module::load_module(mc, source, base_path.as_deref(), Some(*env))
+                .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
 
             if let Value::Object(exports_obj) = exports {
                 for spec in specifiers {
@@ -2711,8 +2723,8 @@ fn eval_res<'gc>(
                     };
                     Value::Object(exports_obj)
                 } else {
-                    crate::js_module::load_module(mc, source, base_path.as_deref())
-                        .map_err(|e| EvalError::Throw(Value::String(utf8_to_utf16(&e.message())), Some(stmt.line), Some(stmt.column)))?
+                    crate::js_module::load_module(mc, source, base_path.as_deref(), Some(*env))
+                        .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?
                 };
 
                 if let Value::Object(exports_obj) = exports {
@@ -2727,6 +2739,19 @@ fn eval_res<'gc>(
                                     Value::Undefined
                                 };
                                 export_value(mc, env, export_name, val)?;
+                            }
+                            ExportSpecifier::Namespace(name) => {
+                                export_value(mc, env, name, Value::Object(exports_obj))?;
+                            }
+                            ExportSpecifier::Star => {
+                                for key in exports_obj.borrow().properties.keys() {
+                                    if let PropertyKey::String(name) = key
+                                        && name != "default"
+                                        && let Some(cell) = object_get_key_value(&exports_obj, name)
+                                    {
+                                        export_value(mc, env, name, cell.borrow().clone())?;
+                                    }
+                                }
                             }
                             ExportSpecifier::Default(_) => {
                                 return Err(raise_syntax_error!("Unexpected default export in re-export clause").into());
@@ -2759,32 +2784,28 @@ fn eval_res<'gc>(
                 match &*stmt.kind {
                     StatementKind::Var(decls) => {
                         for (name, _) in decls {
-                            if let Some(cell) = env_get(env, name) {
-                                let val = cell.borrow().clone();
-                                export_value(mc, env, name, val)?;
+                            if env_get(env, name).is_some() {
+                                export_binding(mc, env, name, name)?;
                             }
                         }
                     }
                     StatementKind::Let(decls) => {
                         for (name, _) in decls {
-                            if let Some(cell) = env_get(env, name) {
-                                let val = cell.borrow().clone();
-                                export_value(mc, env, name, val)?;
+                            if env_get(env, name).is_some() {
+                                export_binding(mc, env, name, name)?;
                             }
                         }
                     }
                     StatementKind::Const(decls) => {
                         for (name, _) in decls {
-                            if let Some(cell) = env_get(env, name) {
-                                let val = cell.borrow().clone();
-                                export_value(mc, env, name, val)?;
+                            if env_get(env, name).is_some() {
+                                export_binding(mc, env, name, name)?;
                             }
                         }
                     }
                     StatementKind::FunctionDeclaration(name, ..) => {
-                        if let Some(cell) = env_get(env, name) {
-                            let val = cell.borrow().clone();
-                            export_value(mc, env, name, val)?;
+                        if env_get(env, name).is_some() {
+                            export_binding(mc, env, name, name)?;
                         }
                     }
                     _ => {}
@@ -2796,11 +2817,10 @@ fn eval_res<'gc>(
                 match spec {
                     ExportSpecifier::Named(name, alias) => {
                         // export { name as alias }
-                        // value should be in env
-                        if let Some(cell) = env_get(env, name) {
-                            let val = cell.borrow().clone();
+                        // Use a live binding to the local environment.
+                        if env_get(env, name).is_some() {
                             let export_name = alias.as_ref().unwrap_or(name);
-                            export_value(mc, env, export_name, val)?;
+                            export_binding(mc, env, export_name, name)?;
                         } else {
                             return Err(raise_reference_error!(format!("{} is not defined", name)).into());
                         }
@@ -2817,6 +2837,12 @@ fn eval_res<'gc>(
                             evaluate_expr(mc, env, expr)?
                         };
                         export_value(mc, env, "default", val)?;
+                    }
+                    ExportSpecifier::Namespace(_) => {
+                        return Err(raise_syntax_error!("Namespace export requires a module source").into());
+                    }
+                    ExportSpecifier::Star => {
+                        return Err(raise_syntax_error!("Star export requires a module source").into());
                     }
                 }
             }
@@ -5540,6 +5566,44 @@ pub fn export_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, 
     Ok(())
 }
 
+fn export_binding<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    export_name: &str,
+    binding_name: &str,
+) -> Result<(), EvalError<'gc>> {
+    let getter_body = vec![Statement {
+        kind: Box::new(StatementKind::Return(Some(Expr::Var(binding_name.to_string(), None, None)))),
+        line: 0,
+        column: 0,
+    }];
+    let getter_val = Value::Getter(getter_body, *env, None);
+    let prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(getter_val)),
+        setter: None,
+    };
+
+    if let Some(exports_cell) = env_get(env, "exports") {
+        let exports = exports_cell.borrow().clone();
+        if let Value::Object(exports_obj) = exports {
+            object_set_key_value(mc, &exports_obj, export_name, prop)?;
+            return Ok(());
+        }
+    }
+
+    if let Some(module_cell) = env_get(env, "module") {
+        let module = module_cell.borrow().clone();
+        if let Value::Object(module_obj) = module
+            && let Some(exports_val) = object_get_key_value(&module_obj, "exports")
+            && let Value::Object(exports_obj) = &*exports_val.borrow()
+        {
+            object_set_key_value(mc, exports_obj, export_name, prop)?;
+        }
+    }
+    Ok(())
+}
+
 fn refresh_error_by_additional_stack_frame<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -5888,21 +5952,100 @@ fn precompute_target<'gc>(
 // before the identifier token position.
 fn candidate_name_from_target<'gc>(env: &JSObjectDataPtr<'gc>, target: &Expr) -> String {
     if let Expr::Var(n, maybe_line, maybe_col) = target {
-        if let (Some(line), Some(col)) = (maybe_line, maybe_col)
-            && let Some(val_ptr) = object_get_key_value(env, "__filepath")
+        if let Some(val_ptr) = env_get(env, "__filepath")
             && let Value::String(s) = &*val_ptr.borrow()
         {
             let path = utf16_to_utf8(s);
-            if let Ok(txt) = std::fs::read_to_string(path)
-                && let Some(l) = txt.lines().nth(*line - 1)
-            {
-                // Find the last non-whitespace char before the
-                // identifier column (columns are 1-indexed)
-                let upto = (*col).saturating_sub(2);
-                #[allow(clippy::skip_while_next)]
-                if let Some(prev_slice) = l.get(0..=upto)
-                    && prev_slice.chars().rev().skip_while(|c| c.is_whitespace()).next() == Some('(')
+            if let Ok(txt) = std::fs::read_to_string(path) {
+                let mut matched_paren = false;
+                if let Some(line) = maybe_line
+                    && let Some(l) = txt.lines().nth(line.saturating_sub(1))
                 {
+                    // Fast path: if the line starts with a parenthesized identifier like `(name)`
+                    // treat this as CoverParenthesizedExpression and return empty.
+                    let trimmed = l.trim_start();
+                    if let Some(rest) = trimmed.strip_prefix('(') {
+                        let rest = rest.trim_start();
+                        let mut rest_chars = rest.chars();
+                        let mut ok = true;
+                        for nc in n.chars() {
+                            match rest_chars.next() {
+                                Some(rc) if rc == nc => {}
+                                _ => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok {
+                            let rest_after: String = rest_chars.collect();
+                            let after_trim = rest_after.trim_start();
+                            if after_trim.starts_with(')') {
+                                matched_paren = true;
+                            }
+                        }
+                    }
+
+                    if !matched_paren {
+                        let chars: Vec<char> = l.chars().collect();
+                        let mut col_idx_opt = maybe_col.map(|c| c.saturating_sub(1));
+
+                        if col_idx_opt.is_none()
+                            && let Some(byte_idx) = l.find(n)
+                        {
+                            let char_idx = l[..byte_idx].chars().count();
+                            col_idx_opt = Some(char_idx);
+                        }
+
+                        if let Some(col_idx) = col_idx_opt {
+                            let mut i = col_idx;
+                            while i > 0 {
+                                i -= 1;
+                                let ch = chars[i];
+                                if ch.is_whitespace() {
+                                    continue;
+                                }
+                                if ch == '(' {
+                                    matched_paren = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if !matched_paren {
+                    for l in txt.lines() {
+                        let trimmed = l.trim_start();
+                        if let Some(rest) = trimmed.strip_prefix('(') {
+                            let rest = rest.trim_start();
+                            let mut rest_chars = rest.chars();
+                            let mut ok = true;
+                            for nc in n.chars() {
+                                match rest_chars.next() {
+                                    Some(rc) if rc == nc => {}
+                                    _ => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ok {
+                                let rest_after: String = rest_chars.collect();
+                                let after_trim = rest_after.trim_start();
+                                if let Some(stripped) = after_trim.strip_prefix(')') {
+                                    let after_paren = stripped.trim_start();
+                                    if after_paren.starts_with('=') {
+                                        matched_paren = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if matched_paren {
                     return String::new();
                 }
             }
@@ -8807,38 +8950,6 @@ fn handle_eval_function<'gc>(
         // to determine whether the use is a SuperCall or SuperProperty).
         let _contains_super_token = tokens.iter().any(|td| matches!(td.token, Token::Super));
 
-        // Early errors: Import/Export declarations are disallowed in eval code; this can
-        // be determined from tokens and thrown early.
-        if tokens.iter().any(|td| matches!(td.token, Token::Import | Token::Export)) {
-            let msg = "Import/Export declarations may not appear in eval code";
-            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
-            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
-                v.borrow().clone()
-            } else {
-                return Err(EvalError::Js(raise_syntax_error!(msg)));
-            };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
-                Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
-                Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
-            }
-        }
-
-        if tokens.iter().any(|td| matches!(td.token, Token::Import | Token::Export)) {
-            let msg = "Import/Export declarations may not appear in eval code";
-            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
-            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
-                v.borrow().clone()
-            } else {
-                return Err(EvalError::Js(raise_syntax_error!(msg)));
-            };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
-                Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
-                Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
-            }
-        }
-
         let mut index = 0;
         // Debug: print eval context
         log::trace!(
@@ -8939,6 +9050,24 @@ fn handle_eval_function<'gc>(
         }
         let statements = parse_statements(&tokens, &mut index)?;
         log::trace!("HANDLE_EVAL PARSED: {:#?}", statements);
+
+        if statements
+            .iter()
+            .any(|s| matches!(&*s.kind, StatementKind::Import(..) | StatementKind::Export(..)))
+        {
+            let msg = "Import/Export declarations may not appear in eval code";
+            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(EvalError::Js(raise_syntax_error!(msg)));
+            };
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
+            }
+        }
 
         // If executing in the global environment, perform EvalDeclarationInstantiation
         // checks for FunctionDeclarations per spec: if any function cannot be declared
@@ -9361,7 +9490,15 @@ fn handle_eval_function<'gc>(
         };
 
         // Execution closure
-        let run_stmts = || check_top_level_return(&statements).and_then(|_| evaluate_statements(mc, &exec_env, &statements));
+        let run_stmts = || {
+            object_set_key_value(mc, &exec_env, "__allow_dynamic_import_result", Value::Boolean(true))?;
+            let res = check_top_level_return(&statements).and_then(|_| evaluate_statements(mc, &exec_env, &statements));
+            let _ = exec_env
+                .borrow_mut(mc)
+                .properties
+                .shift_remove(&PropertyKey::String("__allow_dynamic_import_result".to_string()));
+            res
+        };
 
         // Run with temporary global strictness clearing if needed (Global Scope + Non-Strict Eval)
         let res = if env.borrow().prototype.is_none() && !is_strict_eval {
@@ -9760,33 +9897,8 @@ pub fn evaluate_call_dispatch<'gc>(
             } else if name.starts_with("Function.") {
                 if let Some(method) = name.strip_prefix("Function.prototype.") {
                     if method == "call" {
-                        // function.call(thisArg, ...args)
-                        let this_v = this_val.clone().unwrap_or(Value::Undefined);
-                        let this_arg = eval_args.first().cloned().unwrap_or(Value::Undefined);
-                        let call_args = if eval_args.len() > 1 { &eval_args[1..] } else { &[] };
-                        // Call this_v with this_arg as this
-                        match this_v {
-                            Value::Closure(cl) => call_closure(mc, &cl, Some(this_arg), call_args, env, None),
-                            Value::Function(n) => {
-                                if let Some(res) = call_native_function(mc, &n, Some(this_arg), call_args, env)? {
-                                    Ok(res)
-                                } else {
-                                    Err(raise_eval_error!("Native function call failed").into())
-                                }
-                            }
-                            Value::Object(obj) => {
-                                if let Some(cl_ptr) = obj.borrow().get_closure() {
-                                    if let Value::Closure(cl) = &*cl_ptr.borrow() {
-                                        call_closure(mc, cl, Some(this_arg), call_args, env, None)
-                                    } else {
-                                        Err(raise_type_error!("Not a function").into())
-                                    }
-                                } else {
-                                    Err(raise_type_error!("Not a function").into())
-                                }
-                            }
-                            _ => Err(raise_type_error!("Function.prototype.call called on non-function").into()),
-                        }
+                        let call_env = prepare_call_env_with_this(mc, Some(env), this_val.clone(), None, &[], None, Some(env), None)?;
+                        Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?)
                     } else {
                         let this_v = this_val.clone().unwrap_or(Value::Undefined);
                         handle_function_prototype_method(mc, &this_v, method, &eval_args, env)
@@ -9965,7 +10077,12 @@ fn evaluate_expr_call<'gc>(
                 if !matches!(prop_val, Value::Undefined) {
                     prop_val
                 } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
-                    Value::Function(key.to_string())
+                    let name = if key.as_str() == "call" {
+                        "Function.prototype.call"
+                    } else {
+                        "Function.prototype.apply"
+                    };
+                    Value::Function(name.to_string())
                 } else {
                     Value::Undefined
                 }
@@ -9978,7 +10095,12 @@ fn evaluate_expr_call<'gc>(
                 Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
             ) && (key == "call" || key == "apply")
             {
-                Value::Function(key.to_string())
+                let name = if key == "call" {
+                    "Function.prototype.call"
+                } else {
+                    "Function.prototype.apply"
+                };
+                Value::Function(name.to_string())
             } else {
                 get_primitive_prototype_property(mc, env, &obj_val, key)?
             };
@@ -10042,7 +10164,12 @@ fn evaluate_expr_call<'gc>(
                 if !matches!(prop_val, Value::Undefined) {
                     prop_val
                 } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
-                    Value::Function(key.to_string())
+                    let name = if key.as_str() == "call" {
+                        "Function.prototype.call"
+                    } else {
+                        "Function.prototype.apply"
+                    };
+                    Value::Function(name.to_string())
                 } else {
                     Value::Undefined
                 }
@@ -10057,7 +10184,12 @@ fn evaluate_expr_call<'gc>(
                 Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
             ) && (key == "call" || key == "apply")
             {
-                Value::Function(key.to_string())
+                let name = if key == "call" {
+                    "Function.prototype.call"
+                } else {
+                    "Function.prototype.apply"
+                };
+                Value::Function(name.to_string())
             } else {
                 get_primitive_prototype_property(mc, env, &obj_val, key)?
             };
@@ -11523,25 +11655,45 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::Call(func_expr, args) => evaluate_expr_call(mc, env, func_expr, args),
         Expr::New(ctor, args) => evaluate_expr_new(mc, env, ctor, args),
         Expr::DynamicImport(specifier) => {
+            // Evaluate the specifier before creating the promise capability so
+            // abrupt completion at this stage throws synchronously.
             let spec_val = evaluate_expr(mc, env, specifier)?;
-            let module_name = match spec_val {
-                Value::String(s) => utf16_to_utf8(&s),
-                _ => return Err(raise_type_error!("import() argument must be a string").into()),
-            };
 
-            let base_path = if let Some(cell) = env_get(env, "__filepath")
-                && let Value::String(s) = cell.borrow().clone()
-            {
-                Some(utf16_to_utf8(&s))
-            } else {
-                None
-            };
-
-            let module_value = crate::js_module::load_module(mc, &module_name, base_path.as_deref())
-                .map_err(|e| EvalError::Throw(Value::String(utf8_to_utf16(&e.message())), None, None))?;
             let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
             let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
-            crate::js_promise::resolve_promise(mc, &promise, module_value, env);
+
+            let module_result: Result<Value<'gc>, EvalError<'gc>> = (|| {
+                let prim = crate::core::to_primitive(mc, &spec_val, "string", env)?;
+                let module_name = match prim {
+                    Value::Symbol(_) => {
+                        return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                    }
+                    _ => crate::core::value_to_string(&prim),
+                };
+
+                let base_path = if let Some(cell) = env_get(env, "__filepath")
+                    && let Value::String(s) = cell.borrow().clone()
+                {
+                    Some(utf16_to_utf8(&s))
+                } else {
+                    None
+                };
+
+                crate::js_module::load_module(mc, &module_name, base_path.as_deref(), Some(*env))
+            })();
+
+            match module_result {
+                Ok(module_value) => {
+                    crate::js_promise::resolve_promise(mc, &promise, module_value, env);
+                }
+                Err(err) => {
+                    let reason = match err {
+                        EvalError::Throw(val, _line, _column) => val,
+                        EvalError::Js(js_err) => js_error_to_value(mc, env, &js_err),
+                    };
+                    crate::js_promise::reject_promise(mc, &promise, reason, env);
+                }
+            }
             Ok(Value::Object(promise_obj))
         }
 
@@ -13134,6 +13286,9 @@ pub fn call_native_function<'gc>(
         let rest_args = if args.is_empty() { &[] } else { &args[1..] };
         return match this {
             Value::Closure(cl) => Ok(Some(call_closure(mc, &cl, Some(new_this), rest_args, env, None)?)),
+            Value::AsyncClosure(cl) => Ok(Some(handle_async_closure_call(mc, &cl, Some(new_this), rest_args, env, None)?)),
+            Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(mc, &cl, rest_args, Some(new_this))?)),
+            Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, &cl, rest_args, None)?)),
 
             Value::Function(func_name) => {
                 if let Some(res) = call_native_function(mc, &func_name, Some(new_this.clone()), rest_args, env)? {
@@ -13165,7 +13320,9 @@ pub fn call_native_function<'gc>(
                 if let Some(cl_ptr) = obj.borrow().get_closure() {
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), rest_args, env, Some(obj))?)),
-
+                        Value::AsyncClosure(cl) => Ok(Some(handle_async_closure_call(mc, cl, Some(new_this), rest_args, env, Some(obj))?)),
+                        Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(mc, cl, rest_args, Some(new_this))?)),
+                        Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, rest_args, None)?)),
                         _ => Err(raise_type_error!("Not a function").into()),
                     }
                 } else {
@@ -13196,6 +13353,9 @@ pub fn call_native_function<'gc>(
 
         return match this {
             Value::Closure(cl) => Ok(Some(call_closure(mc, &cl, Some(new_this), &rest_args, env, None)?)),
+            Value::AsyncClosure(cl) => Ok(Some(handle_async_closure_call(mc, &cl, Some(new_this), &rest_args, env, None)?)),
+            Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(mc, &cl, &rest_args, Some(new_this))?)),
+            Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, &cl, &rest_args, None)?)),
             Value::Function(func_name) => {
                 if let Some(res) = call_native_function(mc, &func_name, Some(new_this.clone()), &rest_args, env)? {
                     Ok(Some(res))
@@ -13226,6 +13386,9 @@ pub fn call_native_function<'gc>(
                 if let Some(cl_ptr) = obj.borrow().get_closure() {
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), &rest_args, env, Some(obj))?)),
+                        Value::AsyncClosure(cl) => Ok(Some(handle_async_closure_call(mc, cl, Some(new_this), &rest_args, env, Some(obj))?)),
+                        Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(mc, cl, &rest_args, Some(new_this))?)),
+                        Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, &rest_args, None)?)),
                         _ => Err(raise_type_error!("Not a function").into()),
                     }
                 } else {
@@ -14727,7 +14890,7 @@ fn evaluate_expr_new<'gc>(
                     let name_str = crate::unicode::utf16_to_utf8(name);
                     if matches!(
                         name_str.as_str(),
-                        "Error" | "ReferenceError" | "TypeError" | "RangeError" | "SyntaxError"
+                        "Error" | "ReferenceError" | "TypeError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError"
                     ) {
                         let msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
                         let prototype = if let Some(proto_val) = object_get_key_value(&obj, "prototype")

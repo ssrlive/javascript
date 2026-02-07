@@ -4,6 +4,7 @@
 /*.txt
 /*.sh
 /*.py
+/*.mjs
 /tools/*.*
 /examples
 /plan.md

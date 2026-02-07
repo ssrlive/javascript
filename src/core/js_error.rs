@@ -151,6 +151,12 @@ pub fn create_error<'gc>(
     let error_obj = new_js_object_data(mc);
     error_obj.borrow_mut(mc).prototype = prototype;
 
+    let message = match message {
+        Value::Undefined => Value::String(vec![]),
+        Value::String(_) => message,
+        other => Value::String(utf8_to_utf16(&value_to_string(&other))),
+    };
+
     object_set_key_value(mc, &error_obj, "message", message.clone())?;
     // Make message non-enumerable by default
     error_obj.borrow_mut(mc).set_non_enumerable("message");
@@ -158,7 +164,7 @@ pub fn create_error<'gc>(
     let msg_str = if let Value::String(s) = &message {
         utf16_to_utf8(s)
     } else {
-        "Unknown error".to_string()
+        String::new()
     };
     let stack_str = format!("Error: {msg_str}");
     object_set_key_value(mc, &error_obj, "stack", Value::String(utf8_to_utf16(&stack_str)))?;

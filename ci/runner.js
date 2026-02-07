@@ -239,6 +239,7 @@ async function runAll(){
     // stop when we've executed LIMIT tests
     if (execCount >= LIMIT) break;
     n++;
+    if (/_FIXTURE\.js$/.test(f)) { skip++; log(`SKIP (fixture) ${f}`); continue; }
     const meta = extractMeta(f);
 
     // detect noStrict (capture the full flags array reliably)

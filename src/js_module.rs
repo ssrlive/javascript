@@ -1,12 +1,20 @@
 use crate::{
     JSError, Value,
-    core::{ClosureData, DestructuringElement, Expr, Statement, StatementKind, object_get_key_value, object_set_key_value},
+    core::{
+        ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, object_get_key_value,
+        object_set_key_value,
+    },
     core::{Gc, MutationContext, new_gc_cell_ptr},
     new_js_object_data,
 };
 use std::path::Path;
 
-pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path: Option<&str>) -> Result<Value<'gc>, JSError> {
+pub fn load_module<'gc>(
+    mc: &MutationContext<'gc>,
+    module_name: &str,
+    base_path: Option<&str>,
+    caller_env: Option<JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create a new object for the module
     let module_exports = new_js_object_data(mc);
 
@@ -47,7 +55,7 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
             return Ok(Value::Object(std_obj));
         }
         #[cfg(not(feature = "std"))]
-        return Err(crate::raise_eval_error!("Module 'std' is not built-in (feature disabled)."));
+        return Err(crate::raise_eval_error!("Module 'std' is not built-in (feature disabled).").into());
     } else if module_name == "os" {
         #[cfg(feature = "os")]
         {
@@ -55,32 +63,59 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
             return Ok(Value::Object(os_obj));
         }
         #[cfg(not(feature = "os"))]
-        return Err(crate::raise_eval_error!(
-            "Module 'os' is not built-in. Please provide it via host environment."
-        ));
+        return Err(crate::raise_eval_error!("Module 'os' is not built-in. Please provide it via host environment.").into());
     } else {
         // Try to load as a file
-        match load_module_from_file(mc, module_name, base_path) {
-            Ok(loaded_module) => return Ok(loaded_module),
-            Err(_) => {
-                // Default empty module if file loading fails
-                log::debug!("Failed to load module '{module_name}' from file, returning empty module");
-            }
-        }
+        return load_module_from_file(mc, module_name, base_path, caller_env);
     }
 
     Ok(Value::Object(module_exports))
 }
 
-fn load_module_from_file<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path: Option<&str>) -> Result<Value<'gc>, JSError> {
+fn load_module_from_file<'gc>(
+    mc: &MutationContext<'gc>,
+    module_name: &str,
+    base_path: Option<&str>,
+    caller_env: Option<JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Resolve the module path
-    let module_path = resolve_module_path(module_name, base_path)?;
+    let module_path = resolve_module_path(module_name, base_path).map_err(EvalError::from)?;
+
+    let cache_env = resolve_cache_env(caller_env);
+    if let Some(cache_env) = cache_env {
+        let cache = get_or_create_module_cache(mc, &cache_env)?;
+        if let Some(val_rc) = object_get_key_value(&cache, module_path.as_str()) {
+            return Ok(val_rc.borrow().clone());
+        }
+
+        let loading = get_or_create_module_loading(mc, &cache_env)?;
+        if let Some(flag_rc) = object_get_key_value(&loading, module_path.as_str())
+            && matches!(*flag_rc.borrow(), Value::Boolean(true))
+        {
+            return Err(crate::raise_syntax_error!("Circular module import").into());
+        }
+
+        object_set_key_value(mc, &loading, module_path.as_str(), Value::Boolean(true))?;
+
+        let module_exports = new_js_object_data(mc);
+        object_set_key_value(mc, &cache, module_path.as_str(), Value::Object(module_exports))?;
+
+        // Read the file
+        let content = crate::core::read_script_file(&module_path).map_err(EvalError::from)?;
+
+        // Execute the module and get the final module value
+        let value = execute_module(mc, &content, &module_path, caller_env, Some(module_exports))?;
+
+        object_set_key_value(mc, &cache, module_path.as_str(), value.clone())?;
+        object_set_key_value(mc, &loading, module_path.as_str(), Value::Boolean(false))?;
+        return Ok(value);
+    }
 
     // Read the file
-    let content = crate::core::read_script_file(&module_path)?;
+    let content = crate::core::read_script_file(&module_path).map_err(EvalError::from)?;
 
     // Execute the module and get the final module value
-    execute_module(mc, &content, &module_path)
+    execute_module(mc, &content, &module_path, caller_env, None)
 }
 
 pub(crate) fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<String, JSError> {
@@ -125,13 +160,23 @@ pub(crate) fn resolve_module_path(module_name: &str, base_path: Option<&str>) ->
     }
 }
 
-fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &str) -> Result<Value<'gc>, JSError> {
+fn execute_module<'gc>(
+    mc: &MutationContext<'gc>,
+    content: &str,
+    module_path: &str,
+    caller_env: Option<JSObjectDataPtr<'gc>>,
+    module_exports_override: Option<JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create module exports object
-    let module_exports = new_js_object_data(mc);
+    let module_exports = module_exports_override.unwrap_or_else(|| new_js_object_data(mc));
 
     // Create a module environment
     let env = new_js_object_data(mc);
     env.borrow_mut(mc).is_function_scope = true;
+
+    if let Some(caller) = caller_env {
+        env.borrow_mut(mc).prototype = Some(caller);
+    }
 
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__filepath` similarly to `evaluate_script`.
@@ -155,16 +200,26 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
         new_gc_cell_ptr(mc, Value::Object(module_obj)),
     );
 
-    // Initialize global constructors
-    crate::core::initialize_global_constructors(mc, &env)?;
-
-    // Expose `globalThis` binding in module environment as well
-    object_set_key_value(mc, &env, "globalThis", crate::core::Value::Object(env))?;
+    if caller_env.is_none() {
+        // Initialize global constructors for standalone module execution
+        crate::core::initialize_global_constructors(mc, &env)?;
+        object_set_key_value(mc, &env, "globalThis", crate::core::Value::Object(env))?;
+    } else if let Some(caller) = caller_env {
+        let global_obj = if let Some(global_val) = object_get_key_value(&caller, "globalThis") {
+            match global_val.borrow().clone() {
+                Value::Object(global_obj) => global_obj,
+                _ => caller,
+            }
+        } else {
+            caller
+        };
+        object_set_key_value(mc, &env, "globalThis", crate::core::Value::Object(global_obj))?;
+    }
 
     // Parse and execute the module content
-    let tokens = crate::core::tokenize(content)?;
+    let tokens = crate::core::tokenize(content).map_err(EvalError::from)?;
     let mut index = 0;
-    let statements = crate::core::parse_statements(&tokens, &mut index)?;
+    let statements = crate::core::parse_statements(&tokens, &mut index).map_err(EvalError::from)?;
 
     // Execute statements in module environment
     crate::core::evaluate_statements(mc, &env, &statements)?;
@@ -201,6 +256,48 @@ pub fn import_from_module<'gc>(module_value: &Value<'gc>, specifier: &str) -> Re
         },
         _ => Err(crate::raise_eval_error!("Module is not an object")),
     }
+}
+
+pub(crate) fn get_or_create_module_cache<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    if let Some(val_rc) = object_get_key_value(env, "__module_cache")
+        && let Value::Object(obj) = &*val_rc.borrow()
+    {
+        return Ok(*obj);
+    }
+
+    let cache = new_js_object_data(mc);
+    object_set_key_value(mc, env, "__module_cache", Value::Object(cache))?;
+    Ok(cache)
+}
+
+pub(crate) fn get_or_create_module_loading<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    if let Some(val_rc) = object_get_key_value(env, "__module_loading")
+        && let Value::Object(obj) = &*val_rc.borrow()
+    {
+        return Ok(*obj);
+    }
+
+    let loading = new_js_object_data(mc);
+    object_set_key_value(mc, env, "__module_loading", Value::Object(loading))?;
+    Ok(loading)
+}
+
+fn resolve_cache_env<'gc>(caller_env: Option<JSObjectDataPtr<'gc>>) -> Option<JSObjectDataPtr<'gc>> {
+    if let Some(env) = caller_env {
+        if let Some(global_val) = object_get_key_value(&env, "globalThis")
+            && let Value::Object(global_obj) = &*global_val.borrow()
+        {
+            return Some(*global_obj);
+        }
+        return Some(env);
+    }
+    None
 }
 
 #[allow(dead_code)]

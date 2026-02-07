@@ -867,28 +867,15 @@ fn call_to_string_strict<'gc>(
     env: &JSObjectDataPtr<'gc>,
     obj_ptr: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    if let Some(method_rc) = object_get_key_value(obj_ptr, "toString") {
-        let method_val = method_rc.borrow().clone();
-        let callable = match method_val {
-            Value::Property { getter, value, .. } => {
-                if let Some(g) = getter {
-                    crate::core::call_accessor(mc, env, obj_ptr, &g)?
-                } else if let Some(v) = value {
-                    v.borrow().clone()
-                } else {
-                    Value::Undefined
-                }
-            }
-            v => v,
-        };
-        if matches!(
-            callable,
-            Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
-        ) {
-            crate::core::evaluate_call_dispatch(mc, env, callable, Some(Value::Object(*obj_ptr)), Vec::new())
-        } else {
-            Ok(Value::Uninitialized)
-        }
+    let method_val = crate::core::get_property_with_accessors(mc, env, obj_ptr, "toString")?;
+    if matches!(method_val, Value::Undefined | Value::Null) {
+        return Ok(Value::Uninitialized);
+    }
+    if matches!(
+        method_val,
+        Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
+    ) {
+        crate::core::evaluate_call_dispatch(mc, env, method_val, Some(Value::Object(*obj_ptr)), Vec::new())
     } else {
         Ok(Value::Uninitialized)
     }

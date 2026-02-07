@@ -13938,6 +13938,12 @@ pub fn call_closure<'gc>(
     if let Some(fn_obj_ptr) = fn_obj {
         if let Some(name) = fn_obj_ptr.borrow().get_property("name") {
             crate::core::env_set(mc, &param_env, &name, Value::Object(fn_obj_ptr))?;
+            // If this function executes in strict mode, the name binding must be immutable
+            // (assignment to it should throw a TypeError). Mark it as a const binding so
+            // subsequent assignment attempts will produce the correct error.
+            if fn_is_strict {
+                param_env.borrow_mut(mc).set_const(name.clone());
+            }
             // Also set a frame name on the variable environment so thrown errors can
             // indicate which function they occurred in (used in stack traces).
             object_set_key_value(mc, &var_env, "__frame", Value::String(utf8_to_utf16(&name)))?;

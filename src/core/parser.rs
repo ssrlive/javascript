@@ -1898,6 +1898,11 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
         "parse_parameters: starting tokens (first 16): {:?}",
         tokens.iter().take(16).collect::<Vec<_>>()
     );
+    // Allow optional leading line terminators before the first parameter
+    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+
     if *index < tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
         loop {
             if matches!(tokens[*index].token, Token::Spread) {

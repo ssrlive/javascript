@@ -11087,21 +11087,32 @@ fn evaluate_expr_binary<'gc>(
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
             (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? % to_number_with_env(mc, env, &r)?)),
         },
-        BinaryOp::Pow => match (l_val, r_val) {
-            (Value::BigInt(base), Value::BigInt(exp)) => {
-                if exp.sign() == num_bigint::Sign::Minus {
-                    return Err(raise_range_error!("Exponent must be non-negative").into());
+        BinaryOp::Pow => {
+            // Perform ToNumeric on both operands first (handles wrapped primitives)
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(base), Value::BigInt(exp)) => {
+                    if exp.sign() == num_bigint::Sign::Minus {
+                        return Err(raise_range_error!("Exponent must be non-negative").into());
+                    }
+                    let e = exp
+                        .to_u32()
+                        .ok_or_else(|| EvalError::Js(raise_range_error!("Exponent too large")))?;
+                    Ok(Value::BigInt(Box::new(base.pow(e))))
                 }
-                let e = exp
-                    .to_u32()
-                    .ok_or_else(|| EvalError::Js(raise_range_error!("Exponent too large")))?;
-                Ok(Value::BigInt(Box::new(base.pow(e))))
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(lf), Value::Number(rf)) => {
+                    // If abs(base) is 1 and exponent is +Infinity or -Infinity, result is NaN
+                    if lf.abs() == 1.0 && rf.is_infinite() {
+                        Ok(Value::Number(f64::NAN))
+                    } else {
+                        Ok(Value::Number(lf.powf(rf)))
+                    }
+                }
+                _ => unreachable!("ToNumeric returned non-numeric primitive"),
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(
-                to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?),
-            )),
-        },
+        }
         BinaryOp::BitAnd => {
             let lnum = to_numeric_with_env(mc, env, &l_val)?;
             let rnum = to_numeric_with_env(mc, env, &r_val)?;

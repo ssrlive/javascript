@@ -11422,6 +11422,27 @@ fn evaluate_expr_logical_assign<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match target {
         Expr::Var(name, _, _) => {
+            // Support NamedEvaluation for logical assignment similar to simple assignment
+            let mut maybe_name_to_set: Option<String> = None;
+            match value_expr {
+                crate::core::Expr::Function(name_opt, ..) if name_opt.is_none() => {
+                    maybe_name_to_set = Some(candidate_name_from_target(env, target));
+                }
+                crate::core::Expr::ArrowFunction(..) | crate::core::Expr::AsyncArrowFunction(..) => {
+                    maybe_name_to_set = Some(candidate_name_from_target(env, target));
+                }
+                crate::core::Expr::GeneratorFunction(name_opt, ..) if name_opt.is_none() => {
+                    maybe_name_to_set = Some(candidate_name_from_target(env, target));
+                }
+                crate::core::Expr::AsyncFunction(name_opt, ..) if name_opt.is_none() => {
+                    maybe_name_to_set = Some(candidate_name_from_target(env, target));
+                }
+                crate::core::Expr::Class(class_def) if class_def.name.is_empty() => {
+                    maybe_name_to_set = Some(candidate_name_from_target(env, target));
+                }
+                _ => {}
+            }
+
             let current = evaluate_var(mc, env, name)?;
             let should_assign = match op {
                 LogicalAssignOp::And => current.to_truthy(),
@@ -11430,7 +11451,47 @@ fn evaluate_expr_logical_assign<'gc>(
             };
 
             if should_assign {
-                let val = evaluate_expr(mc, env, value_expr)?;
+                // Handle NamedEvaluation special-case for class expressions
+                let val = if let Expr::Class(class_def) = value_expr
+                    && class_def.name.is_empty()
+                    && maybe_name_to_set.is_some()
+                {
+                    let inferred_name = maybe_name_to_set.clone().unwrap();
+                    create_class_object(mc, &inferred_name, &class_def.extends, &class_def.members, env, false)?
+                } else {
+                    evaluate_expr(mc, env, value_expr)?
+                };
+
+                // NamedEvaluation: after RHS evaluated, set function 'name' if appropriate
+                if let Some(nm) = maybe_name_to_set.clone()
+                    && let Value::Object(obj) = &val
+                {
+                    let mut should_set = false;
+                    let force_set_for_arrow = matches!(
+                        value_expr,
+                        crate::core::Expr::ArrowFunction(..) | crate::core::Expr::AsyncArrowFunction(..)
+                    ) || format!("{:?}", value_expr).contains("ArrowFunction");
+                    if force_set_for_arrow {
+                        should_set = true;
+                    } else if let Some(name_rc) = object_get_key_value(obj, "name") {
+                        let existing_val = match &*name_rc.borrow() {
+                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                            other => other.clone(),
+                        };
+                        let name_str = crate::core::value_to_string(&existing_val);
+                        if name_str.is_empty() {
+                            should_set = true;
+                        }
+                    } else {
+                        should_set = true;
+                    }
+
+                    if should_set {
+                        let desc = create_descriptor_object(mc, Value::String(crate::unicode::utf8_to_utf16(&nm)), false, false, true)?;
+                        crate::js_object::define_property_internal(mc, obj, "name", &desc)?;
+                    }
+                }
+
                 env_set_recursive(mc, env, name, val.clone())?;
                 Ok(val)
             } else {
@@ -11492,6 +11553,26 @@ fn evaluate_expr_logical_assign<'gc>(
                 }
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
+            }
+        }
+        Expr::PrivateMember(obj_expr, name) => {
+            // Evaluate base and resolve private key; this will throw on invalid base or missing private name
+            let (obj, prop_key) = eval_private_member_ref(mc, env, obj_expr, name)?;
+
+            let current = get_property_with_accessors(mc, env, &obj, prop_key.clone())?;
+
+            let should_assign = match op {
+                LogicalAssignOp::And => current.to_truthy(),
+                LogicalAssignOp::Or => !current.to_truthy(),
+                LogicalAssignOp::Nullish => matches!(current, Value::Null | Value::Undefined),
+            };
+
+            if should_assign {
+                let val = evaluate_expr(mc, env, value_expr)?;
+                set_property_with_accessors(mc, env, &obj, prop_key, val.clone())?;
+                Ok(val)
+            } else {
+                Ok(current)
             }
         }
         _ => Err(raise_eval_error!("Invalid assignment target").into()),

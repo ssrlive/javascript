@@ -417,7 +417,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/greater-than,language/expressions/greater-than-or-equal
+          node ci/runner.js --limit 10000 --focus language/expressions/greater-than,language/expressions/greater-than-or-equal,language/expressions/less-than,language/expressions/less-than-or-equal,language/expressions/logical-and,language/expressions/logical-assignment,language/expressions/logical-not,language/expressions/logical-or,language/expressions/void
 
       - name: Upload results
         if: ${{ !cancelled() }}

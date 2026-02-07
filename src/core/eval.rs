@@ -5765,7 +5765,7 @@ fn get_primitive_prototype_property<'gc>(
             && s == "description"
             && let Value::Symbol(sd) = obj_val
         {
-            if let Some(desc) = &sd.description {
+            if let Some(desc) = sd.description() {
                 return Ok(Value::String(crate::unicode::utf8_to_utf16(desc)));
             }
             return Ok(Value::Undefined);
@@ -11519,10 +11519,68 @@ fn evaluate_expr_binary<'gc>(
         }
         BinaryOp::InstanceOf => match r_val {
             Value::Object(ctor) => {
+                // Per ECMAScript: if RHS has a @@hasInstance method, call it (GetMethod)
+                if let Some(sym_ctor_rc) = crate::core::object_get_key_value(env, "Symbol")
+                    && let Value::Object(sym_ctor_obj) = &*sym_ctor_rc.borrow()
+                    && let Some(has_inst_rc) = crate::core::object_get_key_value(sym_ctor_obj, "hasInstance")
+                    && let Value::Symbol(has_inst_sym) = &*has_inst_rc.borrow()
+                {
+                    // Get method = ctor[Symbol.hasInstance] using Get (accessors invoked)
+                    let method_val =
+                        crate::core::get_property_with_accessors(mc, env, &ctor, crate::core::PropertyKey::Symbol(*has_inst_sym))?;
+                    match method_val {
+                        Value::Undefined | Value::Null => { /* treat as absent */ }
+                        ref method_val => {
+                            // If present but not callable -> TypeError per spec
+                            let is_callable = matches!(method_val, Value::Closure(_) | Value::Function(_) | Value::Object(_));
+                            if !is_callable {
+                                return Err(raise_type_error!("Symbol.hasInstance method is not callable").into());
+                            }
+                            // Call method with this = ctor and argument = left value
+                            let call_res =
+                                crate::js_promise::call_function_with_this(mc, method_val, Some(Value::Object(ctor)), &[l_val], env)?;
+                            return Ok(Value::Boolean(call_res.to_truthy()));
+                        }
+                    }
+                }
+
+                // No @@hasInstance -> ordinary behavior
+                // If left-hand side is an object, per tests we must attempt to fetch
+                // `ctor.prototype` (Get semantics) *before* throwing for non-callable C
                 if let Value::Object(obj) = l_val {
-                    let res = crate::js_class::is_instance_of(&obj, &ctor)?;
-                    Ok(Value::Boolean(res))
+                    // Attempt to read prototype (this may throw and should propagate)
+                    let prototype_val = crate::core::get_property_with_accessors(mc, env, &ctor, "prototype")?;
+
+                    // Now ensure constructor is callable
+                    let is_callable_ctor = ctor.borrow().get_closure().is_some()
+                        || ctor.borrow().class_def.is_some()
+                        || crate::core::object_get_key_value(&ctor, "__is_constructor").is_some();
+                    if !is_callable_ctor {
+                        return Err(raise_type_error!("Only Function objects implement [[HasInstance]] and consequently can be proper ShiftExpression for The instanceof operator").into());
+                    }
+
+                    // Prototype must be an object
+                    if let Value::Object(constructor_proto_obj) = prototype_val {
+                        // Walk the internal prototype chain
+                        let mut current_proto_opt: Option<crate::core::JSObjectDataPtr> = obj.borrow().prototype;
+                        while let Some(proto_obj) = current_proto_opt {
+                            if Gc::ptr_eq(proto_obj, constructor_proto_obj) {
+                                return Ok(Value::Boolean(true));
+                            }
+                            current_proto_opt = proto_obj.borrow().prototype;
+                        }
+                        Ok(Value::Boolean(false))
+                    } else {
+                        Err(raise_type_error!("Right-hand side of 'instanceof' is not an object").into())
+                    }
                 } else {
+                    // If LHS is not object we still must check whether constructor is callable
+                    let is_callable_ctor = ctor.borrow().get_closure().is_some()
+                        || ctor.borrow().class_def.is_some()
+                        || crate::core::object_get_key_value(&ctor, "__is_constructor").is_some();
+                    if !is_callable_ctor {
+                        return Err(raise_type_error!("Only Function objects implement [[HasInstance]] and consequently can be proper ShiftExpression for The instanceof operator").into());
+                    }
                     Ok(Value::Boolean(false))
                 }
             }
@@ -14711,7 +14769,7 @@ pub fn call_closure<'gc>(
             {
                 let key_val = iter_sym_val.borrow().clone();
                 let _key_str = match key_val {
-                    Value::Symbol(s) => s.description.clone().unwrap_or_default(), // logic for symbol key?
+                    Value::Symbol(s) => s.description().unwrap_or_default().to_owned(), // logic for symbol key?
                     _ => "iterator".to_string(),
                 };
                 // But object_set_key_value takes PropertyKey.

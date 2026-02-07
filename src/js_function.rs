@@ -2,7 +2,7 @@ use crate::core::{
     ClosureData, EvalError, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr, get_own_property,
     has_own_property_value, new_js_object_data, prepare_function_call_env,
 };
-use crate::core::{PropertyKey, SwitchCase, Token, object_get_key_value, object_set_key_value};
+use crate::core::{PropertyKey, SwitchCase, SymbolData, Token, new_gc_cell_ptr, object_get_key_value, object_set_key_value};
 use crate::error::{JSError, JSErrorKind};
 use crate::js_array::handle_array_constructor;
 use crate::js_class::prepare_call_env_with_this;
@@ -958,7 +958,46 @@ fn function_constructor<'gc>(
             let mut closure_data = ClosureData::new(params, body, Some(global_env), None);
             // Function constructor created functions should not inherit strict mode from the context
             closure_data.enforce_strictness_inheritance = false;
-            Ok(Value::Closure(Gc::new(mc, closure_data)))
+            let closure_val = Value::Closure(Gc::new(mc, closure_data));
+
+            // Create a function object wrapper so it has a proper `prototype` and property attributes
+            let func_obj = crate::core::new_js_object_data(mc);
+            // Set __proto__ to Function.prototype if available
+            if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
+                && let Value::Object(proto) = &*proto_val.borrow()
+            {
+                func_obj.borrow_mut(mc).prototype = Some(*proto);
+            }
+
+            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+
+            // Set name as anonymous for Function constructor-produced functions
+            object_set_key_value(mc, &func_obj, "name", Value::String(crate::unicode::utf8_to_utf16("")))?;
+            func_obj.borrow_mut(mc).set_non_writable("name");
+            func_obj.borrow_mut(mc).set_non_enumerable("name");
+            func_obj.borrow_mut(mc).set_configurable("name");
+
+            // Set length
+            let desc_len = crate::core::create_descriptor_object(mc, Value::Number((params.len()) as f64), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
+
+            // Create prototype object and attach
+            let proto_obj = crate::core::new_js_object_data(mc);
+            if let Some(obj_val) = crate::core::env_get(env, "Object")
+                && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                && let Some(obj_proto_val) = crate::core::object_get_key_value(obj_ctor, "prototype")
+                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+            {
+                proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+            }
+            let desc_ctor = crate::core::create_descriptor_object(mc, Value::Object(func_obj), true, false, true)?;
+            crate::js_object::define_property_internal(mc, &proto_obj, "constructor", &desc_ctor)?;
+            let desc_proto = crate::core::create_descriptor_object(mc, Value::Object(proto_obj), true, false, false)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
+
+            Ok(Value::Object(func_obj))
         } else {
             Err(raise_type_error!("Failed to parse function body").into())
         }
@@ -1066,7 +1105,7 @@ fn symbol_prototype_to_string<'gc>(
         }
     };
 
-    let desc = sym.description.as_deref().unwrap_or("");
+    let desc = sym.description().unwrap_or("");
     Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", desc))))
 }
 
@@ -1084,7 +1123,7 @@ fn symbol_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Re
         }
     };
 
-    let symbol_data = Gc::new(mc, crate::core::SymbolData { description });
+    let symbol_data = Gc::new(mc, SymbolData::new(description.as_deref()));
     Ok(Value::Symbol(symbol_data))
 }
 
@@ -2025,6 +2064,15 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
     object_set_key_value(mc, &func_ctor, "prototype", Value::Object(func_proto))?;
     object_set_key_value(mc, &func_proto, "constructor", Value::Object(func_ctor))?;
+
+    // Make Function.prototype itself callable (typeof Function.prototype === 'function') by
+    // attaching an empty closure; engines typically expose Function.prototype as a function object.
+    let proto_closure = ClosureData {
+        env: Some(*env),
+        ..ClosureData::default()
+    };
+    let proto_closure_val = Value::Closure(Gc::new(mc, proto_closure));
+    func_proto.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, proto_closure_val)));
 
     // Function.prototype.bind
     object_set_key_value(mc, &func_proto, "bind", Value::Function("Function.prototype.bind".to_string()))?;

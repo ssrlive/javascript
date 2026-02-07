@@ -501,7 +501,7 @@ fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr:
         let name_string = match key {
             PropertyKey::String(s) => s.clone(),
             PropertyKey::Symbol(sym) => {
-                let desc = sym.description.clone().unwrap_or_default();
+                let desc = sym.description().unwrap_or_default();
                 format!("[{desc}]")
             }
             PropertyKey::Private(s, _) => format!("#{s}"),
@@ -517,7 +517,7 @@ fn property_key_to_name_string<'gc>(key: &PropertyKey<'gc>) -> String {
     match key {
         PropertyKey::String(s) => s.clone(),
         PropertyKey::Symbol(sym) => {
-            let desc = sym.description.clone().unwrap_or_default();
+            let desc = sym.description().unwrap_or_default();
             format!("[{desc}]")
         }
         PropertyKey::Private(s, _) => format!("#{s}"),
@@ -2454,42 +2454,6 @@ pub(crate) fn call_class_method<'gc>(
     }
     // Other object methods not implemented
     Err(raise_eval_error!(format!("Method '{method}' not found on class instance")))
-}
-
-pub(crate) fn is_instance_of<'gc>(obj: &JSObjectDataPtr<'gc>, constructor: &JSObjectDataPtr<'gc>) -> Result<bool, JSError> {
-    // Get the prototype of the constructor
-    if let Some(constructor_proto) = object_get_key_value(constructor, "prototype") {
-        log::trace!("is_instance_of: constructor.prototype raw = {:?}", constructor_proto);
-        // Handle both direct Object values and descriptor-stored values (Value::Property)
-        let constructor_proto_obj_opt = match &*constructor_proto.borrow() {
-            Value::Object(o) => Some(*o),
-            Value::Property { value: Some(v), .. } => {
-                let inner = v.borrow().clone();
-                if let Value::Object(o2) = inner { Some(o2) } else { None }
-            }
-            _ => None,
-        };
-        if let Some(constructor_proto_obj) = constructor_proto_obj_opt {
-            // Walk the internal prototype chain directly
-            let mut current_proto_opt: Option<JSObjectDataPtr> = obj.borrow().prototype;
-            log::trace!(
-                "is_instance_of: starting internal current_proto = {:?}",
-                current_proto_opt.as_ref().map(|gc| Gc::as_ptr(*gc))
-            );
-            while let Some(proto_obj) = current_proto_opt {
-                log::trace!(
-                    "is_instance_of: proto_obj={:p}, constructor_proto_obj={:p}",
-                    Gc::as_ptr(proto_obj),
-                    Gc::as_ptr(constructor_proto_obj)
-                );
-                if Gc::ptr_eq(proto_obj, constructor_proto_obj) {
-                    return Ok(true);
-                }
-                current_proto_opt = proto_obj.borrow().prototype;
-            }
-        }
-    }
-    Ok(false)
 }
 
 pub(crate) fn evaluate_super<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {

@@ -212,6 +212,21 @@ mod symbol_additional_tests {
     }
 
     #[test]
+    fn test_symbol_has_instance() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let script = r#"
+            // Symbol.hasInstance exists and custom handler can control instanceof
+            (typeof Symbol.hasInstance === 'symbol') && (function(){
+                let F = {};
+                F[Symbol.hasInstance] = function(obj) { return true; };
+                return 1 instanceof F;
+            })();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_well_known_symbol_iterator_and_iterable() {
         let script = r#"
             typeof Symbol.iterator

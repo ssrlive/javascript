@@ -138,8 +138,8 @@ pub(crate) fn string_constructor<'gc>(
                     Value::String(s) => Ok(Value::String(s)),
                     Value::Number(n) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n))))),
                     Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-                    Value::Symbol(sd) => match sd.description {
-                        Some(ref d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", d)))),
+                    Value::Symbol(sd) => match sd.description() {
+                        Some(d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({d})")))),
                         None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
                     },
                     _ => Ok(Value::String(utf8_to_utf16("[object Object]"))),
@@ -154,7 +154,7 @@ pub(crate) fn string_constructor<'gc>(
             Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[property]"))),
             Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
             Value::Symbol(symbol_data) => {
-                let desc = symbol_data.description.as_deref().unwrap_or("");
+                let desc = symbol_data.description().unwrap_or("");
                 Ok(Value::String(utf8_to_utf16(&format!("Symbol({desc})"))))
             }
             Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.to_string()))),

@@ -482,7 +482,19 @@ impl<'gc> ClosureData<'gc> {
 #[derive(Clone, Debug, Collect)]
 #[collect(require_static)]
 pub struct SymbolData {
-    pub description: Option<String>,
+    description: Option<String>,
+}
+
+impl SymbolData {
+    pub fn new(description: Option<&str>) -> Self {
+        SymbolData {
+            description: description.map(|s| s.to_string()),
+        }
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
 }
 
 #[derive(Clone, Collect, Default)]

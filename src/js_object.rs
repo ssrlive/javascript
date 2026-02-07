@@ -1199,7 +1199,7 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[Property]"))),
         Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
         Value::Symbol(symbol_data) => {
-            let desc_str = symbol_data.description.as_deref().unwrap_or("");
+            let desc_str = symbol_data.description().unwrap_or("");
             Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", desc_str))))
         }
         Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),

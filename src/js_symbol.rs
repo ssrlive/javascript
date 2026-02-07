@@ -30,44 +30,29 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     object_set_key_value(mc, &symbol_proto, "constructor", Value::Object(symbol_ctor))?;
 
     // Symbol.iterator
-    let iterator_sym_data = Gc::new(
-        mc,
-        SymbolData {
-            description: Some("Symbol.iterator".to_string()),
-        },
-    );
+    let iterator_sym_data = Gc::new(mc, SymbolData::new(Some("Symbol.iterator")));
     let iterator_sym = Value::Symbol(iterator_sym_data);
     object_set_key_value(mc, &symbol_ctor, "iterator", iterator_sym)?;
 
     // Symbol.asyncIterator
-    let async_iterator_sym_data = Gc::new(
-        mc,
-        SymbolData {
-            description: Some("Symbol.asyncIterator".to_string()),
-        },
-    );
+    let async_iterator_sym_data = Gc::new(mc, SymbolData::new(Some("Symbol.asyncIterator")));
     let async_iterator_sym = Value::Symbol(async_iterator_sym_data);
     object_set_key_value(mc, &symbol_ctor, "asyncIterator", async_iterator_sym)?;
 
     // Symbol.toPrimitive
-    let to_primitive_data = Gc::new(
-        mc,
-        SymbolData {
-            description: Some("Symbol.toPrimitive".to_string()),
-        },
-    );
+    let to_primitive_data = Gc::new(mc, SymbolData::new(Some("Symbol.toPrimitive")));
     let to_primitive_sym = Value::Symbol(to_primitive_data);
     object_set_key_value(mc, &symbol_ctor, "toPrimitive", to_primitive_sym)?;
 
     // Symbol.toStringTag
-    let to_string_tag_data = Gc::new(
-        mc,
-        SymbolData {
-            description: Some("Symbol.toStringTag".to_string()),
-        },
-    );
+    let to_string_tag_data = Gc::new(mc, SymbolData::new(Some("Symbol.toStringTag")));
     let to_string_tag_sym = Value::Symbol(to_string_tag_data);
     object_set_key_value(mc, &symbol_ctor, "toStringTag", to_string_tag_sym)?;
+
+    // Symbol.hasInstance
+    let has_instance_data = Gc::new(mc, SymbolData::new(Some("Symbol.hasInstance")));
+    let has_instance_sym = Value::Symbol(has_instance_data);
+    object_set_key_value(mc, &symbol_ctor, "hasInstance", has_instance_sym)?;
 
     // toString method
     let val = Value::Function("Symbol.prototype.toString".to_string());
@@ -114,7 +99,7 @@ pub(crate) fn handle_symbol_call<'gc>(
         None
     };
 
-    let sym = Gc::new(mc, SymbolData { description });
+    let sym = Gc::new(mc, SymbolData::new(description.as_deref()));
     Ok(Value::Symbol(sym))
 }
 
@@ -143,7 +128,7 @@ pub(crate) fn handle_symbol_tostring<'gc>(_mc: &MutationContext<'gc>, this_value
         }
     };
 
-    let desc = sym.description.as_deref().unwrap_or("");
+    let desc = sym.description().unwrap_or("");
     let s = if desc.is_empty() {
         "Symbol()".to_string()
     } else {
@@ -204,12 +189,7 @@ pub(crate) fn handle_symbol_for<'gc>(
     }
 
     // Otherwise create and store a new symbol associated with the key
-    let sym = Gc::new(
-        mc,
-        SymbolData {
-            description: Some(key.clone()),
-        },
-    );
+    let sym = Gc::new(mc, SymbolData::new(Some(&key)));
     object_set_key_value(mc, &registry_obj, &key, Value::Symbol(sym))?;
     Ok(Value::Symbol(sym))
 }

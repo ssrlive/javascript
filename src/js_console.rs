@@ -138,7 +138,7 @@ fn format_value_pretty<'gc>(
                         Value::Number(n) => return Ok(format!("[Number: {}]", n)),
                         Value::String(ref s) => return Ok(format!("[String: '{}']", utf16_to_utf8(s))),
                         Value::BigInt(ref b) => return Ok(format!("[BigInt: {}n]", b)),
-                        Value::Symbol(ref s) => return Ok(format!("[Symbol: Symbol({})]", s.description.as_deref().unwrap_or(""))),
+                        Value::Symbol(ref s) => return Ok(format!("[Symbol: Symbol({})]", s.description().unwrap_or(""))),
                         _ => {}
                     }
                 }
@@ -265,7 +265,7 @@ fn format_value_pretty<'gc>(
             Ok(s)
         }
         Value::Promise(p_rc) => format_promise(mc, p_rc, _env, _depth, seen),
-        Value::Symbol(s) => Ok(format!("Symbol({})", s.description.as_deref().unwrap_or(""))),
+        Value::Symbol(s) => Ok(format!("Symbol({})", s.description().unwrap_or(""))),
         // Value::Map(_) => Ok("[object Map]".to_string()),
         // Value::Set(_) => Ok("[object Set]".to_string()),
         // Value::WeakMap(_) => Ok("[object WeakMap]".to_string()),

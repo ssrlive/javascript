@@ -3251,7 +3251,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             } else if *index >= tokens.len()
                 || matches!(
                     tokens[*index].token,
-                    Token::Semicolon | Token::Comma | Token::RParen | Token::RBracket | Token::RBrace | Token::Colon
+                    Token::Semicolon
+                        | Token::Comma
+                        | Token::RParen
+                        | Token::RBracket
+                        | Token::RBrace
+                        | Token::Colon
+                        | Token::LineTerminator
                 )
             {
                 // `yield` with no expression

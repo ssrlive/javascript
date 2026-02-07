@@ -267,6 +267,7 @@ impl<'gc> JSObjectData<'gc> {
         self.properties.insert(key, val);
     }
     pub fn set_const(&mut self, key: String) {
+        log::debug!("set_const: obj_ptr={:p} key={}", self as *const _, key);
         self.constants.insert(key);
     }
 
@@ -1350,6 +1351,14 @@ pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, 
 
 pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: Value<'gc>) -> Result<(), JSError> {
     if (*env.borrow()).is_const(key) {
+        log::trace!(
+            "env_set: assignment to const detected: env_ptr={:p} key={} constants={:?} lexical_decls={:?} own_props={:?}",
+            &**env as *const _,
+            key,
+            env.borrow().constants,
+            env.borrow().lexical_declarations,
+            env.borrow().properties.keys().collect::<Vec<_>>()
+        );
         return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
     }
     let val_ptr = new_gc_cell_ptr(mc, val);

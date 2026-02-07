@@ -1419,7 +1419,41 @@ fn hoist_declarations<'gc>(
 
                 // Create prototype object
                 let proto_obj = crate::core::new_js_object_data(mc);
-                if let Some(obj_val) = env_get(env, "Object")
+                // For generator (and async generator) functions, the created
+                // `prototype` object's internal [[Prototype]] should point to the
+                // realm's Generator.prototype (or AsyncGenerator.prototype).
+                // Fall back to Object.prototype when the intrinsic is not available.
+                if *is_async {
+                    if let Some(async_gen_val) = env_get(env, "AsyncGenerator")
+                        && let Value::Object(async_gen_ctor) = &*async_gen_val.borrow()
+                        && let Some(async_proto_val) = object_get_key_value(async_gen_ctor, "prototype")
+                    {
+                        let proto_value = match &*async_proto_val.borrow() {
+                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                            other => other.clone(),
+                        };
+                        if let Value::Object(async_proto) = proto_value {
+                            proto_obj.borrow_mut(mc).prototype = Some(async_proto);
+                        }
+                    } else if let Some(obj_val) = env_get(env, "Object")
+                        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+                        && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+                    {
+                        proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+                    }
+                } else if let Some(gen_val) = env_get(env, "Generator")
+                    && let Value::Object(gen_ctor) = &*gen_val.borrow()
+                    && let Some(gen_proto_val) = object_get_key_value(gen_ctor, "prototype")
+                {
+                    let proto_value = match &*gen_proto_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Object(gen_proto) = proto_value {
+                        proto_obj.borrow_mut(mc).prototype = Some(gen_proto);
+                    }
+                } else if let Some(obj_val) = env_get(env, "Object")
                     && let Value::Object(obj_ctor) = &*obj_val.borrow()
                     && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
                     && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
@@ -1427,7 +1461,10 @@ fn hoist_declarations<'gc>(
                     proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
                 }
 
-                object_set_key_value(mc, &func_obj, "prototype", Value::Object(proto_obj))?;
+                // Define the 'prototype' property on the function with the standard
+                // attributes: writable:true, enumerable:false, configurable:false
+                let desc_proto = crate::core::create_descriptor_object(mc, Value::Object(proto_obj), true, false, false)?;
+                crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
                 env_set(mc, env, name, Value::Object(func_obj))?;
             } else if *is_async {
                 let func_obj = crate::core::new_js_object_data(mc);
@@ -2267,6 +2304,12 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
         hoist_declarations(mc, &exec_env, statements, false, false)?;
     }
 
+    // Debug: show any const bindings hoisted into the execution environment
+    log::trace!(
+        "evaluate_statements: post-hoist exec_env constants={:?}",
+        exec_env.borrow().constants
+    );
+
     if env_get_strictness(&exec_env) {
         for stmt in statements {
             let mut err_msg = None;
@@ -2338,9 +2381,22 @@ fn evaluate_destructuring_array_assignment<'gc>(
         && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
     {
         let method = if let Value::Object(obj) = &val {
-            get_property_with_accessors(mc, env, obj, iter_sym_data)?
+            log::debug!(
+                "destructuring: looking up Symbol.iterator on obj ptr={:p} sym_ptr={:?} sym={:?}",
+                Gc::as_ptr(*obj),
+                Gc::as_ptr(*iter_sym_data),
+                iter_sym_data
+            );
+            let is_gen = crate::core::object_get_key_value(obj, "__generator__").is_some();
+            let proto_ptr = obj.borrow().prototype.map(Gc::as_ptr);
+            log::debug!("destructuring: obj is_generator = {} proto = {:?}", is_gen, proto_ptr);
+            let m = get_property_with_accessors(mc, env, obj, iter_sym_data)?;
+            log::debug!("destructuring: method lookup result = {:?}", m);
+            m
         } else {
-            get_primitive_prototype_property(mc, env, &val, iter_sym_data)?
+            let m = get_primitive_prototype_property(mc, env, &val, iter_sym_data)?;
+            log::debug!("destructuring: primitive method lookup result = {:?}", m);
+            m
         };
         if !matches!(method, Value::Undefined | Value::Null) {
             let res = evaluate_call_dispatch(mc, env, method, Some(val.clone()), vec![])?;
@@ -3323,6 +3379,56 @@ fn eval_res<'gc>(
             if let ControlFlow::Throw(val, ..) = &result
                 && let Some(catch_stmts) = &tc_stmt.catch_body
             {
+                // DEBUG: log caught value for tracing failing assert.throws cases
+                log::debug!("TryCatch: caught value = {:?}", val);
+                if let Value::Object(obj) = val {
+                    // Attempt to extract constructor.name for debugging (use prototype chain lookup)
+                    let ctor_prop = get_property_with_accessors(mc, env, obj, "constructor").ok();
+                    let ctor_name = if let Some(ctor_val) = ctor_prop {
+                        match &ctor_val {
+                            Value::Object(cobj) => {
+                                if let Some(name_val) = object_get_key_value(cobj, "name") {
+                                    if let Value::String(s) = &*name_val.borrow() {
+                                        Some(crate::unicode::utf16_to_utf8(s))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                            Value::Function(name) => Some(name.clone()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    log::debug!("TryCatch: caught.constructor.name = {:?}", ctor_name);
+
+                    // Also inspect the thrown object's [[Prototype]]'s constructor.name
+                    if let Some(proto_ptr) = obj.borrow().prototype {
+                        if let Some(ctor_val) = object_get_key_value(&proto_ptr, "constructor") {
+                            match &*ctor_val.borrow() {
+                                Value::Object(cobj) => {
+                                    if let Some(name_val) = object_get_key_value(cobj, "name")
+                                        && let Value::String(s) = &*name_val.borrow()
+                                    {
+                                        log::debug!("TryCatch: prototype.constructor.name = {}", crate::unicode::utf16_to_utf8(s));
+                                    }
+                                }
+                                Value::Function(name) => {
+                                    log::debug!("TryCatch: prototype.constructor.name = {}", name);
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            log::debug!("TryCatch: prototype has no constructor own-property");
+                        }
+                    } else {
+                        log::debug!("TryCatch: thrown object has no [[Prototype]]");
+                    }
+                }
+
                 // Create new scope for catch
                 let catch_env = crate::core::new_js_object_data(mc);
                 catch_env.borrow_mut(mc).prototype = Some(*env);
@@ -9528,7 +9634,7 @@ pub fn evaluate_call_dispatch<'gc>(
     match func_val {
         Value::Closure(cl) => call_closure(mc, &cl, this_val.clone(), &eval_args, env, None),
         Value::AsyncClosure(cl) => Ok(handle_async_closure_call(mc, &cl, this_val.clone(), &eval_args, env, None)?),
-        Value::GeneratorFunction(_, cl) => Ok(handle_generator_function_call(mc, &cl, &eval_args, this_val.clone())?),
+        Value::GeneratorFunction(_, cl) => Ok(handle_generator_function_call(mc, &cl, &eval_args, this_val.clone(), None, None)?),
         Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, &cl, &eval_args, None)?),
         Value::Function(name) => {
             if let Some(res) = call_native_function(mc, &name, this_val.clone(), &eval_args, env)? {
@@ -9932,7 +10038,21 @@ pub fn evaluate_call_dispatch<'gc>(
                         }
                     }
                     Value::AsyncClosure(cl) => Ok(handle_async_closure_call(mc, cl, this_val.clone(), &eval_args, env, Some(obj))?),
-                    Value::GeneratorFunction(_, cl) => Ok(handle_generator_function_call(mc, cl, &eval_args, this_val.clone())?),
+                    Value::GeneratorFunction(_, cl) => {
+                        // Do not pre-read the function object's 'prototype' here because
+                        // parameter default initializers may mutate it; let the
+                        // generator call handler resolve the constructor prototype
+                        // after parameter initialization by passing the function
+                        // object so it can be observed at the correct time.
+                        Ok(handle_generator_function_call(
+                            mc,
+                            cl,
+                            &eval_args,
+                            this_val.clone(),
+                            None,
+                            Some(obj),
+                        )?)
+                    }
                     // Async generator functions: create AsyncGenerator instance
                     Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, cl, &eval_args, Some(obj))?),
                     _ => Err(raise_type_error!("Not a function").into()),
@@ -11367,12 +11487,35 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::GeneratorFunction(name, params, body) => {
             // Similar to Function but produces a GeneratorFunction value
             let func_obj = crate::core::new_js_object_data(mc);
-            // Set __proto__ to Function.prototype
-            if let Some(func_ctor_val) = env_get(env, "Function")
+            // Set internal [[Prototype]] to `GeneratorFunction.prototype` when available
+            // so generator functions inherit from a distinct function prototype.
+            if let Some(gen_func_ctor_val) = env_get(env, "GeneratorFunction")
+                && let Value::Object(gen_func_ctor) = &*gen_func_ctor_val.borrow()
+                && let Some(gen_func_proto_val) = object_get_key_value(gen_func_ctor, "prototype")
+            {
+                let proto_opt = match &*gen_func_proto_val.borrow() {
+                    Value::Object(o) => Some(*o),
+                    Value::Property { value: Some(v), .. } => {
+                        let inner = v.borrow().clone();
+                        if let Value::Object(o2) = inner { Some(o2) } else { None }
+                    }
+                    _ => None,
+                };
+                if let Some(gen_func_proto) = proto_opt {
+                    func_obj.borrow_mut(mc).prototype = Some(gen_func_proto);
+                    // DEBUG: report that the new generator function object's [[Prototype]] was set
+                    log::trace!(
+                        "eval: created generator function func_obj.ptr={:p} [[Prototype]] -> {:p}",
+                        Gc::as_ptr(func_obj),
+                        Gc::as_ptr(gen_func_proto)
+                    );
+                }
+            } else if let Some(func_ctor_val) = env_get(env, "Function")
                 && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
                 && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                 && let Value::Object(proto) = &*proto_val.borrow()
             {
+                // Fallback: use Function.prototype
                 func_obj.borrow_mut(mc).prototype = Some(*proto);
             }
 
@@ -11394,7 +11537,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     let desc = create_descriptor_object(mc, Value::String(utf8_to_utf16(n)), false, false, true)?;
                     crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
                 }
-                _ => {}
+                _ => {
+                    // Anonymous generator functions should expose an own 'name' property with the empty string
+                    // and the standard attributes: writable:false, enumerable:false, configurable:true
+                    let desc = crate::core::create_descriptor_object(mc, Value::String(vec![]), false, false, true)?;
+                    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
+                }
             }
 
             // Set 'length' property for generator function
@@ -11426,30 +11574,56 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 && let Value::Object(gen_ctor) = &*gen_val.borrow()
                 && let Some(gen_proto_val) = object_get_key_value(gen_ctor, "prototype")
             {
+                log::debug!("GeneratorFunction: found Generator constructor ptr = {:p}", Gc::as_ptr(*gen_ctor));
+                log::debug!("GeneratorFunction: raw prototype value ptr = {:p}", Gc::as_ptr(gen_proto_val));
                 let proto_value = match &*gen_proto_val.borrow() {
                     Value::Property { value: Some(v), .. } => v.borrow().clone(),
                     other => other.clone(),
                 };
                 if let Value::Object(gen_proto) = proto_value {
+                    log::debug!(
+                        "GeneratorFunction: setting proto_obj.prototype to Generator.prototype {:p}",
+                        Gc::as_ptr(gen_proto)
+                    );
                     proto_obj.borrow_mut(mc).prototype = Some(gen_proto);
+                } else {
+                    log::debug!("GeneratorFunction: Generator.prototype is not an object");
                 }
-            } else if let Some(obj_val) = env_get(env, "Object")
-                && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-            {
-                let proto_value = match &*obj_proto_val.borrow() {
-                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                    other => other.clone(),
-                };
-                if let Value::Object(obj_proto) = proto_value {
-                    proto_obj.borrow_mut(mc).prototype = Some(obj_proto);
+            } else {
+                log::debug!("GeneratorFunction: could not find Generator.prototype");
+                if let Some(obj_val) = env_get(env, "Object")
+                    && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                    && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+                {
+                    let proto_value = match &*obj_proto_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Object(obj_proto) = proto_value {
+                        log::debug!("GeneratorFunction: falling back to Object.prototype {:p}", Gc::as_ptr(obj_proto));
+                        proto_obj.borrow_mut(mc).prototype = Some(obj_proto);
+                    }
                 }
             }
 
-            // Set 'constructor' on prototype
-            object_set_key_value(mc, &proto_obj, "constructor", Value::Object(func_obj))?;
-            // Set 'prototype' on function
-            object_set_key_value(mc, &func_obj, "prototype", Value::Object(proto_obj))?;
+            // For generator functions, do NOT create an own 'constructor'
+            // property on the prototype object (per test262 expectations).
+            // Only define the `prototype` property on the function itself
+            // with writable:true, enumerable:false, configurable:false.
+            let desc_proto = crate::core::create_descriptor_object(mc, Value::Object(proto_obj), true, false, false)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
+            // DEBUG: report the enumerable flag for the newly-defined `prototype` property
+            log::trace!(
+                "eval: func_obj.ptr={:p} prototype enumerable={} non_enumerable={}",
+                Gc::as_ptr(func_obj),
+                func_obj.borrow().is_enumerable("prototype"),
+                func_obj
+                    .borrow()
+                    .non_enumerable
+                    .contains(&crate::core::PropertyKey::String("prototype".to_string()))
+            );
+            // Ensure non-enumerable as spec requires for function `prototype` property
+            func_obj.borrow_mut(mc).set_non_enumerable("prototype");
 
             Ok(Value::Object(func_obj))
         }
@@ -11540,10 +11714,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 object_set_key_value(mc, &func_obj, "__async_generator_proto", Value::Object(proto))?;
             }
 
-            // Set 'constructor' on prototype
-            object_set_key_value(mc, &proto_obj, "constructor", Value::Object(func_obj))?;
-            // Set 'prototype' on function
-            object_set_key_value(mc, &func_obj, "prototype", Value::Object(proto_obj))?;
+            // For async generator functions, do NOT create an own 'constructor'
+            // property on the prototype object (per Test262 expectations).
+            // Only define the `prototype` property on the function itself
+            // with writable:true, enumerable:false, configurable:false.
+            let desc_proto = crate::core::create_descriptor_object(mc, Value::Object(proto_obj), true, false, false)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
 
             Ok(Value::Object(func_obj))
         }
@@ -12683,10 +12859,18 @@ fn evaluate_function_expression<'gc>(
         proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
     }
 
-    // Set 'constructor' on prototype
-    object_set_key_value(mc, &proto_obj, "constructor", Value::Object(func_obj))?;
-    // Set 'prototype' on function
-    object_set_key_value(mc, &func_obj, "prototype", Value::Object(proto_obj))?;
+    // Set 'constructor' on prototype with proper attributes (writable:true, enumerable:false, configurable:true)
+    let desc_ctor = crate::core::create_descriptor_object(mc, Value::Object(func_obj), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &proto_obj, "constructor", &desc_ctor)?;
+    // Set 'prototype' on function with proper attributes (writable:true, enumerable:false, configurable:false)
+    let desc_proto = crate::core::create_descriptor_object(mc, Value::Object(proto_obj), true, false, false)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
+    // DEBUG: log pointers for function and its prototype so we can compare when constructing instances
+    log::debug!(
+        "evaluate_function_expression: func_obj={:p} proto_obj={:p}",
+        Gc::as_ptr(func_obj),
+        Gc::as_ptr(proto_obj)
+    );
 
     Ok(Value::Object(func_obj))
 }
@@ -12760,7 +12944,28 @@ pub(crate) fn get_property_with_accessors<'gc>(
 
     let mut cur = Some(*obj);
     while let Some(cur_obj) = cur {
+        log::debug!("get_property_with_accessors: checking obj={:p}, key={:?}", cur_obj.as_ptr(), key);
+        // Extra diagnostics for Symbol keys: log the sought symbol pointer and
+        // any symbol keys present on the current object so we can detect
+        // pointer/mismatch issues during prototype traversal.
+        if let PropertyKey::Symbol(sym_ptr) = key {
+            log::debug!(
+                "get_property_with_accessors: looking for symbol ptr={:p} on obj={:p}",
+                Gc::as_ptr(*sym_ptr),
+                cur_obj.as_ptr()
+            );
+            for k in cur_obj.borrow().properties.keys() {
+                if let PropertyKey::Symbol(k_sym) = k {
+                    log::debug!(
+                        "get_property_with_accessors: obj={:p} has symbol key ptr={:p}",
+                        cur_obj.as_ptr(),
+                        Gc::as_ptr(*k_sym)
+                    );
+                }
+            }
+        }
         if let Some(val_ptr) = object_get_key_value(&cur_obj, key) {
+            log::debug!("get_property_with_accessors: found property on obj={:p}", cur_obj.as_ptr());
             let val = val_ptr.borrow().clone();
             return match val {
                 Value::Property { getter, value, .. } => {
@@ -12776,6 +12981,10 @@ pub(crate) fn get_property_with_accessors<'gc>(
                 _ => Ok(val),
             };
         }
+        log::debug!(
+            "get_property_with_accessors: not found on obj={:p}, moving to prototype",
+            cur_obj.as_ptr()
+        );
 
         // If not found in ordinary properties, check for TypedArray indexed elements when
         // the property key is a canonical numeric index string.
@@ -12836,6 +13045,10 @@ pub(crate) fn get_property_with_accessors<'gc>(
 
         cur = cur_obj.borrow().prototype;
     }
+    log::debug!(
+        "get_property_with_accessors: property not found, returning Undefined for key={:?}",
+        key
+    );
     Ok(Value::Undefined)
 }
 
@@ -13298,7 +13511,14 @@ pub fn call_native_function<'gc>(
         return match this {
             Value::Closure(cl) => Ok(Some(call_closure(mc, &cl, Some(new_this), rest_args, env, None)?)),
             Value::AsyncClosure(cl) => Ok(Some(handle_async_closure_call(mc, &cl, Some(new_this), rest_args, env, None)?)),
-            Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(mc, &cl, rest_args, Some(new_this))?)),
+            Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(
+                mc,
+                &cl,
+                rest_args,
+                Some(new_this),
+                None,
+                None,
+            )?)),
             Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, &cl, rest_args, None)?)),
 
             Value::Function(func_name) => {
@@ -13332,7 +13552,14 @@ pub fn call_native_function<'gc>(
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), rest_args, env, Some(obj))?)),
                         Value::AsyncClosure(cl) => Ok(Some(handle_async_closure_call(mc, cl, Some(new_this), rest_args, env, Some(obj))?)),
-                        Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(mc, cl, rest_args, Some(new_this))?)),
+                        Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(
+                            mc,
+                            cl,
+                            rest_args,
+                            Some(new_this),
+                            None,
+                            Some(obj),
+                        )?)),
                         Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, rest_args, None)?)),
                         _ => Err(raise_type_error!("Not a function").into()),
                     }
@@ -13365,7 +13592,14 @@ pub fn call_native_function<'gc>(
         return match this {
             Value::Closure(cl) => Ok(Some(call_closure(mc, &cl, Some(new_this), &rest_args, env, None)?)),
             Value::AsyncClosure(cl) => Ok(Some(handle_async_closure_call(mc, &cl, Some(new_this), &rest_args, env, None)?)),
-            Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(mc, &cl, &rest_args, Some(new_this))?)),
+            Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(
+                mc,
+                &cl,
+                &rest_args,
+                Some(new_this),
+                None,
+                None,
+            )?)),
             Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, &cl, &rest_args, None)?)),
             Value::Function(func_name) => {
                 if let Some(res) = call_native_function(mc, &func_name, Some(new_this.clone()), &rest_args, env)? {
@@ -13398,7 +13632,14 @@ pub fn call_native_function<'gc>(
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), &rest_args, env, Some(obj))?)),
                         Value::AsyncClosure(cl) => Ok(Some(handle_async_closure_call(mc, cl, Some(new_this), &rest_args, env, Some(obj))?)),
-                        Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(mc, cl, &rest_args, Some(new_this))?)),
+                        Value::GeneratorFunction(_, cl) => Ok(Some(handle_generator_function_call(
+                            mc,
+                            cl,
+                            &rest_args,
+                            Some(new_this),
+                            None,
+                            Some(obj),
+                        )?)),
                         Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, &rest_args, None)?)),
                         _ => Err(raise_type_error!("Not a function").into()),
                     }
@@ -13937,15 +14178,46 @@ pub fn call_closure<'gc>(
     // the function can reference itself by name (e.g., `fac` inside `function fac ...`).
     if let Some(fn_obj_ptr) = fn_obj {
         if let Some(name) = fn_obj_ptr.borrow().get_property("name") {
-            crate::core::env_set(mc, &param_env, &name, Value::Object(fn_obj_ptr))?;
-            // If this function executes in strict mode, the name binding must be immutable
-            // (assignment to it should throw a TypeError). Mark it as a const binding so
-            // subsequent assignment attempts will produce the correct error.
-            if fn_is_strict {
-                param_env.borrow_mut(mc).set_const(name.clone());
+            // If the function object was created as a hoisted declaration on its
+            // creation environment, do NOT create a separate per-call binding for
+            // the name (that behavior is only for Named Function Expressions).
+            let mut should_bind_name = true;
+            if let Some(creation_env) = cl.env
+                && let Some(existing_cell) = crate::core::env_get_own(&creation_env, &name)
+            {
+                // If the existing own binding is the same object as the function
+                // object being called, assume this was a function declaration
+                // and skip creating the per-call name binding.
+                match &*existing_cell.borrow() {
+                    Value::Object(existing_obj_ptr) => {
+                        if Gc::as_ptr(*existing_obj_ptr) == Gc::as_ptr(fn_obj_ptr) {
+                            should_bind_name = false;
+                        }
+                    }
+                    Value::Property { value: Some(v), .. } => {
+                        if let Value::Object(existing_obj_ptr) = &*v.borrow()
+                            && Gc::as_ptr(*existing_obj_ptr) == Gc::as_ptr(fn_obj_ptr)
+                        {
+                            should_bind_name = false;
+                        }
+                    }
+                    _ => {}
+                }
             }
-            // Also set a frame name on the variable environment so thrown errors can
-            // indicate which function they occurred in (used in stack traces).
+            if should_bind_name {
+                crate::core::env_set(mc, &param_env, &name, Value::Object(fn_obj_ptr))?;
+                // If this function executes in strict mode, the name binding must be immutable
+                // (assignment to it should throw a TypeError). Mark it as a const binding so
+                // subsequent assignment attempts will produce the correct error.
+                if fn_is_strict {
+                    param_env.borrow_mut(mc).set_const(name.clone());
+                }
+            }
+            // Always set a frame name on the variable environment so thrown errors can
+            // indicate which function they occurred in (used in stack traces). Even when
+            // the function was hoisted into its creation environment (and therefore we
+            // skipped creating a per-call name binding), the frame name is useful for
+            // generating meaningful stack traces.
             object_set_key_value(mc, &var_env, "__frame", Value::String(utf8_to_utf16(&name)))?;
         }
         // Link caller environment so stacks can be assembled by walking __caller
@@ -14828,8 +15100,10 @@ fn evaluate_expr_new<'gc>(
         }
         Value::Object(obj) => {
             if let Some(cl_ptr) = obj.borrow().get_closure() {
+                log::debug!("evaluate_expr_new: constructor object has closure ptr = {:p}", Gc::as_ptr(obj));
                 match &*cl_ptr.borrow() {
                     Value::Closure(cl) => {
+                        log::debug!("evaluate_expr_new: found closure; is_arrow={} params={:?}", cl.is_arrow, cl.params);
                         // Arrow functions are not constructors per ECMAScript; throw TypeError
                         if cl.is_arrow {
                             return Err(raise_type_error!("Not a constructor").into());
@@ -14840,9 +15114,23 @@ fn evaluate_expr_new<'gc>(
 
                         // 2. Set prototype
                         if let Some(proto_val) = object_get_key_value(&obj, "prototype") {
-                            if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                                instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                                object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj))?;
+                            // Debug: log the raw 'prototype' slot value we found on the constructor
+                            log::debug!("evaluate_expr_new: raw prototype slot = {:?}", proto_val.borrow());
+                            // Also log the constructor object's function/proto pointers
+                            log::debug!("evaluate_expr_new: constructor obj ptr = {:p}", Gc::as_ptr(obj));
+
+                            // Handle the case where 'prototype' is stored as a property descriptor
+                            // (Value::Property { value: Some(v), .. }) or as a direct Object value.
+                            let proto_value = match &*proto_val.borrow() {
+                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                other => other.clone(),
+                            };
+                            log::debug!("evaluate_expr_new: resolved prototype value = {:?}", proto_value);
+
+                            if let Value::Object(proto_obj) = proto_value {
+                                instance.borrow_mut(mc).prototype = Some(proto_obj);
+                                object_set_key_value(mc, &instance, "__proto__", Value::Object(proto_obj))?;
+                                log::debug!("evaluate_expr_new: instance prototype set to {:p}", Gc::as_ptr(proto_obj));
                             } else {
                                 // Fallback to Object.prototype
                                 if let Some(obj_val) = env_get(env, "Object")
@@ -14851,6 +15139,10 @@ fn evaluate_expr_new<'gc>(
                                     && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
                                 {
                                     instance.borrow_mut(mc).prototype = Some(*obj_proto);
+                                    log::debug!(
+                                        "evaluate_expr_new: instance prototype fallback to Object.prototype {:p}",
+                                        Gc::as_ptr(*obj_proto)
+                                    );
                                 }
                             }
                         }
@@ -14894,7 +15186,7 @@ fn evaluate_expr_new<'gc>(
                             _ => Ok(Value::Object(instance)),
                         }
                     }
-                    _ => Err(raise_eval_error!("Not a constructor").into()),
+                    _ => Err(raise_type_error!("Not a constructor").into()),
                 }
             } else if obj.borrow().class_def.is_some() {
                 // Delegate to js_class::evaluate_new

@@ -23,7 +23,7 @@ pub fn handle_async_closure_call<'gc>(
     // Create a new Closure wrapped in Value to pass to the task.
     // Instead of deferring the entire execution, synchronously start the generator
     // so that the body runs up to the first `await` (per spec) before returning the Promise.
-    match crate::js_generator::handle_generator_function_call(mc, closure, args, _this_val) {
+    match crate::js_generator::handle_generator_function_call(mc, closure, args, _this_val, None, None) {
         Ok(gen_val) => {
             if let Value::Object(gen_obj) = gen_val
                 && let Some(gen_inner) = object_get_key_value(&gen_obj, "__generator__")

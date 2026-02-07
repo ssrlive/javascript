@@ -119,6 +119,15 @@ pub(crate) fn define_property_internal<'gc>(
     let prop_key = &prop_key.into();
     // Parse descriptor into typed PropertyDescriptor
     let pd = PropertyDescriptor::from_object(desc_obj)?;
+    // DEBUG: print parsed descriptor flags
+    log::trace!(
+        "define_property_internal: parsed descriptor writable={:?} enumerable={:?} configurable={:?} for key={:?} on obj_ptr={:p}",
+        pd.writable,
+        pd.enumerable,
+        pd.configurable,
+        prop_key,
+        target_obj.as_ptr()
+    );
 
     // If the property exists and is non-configurable on the target, apply ECMAScript-compatible checks
     if let Some(existing_rc) = object_get_key_value(target_obj, prop_key)
@@ -343,6 +352,13 @@ pub(crate) fn define_property_internal<'gc>(
 
     // Always update value
     object_set_key_value(mc, target_obj, prop_key, prop_descriptor)?;
+    // Ensure explicitly-requested non-enumerable flag is applied even after
+    // the property value has been stored. This guards against cases where
+    // insertion order or existing property state prevented the marker from
+    // being set earlier in the function.
+    if pd.enumerable == Some(false) {
+        target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
+    }
     Ok(())
 }
 

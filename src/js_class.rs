@@ -2460,7 +2460,16 @@ pub(crate) fn is_instance_of<'gc>(obj: &JSObjectDataPtr<'gc>, constructor: &JSOb
     // Get the prototype of the constructor
     if let Some(constructor_proto) = object_get_key_value(constructor, "prototype") {
         log::trace!("is_instance_of: constructor.prototype raw = {:?}", constructor_proto);
-        if let Value::Object(constructor_proto_obj) = &*constructor_proto.borrow() {
+        // Handle both direct Object values and descriptor-stored values (Value::Property)
+        let constructor_proto_obj_opt = match &*constructor_proto.borrow() {
+            Value::Object(o) => Some(*o),
+            Value::Property { value: Some(v), .. } => {
+                let inner = v.borrow().clone();
+                if let Value::Object(o2) = inner { Some(o2) } else { None }
+            }
+            _ => None,
+        };
+        if let Some(constructor_proto_obj) = constructor_proto_obj_opt {
             // Walk the internal prototype chain directly
             let mut current_proto_opt: Option<JSObjectDataPtr> = obj.borrow().prototype;
             log::trace!(
@@ -2471,9 +2480,9 @@ pub(crate) fn is_instance_of<'gc>(obj: &JSObjectDataPtr<'gc>, constructor: &JSOb
                 log::trace!(
                     "is_instance_of: proto_obj={:p}, constructor_proto_obj={:p}",
                     Gc::as_ptr(proto_obj),
-                    Gc::as_ptr(*constructor_proto_obj)
+                    Gc::as_ptr(constructor_proto_obj)
                 );
-                if Gc::ptr_eq(proto_obj, *constructor_proto_obj) {
+                if Gc::ptr_eq(proto_obj, constructor_proto_obj) {
                     return Ok(true);
                 }
                 current_proto_opt = proto_obj.borrow().prototype;

@@ -257,7 +257,12 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     }
 
     // Link prototype to constructor and expose on global env
-    object_set_key_value(mc, &async_gen_ctor, "prototype", Value::Object(async_gen_proto))?;
+    // Set 'constructor' on prototype with proper attributes
+    let desc_ctor = crate::core::create_descriptor_object(mc, Value::Object(async_gen_ctor), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &async_gen_proto, "constructor", &desc_ctor)?;
+    // Set 'prototype' on constructor with proper attributes
+    let desc_proto = crate::core::create_descriptor_object(mc, Value::Object(async_gen_proto), true, false, false)?;
+    crate::js_object::define_property_internal(mc, &async_gen_ctor, "prototype", &desc_proto)?;
     crate::core::env_set(mc, env, "AsyncGenerator", Value::Object(async_gen_ctor))?;
     Ok(())
 }

@@ -226,10 +226,16 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push('');
 
   // Ensure dynamic import resolves relative to the original test file path,
-  // not the ephemeral /tmp composed file.
-  outLines.push('// Inject: stabilize __filepath for module resolution');
-  outLines.push(`globalThis.__filepath = ${JSON.stringify(path.resolve(testPath))};`);
-  outLines.push('');
+  // not the ephemeral /tmp composed file. Only inject when the test actually
+  // contains an import (either a static `import` declaration or dynamic
+  // `import()` expression) to avoid polluting tests that don't need it.
+  const _test_src = fs.readFileSync(testPath, 'utf8');
+  const _uses_import = /^\s*import\b/m.test(_test_src) || /\bimport\s*\(/.test(_test_src);
+  if (_uses_import) {
+    outLines.push('// Inject: stabilize __filepath for module resolution (only for tests that use import)');
+    outLines.push(`globalThis.__filepath = ${JSON.stringify(path.resolve(testPath))};`);
+    outLines.push('');
+  }
 
   const meta = extractMeta(testPath);
   if (hasFeature(meta, 'cross-realm')) {

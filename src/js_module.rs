@@ -200,6 +200,13 @@ fn execute_module<'gc>(
         new_gc_cell_ptr(mc, Value::Object(module_obj)),
     );
 
+    // Create and store import.meta object for this module
+    let import_meta = new_js_object_data(mc);
+    // Provide a 'url' property referencing the module path; leave as raw path string
+    object_set_key_value(mc, &import_meta, "url", Value::String(crate::unicode::utf8_to_utf16(module_path)))?;
+    // Store the import.meta object on the module environment under a hidden key
+    object_set_key_value(mc, &env, "__import_meta", Value::Object(import_meta))?;
+
     if caller_env.is_none() {
         // Initialize global constructors for standalone module execution
         crate::core::initialize_global_constructors(mc, &env)?;

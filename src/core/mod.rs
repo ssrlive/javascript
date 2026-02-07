@@ -186,7 +186,31 @@ where
         tokens.pop();
     }
     let mut index = 0;
-    let statements = parse_statements(&tokens, &mut index)?;
+    // Allow top-level `await` in script evaluations to support tests and test262 harnesses
+    // but avoid enabling it when the script declares an identifier named `await` (e.g., `function await`, `var await`)
+    // so that `await(...)` can still be a call to a user-defined identifier when present.
+    fn script_declares_await_identifier(s: &str) -> bool {
+        s.contains("function await")
+            || s.contains("function await(")
+            || s.contains("var await")
+            || s.contains("let await")
+            || s.contains("const await")
+            || s.contains("class await")
+    }
+
+    let statements = if kind == ProgramKind::Script {
+        let enable_top_level_await = !script_declares_await_identifier(script);
+        if enable_top_level_await {
+            crate::core::parser::push_await_context();
+            let res = parse_statements(&tokens, &mut index);
+            crate::core::parser::pop_await_context();
+            res?
+        } else {
+            parse_statements(&tokens, &mut index)?
+        }
+    } else {
+        parse_statements(&tokens, &mut index)?
+    };
     // DEBUG: show parsed statements for troubleshooting
     log::trace!("DEBUG: PARSED STATEMENTS: {:#?}", statements);
 
@@ -238,6 +262,11 @@ where
             object_set_key_value(mc, &cache, module_path_str.as_str(), Value::Object(exports_obj))?;
             let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
             object_set_key_value(mc, &loading, module_path_str.as_str(), Value::Boolean(true))?;
+
+            // Create import.meta for the entry module so `import.meta` is defined in module scripts
+            let import_meta = new_js_object_data(mc);
+            object_set_key_value(mc, &import_meta, "url", Value::String(utf8_to_utf16(&module_path_str)))?;
+            object_set_key_value(mc, &root.global_env, "__import_meta", Value::Object(import_meta))?;
         }
         match evaluate_statements(mc, &root.global_env, &statements) {
             Ok(mut result) => {

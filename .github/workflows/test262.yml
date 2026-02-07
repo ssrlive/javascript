@@ -412,7 +412,7 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/equals" - "language/expressions/generators"
+      - name: Run a small test262 subset - "language/expressions/greater-than" - "language/expressions/void"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
@@ -424,5 +424,40 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test262-results-12
+          path: test262-results.log
+
+  run-test262-subset-13:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Build JavaScript engine
+        run: |
+          cargo build --all-features --example js
+
+      - name: Run a small test262 subset - "language/expressions/grouping" - "language/expressions/in"
+        if: ${{ !cancelled() }}
+        env:
+          FAIL_ON_FAILURE: 'true'
+        run: |
+          node ci/runner.js --limit 10000 --focus language/expressions/grouping,language/expressions/import.meta,language/expressions/in
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-results-13
           path: test262-results.log
 

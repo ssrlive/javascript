@@ -542,6 +542,102 @@ pub fn handle_object_method<'gc>(
                 _ => Err(raise_type_error!("Object.preventExtensions called on non-object")),
             }
         }
+        "seal" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Object.seal requires exactly one argument"));
+            }
+            match &args[0] {
+                Value::Object(obj) => {
+                    // Make all own properties non-configurable
+                    let ordered = crate::core::ordinary_own_property_keys(obj);
+                    for k in ordered {
+                        obj.borrow_mut(mc).set_non_configurable(k.clone());
+                    }
+                    // Make non-extensible
+                    obj.borrow_mut(mc).prevent_extensions();
+                    Ok(Value::Object(*obj))
+                }
+                _ => Err(raise_type_error!("Object.seal called on non-object")),
+            }
+        }
+        "isSealed" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Object.isSealed requires exactly one argument"));
+            }
+            let arg = args[0].clone();
+            match arg {
+                Value::Object(obj) => {
+                    if obj.borrow().is_extensible() {
+                        return Ok(Value::Boolean(false));
+                    }
+                    let ordered = crate::core::ordinary_own_property_keys(&obj);
+                    for k in ordered {
+                        if obj.borrow().is_configurable(&k) {
+                            return Ok(Value::Boolean(false));
+                        }
+                    }
+                    Ok(Value::Boolean(true))
+                }
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                _ => Ok(Value::Boolean(true)),
+            }
+        }
+        "freeze" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Object.freeze requires exactly one argument"));
+            }
+            match &args[0] {
+                Value::Object(obj) => {
+                    // For every own property: if data property -> make non-writable; in any case make non-configurable
+                    let ordered = crate::core::ordinary_own_property_keys(obj);
+                    for k in ordered.clone() {
+                        if let Some(desc_rc) = crate::core::object_get_key_value(obj, &k) {
+                            match &*desc_rc.borrow() {
+                                Value::Property { value: Some(_), .. } => {
+                                    obj.borrow_mut(mc).set_non_writable(k.clone());
+                                }
+                                _ => {
+                                    // Accessor or other -> don't change writability
+                                }
+                            }
+                            obj.borrow_mut(mc).set_non_configurable(k.clone());
+                        }
+                    }
+                    obj.borrow_mut(mc).prevent_extensions();
+                    Ok(Value::Object(*obj))
+                }
+                _ => Err(raise_type_error!("Object.freeze called on non-object")),
+            }
+        }
+        "isFrozen" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Object.isFrozen requires exactly one argument"));
+            }
+            let arg = args[0].clone();
+            match arg {
+                Value::Object(obj) => {
+                    if obj.borrow().is_extensible() {
+                        return Ok(Value::Boolean(false));
+                    }
+                    let ordered = crate::core::ordinary_own_property_keys(&obj);
+                    for k in ordered {
+                        if obj.borrow().is_configurable(&k) {
+                            return Ok(Value::Boolean(false));
+                        }
+                        // If data property, it must be non-writable
+                        if let Some(desc_rc) = crate::core::object_get_key_value(&obj, &k)
+                            && let Value::Property { value: Some(_), .. } = &*desc_rc.borrow()
+                            && obj.borrow().is_writable(&k)
+                        {
+                            return Ok(Value::Boolean(false));
+                        }
+                    }
+                    Ok(Value::Boolean(true))
+                }
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                _ => Ok(Value::Boolean(true)),
+            }
+        }
         "groupBy" => {
             if args.len() != 2 {
                 return Err(raise_type_error!("Object.groupBy requires exactly two arguments"));

@@ -2,7 +2,7 @@ use crate::core::{
     ClosureData, EvalError, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr, get_own_property,
     has_own_property_value, new_js_object_data, prepare_function_call_env,
 };
-use crate::core::{PropertyKey, Token, object_get_key_value, object_set_key_value};
+use crate::core::{PropertyKey, SwitchCase, Token, object_get_key_value, object_set_key_value};
 use crate::error::{JSError, JSErrorKind};
 use crate::js_array::handle_array_constructor;
 use crate::js_class::prepare_call_env_with_this;
@@ -930,6 +930,19 @@ fn function_constructor<'gc>(
     let func_source = format!("function anonymous({params_str}) {{ {body_str} }}");
     let tokens = crate::core::tokenize(&func_source)?;
 
+    // Per spec, import.meta is only valid when Module is the syntactic goal symbol.
+    // When Function constructor parses its body/parameters it uses the goal symbols FunctionBody/FormalParameters
+    // and therefore import.meta usage must be a SyntaxError. Scan tokens for the sequence
+    // `import . meta` and throw a SyntaxError if found.
+    for i in 0..tokens.len().saturating_sub(2) {
+        if matches!(tokens[i].token, Token::Import)
+            && matches!(tokens[i + 1].token, Token::Dot)
+            && matches!(tokens[i + 2].token, Token::Identifier(ref s) if s == "meta")
+        {
+            return Err(raise_syntax_error!("import.meta is not allowed in Function constructor context").into());
+        }
+    }
+
     let mut index = 0;
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
@@ -1075,6 +1088,191 @@ fn symbol_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Re
     Ok(Value::Symbol(symbol_data))
 }
 
+fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has_new_target: &mut bool, has_import_meta: &mut bool) {
+    match e {
+        Expr::SuperCall(args) => {
+            *has_super_call = true;
+            for a in args {
+                walk_expr(a, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+        }
+        Expr::SuperProperty(_) => {
+            *has_super_prop = true;
+        }
+        Expr::NewTarget => {
+            *has_new_target = true;
+        }
+        Expr::Super => {
+            // Bare `super` appearing as an object in an index expression
+            // (e.g. `super["x"]`) should be treated as a SuperProperty
+            log::trace!("walk_expr (js_function fast-path): found Expr::Super");
+            *has_super_prop = true;
+        }
+        Expr::Call(callee, args) | Expr::New(callee, args) => {
+            walk_expr(callee, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            for a in args {
+                walk_expr(a, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+        }
+        Expr::Property(obj, key) => {
+            if let Expr::Var(name, _, _) = &**obj
+                && name == "import"
+                && key == "meta"
+            {
+                *has_import_meta = true;
+            }
+            walk_expr(obj, has_super_call, has_super_prop, has_new_target, has_import_meta);
+        }
+        Expr::OptionalProperty(obj, key) => {
+            if let Expr::Var(name, _, _) = &**obj
+                && name == "import"
+                && key == "meta"
+            {
+                *has_import_meta = true;
+            }
+            walk_expr(obj, has_super_call, has_super_prop, has_new_target, has_import_meta);
+        }
+        Expr::TypeOf(obj)
+        | Expr::UnaryNeg(obj)
+        | Expr::UnaryPlus(obj)
+        | Expr::BitNot(obj)
+        | Expr::Delete(obj)
+        | Expr::Void(obj)
+        | Expr::Await(obj)
+        | Expr::Yield(Some(obj))
+        | Expr::YieldStar(obj)
+        | Expr::LogicalNot(obj)
+        | Expr::PostIncrement(obj)
+        | Expr::PostDecrement(obj)
+        | Expr::Spread(obj)
+        | Expr::OptionalCall(obj, _)
+        | Expr::TaggedTemplate(obj, _, _)
+        | Expr::DynamicImport(obj)
+        | Expr::BitAndAssign(obj, _) => {
+            // common single-child variants
+            walk_expr(obj, has_super_call, has_super_prop, has_new_target, has_import_meta);
+        }
+        Expr::Assign(l, r)
+        | Expr::Binary(l, _, r)
+        | Expr::Conditional(l, _, r)
+        | Expr::Comma(l, r)
+        | Expr::LogicalAnd(l, r)
+        | Expr::LogicalOr(l, r)
+        | Expr::Mod(l, r)
+        | Expr::Pow(l, r) => {
+            walk_expr(l, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            walk_expr(r, has_super_call, has_super_prop, has_new_target, has_import_meta);
+        }
+        Expr::Index(obj, idx) | Expr::OptionalIndex(obj, idx) => {
+            walk_expr(obj, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            walk_expr(idx, has_super_call, has_super_prop, has_new_target, has_import_meta);
+        }
+        Expr::Object(kv) => {
+            for (k, v, _flag) in kv {
+                walk_expr(k, has_super_call, has_super_prop, has_new_target, has_import_meta);
+                walk_expr(v, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+        }
+        Expr::Array(elems) => {
+            for e in elems.iter().flatten() {
+                walk_expr(e, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+        }
+        Expr::Function(_, _, body)
+        | Expr::ArrowFunction(_, body)
+        | Expr::AsyncFunction(_, _, body)
+        | Expr::GeneratorFunction(_, _, body)
+        | Expr::AsyncGeneratorFunction(_, _, body)
+        | Expr::AsyncArrowFunction(_, body) => {
+            // Do not descend into nested function bodies for eval early errors
+            let _ = body;
+        }
+        _ => {}
+    }
+}
+
+fn walk_stmt(s: &Statement, has_super_call: &mut bool, has_super_prop: &mut bool, has_new_target: &mut bool, has_import_meta: &mut bool) {
+    match &*s.kind {
+        StatementKind::Expr(expr) => walk_expr(expr, has_super_call, has_super_prop, has_new_target, has_import_meta),
+        StatementKind::If(ifstmt) => {
+            walk_expr(&ifstmt.condition, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            for st in &ifstmt.then_body {
+                walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+            if let Some(else_body) = &ifstmt.else_body {
+                for st in else_body {
+                    walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+                }
+            }
+        }
+        StatementKind::While(cond, body) => {
+            walk_expr(cond, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            for st in body {
+                walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+        }
+        StatementKind::DoWhile(body, cond) => {
+            for st in body {
+                walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+            walk_expr(cond, has_super_call, has_super_prop, has_new_target, has_import_meta);
+        }
+        StatementKind::For(forstmt) => {
+            if let Some(init) = &forstmt.init {
+                walk_stmt(init, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+            if let Some(test) = &forstmt.test {
+                walk_expr(test, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+            if let Some(update) = &forstmt.update {
+                walk_stmt(update, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+            for st in &forstmt.body {
+                walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+        }
+        StatementKind::Block(vec) => {
+            for st in vec {
+                walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+        }
+        StatementKind::TryCatch(tc) => {
+            for st in &tc.try_body {
+                walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            }
+            if let Some(cb) = &tc.catch_body {
+                for st in cb {
+                    walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+                }
+            }
+            if let Some(fb) = &tc.finally_body {
+                for st in fb {
+                    walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+                }
+            }
+        }
+        StatementKind::Switch(sw) => {
+            walk_expr(&sw.expr, has_super_call, has_super_prop, has_new_target, has_import_meta);
+            for case in &sw.cases {
+                match case {
+                    SwitchCase::Case(_, stmts) => {
+                        for st in stmts {
+                            walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+                        }
+                    }
+                    SwitchCase::Default(stmts) => {
+                        for st in stmts {
+                            walk_stmt(st, has_super_call, has_super_prop, has_new_target, has_import_meta);
+                        }
+                    }
+                }
+            }
+        }
+        StatementKind::FunctionDeclaration(_, _, _body, _, _) => { /* do not descend */ }
+        _ => {}
+    }
+}
+
 fn evaluate_new_expression<'gc>(
     _mc: &MutationContext<'gc>,
     _args: &[Value<'gc>],
@@ -1091,551 +1289,455 @@ fn evalute_eval_function<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // eval function - execute the code
-    if !args.is_empty() {
-        let arg_val = args[0].clone();
-        match arg_val {
-            Value::String(s) => {
-                let code = utf16_to_utf8(&s);
+    if args.is_empty() {
+        return Ok(Value::Undefined);
+    }
 
-                log::trace!("eval invoked with code='{}'", code);
+    let Value::String(s) = &args[0] else {
+        // Per spec, if the argument is not a string, return it directly without side effects
+        return Ok(args[0].clone());
+    };
 
-                // Fast-path optimization: if the evaluated string (after optional
-                // leading whitespace) is a single-line comment that does not contain
-                // any line terminator characters, it is a no-op and we can avoid
-                // tokenization/parsing which is expensive in tight loops like S7.4_A5.
-                let code_trim = code.trim_start();
-                if code_trim.starts_with("//")
-                    && !code.contains('\n')
-                    && !code.contains('\r')
-                    && !code.contains('\u{2028}')
-                    && !code.contains('\u{2029}')
-                {
-                    log::trace!("eval fast-path: comment-only to EOF, returning undefined");
-                    return Ok(Value::Undefined);
+    let code = utf16_to_utf8(s);
+
+    log::trace!("eval invoked with code='{}'", code);
+
+    // Token-based early check: tokenize the evaluated string and look for the
+    // sequence Identifier("import"), Dot, Identifier("meta") to detect use
+    // of `import.meta` inside eval code. This is more robust than a simple
+    // string substring check (handles comments, spacing, etc.) and allows us
+    // to throw the required early SyntaxError before parsing.
+    let mut quick_tokens = crate::core::tokenize(&code)?;
+    if quick_tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
+        quick_tokens.pop();
+    }
+    let has_import_meta_token = quick_tokens.windows(3).any(|w| {
+        matches!(w[0].token, Token::Identifier(ref id) if id == "import")
+            && matches!(w[1].token, Token::Dot)
+            && matches!(&w[2].token, Token::Identifier(id2) if id2 == "meta")
+    });
+    if has_import_meta_token {
+        let is_indirect_eval = if let Some(flag) = object_get_key_value(env, "__is_indirect_eval") {
+            matches!(*flag.borrow(), Value::Boolean(true))
+        } else {
+            false
+        };
+        // Find the root env and check for module marker
+        let mut root_env = *env;
+        while let Some(proto) = root_env.borrow().prototype {
+            root_env = proto;
+        }
+        let is_in_module = object_get_key_value(&root_env, "__import_meta").is_some();
+        log::trace!(
+            "eval quick-check: has_import_meta_token={} is_in_module={} is_indirect_eval={}",
+            has_import_meta_token,
+            is_in_module,
+            is_indirect_eval
+        );
+        if is_in_module && !is_indirect_eval {
+            let msg = "import.meta is not allowed in eval code";
+            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(raise_syntax_error!(msg).into());
+            };
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(raise_syntax_error!(msg).into()),
+            }
+        }
+    }
+
+    // Fast-path optimization: if the evaluated string (after optional
+    // leading whitespace) is a single-line comment that does not contain
+    // any line terminator characters, it is a no-op and we can avoid
+    // tokenization/parsing which is expensive in tight loops like S7.4_A5.
+    let code_trim = code.trim_start();
+    if code_trim.starts_with("//")
+        && !code.contains('\n')
+        && !code.contains('\r')
+        && !code.contains('\u{2028}')
+        && !code.contains('\u{2029}')
+    {
+        log::trace!("eval fast-path: comment-only to EOF, returning undefined");
+        return Ok(Value::Undefined);
+    }
+
+    let mut tokens = crate::core::tokenize(&code)?;
+    // Debug: always emit token list for eval bodies containing 'return' or for small bodies
+    if code.contains("return") || code.len() < 256 {
+        log::trace!(
+            "eval debug: code='{}' tokens={:?}",
+            code,
+            tokens.iter().map(|t| (&t.token, t.line, t.column)).collect::<Vec<_>>()
+        );
+    }
+    if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
+        tokens.pop();
+    }
+
+    // Fast special-case: token-only single `new.target` statement in the eval body.
+    // Pattern: [New, Dot, Identifier("target"), opt Semicolon]
+    let mut t_iter = tokens.iter().filter(|td| !matches!(td.token, Token::LineTerminator));
+    let is_single_new_target = match (t_iter.next(), t_iter.next(), t_iter.next(), t_iter.next()) {
+        (Some(a), Some(b), Some(c), Some(d)) => {
+            matches!(a.token, Token::New)
+                && matches!(b.token, Token::Dot)
+                && matches!(&c.token, Token::Identifier(id) if id == "target")
+                && matches!(d.token, Token::Semicolon)
+        }
+        (Some(a), Some(b), Some(c), None) => {
+            matches!(a.token, Token::New) && matches!(b.token, Token::Dot) && matches!(&c.token, Token::Identifier(id) if id == "target")
+        }
+        _ => false,
+    };
+
+    if is_single_new_target {
+        // detect indirect eval marker
+        let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
+            .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+            .unwrap_or(false);
+        // find nearest function scope and arrow-ness
+        // NOTE: do not treat the global environment (prototype == None) as a function scope
+        let mut cur = Some(*env);
+        let mut in_function = false;
+        let mut in_arrow = false;
+        while let Some(e) = cur {
+            if e.borrow().is_function_scope && e.borrow().prototype.is_some() {
+                in_function = true;
+                if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function") {
+                    in_arrow = matches!(*flag_rc.borrow(), Value::Boolean(true));
                 }
-
-                let mut tokens = crate::core::tokenize(&code)?;
-                // Debug: always emit token list for eval bodies containing 'return' or for small bodies
-                if code.contains("return") || code.len() < 256 {
-                    log::trace!(
-                        "eval debug: code='{}' tokens={:?}",
-                        code,
-                        tokens.iter().map(|t| (&t.token, t.line, t.column)).collect::<Vec<_>>()
-                    );
+                break;
+            }
+            cur = e.borrow().prototype;
+        }
+        if !(!is_indirect_eval && in_function && !in_arrow) {
+            // throw SyntaxError
+            let msg = "Invalid use of 'new.target' in eval code";
+            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(raise_syntax_error!(msg).into());
+            };
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                Ok(Value::Object(obj)) => {
+                    return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
-                if tokens.last().map(|td| td.token == crate::core::Token::EOF).unwrap_or(false) {
-                    tokens.pop();
-                }
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(raise_syntax_error!(msg).into()),
+            }
+        }
+        // allowed — return runtime new.target value: function object if constructor call, otherwise undefined
+        if in_function
+            && let Some(e) = cur
+            && let Some(inst_rc) = object_get_key_value(&e, "__instance")
+            && !matches!(*inst_rc.borrow(), Value::Undefined)
+            && let Some(func_rc) = object_get_key_value(&e, "__function")
+        {
+            return Ok(Value::Closure(match &*func_rc.borrow() {
+                Value::Closure(cl) => *cl,
+                _ => return Ok(Value::Undefined),
+            }));
+        }
+        return Ok(Value::Undefined);
+    }
 
-                // Fast special-case: token-only single `new.target` statement in the eval body.
-                // Pattern: [New, Dot, Identifier("target"), opt Semicolon]
-                let mut t_iter = tokens.iter().filter(|td| !matches!(td.token, Token::LineTerminator));
-                let is_single_new_target = match (t_iter.next(), t_iter.next(), t_iter.next(), t_iter.next()) {
-                    (Some(a), Some(b), Some(c), Some(d)) => {
-                        matches!(a.token, Token::New)
-                            && matches!(b.token, Token::Dot)
-                            && matches!(&c.token, Token::Identifier(id) if id == "target")
-                            && matches!(d.token, Token::Semicolon)
-                    }
-                    (Some(a), Some(b), Some(c), None) => {
-                        matches!(a.token, Token::New)
-                            && matches!(b.token, Token::Dot)
-                            && matches!(&c.token, Token::Identifier(id) if id == "target")
+    // Fast-path token check for 'super' -- calculate before parsing because
+    // parsing may consume or rewrite tokens.
+    let contains_super = tokens.iter().any(|td| matches!(td.token, Token::Super));
+    log::trace!("eval fast-path check: contains_super = {}", contains_super);
+
+    // index for parsing start position
+    let mut index: usize = 0;
+
+    let mut stmts = crate::core::parse_statements(&tokens, &mut index)?;
+
+    // Early errors for eval code: importing/exporting and `super` usages are
+    // not allowed inside eval code (Script) per the spec's early error rules.
+    // Fast-path: if the token stream contains 'super' or module import/export
+    // tokens, throw a SyntaxError rather than attempting to evaluate.
+    // If the token stream contains 'super', inspect the parsed
+    // AST to determine if it's a SuperCall or SuperProperty usage, and
+    // apply the appropriate early-error rules per spec.
+    {
+        // Walk AST to find SuperCall, SuperProperty and NewTarget occurrences
+        let mut has_super_call = false;
+        let mut has_super_prop = false;
+        let mut has_new_target = false;
+        let mut has_import_meta = false;
+
+        for st in &stmts {
+            walk_stmt(
+                st,
+                &mut has_super_call,
+                &mut has_super_prop,
+                &mut has_new_target,
+                &mut has_import_meta,
+            );
+        }
+        log::trace!("FASTPATH-AST: has_super_call={has_super_call} has_super_prop={has_super_prop} has_new_target={has_new_target}");
+
+        // Determine inMethod / inConstructor per spec rules by walking the env prototype chain
+        let mut cur_env = Some(*env);
+        let mut in_method = false;
+        while let Some(e) = cur_env {
+            if e.borrow().get_home_object().is_some() {
+                in_method = true;
+                break;
+            }
+            cur_env = e.borrow().prototype;
+        }
+
+        let in_constructor = if in_method {
+            if let Some(func_val_ptr) = crate::core::env_get(env, "__function") {
+                match &*func_val_ptr.borrow() {
+                    Value::Object(func_obj) => {
+                        if let Some(is_ctor_ptr) = object_get_key_value(func_obj, "__is_constructor") {
+                            matches!(*is_ctor_ptr.borrow(), Value::Boolean(true))
+                        } else {
+                            false
+                        }
                     }
                     _ => false,
-                };
-
-                if is_single_new_target {
-                    // detect indirect eval marker
-                    let is_indirect_eval = crate::core::object_get_key_value(env, "__is_indirect_eval")
-                        .map(|c| matches!(*c.borrow(), crate::core::Value::Boolean(true)))
-                        .unwrap_or(false);
-                    // find nearest function scope and arrow-ness
-                    // NOTE: do not treat the global environment (prototype == None) as a function scope
-                    let mut cur = Some(*env);
-                    let mut in_function = false;
-                    let mut in_arrow = false;
-                    while let Some(e) = cur {
-                        if e.borrow().is_function_scope && e.borrow().prototype.is_some() {
-                            in_function = true;
-                            if let Some(flag_rc) = crate::core::object_get_key_value(&e, "__is_arrow_function") {
-                                in_arrow = matches!(*flag_rc.borrow(), crate::core::Value::Boolean(true));
-                            }
-                            break;
-                        }
-                        cur = e.borrow().prototype;
-                    }
-                    if !(!is_indirect_eval && in_function && !in_arrow) {
-                        // throw SyntaxError
-                        let msg = "Invalid use of 'new.target' in eval code";
-                        let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
-                        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
-                            v.borrow().clone()
-                        } else {
-                            return Err(raise_syntax_error!(msg).into());
-                        };
-                        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
-                            Ok(Value::Object(obj)) => {
-                                return Err(EvalError::Throw(Value::Object(obj), None, None));
-                            }
-                            Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                            Err(_) => return Err(raise_syntax_error!(msg).into()),
-                        }
-                    }
-                    // allowed — return runtime new.target value: function object if constructor call, otherwise undefined
-                    if in_function
-                        && let Some(e) = cur
-                        && let Some(inst_rc) = object_get_key_value(&e, "__instance")
-                        && !matches!(*inst_rc.borrow(), Value::Undefined)
-                        && let Some(func_rc) = object_get_key_value(&e, "__function")
-                    {
-                        return Ok(Value::Closure(match &*func_rc.borrow() {
-                            Value::Closure(cl) => *cl,
-                            _ => return Ok(Value::Undefined),
-                        }));
-                    }
-                    return Ok(Value::Undefined);
                 }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
 
-                // Fast-path token check for 'super' -- calculate before parsing because
-                // parsing may consume or rewrite tokens.
-                let contains_super = tokens.iter().any(|td| matches!(td.token, Token::Super));
-                log::trace!("eval fast-path check: contains_super = {}", contains_super);
-
-                // index for parsing start position
-                let mut index: usize = 0;
-
-                let mut stmts = crate::core::parse_statements(&tokens, &mut index)?;
-
-                // Early errors for eval code: importing/exporting and `super` usages are
-                // not allowed inside eval code (Script) per the spec's early error rules.
-                // Fast-path: if the token stream contains 'super' or module import/export
-                // tokens, throw a SyntaxError rather than attempting to evaluate.
-                // If the token stream contains 'super', inspect the parsed
-                // AST to determine if it's a SuperCall or SuperProperty usage, and
-                // apply the appropriate early-error rules per spec.
-                {
-                    // Walk AST to find SuperCall, SuperProperty and NewTarget occurrences
-                    let mut has_super_call = false;
-                    let mut has_super_prop = false;
-                    let mut has_new_target = false;
-                    fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has_new_target: &mut bool) {
-                        match e {
-                            Expr::SuperCall(args) => {
-                                *has_super_call = true;
-                                for a in args {
-                                    walk_expr(a, has_super_call, has_super_prop, has_new_target);
-                                }
-                            }
-                            Expr::SuperProperty(_) => {
-                                *has_super_prop = true;
-                            }
-                            Expr::NewTarget => {
-                                *has_new_target = true;
-                            }
-                            Expr::Super => {
-                                // Bare `super` appearing as an object in an index expression
-                                // (e.g. `super["x"]`) should be treated as a SuperProperty
-                                log::trace!("walk_expr (js_function fast-path): found Expr::Super");
-                                *has_super_prop = true;
-                            }
-                            Expr::Call(callee, args) | Expr::New(callee, args) => {
-                                walk_expr(callee, has_super_call, has_super_prop, has_new_target);
-                                for a in args {
-                                    walk_expr(a, has_super_call, has_super_prop, has_new_target);
-                                }
-                            }
-                            Expr::Property(obj, _)
-                            | Expr::OptionalProperty(obj, _)
-                            | Expr::TypeOf(obj)
-                            | Expr::UnaryNeg(obj)
-                            | Expr::UnaryPlus(obj)
-                            | Expr::BitNot(obj)
-                            | Expr::Delete(obj)
-                            | Expr::Void(obj)
-                            | Expr::Await(obj)
-                            | Expr::Yield(Some(obj))
-                            | Expr::YieldStar(obj)
-                            | Expr::LogicalNot(obj)
-                            | Expr::PostIncrement(obj)
-                            | Expr::PostDecrement(obj)
-                            | Expr::Spread(obj)
-                            | Expr::OptionalCall(obj, _)
-                            | Expr::TaggedTemplate(obj, _, _)
-                            | Expr::DynamicImport(obj)
-                            | Expr::BitAndAssign(obj, _) => {
-                                // common single-child variants
-                                walk_expr(obj, has_super_call, has_super_prop, has_new_target);
-                            }
-                            Expr::Assign(l, r)
-                            | Expr::Binary(l, _, r)
-                            | Expr::Conditional(l, _, r)
-                            | Expr::Comma(l, r)
-                            | Expr::LogicalAnd(l, r)
-                            | Expr::LogicalOr(l, r)
-                            | Expr::Mod(l, r)
-                            | Expr::Pow(l, r) => {
-                                walk_expr(l, has_super_call, has_super_prop, has_new_target);
-                                walk_expr(r, has_super_call, has_super_prop, has_new_target);
-                            }
-                            Expr::Index(obj, idx) | Expr::OptionalIndex(obj, idx) => {
-                                walk_expr(obj, has_super_call, has_super_prop, has_new_target);
-                                walk_expr(idx, has_super_call, has_super_prop, has_new_target);
-                            }
-                            Expr::Object(kv) => {
-                                for (k, v, _flag) in kv {
-                                    walk_expr(k, has_super_call, has_super_prop, has_new_target);
-                                    walk_expr(v, has_super_call, has_super_prop, has_new_target);
-                                }
-                            }
-                            Expr::Array(elems) => {
-                                for e in elems.iter().flatten() {
-                                    walk_expr(e, has_super_call, has_super_prop, has_new_target);
-                                }
-                            }
-                            Expr::Function(_, _, body)
-                            | Expr::ArrowFunction(_, body)
-                            | Expr::AsyncFunction(_, _, body)
-                            | Expr::GeneratorFunction(_, _, body)
-                            | Expr::AsyncGeneratorFunction(_, _, body)
-                            | Expr::AsyncArrowFunction(_, body) => {
-                                // Do not descend into nested function bodies for eval early errors
-                                let _ = body;
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    fn walk_stmt(
-                        s: &crate::core::Statement,
-                        has_super_call: &mut bool,
-                        has_super_prop: &mut bool,
-                        has_new_target: &mut bool,
-                    ) {
-                        match &*s.kind {
-                            StatementKind::Expr(expr) => walk_expr(expr, has_super_call, has_super_prop, has_new_target),
-                            StatementKind::If(ifstmt) => {
-                                walk_expr(&ifstmt.condition, has_super_call, has_super_prop, has_new_target);
-                                for st in &ifstmt.then_body {
-                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                }
-                                if let Some(else_body) = &ifstmt.else_body {
-                                    for st in else_body {
-                                        walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                    }
-                                }
-                            }
-                            StatementKind::While(cond, body) => {
-                                walk_expr(cond, has_super_call, has_super_prop, has_new_target);
-                                for st in body {
-                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                }
-                            }
-                            StatementKind::DoWhile(body, cond) => {
-                                for st in body {
-                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                }
-                                walk_expr(cond, has_super_call, has_super_prop, has_new_target);
-                            }
-                            StatementKind::For(forstmt) => {
-                                if let Some(init) = &forstmt.init {
-                                    walk_stmt(init, has_super_call, has_super_prop, has_new_target);
-                                }
-                                if let Some(test) = &forstmt.test {
-                                    walk_expr(test, has_super_call, has_super_prop, has_new_target);
-                                }
-                                if let Some(update) = &forstmt.update {
-                                    walk_stmt(update, has_super_call, has_super_prop, has_new_target);
-                                }
-                                for st in &forstmt.body {
-                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                }
-                            }
-                            StatementKind::Block(vec) => {
-                                for st in vec {
-                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                }
-                            }
-                            StatementKind::TryCatch(tc) => {
-                                for st in &tc.try_body {
-                                    walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                }
-                                if let Some(cb) = &tc.catch_body {
-                                    for st in cb {
-                                        walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                    }
-                                }
-                                if let Some(fb) = &tc.finally_body {
-                                    for st in fb {
-                                        walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                    }
-                                }
-                            }
-                            StatementKind::Switch(sw) => {
-                                walk_expr(&sw.expr, has_super_call, has_super_prop, has_new_target);
-                                for case in &sw.cases {
-                                    match case {
-                                        crate::core::SwitchCase::Case(_, stmts) => {
-                                            for st in stmts {
-                                                walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                            }
-                                        }
-                                        crate::core::SwitchCase::Default(stmts) => {
-                                            for st in stmts {
-                                                walk_stmt(st, has_super_call, has_super_prop, has_new_target);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            StatementKind::FunctionDeclaration(_, _, _body, _, _) => { /* do not descend */ }
-                            _ => {}
-                        }
-                    }
-
-                    for st in &stmts {
-                        walk_stmt(st, &mut has_super_call, &mut has_super_prop, &mut has_new_target);
-                    }
-                    log::trace!(
-                        "FASTPATH-AST: has_super_call={} has_super_prop={} has_new_target={}",
-                        has_super_call,
-                        has_super_prop,
-                        has_new_target
-                    );
-
-                    // Determine inMethod / inConstructor per spec rules by walking the env prototype chain
-                    let mut cur_env = Some(*env);
-                    let mut in_method = false;
-                    while let Some(e) = cur_env {
-                        if e.borrow().get_home_object().is_some() {
-                            in_method = true;
-                            break;
-                        }
-                        cur_env = e.borrow().prototype;
-                    }
-
-                    let in_constructor = if in_method {
-                        if let Some(func_val_ptr) = crate::core::env_get(env, "__function") {
-                            match &*func_val_ptr.borrow() {
-                                Value::Object(func_obj) => {
-                                    if let Some(is_ctor_ptr) = object_get_key_value(func_obj, "__is_constructor") {
-                                        matches!(*is_ctor_ptr.borrow(), Value::Boolean(true))
-                                    } else {
-                                        false
-                                    }
-                                }
-                                _ => false,
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    // SuperCall: only allowed in direct eval when inMethod && inConstructor
-                    log::debug!(
-                        "eval-super-check: has_super_call={} has_super_prop={} in_method={} in_constructor={}",
-                        has_super_call,
-                        has_super_prop,
-                        in_method,
-                        in_constructor
-                    );
-                    if has_super_call && !(in_method && in_constructor) {
-                        let msg = "Invalid use of 'super' in eval code";
-                        let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
-                        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
-                            v.borrow().clone()
-                        } else {
-                            return Err(raise_syntax_error!(msg).into());
-                        };
-                        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
-                            Ok(Value::Object(obj)) => {
-                                return Err(EvalError::Throw(Value::Object(obj), None, None));
-                            }
-                            Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                            Err(_) => return Err(raise_syntax_error!(msg).into()),
-                        }
-                    }
-
-                    // SuperProperty: only allowed in direct eval when inMethod
-                    if has_super_prop && !in_method {
-                        let msg = "Invalid use of 'super' in eval code";
-                        let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
-                        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
-                            v.borrow().clone()
-                        } else {
-                            return Err(raise_syntax_error!(msg).into());
-                        };
-                        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
-                            Ok(Value::Object(obj)) => {
-                                return Err(EvalError::Throw(Value::Object(obj), None, None));
-                            }
-                            Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                            Err(_) => return Err(raise_syntax_error!(msg).into()),
-                        }
-                    }
-
-                    // NewTarget: only allowed in direct eval when the eval is contained in function code that is not an ArrowFunction
-                    if has_new_target {
-                        // is_indirect_eval = true when this is an indirect eval
-                        let is_indirect_eval = if let Some(flag) = crate::core::object_get_key_value(env, "__is_indirect_eval") {
-                            matches!(*flag.borrow(), crate::core::Value::Boolean(true))
-                        } else {
-                            false
-                        };
-
-                        // Walk environment chain to locate a function scope and
-                        // detect arrow functions using the `__is_arrow_function` flag
-                        // set by `call_closure`.
-                        let mut cur = Some(*env);
-                        let mut in_function = false;
-                        let mut in_arrow = false;
-                        while let Some(e) = cur {
-                            if e.borrow().is_function_scope {
-                                in_function = true;
-                                if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function") {
-                                    in_arrow = matches!(*flag_rc.borrow(), Value::Boolean(true));
-                                } else {
-                                    in_arrow = false;
-                                }
-                                break;
-                            }
-                            cur = e.borrow().prototype;
-                        }
-
-                        // Allowed only when direct eval, inside a function, and that function is NOT an arrow
-                        log::trace!(
-                            "DEBUG-FASTPATH-NEWTARGET: is_indirect_eval={} in_function={} in_arrow={} has_new_target={}",
-                            is_indirect_eval,
-                            in_function,
-                            in_arrow,
-                            has_new_target
-                        );
-                        if !(!is_indirect_eval && in_function && !in_arrow) {
-                            let msg = "Invalid use of 'new.target' in eval code";
-                            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
-                            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
-                                v.borrow().clone()
-                            } else {
-                                return Err(raise_syntax_error!(msg).into());
-                            };
-                            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
-                                Ok(Value::Object(obj)) => {
-                                    return Err(EvalError::Throw(Value::Object(obj), None, None));
-                                }
-                                Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                                Err(_) => return Err(raise_syntax_error!(msg).into()),
-                            }
-                        }
-                    }
+        // SuperCall: only allowed in direct eval when inMethod && inConstructor
+        log::debug!(
+            "eval-super-check: has_super_call={} has_super_prop={} in_method={} in_constructor={}",
+            has_super_call,
+            has_super_prop,
+            in_method,
+            in_constructor
+        );
+        if has_super_call && !(in_method && in_constructor) {
+            let msg = "Invalid use of 'super' in eval code";
+            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(raise_syntax_error!(msg).into());
+            };
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                Ok(Value::Object(obj)) => {
+                    return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(raise_syntax_error!(msg).into()),
+            }
+        }
 
-                if stmts
-                    .iter()
-                    .any(|s| matches!(&*s.kind, StatementKind::Import(..) | StatementKind::Export(..)))
-                {
-                    let msg = "Import/Export declarations may not appear in eval code";
-                    let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
-                    let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
-                        v.borrow().clone()
-                    } else {
-                        return Err(raise_syntax_error!(msg).into());
-                    };
-                    match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
-                        Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
-                        Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                        Err(_) => return Err(raise_syntax_error!(msg).into()),
-                    }
+        // SuperProperty: only allowed in direct eval when inMethod
+        if has_super_prop && !in_method {
+            let msg = "Invalid use of 'super' in eval code";
+            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(raise_syntax_error!(msg).into());
+            };
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                Ok(Value::Object(obj)) => {
+                    return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(raise_syntax_error!(msg).into()),
+            }
+        }
 
-                // If this is an indirect eval executed in the global env and the eval code
-                // is strict (starts with "use strict"), do not instantiate top-level
-                // FunctionDeclarations into the (global) variable environment. Convert
-                // them into function expressions so they don't create bindings.
-                let is_indirect_eval = if let Some(flag) = crate::core::object_get_key_value(env, "__is_indirect_eval") {
-                    matches!(*flag.borrow(), crate::core::Value::Boolean(true))
+        // If AST contains `import.meta` and we're being called from module code via direct eval,
+        // this is an early SyntaxError (import.meta is only valid when the syntactic goal is Module).
+        if has_import_meta {
+            let is_indirect_eval = if let Some(flag) = object_get_key_value(env, "__is_indirect_eval") {
+                matches!(*flag.borrow(), Value::Boolean(true))
+            } else {
+                false
+            };
+            // Find the root environment and see if it has a module marker (import.meta)
+            let mut root_env = *env;
+            while let Some(proto) = root_env.borrow().prototype {
+                root_env = proto;
+            }
+            let is_in_module = object_get_key_value(&root_env, "__import_meta").is_some();
+            if is_in_module && !is_indirect_eval {
+                let msg = "import.meta is not allowed in eval code";
+                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                    v.borrow().clone()
                 } else {
-                    false
+                    return Err(raise_syntax_error!(msg).into());
                 };
-                log::trace!(
-                    "DEBUG: eval env ptr={:p} __is_indirect_eval present={}",
-                    env,
-                    crate::core::object_get_key_value(env, "__is_indirect_eval").is_some()
-                );
-                log::trace!("DEBUG: is_indirect_eval = {}", is_indirect_eval);
-                if is_indirect_eval {
-                    log::trace!("DEBUG: eval env has __is_indirect_eval flag");
-                    if let Some(first) = stmts.first()
-                        && let crate::core::StatementKind::Expr(expr) = &*first.kind
-                        && let crate::core::Expr::StringLit(s) = expr
-                        && crate::unicode::utf16_to_utf8(s).as_str() == "use strict"
-                    {
-                        let mut converted = 0;
-                        for stmt in stmts.iter_mut() {
-                            if let crate::core::StatementKind::FunctionDeclaration(name, params, body, _is_generator, _is_async) =
-                                &*stmt.kind
-                            {
-                                let func_expr = crate::core::Expr::Function(Some(name.clone()), params.clone(), body.clone());
-                                *stmt.kind = crate::core::StatementKind::Expr(func_expr);
-                                converted += 1;
-                            }
-                        }
-                        log::trace!(
-                            "DEBUG: indirect strict eval - converted {} top-level function declarations into expressions",
-                            converted
-                        );
-                    } else {
-                        log::trace!(
-                            "DEBUG: indirect eval detected but not strict or no first-string; is_indirect_eval={}",
-                            is_indirect_eval
-                        );
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                    Ok(Value::Object(obj)) => {
+                        return Err(EvalError::Throw(Value::Object(obj), None, None));
                     }
-                }
-
-                crate::core::check_top_level_return(&stmts)?;
-
-                // If this was an indirect eval and the eval is strict (starts with "use strict"),
-                // execute it in a fresh declarative environment whose prototype is the global env.
-                // This prevents top-level FunctionDeclarations from creating global bindings (they
-                // will instead be bound to the new declarative env and won't leak into the caller).
-                let mut exec_env = *env;
-                if is_indirect_eval
-                    && let Some(first) = stmts.first()
-                    && let crate::core::StatementKind::Expr(expr) = &*first.kind
-                    && let crate::core::Expr::StringLit(s) = expr
-                    && crate::unicode::utf16_to_utf8(s).as_str() == "use strict"
-                {
-                    log::trace!("DEBUG: indirect strict eval - creating fresh declarative environment");
-                    let new_env = crate::core::new_js_object_data(mc);
-                    new_env.borrow_mut(mc).prototype = Some(*env);
-                    exec_env = new_env;
-                }
-
-                match crate::core::evaluate_statements(mc, &exec_env, &stmts) {
-                    Ok(v) => Ok(v),
-                    Err(err) => {
-                        // Convert parse/eval errors into a thrown JS Error object so that
-                        // `try { eval(...) } catch (e) { e instanceof SyntaxError }` works
-                        let msg = err.message();
-                        let msg_val = Value::String(crate::unicode::utf8_to_utf16(&msg));
-                        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
-                            v.borrow().clone()
-                        } else {
-                            return Err(err);
-                        };
-                        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
-                            Ok(Value::Object(obj)) => Err(EvalError::Throw(Value::Object(obj), None, None)),
-                            Ok(other) => Err(EvalError::Throw(other, None, None)),
-                            Err(_) => Err(err),
-                        }
-                    }
+                    Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                    Err(_) => return Err(raise_syntax_error!(msg).into()),
                 }
             }
-            _ => Ok(arg_val),
         }
+
+        // NewTarget: only allowed in direct eval when the eval is contained in function code that is not an ArrowFunction
+        if has_new_target {
+            // is_indirect_eval = true when this is an indirect eval
+            let is_indirect_eval = if let Some(flag) = object_get_key_value(env, "__is_indirect_eval") {
+                matches!(*flag.borrow(), Value::Boolean(true))
+            } else {
+                false
+            };
+
+            // Walk environment chain to locate a function scope and
+            // detect arrow functions using the `__is_arrow_function` flag
+            // set by `call_closure`.
+            let mut cur = Some(*env);
+            let mut in_function = false;
+            let mut in_arrow = false;
+            while let Some(e) = cur {
+                if e.borrow().is_function_scope {
+                    in_function = true;
+                    if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function") {
+                        in_arrow = matches!(*flag_rc.borrow(), Value::Boolean(true));
+                    } else {
+                        in_arrow = false;
+                    }
+                    break;
+                }
+                cur = e.borrow().prototype;
+            }
+
+            // Allowed only when direct eval, inside a function, and that function is NOT an arrow
+            log::trace!(
+                "DEBUG-FASTPATH-NEWTARGET: is_indirect_eval={} in_function={} in_arrow={} has_new_target={}",
+                is_indirect_eval,
+                in_function,
+                in_arrow,
+                has_new_target
+            );
+            if !(!is_indirect_eval && in_function && !in_arrow) {
+                let msg = "Invalid use of 'new.target' in eval code";
+                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                    v.borrow().clone()
+                } else {
+                    return Err(raise_syntax_error!(msg).into());
+                };
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                    Ok(Value::Object(obj)) => {
+                        return Err(EvalError::Throw(Value::Object(obj), None, None));
+                    }
+                    Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                    Err(_) => return Err(raise_syntax_error!(msg).into()),
+                }
+            }
+        }
+    }
+
+    if stmts
+        .iter()
+        .any(|s| matches!(&*s.kind, StatementKind::Import(..) | StatementKind::Export(..)))
+    {
+        let msg = "Import/Export declarations may not appear in eval code";
+        let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+            v.borrow().clone()
+        } else {
+            return Err(raise_syntax_error!(msg).into());
+        };
+        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
+            Ok(other) => return Err(EvalError::Throw(other, None, None)),
+            Err(_) => return Err(raise_syntax_error!(msg).into()),
+        }
+    }
+
+    // If this is an indirect eval executed in the global env and the eval code
+    // is strict (starts with "use strict"), do not instantiate top-level
+    // FunctionDeclarations into the (global) variable environment. Convert
+    // them into function expressions so they don't create bindings.
+    let is_indirect_eval = if let Some(flag) = object_get_key_value(env, "__is_indirect_eval") {
+        matches!(*flag.borrow(), Value::Boolean(true))
     } else {
-        Ok(Value::Undefined)
+        false
+    };
+    log::trace!(
+        "DEBUG: eval env ptr={:p} __is_indirect_eval present={}",
+        env,
+        object_get_key_value(env, "__is_indirect_eval").is_some()
+    );
+    log::trace!("DEBUG: is_indirect_eval = {}", is_indirect_eval);
+    if is_indirect_eval {
+        log::trace!("DEBUG: eval env has __is_indirect_eval flag");
+        if let Some(first) = stmts.first()
+            && let StatementKind::Expr(expr) = &*first.kind
+            && let Expr::StringLit(s) = expr
+            && crate::unicode::utf16_to_utf8(s).as_str() == "use strict"
+        {
+            let mut converted = 0;
+            for stmt in stmts.iter_mut() {
+                if let StatementKind::FunctionDeclaration(name, params, body, _is_generator, _is_async) = &*stmt.kind {
+                    let func_expr = Expr::Function(Some(name.clone()), params.clone(), body.clone());
+                    *stmt.kind = StatementKind::Expr(func_expr);
+                    converted += 1;
+                }
+            }
+            log::trace!(
+                "DEBUG: indirect strict eval - converted {} top-level function declarations into expressions",
+                converted
+            );
+        } else {
+            log::trace!(
+                "DEBUG: indirect eval detected but not strict or no first-string; is_indirect_eval={}",
+                is_indirect_eval
+            );
+        }
+    }
+
+    crate::core::check_top_level_return(&stmts)?;
+
+    // If this was an indirect eval and the eval is strict (starts with "use strict"),
+    // execute it in a fresh declarative environment whose prototype is the global env.
+    // This prevents top-level FunctionDeclarations from creating global bindings (they
+    // will instead be bound to the new declarative env and won't leak into the caller).
+    let mut exec_env = *env;
+    if is_indirect_eval
+        && let Some(first) = stmts.first()
+        && let StatementKind::Expr(expr) = &*first.kind
+        && let Expr::StringLit(s) = expr
+        && crate::unicode::utf16_to_utf8(s).as_str() == "use strict"
+    {
+        log::trace!("DEBUG: indirect strict eval - creating fresh declarative environment");
+        let new_env = new_js_object_data(mc);
+        new_env.borrow_mut(mc).prototype = Some(*env);
+        exec_env = new_env;
+    }
+
+    match crate::core::evaluate_statements(mc, &exec_env, &stmts) {
+        Ok(v) => Ok(v),
+        Err(err) => {
+            // Convert parse/eval errors into a thrown JS Error object so that
+            // `try { eval(...) } catch (e) { e instanceof SyntaxError }` works
+            let msg = err.message();
+            let msg_val = Value::String(crate::unicode::utf8_to_utf16(&msg));
+            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(err);
+            };
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                Ok(Value::Object(obj)) => Err(EvalError::Throw(Value::Object(obj), None, None)),
+                Ok(other) => Err(EvalError::Throw(other, None, None)),
+                Err(_) => Err(err),
+            }
+        }
     }
 }
 
@@ -1839,71 +1941,6 @@ fn internal_promise_race_resolve<'gc>(
         }
         _ => Err(raise_type_error!("Second argument must be a promise").into()),
     }
-}
-
-#[allow(dead_code)]
-fn internal_promise_all_resolve<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Internal function for Promise.all resolve - requires 3 args: (idx, value, state)
-    validate_internal_args(args, 3)?;
-    let numbers = validate_number_args(args, 1)?;
-    let idx = numbers[0] as usize;
-    let value = args[1].clone();
-    if let Value::Object(state_obj) = args[2].clone() {
-        // Store value in results[idx]
-        if let Some(results_val_rc) = object_get_key_value(&state_obj, "results")
-            && let Value::Object(results_obj) = &*results_val_rc.borrow()
-        {
-            object_set_key_value(mc, results_obj, idx, value)?;
-        }
-        // Increment completed
-        if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
-            && let Value::Number(completed) = &*completed_val_rc.borrow()
-        {
-            let new_completed = completed + 1.0;
-            object_set_key_value(mc, &state_obj, "completed", Value::Number(new_completed))?;
-            // Check if all completed
-            if let Some(total_val_rc) = object_get_key_value(&state_obj, "total")
-                && let Value::Number(total) = &*total_val_rc.borrow()
-                && new_completed == *total
-            {
-                // Resolve result_promise with results array
-                if let Some(promise_val_rc) = object_get_key_value(&state_obj, "result_promise")
-                    && let Value::Promise(_result_promise) = &*promise_val_rc.borrow()
-                    && let Some(results_val_rc) = object_get_key_value(&state_obj, "results")
-                    && let Value::Object(_results_obj) = &*results_val_rc.borrow()
-                {
-                    // crate::js_promise::resolve_promise(mc, result_promise, Value::Object(results_obj.clone()));
-                    todo!("Implement resolve_promise call");
-                }
-            }
-        }
-    }
-    Ok(Value::Undefined)
-}
-
-#[allow(dead_code)]
-fn internal_promise_all_reject<'gc>(
-    _mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Internal function for Promise.all reject - requires 2 args: (reason, state)
-    validate_internal_args(args, 2)?;
-    let _reason = args[0].clone();
-    if let Value::Object(state_obj) = args[1].clone() {
-        // Reject result_promise
-        if let Some(promise_val_rc) = object_get_key_value(&state_obj, "result_promise")
-            && let Value::Promise(_result_promise) = &*promise_val_rc.borrow()
-        {
-            // crate::js_promise::reject_promise(mc, result_promise, reason);
-            todo!("Implement reject_promise call");
-        }
-    }
-    Ok(Value::Undefined)
 }
 
 fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {

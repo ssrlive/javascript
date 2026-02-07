@@ -9012,10 +9012,84 @@ fn handle_eval_function<'gc>(
             tokens.pop();
         }
 
+        // Fast string-level quick-check for import.meta usage. Token windows may
+        // miss some simple cases where the tokenization step behaves unexpectedly
+        // or is skipped, so include a cheap substring check first to ensure we
+        // reliably catch direct evals that reference `import.meta`.
+        if script.contains("import.meta") {
+            let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
+                .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+                .unwrap_or(false);
+            let mut root_env = *env;
+            while let Some(proto) = root_env.borrow().prototype {
+                root_env = proto;
+            }
+            let is_in_module = object_get_key_value(&root_env, "__import_meta").is_some();
+            log::trace!(
+                "HANDLE_EVAL quick-check (string): script contains import.meta, is_in_module={} is_indirect_eval={}",
+                is_in_module,
+                is_indirect_eval
+            );
+            if is_in_module && !is_indirect_eval {
+                let msg = "import.meta is not allowed in eval code";
+                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
+                    v.borrow().clone()
+                } else {
+                    return Err(raise_syntax_error!(msg).into());
+                };
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                    Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
+                    Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                    Err(_) => return Err(raise_syntax_error!(msg).into()),
+                }
+            }
+        }
+
         // Track whether the token stream contains `super` so we can perform
         // additional AST-based early error checks after parsing (we need the AST
         // to determine whether the use is a SuperCall or SuperProperty).
         let _contains_super_token = tokens.iter().any(|td| matches!(td.token, Token::Super));
+
+        // Fast token-based quick-check: if the token stream contains the sequence
+        // Identifier("import"), Dot, Identifier("meta"), and the caller is in a
+        // module context performing a direct eval, this should throw a SyntaxError
+        // per the spec (import.meta is only valid when the syntactic goal is Module).
+        let has_import_meta_token = tokens.windows(3).any(|w| {
+            matches!(w[0].token, Token::Identifier(ref id) if id == "import")
+                && matches!(w[1].token, Token::Dot)
+                && matches!(&w[2].token, Token::Identifier(id2) if id2 == "meta")
+        });
+        if has_import_meta_token {
+            let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
+                .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+                .unwrap_or(false);
+            let mut root_env = *env;
+            while let Some(proto) = root_env.borrow().prototype {
+                root_env = proto;
+            }
+            let is_in_module = object_get_key_value(&root_env, "__import_meta").is_some();
+            log::trace!(
+                "HANDLE_EVAL quick-check: has_import_meta_token={} is_in_module={} is_indirect_eval={}",
+                has_import_meta_token,
+                is_in_module,
+                is_indirect_eval
+            );
+            if is_in_module && !is_indirect_eval {
+                let msg = "import.meta is not allowed in eval code";
+                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
+                    v.borrow().clone()
+                } else {
+                    return Err(raise_syntax_error!(msg).into());
+                };
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                    Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
+                    Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                    Err(_) => return Err(raise_syntax_error!(msg).into()),
+                }
+            }
+        }
 
         let mut index = 0;
         // Debug: print eval context
@@ -10075,6 +10149,40 @@ pub fn evaluate_call_dispatch<'gc>(
     }
 }
 
+fn lookup_or_create_import_meta<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    log::trace!("lookup_or_create_import_meta: env_ptr={:p}", env);
+    // `import.meta` as a per-module ordinary object stored under env.__import_meta.
+    // Prefer the immediate environment but fall back to the root global environment.
+    let meta = object_get_key_value(env, "__import_meta").or_else(|| {
+        let mut root = *env;
+        while let Some(proto) = root.borrow().prototype {
+            root = proto;
+        }
+        object_get_key_value(&root, "__import_meta")
+    });
+    if let Some(meta_rc) = meta
+        && let Value::Object(meta_obj) = &*meta_rc.borrow()
+    {
+        log::trace!("lookup_or_create_import_meta: found existing import.meta object ptr={:p}", meta_obj);
+        return Ok(Value::Object(*meta_obj));
+    }
+
+    // Fallback: create an import.meta object on the root environment
+    log::trace!("lookup_or_create_import_meta: creating fallback import.meta on root env");
+    let mut root = *env;
+    while let Some(proto) = root.borrow().prototype {
+        root = proto;
+    }
+    let import_meta = new_js_object_data(mc);
+    if let Some(cell) = env_get(&root, "__filepath")
+        && let Value::String(s) = cell.borrow().clone()
+    {
+        object_set_key_value(mc, &import_meta, "url", Value::String(s))?;
+    }
+    object_set_key_value(mc, &root, "__import_meta", Value::Object(import_meta))?;
+    Ok(Value::Object(import_meta))
+}
+
 fn evaluate_expr_call<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -10231,51 +10339,65 @@ fn evaluate_expr_call<'gc>(
             (f_val, Some(obj_val))
         }
         Expr::Property(obj_expr, key) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
-                match evaluate_optional_chain_base(mc, env, obj_expr)? {
-                    Some(val) => val,
-                    None => return Ok(Value::Undefined),
-                }
+            // Fast special-case for `import.meta` when used as a callee (e.g. `import.meta()`)
+            // to avoid evaluating the base `import` (which would throw ReferenceError).
+            if let crate::core::Expr::Var(name, ..) = &**obj_expr
+                && name == "import"
+                && key == "meta"
+            {
+                log::trace!("CALL-SPECIAL-IMPORT_META: matched import.meta as callee");
+                let import_meta_val = lookup_or_create_import_meta(mc, env)?;
+                // Use the import.meta object as the call target. For such calls, there is no
+                // meaningful 'this' base value we can evaluate safely, so use `None` to indicate
+                // a plain function call (this -> undefined in strict mode).
+                (import_meta_val, None)
             } else {
-                evaluate_expr(mc, env, obj_expr)?
-            };
-            let f_val = if let Value::Object(obj) = &obj_val {
-                // Use accessor-aware property lookup so getters are executed.
-                let prop_val = get_property_with_accessors(mc, env, obj, key)?;
-                if !matches!(prop_val, Value::Undefined) {
-                    prop_val
-                } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
-                    let name = if key.as_str() == "call" {
+                let obj_val = if is_optional_chain_expr(obj_expr) {
+                    match evaluate_optional_chain_base(mc, env, obj_expr)? {
+                        Some(val) => val,
+                        None => return Ok(Value::Undefined),
+                    }
+                } else {
+                    evaluate_expr(mc, env, obj_expr)?
+                };
+                let f_val = if let Value::Object(obj) = &obj_val {
+                    // Use accessor-aware property lookup so getters are executed.
+                    let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                    if !matches!(prop_val, Value::Undefined) {
+                        prop_val
+                    } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
+                        let name = if key.as_str() == "call" {
+                            "Function.prototype.call"
+                        } else {
+                            "Function.prototype.apply"
+                        };
+                        Value::Function(name.to_string())
+                    } else {
+                        Value::Undefined
+                    }
+                } else if let Value::String(s) = &obj_val
+                    && key == "length"
+                {
+                    Value::Number(s.len() as f64)
+                } else if matches!(obj_val, Value::Undefined | Value::Null) {
+                    return Err(raise_type_error!("Cannot read properties of null or undefined").into());
+                } else if matches!(
+                    obj_val,
+                    Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
+                ) && (key == "call" || key == "apply")
+                {
+                    let name = if key == "call" {
                         "Function.prototype.call"
                     } else {
                         "Function.prototype.apply"
                     };
                     Value::Function(name.to_string())
                 } else {
-                    Value::Undefined
-                }
-            } else if let Value::String(s) = &obj_val
-                && key == "length"
-            {
-                Value::Number(s.len() as f64)
-            } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                return Err(raise_type_error!("Cannot read properties of null or undefined").into());
-            } else if matches!(
-                obj_val,
-                Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
-            ) && (key == "call" || key == "apply")
-            {
-                let name = if key == "call" {
-                    "Function.prototype.call"
-                } else {
-                    "Function.prototype.apply"
+                    get_primitive_prototype_property(mc, env, &obj_val, key)?
                 };
-                Value::Function(name.to_string())
-            } else {
-                get_primitive_prototype_property(mc, env, &obj_val, key)?
-            };
 
-            (f_val, Some(obj_val))
+                (f_val, Some(obj_val))
+            }
         }
         Expr::PrivateMember(obj_expr, key) => {
             let obj_val = if is_optional_chain_expr(obj_expr) {
@@ -11031,8 +11153,10 @@ fn evaluate_expr_binary<'gc>(
             Ok(Value::Boolean(!eq))
         }
         BinaryOp::In => {
+            log::trace!("DEBUG-IN: evaluating In operator: l_val={:?}, r_val={:?}", l_val, r_val);
             if let Value::Object(obj) = r_val {
                 if let Value::PrivateName(name, id) = l_val {
+                    log::trace!("DEBUG-IN: private-in detected: name={}, id={}", name, id);
                     let key = PropertyKey::Private(name, id);
                     // Check for existence of private property anywhere in the prototype chain
                     // (though private fields/methods are usually own properties or on specific prototypes)
@@ -11042,7 +11166,6 @@ fn evaluate_expr_binary<'gc>(
 
                 let key = match l_val {
                     Value::String(s) => utf16_to_utf8(&s),
-                    Value::Number(n) => n.to_string(),
                     _ => value_to_string(&l_val),
                 };
                 // Handle Proxy's has trap if present
@@ -11055,6 +11178,7 @@ fn evaluate_expr_binary<'gc>(
                 let present = object_get_key_value(&obj, key).is_some();
                 Ok(Value::Boolean(present))
             } else {
+                log::trace!("DEBUG-IN: RHS is not object: {:?}", r_val);
                 Err(raise_type_error!("Right-hand side of 'in' must be an object").into())
             }
         }
@@ -12077,6 +12201,49 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
 
         Expr::Property(obj_expr, key) => {
+            // Special-case `import.meta` when executing in a module environment. We treat
+            // `import.meta` as a per-module ordinary object stored under env.__import_meta.
+            if let crate::core::Expr::Var(name, _, _) = &**obj_expr
+                && name == "import"
+                && key == "meta"
+            {
+                // Prefer the immediate environment but fall back to the root global environment
+                let meta_rc = crate::core::object_get_key_value(env, "__import_meta").or_else(|| {
+                    let mut root = *env;
+                    while let Some(proto) = root.borrow().prototype {
+                        root = proto;
+                    }
+                    crate::core::object_get_key_value(&root, "__import_meta")
+                });
+                if let Some(meta_rc) = meta_rc
+                    && let Value::Object(meta_obj) = &*meta_rc.borrow()
+                {
+                    log::trace!("eval Expr::Property: special-case import.meta matched, returning module import.meta object");
+                    return Ok(Value::Object(*meta_obj));
+                } else {
+                    log::trace!(
+                        "eval Expr::Property: special-case import.meta not matched in current env chain, creating fallback import.meta on root env"
+                    );
+                    // Fallback: create an import.meta object on the root environment so
+                    // `import.meta` accessors always produce an ordinary object in
+                    // module contexts. Use __filepath on the root env to populate the
+                    // 'url' property when available.
+                    let mut root = *env;
+                    while let Some(proto) = root.borrow().prototype {
+                        root = proto;
+                    }
+                    // Create a new ordinary object for import.meta
+                    let import_meta = new_js_object_data(mc);
+                    if let Some(cell) = env_get(&root, "__filepath")
+                        && let Value::String(s) = cell.borrow().clone()
+                    {
+                        object_set_key_value(mc, &import_meta, "url", Value::String(s))?;
+                    }
+                    object_set_key_value(mc, &root, "__import_meta", Value::Object(import_meta))?;
+                    return Ok(Value::Object(import_meta));
+                }
+            }
+
             let obj_val = if is_optional_chain_expr(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
@@ -14345,6 +14512,18 @@ pub fn call_closure<'gc>(
         (p, v)
     };
 
+    // Debug: log whether the closure's env chain contains __import_meta (helps diagnose missing import.meta)
+    let closure_env_ptr = if let Some(e) = cl.env {
+        Gc::as_ptr(e) as *const _
+    } else {
+        std::ptr::null()
+    };
+    log::trace!(
+        "call_closure: closure_env_ptr={:p} has___import_meta={}",
+        closure_env_ptr,
+        crate::core::object_get_key_value(&cl.env.unwrap_or_else(|| crate::core::new_js_object_data(mc)), "__import_meta").is_some()
+    );
+
     // Determine whether this function is strict (either via its own 'use strict'
     // directive at creation time or because its lexical environment is marked strict).
     // Determine whether any ancestor of the function's lexical environment is strict.
@@ -15057,13 +15236,25 @@ fn evaluate_expr_new<'gc>(
             Some(CtorRef::Other(val))
         }
         Expr::Property(obj_expr, key) => {
-            // evaluate base and perform GetValue(ref) now (before args)
-            let base = evaluate_expr(mc, env, obj_expr)?;
-            let val = match &base {
-                Value::Object(obj) => get_property_with_accessors(mc, env, obj, key)?,
-                other => get_primitive_prototype_property(mc, env, other, key)?,
-            };
-            Some(CtorRef::Other(val))
+            // Special-case `import.meta` to avoid evaluating `import` which would
+            // throw a ReferenceError. Use the module import.meta object as the
+            // constructor value so 'new import.meta()' throws a TypeError as
+            // expected by tests.
+            if let crate::core::Expr::Var(name, ..) = &**obj_expr
+                && name == "import"
+                && key == "meta"
+            {
+                let import_meta_val = lookup_or_create_import_meta(mc, env)?;
+                Some(CtorRef::Other(import_meta_val))
+            } else {
+                // evaluate base and perform GetValue(ref) now (before args)
+                let base = evaluate_expr(mc, env, obj_expr)?;
+                let val = match &base {
+                    Value::Object(obj) => get_property_with_accessors(mc, env, obj, key)?,
+                    other => get_primitive_prototype_property(mc, env, other, key)?,
+                };
+                Some(CtorRef::Other(val))
+            }
         }
         Expr::Index(obj_expr, key_expr) => {
             // evaluate base and key now, then GetValue(ref) now

@@ -48,7 +48,9 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
     let column = start_token.column;
 
     match start_token.token {
-        Token::Import if !matches!(t.get(*index + 1).map(|d| &d.token), Some(Token::LParen)) => parse_import_statement(t, index),
+        Token::Import if !matches!(t.get(*index + 1).map(|d| &d.token), Some(Token::LParen) | Some(Token::Dot)) => {
+            parse_import_statement(t, index)
+        }
         Token::Export => parse_export_statement(t, index),
         Token::Function | Token::FunctionStar => parse_function_declaration(t, index),
         Token::Class => parse_class_declaration(t, index),
@@ -119,6 +121,24 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
             })
         }
     }
+}
+
+thread_local! {
+    // Tracks whether we are currently parsing inside an async function/arrow/function-expression body.
+    // When > 0, `await` should be parsed as an operator; otherwise it should be treated as an IdentifierName.
+    static AWAIT_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
+}
+
+pub(crate) fn in_await_context() -> bool {
+    AWAIT_CONTEXT.with(|c| *c.borrow() > 0)
+}
+
+pub(crate) fn push_await_context() {
+    AWAIT_CONTEXT.with(|c| *c.borrow_mut() += 1);
+}
+
+pub(crate) fn pop_await_context() {
+    AWAIT_CONTEXT.with(|c| *c.borrow_mut() -= 1);
 }
 
 fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
@@ -685,7 +705,14 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
     }
     *index += 1; // consume {
 
-    let body = parse_statement_block(t, index)?;
+    let body = if is_async {
+        push_await_context();
+        let b = parse_statement_block(t, index)?;
+        pop_await_context();
+        b
+    } else {
+        parse_statement_block(t, index)?
+    };
 
     Ok(Statement {
         kind: Box::new(StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async)),
@@ -1891,6 +1918,38 @@ fn flatten_commas(expr: Expr) -> Vec<Expr> {
     }
 }
 
+fn contains_import_meta_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Property(boxed, prop) => {
+            if let Expr::Var(name, _, _) = &**boxed
+                && name == "import"
+                && prop == "meta"
+            {
+                return true;
+            }
+            contains_import_meta_expr(boxed)
+        }
+        Expr::Assign(left, right) => contains_import_meta_expr(left) || contains_import_meta_expr(right),
+        Expr::Binary(left, _, right) => contains_import_meta_expr(left) || contains_import_meta_expr(right),
+        Expr::Conditional(c, t, f) => contains_import_meta_expr(c) || contains_import_meta_expr(t) || contains_import_meta_expr(f),
+        Expr::Call(f, args) => {
+            if contains_import_meta_expr(f) {
+                return true;
+            }
+            for a in args {
+                if contains_import_meta_expr(a) {
+                    return true;
+                }
+            }
+            false
+        }
+        Expr::TaggedTemplate(f, _, _) => contains_import_meta_expr(f),
+        Expr::Index(obj, key) => contains_import_meta_expr(obj) || contains_import_meta_expr(key),
+        Expr::UnaryNeg(inner) | Expr::UnaryPlus(inner) | Expr::TypeOf(inner) | Expr::Void(inner) => contains_import_meta_expr(inner),
+        _ => false,
+    }
+}
+
 pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<DestructuringElement>, JSError> {
     let mut params = Vec::new();
     log::trace!("parse_parameters called with index={}", *index);
@@ -1935,6 +1994,12 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
                     *index += 1;
                     let expr = parse_assignment(tokens, index)?;
+                    if contains_import_meta_expr(&expr) {
+                        return Err(raise_parse_error_with_token!(
+                            tokens.get(*index - 1).unwrap(),
+                            "import.meta is not allowed in parameter initializers"
+                        ));
+                    }
                     default_expr = Some(Box::new(expr));
                 }
                 params.push(DestructuringElement::NestedObject(pattern, default_expr));
@@ -1944,6 +2009,13 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
                     *index += 1;
                     let expr = parse_assignment(tokens, index)?;
+                    if contains_import_meta_expr(&expr) {
+                        let token = tokens.get(*index - 1).unwrap();
+                        return Err(raise_parse_error_with_token!(
+                            token,
+                            "import.meta is not allowed in parameter initializers"
+                        ));
+                    }
                     default_expr = Some(Box::new(expr));
                 }
                 params.push(DestructuringElement::NestedArray(pattern, default_expr));
@@ -1954,6 +2026,12 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
                     *index += 1;
                     let expr = parse_assignment(tokens, index)?;
+                    if contains_import_meta_expr(&expr) {
+                        return Err(raise_parse_error_with_token!(
+                            tokens.get(*index - 1).unwrap(),
+                            "import.meta is not allowed in parameter initializers"
+                        ));
+                    }
                     default_expr = Some(Box::new(expr));
                 }
                 params.push(DestructuringElement::Variable(param, default_expr));
@@ -1964,6 +2042,12 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
                     *index += 1;
                     let expr = parse_assignment(tokens, index)?;
+                    if contains_import_meta_expr(&expr) {
+                        return Err(raise_parse_error_with_token!(
+                            tokens.get(*index - 1).unwrap(),
+                            "import.meta is not allowed in parameter initializers"
+                        ));
+                    }
                     default_expr = Some(Box::new(expr));
                 }
                 params.push(DestructuringElement::Variable(param, default_expr));
@@ -1974,6 +2058,12 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
                     *index += 1;
                     let expr = parse_assignment(tokens, index)?;
+                    if contains_import_meta_expr(&expr) {
+                        return Err(raise_parse_error_with_token!(
+                            tokens.get(*index - 1).unwrap(),
+                            "import.meta is not allowed in parameter initializers"
+                        ));
+                    }
                     default_expr = Some(Box::new(expr));
                 }
                 params.push(DestructuringElement::Variable(param, default_expr));
@@ -3197,13 +3287,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
         Token::Await => {
             // `await` is a contextual keyword. In non-async/script contexts it can be used as an identifier.
             // If the next token is an assignment operator, treat this as an identifier reference.
-            // Otherwise, only parse an await expression if the following token can start an expression;
-            // if not, treat it as an identifier reference so constructs like `await instanceof X`
-            // are parsed as `(await) instanceof X` rather than `await <missing-expression>`.
+            // Otherwise, only parse an await expression if we are currently inside an async context and
+            // the following token can start an expression; otherwise treat as an identifier reference.
             if *index < tokens.len() {
                 if matches!(tokens[*index].token, Token::Assign) {
                     Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
-                } else {
+                } else if in_await_context() {
                     match &tokens[*index].token {
                         Token::Number(_)
                         | Token::BigInt(_)
@@ -3237,6 +3326,8 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         }
                         _ => Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column)),
                     }
+                } else {
+                    Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
                 }
             } else {
                 Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
@@ -4229,7 +4320,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     }
                     *index += 1; // consume {
+                    push_await_context();
                     let body = parse_statements(tokens, index)?;
+                    pop_await_context();
                     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     }
@@ -4261,7 +4354,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         // Parse arrow body
                         if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
                             *index += 1; // consume '{'
+                            push_await_context();
                             let body = parse_statement_block(tokens, index)?;
+                            pop_await_context();
                             return Ok(Expr::AsyncArrowFunction(p, body));
                         } else {
                             let body_expr = parse_assignment(tokens, index)?;

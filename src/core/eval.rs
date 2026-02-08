@@ -27,6 +27,12 @@ use crate::{Token, parse_statements, raise_range_error, raise_syntax_error, rais
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
+thread_local! {
+    static OPT_CHAIN_RECURSION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+const OPT_CHAIN_RECURSION_LIMIT: u32 = 2000;
+
 #[derive(Clone, Debug)]
 pub enum ControlFlow<'gc> {
     Normal(Value<'gc>),
@@ -42,7 +48,7 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
         Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
         Value::Null => Ok(0.0),
         Value::Undefined | Value::Uninitialized => Ok(f64::NAN),
-        Value::BigInt(b) => Ok(b.to_f64().unwrap_or(f64::NAN)),
+        Value::BigInt(_) => Err(raise_type_error!("Cannot convert a BigInt value to a number").into()),
         Value::String(s) => {
             let str_val = utf16_to_utf8(s);
             let trimmed = str_val.trim();
@@ -5775,6 +5781,18 @@ fn get_primitive_prototype_property<'gc>(
             return Ok(val.borrow().clone());
         }
     }
+
+    // Special-case string indexing: numeric property on a string primitive returns the character
+    if let Value::String(s) = obj_val
+        && let PropertyKey::String(skey) = key
+        && let Ok(idx) = skey.parse::<usize>()
+    {
+        let us = crate::unicode::utf16_to_utf8(s);
+        if let Some(ch) = us.chars().nth(idx) {
+            return Ok(Value::String(crate::unicode::utf8_to_utf16(&ch.to_string())));
+        }
+    }
+
     Ok(Value::Undefined)
 }
 
@@ -6991,7 +7009,7 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
             Ok(val)
         }
         Expr::Property(obj_expr, key) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
+            let obj_val = if expr_contains_optional_chain(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
                     None => return Ok(Value::Undefined),
@@ -7644,7 +7662,7 @@ fn evaluate_expr_add_assign<'gc>(
             Ok(new_val)
         }
         Expr::Property(obj_expr, key) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
+            let obj_val = if expr_contains_optional_chain(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
                     None => return Ok(Value::Undefined),
@@ -7663,7 +7681,7 @@ fn evaluate_expr_add_assign<'gc>(
             }
         }
         Expr::Index(obj_expr, key_expr) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
+            let obj_val = if expr_contains_optional_chain(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
                     None => return Ok(Value::Undefined),
@@ -7728,7 +7746,7 @@ fn evaluate_expr_bitand_assign<'gc>(
             }
         }
         Expr::Property(obj_expr, key) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
+            let obj_val = if expr_contains_optional_chain(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
                     None => return Ok(Value::Undefined),
@@ -7850,7 +7868,7 @@ fn evaluate_expr_bitor_assign<'gc>(
             }
         }
         Expr::Property(obj_expr, key) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
+            let obj_val = if expr_contains_optional_chain(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
                     None => return Ok(Value::Undefined),
@@ -9038,7 +9056,7 @@ fn handle_eval_function<'gc>(
                 } else {
                     return Err(raise_syntax_error!(msg).into());
                 };
-                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                     Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
                     Ok(other) => return Err(EvalError::Throw(other, None, None)),
                     Err(_) => return Err(raise_syntax_error!(msg).into()),
@@ -9083,7 +9101,7 @@ fn handle_eval_function<'gc>(
                 } else {
                     return Err(raise_syntax_error!(msg).into());
                 };
-                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                     Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
                     Ok(other) => return Err(EvalError::Throw(other, None, None)),
                     Err(_) => return Err(raise_syntax_error!(msg).into()),
@@ -9170,7 +9188,7 @@ fn handle_eval_function<'gc>(
                 } else {
                     return Err(EvalError::Js(raise_syntax_error!(msg)));
                 };
-                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                     Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
                     Ok(other) => return Err(EvalError::Throw(other, None, None)),
                     Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
@@ -9203,7 +9221,7 @@ fn handle_eval_function<'gc>(
             } else {
                 return Err(EvalError::Js(raise_syntax_error!(msg)));
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
                 Ok(other) => return Err(EvalError::Throw(other, None, None)),
                 Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
@@ -9515,7 +9533,7 @@ fn handle_eval_function<'gc>(
             } else {
                 return Err(EvalError::Js(raise_syntax_error!(msg)));
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
                 Ok(other) => return Err(EvalError::Throw(other, None, None)),
                 Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
@@ -9530,7 +9548,7 @@ fn handle_eval_function<'gc>(
             } else {
                 return Err(EvalError::Js(raise_syntax_error!(msg)));
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
                 Ok(other) => return Err(EvalError::Throw(other, None, None)),
                 Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
@@ -9545,7 +9563,7 @@ fn handle_eval_function<'gc>(
             } else {
                 return Err(EvalError::Js(raise_syntax_error!(msg)));
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
                 Ok(other) => return Err(EvalError::Throw(other, None, None)),
                 Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
@@ -9584,7 +9602,7 @@ fn handle_eval_function<'gc>(
                 } else {
                     return Err(EvalError::Js(raise_syntax_error!(msg)));
                 };
-                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                     Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
                     Ok(other) => return Err(EvalError::Throw(other, None, None)),
                     Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
@@ -9655,6 +9673,50 @@ fn handle_eval_function<'gc>(
     } else {
         Ok(first_arg)
     }
+}
+
+// Helper: dispatch calls for named functions, marking the global env for indirect `eval`.
+fn call_named_eval_or_dispatch<'gc>(
+    mc: &MutationContext<'gc>,
+    env_for_call: &JSObjectDataPtr<'gc>,
+    call_env: &JSObjectDataPtr<'gc>,
+    name: &str,
+    this_arg: Option<Value<'gc>>,
+    eval_args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if name == "eval" {
+        let key = PropertyKey::String("__is_indirect_eval".to_string());
+        object_set_key_value(mc, env_for_call, &key, Value::Boolean(true))?;
+        let res = evaluate_call_dispatch(mc, call_env, Value::Function(name.to_string()), this_arg, eval_args);
+        let _ = env_for_call.borrow_mut(mc).properties.shift_remove(&key);
+        res
+    } else {
+        evaluate_call_dispatch(mc, call_env, Value::Function(name.to_string()), this_arg, eval_args)
+    }
+}
+
+// Helper: when calling the topl-level dispatcher for a possibly-indirect eval
+fn dispatch_with_indirect_eval_marker<'gc>(
+    mc: &MutationContext<'gc>,
+    env_for_call: &JSObjectDataPtr<'gc>,
+    func_val: Value<'gc>,
+    this_val: Option<Value<'gc>>,
+    eval_args: Vec<Value<'gc>>,
+    is_indirect: bool,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Only set the indirect-eval marker when this is actually an indirect eval
+    // (i.e., caller called `eval` indirectly).  Direct eval should not set this flag.
+    if is_indirect
+        && let Value::Function(name) = &func_val
+        && name == "eval"
+    {
+        let key = PropertyKey::String("__is_indirect_eval".to_string());
+        object_set_key_value(mc, env_for_call, &key, Value::Boolean(true))?;
+        let res = evaluate_call_dispatch(mc, env_for_call, func_val, this_val, eval_args);
+        let _ = env_for_call.borrow_mut(mc).properties.shift_remove(&key);
+        return res;
+    }
+    evaluate_call_dispatch(mc, env_for_call, func_val, this_val, eval_args)
 }
 
 pub fn evaluate_call_dispatch<'gc>(
@@ -10226,7 +10288,7 @@ fn evaluate_expr_call<'gc>(
                 } else {
                     return Err(raise_syntax_error!(msg).into());
                 };
-                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                     Ok(Value::Object(obj)) => {
                         return Err(EvalError::Throw(Value::Object(obj), None, None));
                     }
@@ -10253,6 +10315,7 @@ fn evaluate_expr_call<'gc>(
     }
 
     log::trace!("DEBUG-EVALUATE-CALL: func_expr={:?} args={:?}", func_expr, args);
+    OPT_CHAIN_RECURSION_DEPTH.with(|c| log::trace!("ENTER evaluate_expr_call opt_depth={} func_expr={:?}", c.get(), func_expr));
     let (func_val, this_val) = match func_expr {
         Expr::OptionalProperty(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
@@ -10352,7 +10415,7 @@ fn evaluate_expr_call<'gc>(
                 // a plain function call (this -> undefined in strict mode).
                 (import_meta_val, None)
             } else {
-                let obj_val = if is_optional_chain_expr(obj_expr) {
+                let obj_val = if expr_contains_optional_chain(obj_expr) {
                     match evaluate_optional_chain_base(mc, env, obj_expr)? {
                         Some(val) => val,
                         None => return Ok(Value::Undefined),
@@ -10400,7 +10463,7 @@ fn evaluate_expr_call<'gc>(
             }
         }
         Expr::PrivateMember(obj_expr, key) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
+            let obj_val = if expr_contains_optional_chain(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
                     None => return Ok(Value::Undefined),
@@ -10684,19 +10747,8 @@ fn evaluate_expr_call<'gc>(
         *env
     };
 
-    if is_indirect_eval_call {
-        // Temporarily mark the global env so eval can detect it was called indirectly.
-        object_set_key_value(mc, &env_for_call, "__is_indirect_eval", Value::Boolean(true))?;
-        let res = evaluate_call_dispatch(mc, &env_for_call, func_val, this_val, eval_args);
-        // Remove temporary marker to avoid leaking into future calls.
-        let _ = env_for_call
-            .borrow_mut(mc)
-            .properties
-            .shift_remove(&PropertyKey::String("__is_indirect_eval".to_string()));
-        res
-    } else {
-        evaluate_call_dispatch(mc, &env_for_call, func_val, this_val, eval_args)
-    }
+    // Dispatch, handling indirect `eval` marker on the global env when necessary.
+    dispatch_with_indirect_eval_marker(mc, &env_for_call, func_val, this_val, eval_args, is_indirect_eval_call)
 }
 
 fn is_optional_chain_expr(expr: &Expr) -> bool {
@@ -10706,22 +10758,310 @@ fn is_optional_chain_expr(expr: &Expr) -> bool {
     )
 }
 
+// Recursively detect whether an expression contains an optional chain node anywhere in its subtree.
+fn expr_contains_optional_chain(expr: &Expr) -> bool {
+    use Expr::*;
+    match expr {
+        OptionalProperty(..) | OptionalIndex(..) | OptionalPrivateMember(..) | OptionalCall(..) => true,
+        Property(obj, _) | Index(obj, _) | PrivateMember(obj, _) => expr_contains_optional_chain(obj),
+        Call(func, args) | New(func, args) => {
+            if expr_contains_optional_chain(func) {
+                return true;
+            }
+            for a in args.iter() {
+                if expr_contains_optional_chain(a) {
+                    return true;
+                }
+            }
+            false
+        }
+        SuperCall(args) | SuperMethod(_, args) => args.iter().any(expr_contains_optional_chain),
+        Assign(l, r)
+        | Comma(l, r)
+        | Binary(l, _, r)
+        | LogicalAnd(l, r)
+        | LogicalOr(l, r)
+        | NullishCoalescing(l, r)
+        | Mod(l, r)
+        | Pow(l, r)
+        | LogicalAndAssign(l, r)
+        | LogicalOrAssign(l, r)
+        | NullishAssign(l, r)
+        | AddAssign(l, r)
+        | SubAssign(l, r)
+        | PowAssign(l, r)
+        | MulAssign(l, r)
+        | DivAssign(l, r)
+        | ModAssign(l, r)
+        | BitXorAssign(l, r)
+        | BitAndAssign(l, r)
+        | BitOrAssign(l, r)
+        | LeftShiftAssign(l, r)
+        | RightShiftAssign(l, r)
+        | UnsignedRightShiftAssign(l, r) => expr_contains_optional_chain(l) || expr_contains_optional_chain(r),
+        // single-expression variants
+        TypeOf(e) | Delete(e) | Void(e) | Await(e) | YieldStar(e) | Getter(e) | Setter(e) | UnaryNeg(e) | UnaryPlus(e) | BitNot(e)
+        | LogicalNot(e) | Increment(e) | Decrement(e) | PostIncrement(e) | PostDecrement(e) | Spread(e) => expr_contains_optional_chain(e),
+        Yield(opt) => opt.as_ref().is_some_and(|e| expr_contains_optional_chain(e)),
+        Conditional(c, t, e) => expr_contains_optional_chain(c) || expr_contains_optional_chain(t) || expr_contains_optional_chain(e),
+        Array(elements) => elements.iter().any(|opt| opt.as_ref().is_some_and(expr_contains_optional_chain)),
+        Object(props) => props
+            .iter()
+            .any(|(k, v, _)| expr_contains_optional_chain(k) || expr_contains_optional_chain(v)),
+        _ => false,
+    }
+}
+
+// Helper: evaluate call arguments, expanding spread elements into the final argument list.
+fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, args: &[Expr]) -> Result<Vec<Value<'gc>>, EvalError<'gc>> {
+    let mut eval_args: Vec<Value<'gc>> = Vec::new();
+    for arg_expr in args.iter() {
+        if let Expr::Spread(target) = arg_expr {
+            let val = evaluate_expr(mc, env, target)?;
+            if let Value::Object(obj) = val {
+                if is_array(mc, &obj) {
+                    let len_val = object_get_key_value(&obj, "length").unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
+                    let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
+                    for k in 0..len {
+                        let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
+                        eval_args.push(item.borrow().clone());
+                    }
+                } else {
+                    // Support generic iterables via Symbol.iterator
+                    let mut iter_fn_opt: Option<crate::core::GcPtr<'gc, Value<'gc>>> = None;
+                    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                    {
+                        let iter_sym_val_opt = object_get_key_value(sym_obj, "iterator");
+                        if let Some(iter_sym_val) = iter_sym_val_opt
+                            && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+                        {
+                            // Use accessor-aware property read to support getters that return the iterator method
+                            let iter_fn_val = get_property_with_accessors(mc, env, &obj, iter_sym)?;
+                            // If the accessor returned undefined, there's no iterator
+                            if !matches!(iter_fn_val, crate::core::Value::Undefined) {
+                                // Wrap the returned Value into a GC pointer so code below can inspect/call it uniformly
+                                iter_fn_opt = Some(crate::core::new_gc_cell_ptr(mc, iter_fn_val));
+                            }
+                        }
+                    }
+                    if let Some(iter_fn_val) = iter_fn_opt {
+                        // Call iterator method on the object to get an iterator
+                        let iterator = match &*iter_fn_val.borrow() {
+                            Value::Function(name) => {
+                                let call_env = crate::js_class::prepare_call_env_with_this(
+                                    mc,
+                                    Some(env),
+                                    Some(Value::Object(obj)),
+                                    None,
+                                    &[],
+                                    None,
+                                    Some(env),
+                                    None,
+                                )?;
+                                evaluate_call_dispatch(mc, &call_env, Value::Function(name.clone()), Some(Value::Object(obj)), vec![])?
+                            }
+                            Value::Closure(cl) => crate::core::call_closure(mc, cl, Some(Value::Object(obj)), &[], env, None)?,
+                            Value::Object(o) => {
+                                // Support function objects that wrap a closure (get_closure)
+                                if let Some(cl_ptr) = o.borrow().get_closure() {
+                                    match &*cl_ptr.borrow() {
+                                        Value::Closure(cl) => crate::core::call_closure(mc, cl, Some(Value::Object(*o)), &[], env, None)?,
+                                        Value::Function(name) => {
+                                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                                mc,
+                                                Some(env),
+                                                Some(Value::Object(*o)),
+                                                None,
+                                                &[],
+                                                None,
+                                                Some(env),
+                                                None,
+                                            )?;
+                                            evaluate_call_dispatch(
+                                                mc,
+                                                &call_env,
+                                                Value::Function(name.clone()),
+                                                Some(Value::Object(*o)),
+                                                vec![],
+                                            )?
+                                        }
+                                        _ => return Err(raise_type_error!("Spread target is not iterable").into()),
+                                    }
+                                } else {
+                                    log::trace!("Spread target is not iterable: iterator property is object but not callable");
+                                    return Err(raise_type_error!("Spread target is not iterable").into());
+                                }
+                            }
+                            _ => {
+                                log::trace!("Spread target is not iterable: iterator property exists but not callable");
+                                return Err(raise_type_error!("Spread target is not iterable").into());
+                            }
+                        };
+
+                        // Consume iterator by repeatedly calling its next() method
+                        if let Value::Object(iter_obj) = iterator {
+                            loop {
+                                if let Some(next_val) = object_get_key_value(&iter_obj, "next") {
+                                    let next_fn = next_val.borrow().clone();
+
+                                    let res = match &next_fn {
+                                        Value::Function(name) => {
+                                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                                mc,
+                                                Some(env),
+                                                Some(Value::Object(iter_obj)),
+                                                None,
+                                                &[],
+                                                None,
+                                                Some(env),
+                                                None,
+                                            )?;
+                                            evaluate_call_dispatch(
+                                                mc,
+                                                &call_env,
+                                                Value::Function(name.clone()),
+                                                Some(Value::Object(iter_obj)),
+                                                vec![],
+                                            )?
+                                        }
+                                        Value::Closure(cl) => call_closure(mc, cl, Some(Value::Object(iter_obj)), &[], env, None)?,
+                                        Value::Object(o) => {
+                                            if let Some(cl_ptr) = o.borrow().get_closure() {
+                                                match &*cl_ptr.borrow() {
+                                                    Value::Closure(cl) => call_closure(mc, cl, Some(Value::Object(*o)), &[], env, None)?,
+                                                    Value::Function(name) => {
+                                                        let call_env = crate::js_class::prepare_call_env_with_this(
+                                                            mc,
+                                                            Some(env),
+                                                            Some(Value::Object(*o)),
+                                                            None,
+                                                            &[],
+                                                            None,
+                                                            Some(env),
+                                                            None,
+                                                        )?;
+                                                        evaluate_call_dispatch(
+                                                            mc,
+                                                            &call_env,
+                                                            Value::Function(name.clone()),
+                                                            Some(Value::Object(*o)),
+                                                            vec![],
+                                                        )?
+                                                    }
+                                                    _ => return Err(raise_type_error!("Iterator.next is not callable").into()),
+                                                }
+                                            } else {
+                                                return Err(raise_type_error!("Iterator.next is not callable").into());
+                                            }
+                                        }
+                                        _ => {
+                                            return Err(raise_type_error!("Iterator.next is not callable").into());
+                                        }
+                                    };
+
+                                    if let Value::Object(res_obj) = res {
+                                        // Access 'done' and 'value' using accessor-aware property reads so getters can run
+                                        let done = match get_property_with_accessors(mc, env, &res_obj, "done") {
+                                            Ok(v) => {
+                                                if let Value::Boolean(b) = v {
+                                                    b
+                                                } else {
+                                                    false
+                                                }
+                                            }
+                                            Err(e) => return Err(e),
+                                        };
+
+                                        if done {
+                                            break;
+                                        }
+
+                                        let value = get_property_with_accessors(mc, env, &res_obj, "value")?;
+
+                                        eval_args.push(value);
+
+                                        continue;
+                                    } else {
+                                        return Err(raise_type_error!("Iterator.next did not return an object").into());
+                                    }
+                                } else {
+                                    return Err(raise_type_error!("Iterator has no next method").into());
+                                }
+                            }
+                        } else {
+                            return Err(raise_type_error!("Iterator call did not return an object").into());
+                        }
+                    }
+                }
+            } else {
+                return Err(raise_type_error!("Spread only implemented for Objects").into());
+            }
+        } else {
+            let val = evaluate_expr(mc, env, arg_expr)?;
+            eval_args.push(val);
+        }
+    }
+
+    Ok(eval_args)
+}
+
 fn evaluate_optional_chain_base<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     expr: &Expr,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    // Guard recursion depth to avoid stack overflows from unexpected cycles
+    struct RecursionGuard;
+    impl Drop for RecursionGuard {
+        fn drop(&mut self) {
+            OPT_CHAIN_RECURSION_DEPTH.with(|c| {
+                let new = c.get().saturating_sub(1);
+                c.set(new);
+                log::trace!("EXIT evaluate_optional_chain_base depth={new}");
+            });
+        }
+    }
+
+    OPT_CHAIN_RECURSION_DEPTH.with(|c| c.set(c.get().saturating_add(1)));
+    let _guard = RecursionGuard;
+    // Quick safety gate: fail early if recursion grows unexpectedly large.
+    // This is stricter than the global limit and helps surface runaway
+    // recursion during debugging without affecting normal shallow chains.
+    const OPT_CHAIN_SAFE_LIMIT: u32 = 256;
+    let depth_now = OPT_CHAIN_RECURSION_DEPTH.with(|c| c.get());
+    if depth_now > OPT_CHAIN_SAFE_LIMIT {
+        log::error!(
+            "optional chain recursion safety triggered depth={} (limit={})",
+            depth_now,
+            OPT_CHAIN_SAFE_LIMIT
+        );
+        return Err(raise_eval_error!("optional chain recursion safety triggered").into());
+    }
+    if depth_now > OPT_CHAIN_RECURSION_LIMIT {
+        return Err(raise_eval_error!("optional chain recursion limit exceeded").into());
+    }
+    OPT_CHAIN_RECURSION_DEPTH.with(|c| log::trace!("ENTER evaluate_optional_chain_base depth={} expr={:?}", c.get(), expr));
     match expr {
         Expr::OptionalProperty(obj_expr, prop) => {
+            log::trace!(
+                "OPT_CHAIN: OptionalProperty -> recursing into obj_expr={:?} depth={}",
+                obj_expr,
+                OPT_CHAIN_RECURSION_DEPTH.with(|c| c.get())
+            );
             let base_val = match evaluate_optional_chain_base(mc, env, obj_expr)? {
                 Some(val) => val,
                 None => return Ok(None),
             };
             if base_val.is_null_or_undefined() {
+                log::trace!("OPT_CHAIN: OptionalProperty short-circuit (base nullish) expr={:?}", obj_expr);
                 Ok(None)
             } else if let Value::Object(obj) = &base_val {
-                if let Some(val_rc) = object_get_key_value(obj, prop) {
-                    Ok(Some(val_rc.borrow().clone()))
+                // Use accessor-aware property read so getters are executed.
+                let prop_val = get_property_with_accessors(mc, env, obj, prop)?;
+                log::trace!("OPT_CHAIN: OptionalProperty got prop_val={:?} for prop='{}'", prop_val, prop);
+                if !matches!(prop_val, Value::Undefined) {
+                    Ok(Some(prop_val))
                 } else {
                     Ok(Some(Value::Undefined))
                 }
@@ -10730,11 +11070,17 @@ fn evaluate_optional_chain_base<'gc>(
             }
         }
         Expr::OptionalIndex(obj_expr, index_expr) => {
+            log::trace!(
+                "OPT_CHAIN: OptionalIndex -> recursing into obj_expr={:?} depth={}",
+                obj_expr,
+                OPT_CHAIN_RECURSION_DEPTH.with(|c| c.get())
+            );
             let base_val = match evaluate_optional_chain_base(mc, env, obj_expr)? {
                 Some(val) => val,
                 None => return Ok(None),
             };
             if base_val.is_null_or_undefined() {
+                log::trace!("OPT_CHAIN: OptionalIndex short-circuit (base nullish) expr={:?}", obj_expr);
                 return Ok(None);
             }
             let index_val = evaluate_expr(mc, env, index_expr)?;
@@ -10753,8 +11099,10 @@ fn evaluate_optional_chain_base<'gc>(
                 }
             };
             if let Value::Object(obj) = &base_val {
-                if let Some(val_rc) = object_get_key_value(obj, &prop_key) {
-                    Ok(Some(val_rc.borrow().clone()))
+                // Use accessor-aware lookup so getters are invoked
+                let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
+                if !matches!(prop_val, Value::Undefined) {
+                    Ok(Some(prop_val))
                 } else {
                     Ok(Some(Value::Undefined))
                 }
@@ -10763,11 +11111,17 @@ fn evaluate_optional_chain_base<'gc>(
             }
         }
         Expr::OptionalPrivateMember(obj_expr, key) => {
+            log::trace!(
+                "OPT_CHAIN: OptionalPrivateMember -> recursing into obj_expr={:?} depth={}",
+                obj_expr,
+                OPT_CHAIN_RECURSION_DEPTH.with(|c| c.get())
+            );
             let base_val = match evaluate_optional_chain_base(mc, env, obj_expr)? {
                 Some(val) => val,
                 None => return Ok(None),
             };
             if base_val.is_null_or_undefined() {
+                log::trace!("OPT_CHAIN: OptionalPrivateMember short-circuit (base nullish) expr={:?}", obj_expr);
                 Ok(None)
             } else if let Value::Object(obj) = &base_val {
                 let pv = evaluate_var(mc, env, key)?;
@@ -10780,20 +11134,88 @@ fn evaluate_optional_chain_base<'gc>(
                 Err(raise_type_error!("Cannot access private field on non-object").into())
             }
         }
+        Expr::Property(obj_expr, key) => {
+            log::trace!(
+                "OPT_CHAIN: Property -> evaluating base for obj_expr={:?} key={} depth={}",
+                obj_expr,
+                key,
+                OPT_CHAIN_RECURSION_DEPTH.with(|c| c.get())
+            );
+            // Propagate short-circuiting from nested optional chains (e.g., a?.b.c)
+            let base_val = match evaluate_optional_chain_base(mc, env, obj_expr)? {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            if base_val.is_null_or_undefined() {
+                log::trace!("OPT_CHAIN: Property base nullish -> return undefined for key='{key}'");
+                Ok(Some(Value::Undefined))
+            } else if let Value::Object(obj) = &base_val {
+                let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                if !matches!(prop_val, Value::Undefined) {
+                    Ok(Some(prop_val))
+                } else {
+                    Ok(Some(Value::Undefined))
+                }
+            } else {
+                Ok(Some(get_primitive_prototype_property(mc, env, &base_val, key)?))
+            }
+        }
+        Expr::Index(obj_expr, index_expr) => {
+            // Propagate short-circuiting from nested optional chains (e.g., a?.b['c'])
+            let base_val = match evaluate_optional_chain_base(mc, env, obj_expr)? {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            if base_val.is_null_or_undefined() {
+                return Ok(Some(Value::Undefined));
+            }
+            let index_val = evaluate_expr(mc, env, index_expr)?;
+            let prop_key = match index_val {
+                Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
+                Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                val => {
+                    let s = match val {
+                        Value::Number(n) => n.to_string(),
+                        Value::Boolean(b) => b.to_string(),
+                        Value::Undefined => "undefined".to_string(),
+                        Value::Null => "null".to_string(),
+                        _ => crate::core::value_to_string(&val),
+                    };
+                    crate::core::PropertyKey::String(s)
+                }
+            };
+            if let Value::Object(obj) = &base_val {
+                // Use accessor-aware lookup so getters are invoked
+                let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
+                if !matches!(prop_val, Value::Undefined) {
+                    Ok(Some(prop_val))
+                } else {
+                    Ok(Some(Value::Undefined))
+                }
+            } else {
+                Ok(Some(get_primitive_prototype_property(mc, env, &base_val, &prop_key)?))
+            }
+        }
         Expr::OptionalCall(lhs, args) => match &**lhs {
             Expr::Property(obj_expr, key) => {
                 let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                log::debug!(
+                    "EVAL_OPT_CALL_BASE(PROPERTY): obj_expr={:?} obj_val={:?} key={}",
+                    obj_expr,
+                    obj_val,
+                    key
+                );
                 if obj_val.is_null_or_undefined() {
+                    log::debug!("EVAL_OPT_CALL_BASE: short-circuiting property call because base is null/undefined");
                     return Ok(None);
                 }
-                let mut eval_args = Vec::new();
-                for arg in args {
-                    eval_args.push(evaluate_expr(mc, env, arg)?);
-                }
+                let eval_args = collect_call_args(mc, env, args)?;
 
                 let f_val = if let Value::Object(obj) = &obj_val {
-                    if let Some(val) = object_get_key_value(obj, key) {
-                        val.borrow().clone()
+                    // Use accessor-aware property read so getters are executed.
+                    let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                    if !matches!(prop_val, Value::Undefined) {
+                        prop_val
                     } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
                         Value::Function(key.to_string())
                     } else {
@@ -10813,8 +11235,41 @@ fn evaluate_optional_chain_base<'gc>(
                     get_primitive_prototype_property(mc, env, &obj_val, key)?
                 };
 
+                log::debug!("OPTIONALCALL-PROPERTY: f_val={:?} obj_val={:?} key={}", f_val, obj_val, key);
+
+                // If the f_val is nullish then optional call should short-circuit and return undefined
+                if f_val.is_null_or_undefined() {
+                    log::debug!("EVAL_OPT_CALL_BASE: short-circuiting property call because target is null/undefined");
+                    return Ok(None);
+                }
+
                 let result = match f_val {
                     Value::Function(name) => {
+                        // Optional call invoking `eval` is always an indirect eval — use global env.
+                        let env_for_call = if name == "eval" {
+                            let mut t = *env;
+                            while let Some(proto) = t.borrow().prototype {
+                                t = proto;
+                            }
+                            t
+                        } else {
+                            *env
+                        };
+                        let call_env = crate::js_class::prepare_call_env_with_this(
+                            mc,
+                            Some(&env_for_call),
+                            Some(obj_val.clone()),
+                            None,
+                            &[],
+                            None,
+                            Some(&env_for_call),
+                            None,
+                        )?;
+                        // Dispatch, handling indirect global `eval` marking when necessary.
+                        call_named_eval_or_dispatch(mc, &env_for_call, &call_env, &name, Some(obj_val.clone()), eval_args)?
+                    }
+                    Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None)?,
+                    Value::Object(o) => {
                         let call_env = crate::js_class::prepare_call_env_with_this(
                             mc,
                             Some(env),
@@ -10825,16 +11280,111 @@ fn evaluate_optional_chain_base<'gc>(
                             Some(env),
                             None,
                         )?;
-                        crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?
+                        evaluate_call_dispatch(mc, &call_env, Value::Object(o), Some(obj_val.clone()), eval_args)?
                     }
-                    Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None)?,
                     _ => return Err(raise_type_error!("OptionalCall target is not a function").into()),
                 };
                 Ok(Some(result))
             }
-            Expr::Index(obj_expr, index_expr) => {
-                let obj_val = evaluate_expr(mc, env, obj_expr)?;
-                if obj_val.is_null_or_undefined() {
+            Expr::OptionalProperty(obj_expr, key) => {
+                // Handle optional property followed by optional call (e.g., a?.b?.())
+                log::debug!("EVAL_OPT_CALL_BASE(OPTIONAL_PROPERTY): obj_expr={:?} key={}", obj_expr, key);
+                log::trace!(
+                    "OPT_CHAIN: OptionalCall->OptionalProperty recursing into obj_expr={:?} depth={}",
+                    obj_expr,
+                    OPT_CHAIN_RECURSION_DEPTH.with(|c| c.get())
+                );
+                let base_val = match evaluate_optional_chain_base(mc, env, obj_expr)? {
+                    Some(val) => val,
+                    None => return Ok(None),
+                };
+                if base_val.is_null_or_undefined() {
+                    log::debug!("EVAL_OPT_CALL_BASE: short-circuiting optional property call because base is null/undefined");
+                    return Ok(None);
+                }
+
+                let eval_args = collect_call_args(mc, env, args)?;
+
+                // Get the property value, but if the property itself is nullish then optional call should short-circuit
+                let f_val = if let Value::Object(obj) = &base_val {
+                    let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                    if prop_val.is_null_or_undefined() {
+                        log::debug!("EVAL_OPT_CALL_BASE: optional property is nullish, short-circuiting call");
+                        return Ok(None);
+                    }
+                    prop_val
+                } else {
+                    let proto_val = get_primitive_prototype_property(mc, env, &base_val, key)?;
+                    if proto_val.is_null_or_undefined() {
+                        log::debug!("EVAL_OPT_CALL_BASE: primitive optional property is nullish, short-circuiting call");
+                        return Ok(None);
+                    }
+                    proto_val
+                };
+
+                let result = match f_val {
+                    Value::Function(name) => {
+                        // Optional call invoking `eval` is always an indirect eval — use global env.
+                        let env_for_call = if name == "eval" {
+                            let mut t = *env;
+                            while let Some(proto) = t.borrow().prototype {
+                                t = proto;
+                            }
+                            t
+                        } else {
+                            *env
+                        };
+                        let call_env = crate::js_class::prepare_call_env_with_this(
+                            mc,
+                            Some(&env_for_call),
+                            Some(base_val.clone()),
+                            None,
+                            &[],
+                            None,
+                            Some(&env_for_call),
+                            None,
+                        )?;
+                        if name == "eval" {
+                            object_set_key_value(mc, &env_for_call, "__is_indirect_eval", Value::Boolean(true))?;
+                            let res =
+                                evaluate_call_dispatch(mc, &call_env, Value::Function(name.clone()), Some(base_val.clone()), eval_args);
+                            let _ = env_for_call
+                                .borrow_mut(mc)
+                                .properties
+                                .shift_remove(&PropertyKey::String("__is_indirect_eval".to_string()));
+                            res?
+                        } else {
+                            evaluate_call_dispatch(mc, &call_env, Value::Function(name.clone()), Some(base_val.clone()), eval_args)?
+                        }
+                    }
+                    Value::Closure(c) => call_closure(mc, &c, Some(base_val.clone()), &eval_args, env, None)?,
+                    Value::Object(o) => {
+                        let call_env = crate::js_class::prepare_call_env_with_this(
+                            mc,
+                            Some(env),
+                            Some(base_val.clone()),
+                            None,
+                            &[],
+                            None,
+                            Some(env),
+                            None,
+                        )?;
+                        evaluate_call_dispatch(mc, &call_env, Value::Object(o), Some(base_val.clone()), eval_args)?
+                    }
+                    _ => return Err(raise_type_error!("OptionalCall target is not a function").into()),
+                };
+                Ok(Some(result))
+            }
+
+            Expr::OptionalIndex(obj_expr, index_expr) => {
+                // Handle optional index followed by optional call (e.g., a?.[i]?.())
+                log::debug!("EVAL_OPT_CALL_BASE(OPTIONAL_INDEX): obj_expr={:?}", obj_expr);
+                let base_val = match evaluate_optional_chain_base(mc, env, obj_expr)? {
+                    Some(val) => val,
+                    None => return Ok(None),
+                };
+                if base_val.is_null_or_undefined() {
+                    log::debug!("EVAL_OPT_CALL_BASE: short-circuiting optional index call because base is null/undefined");
                     return Ok(None);
                 }
 
@@ -10854,14 +11404,110 @@ fn evaluate_optional_chain_base<'gc>(
                     }
                 };
 
-                let mut eval_args = Vec::new();
-                for arg in args {
-                    eval_args.push(evaluate_expr(mc, env, arg)?);
+                let eval_args = collect_call_args(mc, env, args)?;
+
+                // If the property itself is nullish then optional call should short-circuit
+                let f_val = if let Value::Object(obj) = &base_val {
+                    let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
+                    if prop_val.is_null_or_undefined() {
+                        log::debug!("EVAL_OPT_CALL_BASE: optional index is nullish, short-circuiting call");
+                        return Ok(None);
+                    }
+                    prop_val
+                } else {
+                    let proto_val = get_primitive_prototype_property(mc, env, &base_val, &prop_key)?;
+                    if proto_val.is_null_or_undefined() {
+                        log::debug!("EVAL_OPT_CALL_BASE: primitive optional index is nullish, short-circuiting call");
+                        return Ok(None);
+                    }
+                    proto_val
+                };
+
+                let result = match f_val {
+                    Value::Function(name) => {
+                        // Optional call invoking `eval` is always an indirect eval — use global env.
+                        let env_for_call = if name == "eval" {
+                            let mut t = *env;
+                            while let Some(proto) = t.borrow().prototype {
+                                t = proto;
+                            }
+                            t
+                        } else {
+                            *env
+                        };
+                        let call_env = crate::js_class::prepare_call_env_with_this(
+                            mc,
+                            Some(&env_for_call),
+                            Some(base_val.clone()),
+                            None,
+                            &[],
+                            None,
+                            Some(&env_for_call),
+                            None,
+                        )?;
+                        if name == "eval" {
+                            object_set_key_value(mc, &env_for_call, "__is_indirect_eval", Value::Boolean(true))?;
+                            let res =
+                                evaluate_call_dispatch(mc, &call_env, Value::Function(name.clone()), Some(base_val.clone()), eval_args);
+                            let _ = env_for_call
+                                .borrow_mut(mc)
+                                .properties
+                                .shift_remove(&PropertyKey::String("__is_indirect_eval".to_string()));
+                            res?
+                        } else {
+                            evaluate_call_dispatch(mc, &call_env, Value::Function(name.clone()), Some(base_val.clone()), eval_args)?
+                        }
+                    }
+                    Value::Closure(c) => call_closure(mc, &c, Some(base_val.clone()), &eval_args, env, None)?,
+                    Value::Object(o) => {
+                        let call_env = crate::js_class::prepare_call_env_with_this(
+                            mc,
+                            Some(env),
+                            Some(base_val.clone()),
+                            None,
+                            &[],
+                            None,
+                            Some(env),
+                            None,
+                        )?;
+                        evaluate_call_dispatch(mc, &call_env, Value::Object(o), Some(base_val.clone()), eval_args)?
+                    }
+                    _ => return Err(raise_type_error!("OptionalCall target is not a function").into()),
+                };
+                Ok(Some(result))
+            }
+
+            Expr::Index(obj_expr, index_expr) => {
+                let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                log::debug!("EVAL_OPT_CALL_BASE(INDEX): obj_expr={:?} obj_val={:?}", obj_expr, obj_val);
+                if obj_val.is_null_or_undefined() {
+                    log::debug!("EVAL_OPT_CALL_BASE: short-circuiting index call because base is null/undefined");
+                    return Ok(None);
                 }
 
+                let index_val = evaluate_expr(mc, env, index_expr)?;
+                let prop_key = match index_val {
+                    Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
+                    Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                    val => {
+                        let s = match val {
+                            Value::Number(n) => n.to_string(),
+                            Value::Boolean(b) => b.to_string(),
+                            Value::Undefined => "undefined".to_string(),
+                            Value::Null => "null".to_string(),
+                            _ => crate::core::value_to_string(&val),
+                        };
+                        crate::core::PropertyKey::String(s)
+                    }
+                };
+
+                let eval_args = collect_call_args(mc, env, args)?;
+
                 let f_val = if let Value::Object(obj) = &obj_val {
-                    if let Some(val_rc) = object_get_key_value(obj, &prop_key) {
-                        val_rc.borrow().clone()
+                    // Use accessor-aware lookup so getters are invoked
+                    let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
+                    if !matches!(prop_val, Value::Undefined) {
+                        prop_val
                     } else {
                         Value::Undefined
                     }
@@ -10871,6 +11517,31 @@ fn evaluate_optional_chain_base<'gc>(
 
                 let result = match f_val {
                     Value::Function(name) => {
+                        // Optional call invoking `eval` is always an indirect eval — use global env.
+                        let env_for_call = if name == "eval" {
+                            let mut t = *env;
+                            while let Some(proto) = t.borrow().prototype {
+                                t = proto;
+                            }
+                            t
+                        } else {
+                            *env
+                        };
+                        let call_env = crate::js_class::prepare_call_env_with_this(
+                            mc,
+                            Some(&env_for_call),
+                            Some(obj_val.clone()),
+                            None,
+                            &[],
+                            None,
+                            Some(&env_for_call),
+                            None,
+                        )?;
+                        // Dispatch, handling indirect global `eval` marking when necessary.
+                        call_named_eval_or_dispatch(mc, &env_for_call, &call_env, &name, Some(obj_val.clone()), eval_args)?
+                    }
+                    Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None)?,
+                    Value::Object(o) => {
                         let call_env = crate::js_class::prepare_call_env_with_this(
                             mc,
                             Some(env),
@@ -10881,9 +11552,8 @@ fn evaluate_optional_chain_base<'gc>(
                             Some(env),
                             None,
                         )?;
-                        crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?
+                        evaluate_call_dispatch(mc, &call_env, Value::Object(o), Some(obj_val.clone()), eval_args)?
                     }
-                    Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None)?,
                     _ => return Err(raise_type_error!("OptionalCall target is not a function").into()),
                 };
                 Ok(Some(result))
@@ -10893,21 +11563,53 @@ fn evaluate_optional_chain_base<'gc>(
                 if left_val.is_null_or_undefined() {
                     return Ok(None);
                 }
-                let mut eval_args = Vec::new();
-                for arg in args {
-                    eval_args.push(evaluate_expr(mc, env, arg)?);
-                }
+                let eval_args = collect_call_args(mc, env, args)?;
                 let result = match left_val {
                     Value::Function(name) => {
-                        let call_env = crate::js_class::prepare_call_env_with_this(mc, Some(env), None, None, &[], None, Some(env), None)?;
-                        crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?
+                        // Optional call invoking `eval` is always an indirect eval — use global env.
+                        let env_for_call = if name == "eval" {
+                            let mut t = *env;
+                            while let Some(proto) = t.borrow().prototype {
+                                t = proto;
+                            }
+                            t
+                        } else {
+                            *env
+                        };
+                        let call_env = crate::js_class::prepare_call_env_with_this(
+                            mc,
+                            Some(&env_for_call),
+                            None,
+                            None,
+                            &[],
+                            None,
+                            Some(&env_for_call),
+                            None,
+                        )?;
+                        // Dispatch, handling indirect global `eval` marking when necessary.
+                        call_named_eval_or_dispatch(mc, &env_for_call, &call_env, &name, None, eval_args)?
                     }
                     Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None)?,
+                    Value::Object(o) => {
+                        let call_env = crate::js_class::prepare_call_env_with_this(mc, Some(env), None, None, &[], None, Some(env), None)?;
+                        evaluate_call_dispatch(mc, &call_env, Value::Object(o), None, eval_args)?
+                    }
+
                     _ => return Err(raise_type_error!("OptionalCall target is not a function").into()),
                 };
                 Ok(Some(result))
             }
         },
+        Expr::Call(func, _args) | Expr::New(func, _args) => {
+            if expr_contains_optional_chain(func) {
+                match evaluate_optional_chain_base(mc, env, func)? {
+                    Some(_) => Ok(Some(evaluate_expr(mc, env, expr)?)),
+                    None => Ok(None),
+                }
+            } else {
+                Ok(Some(evaluate_expr(mc, env, expr)?))
+            }
+        }
         _ => Ok(Some(evaluate_expr(mc, env, expr)?)),
     }
 }
@@ -11088,30 +11790,71 @@ fn evaluate_expr_binary<'gc>(
                 (l, r) => Ok(Value::Number(to_number(&l)? / to_number(&r)?)),
             }
         }
-        BinaryOp::LeftShift => match (l_val, r_val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => {
-                let shift = bigint_shift_count(&rn)?;
-                Ok(Value::BigInt(Box::new(*ln << shift)))
+        BinaryOp::LeftShift => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    // Handle negative shift counts: perform division by 2^(-rn), rounding down
+                    if rn.sign() == num_bigint::Sign::Minus {
+                        let neg = -(&*rn);
+                        let shift = match neg.to_usize() {
+                            Some(s) => s,
+                            None => return Err(raise_eval_error!("invalid bigint shift").into()),
+                        };
+                        if shift == 0 {
+                            return Ok(Value::BigInt(Box::new((*ln).clone())));
+                        }
+                        let divisor = BigInt::from(1u8) << shift;
+                        let q = &*ln / &divisor;
+                        let r = &*ln % &divisor;
+                        if (*ln).sign() == num_bigint::Sign::Minus && !r.is_zero() {
+                            return Ok(Value::BigInt(Box::new(q - BigInt::from(1u8))));
+                        }
+                        return Ok(Value::BigInt(Box::new(q)));
+                    }
+                    let shift = match rn.to_usize() {
+                        Some(s) => s,
+                        None => return Err(raise_eval_error!("invalid bigint shift").into()),
+                    };
+                    Ok(Value::BigInt(Box::new((*ln).clone() << shift)))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (l, r) => {
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    Ok(Value::Number(((l << r) as i32) as f64))
+                }
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => {
-                let l = to_int32_value_with_env(mc, env, &l)?;
-                let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
-                Ok(Value::Number(((l << r) as i32) as f64))
+        }
+        BinaryOp::RightShift => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    // signedRightShift(x, y) is defined as leftShift(x, -y)
+                    if rn.sign() == num_bigint::Sign::Minus {
+                        let pos = match (-&*rn).to_usize() {
+                            Some(s) => s,
+                            None => return Err(raise_eval_error!("invalid bigint shift").into()),
+                        };
+                        Ok(Value::BigInt(Box::new((*ln).clone() << pos)))
+                    } else {
+                        let shift = match rn.to_usize() {
+                            Some(s) => s,
+                            None => return Err(raise_eval_error!("invalid bigint shift").into()),
+                        };
+                        Ok(Value::BigInt(Box::new((*ln).clone() >> shift)))
+                    }
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (l, r) => {
+                    let l = to_int32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    Ok(Value::Number((l >> r) as f64))
+                }
             }
-        },
-        BinaryOp::RightShift => match (l_val, r_val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => {
-                let shift = bigint_shift_count(&rn)?;
-                Ok(Value::BigInt(Box::new(*ln >> shift)))
-            }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => {
-                let l = to_int32_value_with_env(mc, env, &l)?;
-                let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
-                Ok(Value::Number((l >> r) as f64))
-            }
-        },
+        }
         BinaryOp::UnsignedRightShift => match (l_val, r_val) {
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("BigInt does not support >>>").into()),
             (l, r) => {
@@ -12302,7 +13045,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 }
             }
 
-            let obj_val = if is_optional_chain_expr(obj_expr) {
+            let obj_val = if expr_contains_optional_chain(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
                     None => return Ok(Value::Undefined),
@@ -12354,6 +13097,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 }
                 Ok(Value::Number(len))
             } else if matches!(obj_val, Value::Undefined | Value::Null) {
+                log::debug!("Expr::Property: attempting property access on nullish base: obj_expr={obj_expr:?}");
                 Err(raise_type_error!("Cannot read properties of null or undefined").into())
             } else {
                 get_primitive_prototype_property(mc, env, &obj_val, key)
@@ -12417,7 +13161,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 return Ok(crate::js_class::evaluate_super_computed_property(mc, env, key)?);
             }
 
-            let obj_val = if is_optional_chain_expr(obj_expr) {
+            let obj_val = if expr_contains_optional_chain(obj_expr) {
                 match evaluate_optional_chain_base(mc, env, obj_expr)? {
                     Some(val) => val,
                     None => return Ok(Value::Undefined),
@@ -12691,10 +13435,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
 
         Expr::SuperCall(args) => {
-            let mut eval_args = Vec::new();
-            for arg in args {
-                eval_args.push(evaluate_expr(mc, env, arg)?);
-            }
+            let eval_args = collect_call_args(mc, env, args)?;
             Ok(crate::js_class::evaluate_super_call(mc, env, &eval_args)?)
         }
         Expr::SuperProperty(prop) => {
@@ -12703,10 +13444,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             Ok(crate::js_class::evaluate_super_computed_property(mc, env, prop)?)
         }
         Expr::SuperMethod(prop, args) => {
-            let mut eval_args = Vec::new();
-            for arg in args {
-                eval_args.push(evaluate_expr(mc, env, arg)?);
-            }
+            let eval_args = collect_call_args(mc, env, args)?;
             Ok(crate::js_class::evaluate_super_method(mc, env, prop, &eval_args)?)
         }
         Expr::Super => Ok(crate::js_class::evaluate_super(mc, env)?),
@@ -12715,11 +13453,17 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             if left_val.is_null_or_undefined() {
                 Ok(Value::Undefined)
             } else if let Value::Object(obj) = &left_val {
-                if let Some(val_rc) = object_get_key_value(obj, prop) {
-                    Ok(val_rc.borrow().clone())
+                // Use accessor-aware property read so getters are executed.
+                let prop_val = get_property_with_accessors(mc, env, obj, prop)?;
+                if !matches!(prop_val, Value::Undefined) {
+                    Ok(prop_val)
                 } else {
                     Ok(Value::Undefined)
                 }
+            } else if let Value::String(s) = &left_val
+                && prop == "length"
+            {
+                Ok(Value::Number(s.len() as f64))
             } else {
                 get_primitive_prototype_property(mc, env, &left_val, prop)
             }
@@ -12745,8 +13489,10 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
                 };
                 if let Value::Object(obj) = &left_val {
-                    if let Some(val_rc) = object_get_key_value(obj, &prop_key) {
-                        Ok(val_rc.borrow().clone())
+                    // Use accessor-aware lookup so getters are invoked
+                    let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
+                    if !matches!(prop_val, Value::Undefined) {
+                        Ok(prop_val)
                     } else {
                         Ok(Value::Undefined)
                     }
@@ -12760,52 +13506,214 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             // when the base is null/undefined without raising a "Cannot read properties of null or undefined" error.
             match &**lhs {
                 Expr::Property(obj_expr, key) => {
-                    let obj_val = evaluate_expr(mc, env, obj_expr)?;
-                    if obj_val.is_null_or_undefined() {
+                    // Special-case `super.method?.()` semantics: evaluate the property on the
+                    // parent prototype without evaluating call arguments, short-circuit to
+                    // undefined when absent, and ensure the call receives the correct `this`.
+                    if matches!(&**obj_expr, Expr::Super) {
+                        // Get the super property (handles getters and accessors)
+                        let prop_val = crate::js_class::evaluate_super_computed_property(mc, env, key)?;
+                        if matches!(prop_val, Value::Undefined) {
+                            return Ok(Value::Undefined);
+                        }
+                        // Only evaluate arguments once we know the method exists
+                        let eval_args = collect_call_args(mc, env, args)?;
+                        // Resolve the current `this` binding for the call.
+                        // Prefer any direct `this` binding on the current env (so we
+                        // preserve the exact receiver observed by `evaluate_super_computed_property`),
+                        // otherwise fall back to the general `evaluate_this` walker.
+                        let this_val = if let Some(tv_rc) = crate::core::object_get_key_value(env, "this") {
+                            tv_rc.borrow().clone()
+                        } else {
+                            crate::js_class::evaluate_this(mc, env)?
+                        };
+                        log::trace!("DBG OPT_SUPER_CALL: this_val={:?} prop_val={:?}", this_val, prop_val);
+
+                        match prop_val {
+                            Value::Function(name) => {
+                                let env_for_call = if name == "eval" {
+                                    let mut t = *env;
+                                    while let Some(proto) = t.borrow().prototype {
+                                        t = proto;
+                                    }
+                                    t
+                                } else {
+                                    *env
+                                };
+                                let call_env = crate::js_class::prepare_call_env_with_this(
+                                    mc,
+                                    Some(&env_for_call),
+                                    Some(this_val.clone()),
+                                    None,
+                                    &[],
+                                    None,
+                                    Some(&env_for_call),
+                                    None,
+                                )?;
+                                // Dispatch, handling indirect global `eval` marking when necessary.
+                                call_named_eval_or_dispatch(mc, &env_for_call, &call_env, &name, Some(this_val.clone()), eval_args)
+                            }
+                            Value::Closure(c) => call_closure(mc, &c, Some(this_val.clone()), &eval_args, env, None),
+                            Value::Object(o) => {
+                                let call_env = crate::js_class::prepare_call_env_with_this(
+                                    mc,
+                                    Some(env),
+                                    Some(this_val.clone()),
+                                    None,
+                                    &[],
+                                    None,
+                                    Some(env),
+                                    Some(o),
+                                )?;
+                                evaluate_call_dispatch(mc, &call_env, Value::Object(o), Some(this_val.clone()), eval_args)
+                            }
+                            _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
+                        }
+                    } else {
+                        let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                        if obj_val.is_null_or_undefined() {
+                            return Ok(Value::Undefined);
+                        }
+                        let eval_args = collect_call_args(mc, env, args)?;
+
+                        let f_val = if let Value::Object(obj) = &obj_val {
+                            // Use accessor-aware lookup so getters are executed
+                            let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                            if !matches!(prop_val, Value::Undefined) {
+                                prop_val
+                            } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
+                                Value::Function(key.to_string())
+                            } else {
+                                Value::Undefined
+                            }
+                        } else if let Value::String(s) = &obj_val
+                            && key == "length"
+                        {
+                            Value::Number(s.len() as f64)
+                        } else if matches!(
+                            obj_val,
+                            Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
+                        ) && key == "call"
+                        {
+                            Value::Function("call".to_string())
+                        } else {
+                            get_primitive_prototype_property(mc, env, &obj_val, key)?
+                        };
+
+                        match f_val {
+                            Value::Function(name) => {
+                                // Optional call invoking `eval` is always an indirect eval — use global env.
+                                let env_for_call = if name == "eval" {
+                                    let mut t = *env;
+                                    while let Some(proto) = t.borrow().prototype {
+                                        t = proto;
+                                    }
+                                    t
+                                } else {
+                                    *env
+                                };
+                                let call_env = crate::js_class::prepare_call_env_with_this(
+                                    mc,
+                                    Some(&env_for_call),
+                                    Some(obj_val.clone()),
+                                    None,
+                                    &[],
+                                    None,
+                                    Some(&env_for_call),
+                                    None,
+                                )?;
+                                // Dispatch, handling indirect global `eval` marking when necessary.
+                                Ok(call_named_eval_or_dispatch(
+                                    mc,
+                                    &env_for_call,
+                                    &call_env,
+                                    &name,
+                                    Some(obj_val.clone()),
+                                    eval_args,
+                                )?)
+                            }
+                            Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None),
+                            Value::Object(o) => {
+                                let call_env = crate::js_class::prepare_call_env_with_this(
+                                    mc,
+                                    Some(env),
+                                    Some(obj_val.clone()),
+                                    None,
+                                    &[],
+                                    None,
+                                    Some(env),
+                                    None,
+                                )?;
+                                evaluate_call_dispatch(mc, &call_env, Value::Object(o), Some(obj_val.clone()), eval_args)
+                            }
+                            _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
+                        }
+                    }
+                }
+                Expr::SuperProperty(prop) => {
+                    // Special-case `super.prop?.()` where the parser produces a SuperProperty
+                    // node directly (not Property(Super, ...)).
+                    let prop_key = (*prop).clone();
+                    let prop_val = crate::js_class::evaluate_super_computed_property(mc, env, prop_key)?;
+                    if matches!(prop_val, Value::Undefined) {
                         return Ok(Value::Undefined);
                     }
-                    let mut eval_args = Vec::new();
-                    for arg in args {
-                        eval_args.push(evaluate_expr(mc, env, arg)?);
-                    }
-
-                    let f_val = if let Value::Object(obj) = &obj_val {
-                        if let Some(val) = object_get_key_value(obj, key) {
-                            val.borrow().clone()
-                        } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
-                            Value::Function(key.to_string())
-                        } else {
-                            Value::Undefined
-                        }
-                    } else if let Value::String(s) = &obj_val
-                        && key == "length"
-                    {
-                        Value::Number(s.len() as f64)
-                    } else if matches!(
-                        obj_val,
-                        Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
-                    ) && key == "call"
-                    {
-                        Value::Function("call".to_string())
+                    // Only evaluate arguments once we know the method exists.
+                    let eval_args = collect_call_args(mc, env, args)?;
+                    // Resolve the current `this` binding for the call.
+                    let this_val = if let Some(tv_rc) = crate::core::object_get_key_value(env, "this") {
+                        tv_rc.borrow().clone()
                     } else {
-                        get_primitive_prototype_property(mc, env, &obj_val, key)?
+                        crate::js_class::evaluate_this(mc, env)?
                     };
 
-                    match f_val {
+                    match prop_val {
                         Value::Function(name) => {
+                            let env_for_call = if name == "eval" {
+                                let mut t = *env;
+                                while let Some(proto) = t.borrow().prototype {
+                                    t = proto;
+                                }
+                                t
+                            } else {
+                                *env
+                            };
+                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                mc,
+                                Some(&env_for_call),
+                                Some(this_val.clone()),
+                                None,
+                                &[],
+                                None,
+                                Some(&env_for_call),
+                                None,
+                            )?;
+                            if name == "eval" {
+                                object_set_key_value(mc, &env_for_call, "__is_indirect_eval", Value::Boolean(true))?;
+                                let res =
+                                    evaluate_call_dispatch(mc, &call_env, Value::Function(name.clone()), Some(this_val.clone()), eval_args);
+                                let _ = env_for_call
+                                    .borrow_mut(mc)
+                                    .properties
+                                    .shift_remove(&PropertyKey::String("__is_indirect_eval".to_string()));
+                                res
+                            } else {
+                                evaluate_call_dispatch(mc, &call_env, Value::Function(name.clone()), Some(this_val.clone()), eval_args)
+                            }
+                        }
+                        Value::Closure(c) => call_closure(mc, &c, Some(this_val.clone()), &eval_args, env, None),
+                        Value::Object(o) => {
                             let call_env = crate::js_class::prepare_call_env_with_this(
                                 mc,
                                 Some(env),
-                                Some(obj_val.clone()),
+                                Some(this_val.clone()),
                                 None,
                                 &[],
                                 None,
                                 Some(env),
-                                None,
+                                Some(o),
                             )?;
-                            crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)
+                            evaluate_call_dispatch(mc, &call_env, Value::Object(o), Some(this_val.clone()), eval_args)
                         }
-                        Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None),
                         _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
                     }
                 }
@@ -12831,14 +13739,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         }
                     };
 
-                    let mut eval_args = Vec::new();
-                    for arg in args {
-                        eval_args.push(evaluate_expr(mc, env, arg)?);
-                    }
+                    let eval_args = collect_call_args(mc, env, args)?;
 
                     let f_val = if let Value::Object(obj) = &obj_val {
-                        if let Some(val_rc) = object_get_key_value(obj, &prop_key) {
-                            val_rc.borrow().clone()
+                        // Use accessor-aware lookup so getters are invoked
+                        let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
+                        if !matches!(prop_val, Value::Undefined) {
+                            prop_val
                         } else {
                             Value::Undefined
                         }
@@ -12848,6 +13755,37 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
                     match f_val {
                         Value::Function(name) => {
+                            // Optional call invoking `eval` is always an indirect eval — use global env.
+                            let env_for_call = if name == "eval" {
+                                let mut t = *env;
+                                while let Some(proto) = t.borrow().prototype {
+                                    t = proto;
+                                }
+                                t
+                            } else {
+                                *env
+                            };
+                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                mc,
+                                Some(&env_for_call),
+                                Some(obj_val.clone()),
+                                None,
+                                &[],
+                                None,
+                                Some(&env_for_call),
+                                None,
+                            )?;
+                            Ok(call_named_eval_or_dispatch(
+                                mc,
+                                &env_for_call,
+                                &call_env,
+                                &name,
+                                Some(obj_val.clone()),
+                                eval_args,
+                            )?)
+                        }
+                        Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None),
+                        Value::Object(o) => {
                             let call_env = crate::js_class::prepare_call_env_with_this(
                                 mc,
                                 Some(env),
@@ -12858,9 +13796,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 Some(env),
                                 None,
                             )?;
-                            Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?)
+                            evaluate_call_dispatch(mc, &call_env, Value::Object(o), Some(obj_val.clone()), eval_args)
                         }
-                        Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None),
                         _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
                     }
                 }
@@ -12872,12 +13809,33 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                             if left_val.is_null_or_undefined() {
                                 Ok(Value::Undefined)
                             } else {
-                                let mut eval_args = Vec::new();
-                                for arg in args {
-                                    eval_args.push(evaluate_expr(mc, env, arg)?);
-                                }
+                                let eval_args = collect_call_args(mc, env, args)?;
                                 match left_val {
                                     Value::Function(name) => {
+                                        // Optional call invoking `eval` is always an indirect eval — use global env.
+                                        let env_for_call = if name == "eval" {
+                                            let mut t = *env;
+                                            while let Some(proto) = t.borrow().prototype {
+                                                t = proto;
+                                            }
+                                            t
+                                        } else {
+                                            *env
+                                        };
+                                        let call_env = crate::js_class::prepare_call_env_with_this(
+                                            mc,
+                                            Some(&env_for_call),
+                                            None,
+                                            None,
+                                            &[],
+                                            None,
+                                            Some(&env_for_call),
+                                            None,
+                                        )?;
+                                        Ok(call_named_eval_or_dispatch(mc, &env_for_call, &call_env, &name, None, eval_args)?)
+                                    }
+                                    Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None),
+                                    Value::Object(o) => {
                                         let call_env = crate::js_class::prepare_call_env_with_this(
                                             mc,
                                             Some(env),
@@ -12888,9 +13846,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                             Some(env),
                                             None,
                                         )?;
-                                        Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env)?)
+                                        evaluate_call_dispatch(mc, &call_env, Value::Object(o), None, eval_args)
                                     }
-                                    Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None),
                                     _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
                                 }
                             }
@@ -14708,6 +15665,7 @@ pub fn call_closure<'gc>(
     // Bind 'this' into the var_env (function body environment) so the body can access it.
     if let Some(tv) = effective_this {
         object_set_key_value(mc, &var_env, "this", tv.clone())?;
+        log::trace!("DBG call_closure: bound this into var_env = {:?}", tv);
         if cl.is_arrow && matches!(tv, Value::Uninitialized) {
             // If it's an arrow function capturing an uninitialized 'this' (e.g. in derived constructor before super()),
             // we should also mark the call environment as uninitialized.
@@ -15631,7 +16589,7 @@ fn evaluate_expr_new<'gc>(
                 }
             } else if obj.borrow().class_def.is_some() {
                 // Delegate to js_class::evaluate_new
-                let val = crate::js_class::evaluate_new(mc, env, func_val.clone(), &eval_args)?;
+                let val = crate::js_class::evaluate_new(mc, env, func_val.clone(), &eval_args, None)?;
                 Ok(val)
             } else {
                 if let Some(native_name) = object_get_key_value(&obj, "__native_ctor")

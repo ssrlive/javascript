@@ -1381,7 +1381,7 @@ fn evalute_eval_function<'gc>(
             } else {
                 return Err(raise_syntax_error!(msg).into());
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
                 Ok(other) => return Err(EvalError::Throw(other, None, None)),
                 Err(_) => return Err(raise_syntax_error!(msg).into()),
@@ -1462,7 +1462,7 @@ fn evalute_eval_function<'gc>(
             } else {
                 return Err(raise_syntax_error!(msg).into());
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => {
                     return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
@@ -1566,7 +1566,7 @@ fn evalute_eval_function<'gc>(
             } else {
                 return Err(raise_syntax_error!(msg).into());
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => {
                     return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
@@ -1584,7 +1584,7 @@ fn evalute_eval_function<'gc>(
             } else {
                 return Err(raise_syntax_error!(msg).into());
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => {
                     return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
@@ -1615,7 +1615,7 @@ fn evalute_eval_function<'gc>(
                 } else {
                     return Err(raise_syntax_error!(msg).into());
                 };
-                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                     Ok(Value::Object(obj)) => {
                         return Err(EvalError::Throw(Value::Object(obj), None, None));
                     }
@@ -1669,7 +1669,7 @@ fn evalute_eval_function<'gc>(
                 } else {
                     return Err(raise_syntax_error!(msg).into());
                 };
-                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+                match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                     Ok(Value::Object(obj)) => {
                         return Err(EvalError::Throw(Value::Object(obj), None, None));
                     }
@@ -1691,7 +1691,7 @@ fn evalute_eval_function<'gc>(
         } else {
             return Err(raise_syntax_error!(msg).into());
         };
-        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+        match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
             Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
             Ok(other) => return Err(EvalError::Throw(other, None, None)),
             Err(_) => return Err(raise_syntax_error!(msg).into()),
@@ -1771,7 +1771,7 @@ fn evalute_eval_function<'gc>(
             } else {
                 return Err(err);
             };
-            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val]) {
+            match crate::js_class::evaluate_new(mc, env, constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => Err(EvalError::Throw(Value::Object(obj), None, None)),
                 Ok(other) => Err(EvalError::Throw(other, None, None)),
                 Err(_) => Err(err),

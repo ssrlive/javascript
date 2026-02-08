@@ -3422,8 +3422,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
                 look += 1;
             }
-            // Expect '.' after the optional line terminators
-            if look < tokens.len() && matches!(tokens[look].token, Token::Dot) {
+            // Determine whether the `new` token is actually the `new.target` meta-property
+            // (e.g., `new.target?.a`). If so, consume the tokens and return `Expr::NewTarget` as
+            // the primary expression so the normal postfix loop may attach optional chains.
+            let is_new_target = if look < tokens.len() && matches!(tokens[look].token, Token::Dot) {
                 look += 1; // skip '.'
                 while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
                     look += 1;
@@ -3434,57 +3436,65 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 {
                     // consume up through identifier (look points at identifier)
                     *index = look + 1;
-                    return Ok(Expr::NewTarget);
+                    true
+                } else {
+                    false
                 }
-            }
+            } else {
+                false
+            };
 
-            let constructor = parse_primary(tokens, index, false)?;
+            if is_new_target {
+                Expr::NewTarget
+            } else {
+                let constructor = parse_primary(tokens, index, false)?;
 
-            // Check for arguments
-            let args = if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
-                *index += 1; // consume '('
-                let mut args = Vec::new();
-                if *index < tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
-                    loop {
-                        let arg = parse_assignment(tokens, index)?;
-                        args.push(arg);
-                        if *index >= tokens.len() {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        if matches!(tokens[*index].token, Token::RParen) {
-                            break;
-                        }
-                        if !matches!(tokens[*index].token, Token::Comma) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume ','
-                        while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
-                            *index += 1;
-                        }
-                        if *index >= tokens.len() {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        if matches!(tokens[*index].token, Token::RParen) {
-                            break;
+                // Check for arguments
+                let args = if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                    *index += 1; // consume '('
+                    let mut args = Vec::new();
+                    if *index < tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
+                        loop {
+                            let arg = parse_assignment(tokens, index)?;
+                            args.push(arg);
+                            if *index >= tokens.len() {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            if matches!(tokens[*index].token, Token::RParen) {
+                                break;
+                            }
+                            if !matches!(tokens[*index].token, Token::Comma) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume ','
+                            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                                *index += 1;
+                            }
+                            if *index >= tokens.len() {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            if matches!(tokens[*index].token, Token::RParen) {
+                                break;
+                            }
                         }
                     }
-                }
-                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
-                    return Err(raise_parse_error_at!(tokens.get(*index)));
-                }
-                *index += 1; // consume ')'
-                if args.len() == 1
-                    && let Expr::Comma(_, _) = &args[0]
-                {
-                    let first = args.remove(0);
-                    let new_args = flatten_commas(first);
-                    args.extend(new_args);
-                }
-                args
-            } else {
-                Vec::new()
-            };
-            Expr::New(Box::new(constructor), args)
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
+                        return Err(raise_parse_error_at!(tokens.get(*index)));
+                    }
+                    *index += 1; // consume ')'
+                    if args.len() == 1
+                        && let Expr::Comma(_, _) = &args[0]
+                    {
+                        let first = args.remove(0);
+                        let new_args = flatten_commas(first);
+                        args.extend(new_args);
+                    }
+                    args
+                } else {
+                    Vec::new()
+                };
+                Expr::New(Box::new(constructor), args)
+            }
         }
         Token::Minus => {
             let inner = parse_primary(tokens, index, true)?;

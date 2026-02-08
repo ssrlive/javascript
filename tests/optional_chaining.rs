@@ -100,4 +100,158 @@ mod optional_chaining_tests {
         let res2 = evaluate_script(code2, None::<&std::path::Path>).unwrap();
         assert_eq!(res2, "11");
     }
+
+    #[test]
+    fn test_for_update_optional_chaining_triggers_getter_but_short_circuits_index() {
+        let script = r#"
+            let touched = 0;
+            let count;
+            const obj3 = {
+                get a() {
+                    count++;
+                    return undefined;
+                }
+            };
+            for (count = 0; true; obj3?.a?.[touched++]) {
+                if (count > 0) { break; }
+            }
+            count + ',' + touched
+        "#;
+        let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(res, "\"1,0\"");
+    }
+
+    #[test]
+    fn test_optional_call_preserves_this_variants() {
+        let script = r#"
+            const a = {
+                b() { return this._b; },
+                _b: { c: 42 }
+            };
+            [
+                a?.b().c,
+                (a?.b)().c,
+                a.b?.().c,
+                (a.b)?.().c,
+                a?.b?.().c,
+                (a?.b)?.().c
+            ].join(',')
+        "#;
+        let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(res, "\"42,42,42,42,42,42\"");
+    }
+
+    #[test]
+    fn debug_optional_call_variants() {
+        let script = r#"
+            const a = {
+                b() { return this._b; },
+                _b: { c: 42 }
+            };
+            function safe(s) {
+                try { return String(eval(s)); } catch (e) { return 'ERR:'+String(e.message); }
+            }
+            [
+                safe('a?.b().c'),
+                safe('(a?.b)().c'),
+                safe('a.b?.().c'),
+                safe('(a.b)?.().c'),
+                safe('a?.b?.().c'),
+                safe('(a?.b)?.().c')
+            ].join(',')
+        "#;
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+                println!("debug: {}", res);
+                // ensure none returned an error
+                assert!(!res.contains("ERR:"));
+            })
+            .expect("failed to spawn thread");
+    }
+
+    #[test]
+    fn pinpoint_failing_optional_call_variant() {
+        let variants = vec!["a?.b().c", "(a?.b)().c", "a.b?.().c", "(a.b)?.().c", "a?.b?.().c", "(a?.b)?.().c"];
+        let mut outputs: Vec<String> = vec![];
+        for v in variants {
+            let script = format!(
+                r#"const a = {{ b() {{ return this._b; }}, _b: {{ c: 42 }} }}; (function() {{ try {{ return String({}); }} catch(e) {{ return 'ERR:'+String(e && e.message); }} }})()"#,
+                v
+            );
+            let res = evaluate_script(&script, None::<&std::path::Path>);
+            match res {
+                Ok(s) => outputs.push(s),
+                Err(e) => outputs.push(format!("ERR:{}", e)),
+            }
+        }
+        println!("pinpoint outputs: {:?}", outputs);
+        // All variants should evaluate to "42"
+        for o in outputs {
+            assert_eq!(o, "\"42\"");
+        }
+    }
+
+    #[test]
+    fn test_new_target_optional_call_runtime() {
+        let script = r#"
+            const newTargetContext = (function() { return this; })();
+            let called = false;
+            let context = null;
+            function Base() { called = true; context = this; }
+            function Foo() { new.target?.(); }
+            Reflect.construct(Foo, [], Base);
+            [context === newTargetContext, called].join(',')
+        "#;
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+                assert_eq!(res, "\"true,true\"");
+            })
+            .expect("failed to spawn thread");
+    }
+
+    #[test]
+    fn test_super_property_optional_call_runtime() {
+        let script = r#"
+            let called = false;
+            let context = null;
+            class Base { method() { called = true; context = this; } }
+            class Foo extends Base { method() { super.method?.(); } }
+            const foo = new Foo();
+            [foo === context, called].join(',')
+        "#;
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+                assert_eq!(res, "\"true,true\"");
+            })
+            .expect("failed to spawn thread");
+    }
+
+    #[test]
+    fn test_optional_chaining_short_circuit_longcase() {
+        let script = r#"
+            const a = undefined;
+            let x = 1;
+
+            a?.[++x]; // short-circuiting.
+            a?.b.c(++x).d; // long short-circuiting.
+
+            undefined?.[++x]; // short-circuiting.
+            undefined?.b.c(++x).d; // long short-circuiting.
+
+            x
+        "#;
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+                assert_eq!(res, "1");
+            })
+            .expect("failed to spawn thread");
+    }
 }

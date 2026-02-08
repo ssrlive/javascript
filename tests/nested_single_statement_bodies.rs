@@ -471,8 +471,16 @@ fn test_labeled_nested_block_break_and_finally() {
         L3();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"FIN,AFTER_OUTER\"");
+    std::thread::Builder::new()
+        .name("named_function_expression".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"FIN,AFTER_OUTER\"");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

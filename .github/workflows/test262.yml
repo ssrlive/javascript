@@ -447,12 +447,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/grouping" - "language/expressions/instanceof"
+      - name: Run a small test262 subset - "language/expressions/grouping" - "language/expressions/optional-chaining"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/grouping,language/expressions/import.meta,language/expressions/in,language/expressions/instanceof
+          node ci/runner.js --limit 10000 --focus language/expressions/grouping,language/expressions/import.meta,language/expressions/in,language/expressions/instanceof,language/expressions/left-shift,language/expressions/right-shift,language/expressions/optional-chaining
 
       - name: Upload results
         if: ${{ !cancelled() }}

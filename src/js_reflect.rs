@@ -187,7 +187,7 @@ pub fn handle_reflect_method<'gc>(
                 }
             }
 
-            crate::js_class::evaluate_new(mc, env, target, &arg_values)
+            crate::js_class::evaluate_new(mc, env, target, &arg_values, Some(_new_target))
         }
         "defineProperty" => {
             if args.len() < 3 {

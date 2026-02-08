@@ -684,13 +684,28 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     i += 2;
                     column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '.' {
-                    tokens.push(TokenData {
-                        token: Token::OptionalChain,
-                        line,
-                        column: start_col,
-                    });
-                    i += 2;
-                    column += 2;
+                    // Optional chaining punctuator has a lookahead restriction:
+                    // it must not be followed by a decimal digit (to avoid parsing
+                    // constructs like `?.30` where the '.' starts a decimal literal).
+                    if !(i + 2 < chars.len() && chars[i + 2].is_ascii_digit()) {
+                        tokens.push(TokenData {
+                            token: Token::OptionalChain,
+                            line,
+                            column: start_col,
+                        });
+                        i += 2;
+                        column += 2;
+                    } else {
+                        // Treat as plain QuestionMark so the following '.' can be part
+                        // of a numeric literal (e.g., `?.30` should parse as `? .30`).
+                        tokens.push(TokenData {
+                            token: Token::QuestionMark,
+                            line,
+                            column: start_col,
+                        });
+                        i += 1;
+                        column += 1;
+                    }
                 } else {
                     tokens.push(TokenData {
                         token: Token::QuestionMark,

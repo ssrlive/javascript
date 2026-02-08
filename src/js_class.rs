@@ -829,6 +829,7 @@ pub(crate) fn evaluate_new<'gc>(
     env: &JSObjectDataPtr<'gc>,
     constructor_val: Value<'gc>,
     evaluated_args: &[Value<'gc>],
+    new_target: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate arguments first
 
@@ -913,6 +914,20 @@ pub(crate) fn evaluate_new<'gc>(
                         "evaluate_new: calling prepare_call_env_with_this with instance = {:?}",
                         instance.as_ptr()
                     );
+                    // Determine which function object should be exposed as `new.target` inside
+                    // the called constructor. If an explicit `new_target` was provided (e.g.
+                    // via `Reflect.construct`), use that; otherwise default to the
+                    // constructor object itself (`class_obj`). Pass the chosen function
+                    // object pointer into `prepare_call_env_with_this` so `__function` is
+                    // bound appropriately for `new.target` lookup.
+                    let fn_obj_ptr: Option<crate::core::JSObjectDataPtr<'_>> = if let Some(nt) = &new_target {
+                        match nt {
+                            Value::Object(o) => Some(*o),
+                            _ => Some(class_obj),
+                        }
+                    } else {
+                        Some(class_obj)
+                    };
                     let func_env = prepare_call_env_with_this(
                         mc,
                         captured_env.as_ref(),
@@ -921,7 +936,7 @@ pub(crate) fn evaluate_new<'gc>(
                         evaluated_args,
                         Some(instance),
                         Some(env),
-                        Some(class_obj),
+                        fn_obj_ptr,
                     )?;
                     log::trace!("evaluate_new: called prepare_call_env_with_this");
 
@@ -1109,7 +1124,7 @@ pub(crate) fn evaluate_new<'gc>(
                         if let Some(parent_ctor_obj) = class_obj.borrow().prototype {
                             let parent_ctor = Value::Object(parent_ctor_obj);
                             // Call parent constructor
-                            let parent_inst = evaluate_new(mc, env, parent_ctor, evaluated_args)?;
+                            let parent_inst = evaluate_new(mc, env, parent_ctor, evaluated_args, None)?;
                             if let Value::Object(inst_obj) = &parent_inst {
                                 // Fix prototype to point to this class's prototype
                                 if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype")
@@ -2603,6 +2618,19 @@ pub(crate) fn evaluate_super_call<'gc>(
                     return Ok(Value::Object(instance));
                 }
             }
+
+            // If we reach here the parent class had no explicit constructor defined.
+            // Per spec there is an implicit default constructor — treat this as a
+            // successful super() call that simply initializes instance fields and
+            // binds `this` into the constructor environment.
+            bind_this_after_super(mc)?;
+            if already_initialized {
+                return Err(raise_reference_error!("super() called after this is initialized"));
+            }
+            if let Value::Object(ctor_obj) = &current_function {
+                initialize_instance_elements(mc, &instance, ctor_obj)?;
+            }
+            return Ok(Value::Object(instance));
         }
 
         // Handle native constructors (like Array, Object, etc.)
@@ -2610,7 +2638,7 @@ pub(crate) fn evaluate_super_call<'gc>(
             && let Value::String(_) = &*native_ctor_name_rc.borrow()
         {
             // Call native constructor as a constructor (not a normal call)
-            let res = evaluate_new(mc, env, Value::Object(parent_class_obj), evaluated_args)?;
+            let res = evaluate_new(mc, env, Value::Object(parent_class_obj), evaluated_args, None)?;
             if let Value::Object(new_instance) = res {
                 // If we have a derived constructor, ensure the returned instance
                 // has the subclass prototype as its [[Prototype]].
@@ -2683,6 +2711,10 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
                     "DBG evaluate_super_computed_property: found prop_val on super_obj for '{:?}' => {:?}",
                     key,
                     prop_val.borrow()
+                );
+                log::trace!(
+                    "DBG evaluate_super_computed_property: env.this={:?}",
+                    object_get_key_value(env, "this")
                 );
                 // If this is a property descriptor with a getter, call the getter with the current `this` as receiver
                 match &*prop_val.borrow() {
@@ -2895,6 +2927,11 @@ pub(crate) fn evaluate_super_method<'gc>(
             );
             if let Some(method_val) = object_get_key_value(&super_obj, method) {
                 // Reduce verbosity: only log a short method type rather than full Value debug
+                log::trace!(
+                    "DBG evaluate_super_method: found method_val={:?} env.this={:?}",
+                    method_val.borrow(),
+                    object_get_key_value(env, "this")
+                );
                 let method_type = match &*method_val.borrow() {
                     Value::Closure(..) => "Closure",
                     Value::AsyncClosure(..) => "AsyncClosure",
@@ -2913,6 +2950,10 @@ pub(crate) fn evaluate_super_method<'gc>(
                             let home_obj_opt = data.home_object.clone();
 
                             // Create function environment and bind params/this
+                            log::trace!(
+                                "DBG evaluate_super_method: preparing call_env with this={:?}",
+                                this_val.borrow().clone()
+                            );
                             let func_env = prepare_call_env_with_this(
                                 mc,
                                 captured_env.as_ref(),
@@ -2929,6 +2970,10 @@ pub(crate) fn evaluate_super_method<'gc>(
                             }
 
                             // Execute method body
+                            log::trace!(
+                                "DBG evaluate_super_method: calling method body with func_env={:p}",
+                                func_env.as_ptr()
+                            );
                             return Ok(evaluate_statements(mc, &func_env, body)?);
                         }
                         Value::Function(func_name) => {
@@ -2955,6 +3000,10 @@ pub(crate) fn evaluate_super_method<'gc>(
                                         let home_obj_opt = data.home_object.clone();
 
                                         // Create function environment and bind params/this
+                                        log::trace!(
+                                            "DBG evaluate_super_method (object closure): preparing call_env with this={:?}",
+                                            this_val.borrow().clone()
+                                        );
                                         let func_env = prepare_call_env_with_this(
                                             mc,
                                             captured_env.as_ref(),
@@ -2970,6 +3019,10 @@ pub(crate) fn evaluate_super_method<'gc>(
                                             func_env.borrow_mut(mc).set_home_object(Some(home_object));
                                         }
 
+                                        log::trace!(
+                                            "DBG evaluate_super_method (object closure): calling method body with func_env={:p}",
+                                            func_env.as_ptr()
+                                        );
                                         // Execute method body
                                         return Ok(evaluate_statements(mc, &func_env, body)?);
                                     }

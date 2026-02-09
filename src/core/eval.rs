@@ -6890,65 +6890,9 @@ fn evaluate_expr_assign<'gc>(
             }
         }
         Precomputed::SuperProperty(key) => {
-            // Resolve home object and its prototype now and throw if super is invalid.
-            // Per spec, when doing `super.prop = v`, property lookup for the setter is
-            // performed on the prototype chain of the home object's [[Prototype]],
-            // but the setter (if found) must be invoked with the *original* receiver
-            // (the current `this`), not the prototype object. Implement this explicitly
-            // here rather than delegating to `set_property_with_accessors`, which
-            // would use the prototype object as the receiver.
-            if let Some(home_obj) = env.borrow().get_home_object() {
-                if let Some(super_obj) = home_obj.borrow().borrow().prototype {
-                    // Obtain current `this` binding as the receiver
-                    let receiver = match crate::core::env_get(env, "this") {
-                        Some(this_val_ptr) => match &*this_val_ptr.borrow() {
-                            Value::Object(o) => *o,
-                            _ => return Err(raise_type_error!("Invalid receiver for super assignment").into()),
-                        },
-                        None => return Err(raise_type_error!("Invalid receiver for super assignment").into()),
-                    };
-
-                    // Lookup property on the prototype chain starting at `super_obj`
-                    if let Some(prop_ptr) = object_get_key_value(&super_obj, &*key) {
-                        let prop = prop_ptr.borrow().clone();
-                        match prop {
-                            // If there's an accessor/property descriptor, handle setter/getter cases
-                            Value::Property { getter, value: Some(_v), setter } => {
-                                if let Some(s) = setter {
-                                    // Call setter with receiver = original this
-                                    call_setter(mc, &receiver, &*s, &val)?;
-                                    return Ok(val);
-                                } else {
-                                    // Data property on prototype -> create/overwrite own prop on receiver
-                                    object_set_key_value(mc, &receiver, &*key, &val)?;
-                                    return Ok(val);
-                                }
-                            }
-                            Value::Setter(..) => {
-                                // Direct setter variant on prototype
-                                call_setter(mc, &receiver, &prop, &val)?;
-                                return Ok(val);
-                            }
-                            Value::Getter(..) => {
-                                return Err(raise_type_error!("Cannot set property which has only a getter").into());
-                            }
-                            _ => {
-                                // No accessor -> ordinary data property on prototype -> create own property on receiver
-                                object_set_key_value(mc, &receiver, &*key, &val)?;
-                                return Ok(val);
-                            }
-                        }
-                    } else {
-                        // No property on prototype chain: create own property on receiver
-                        object_set_key_value(mc, &receiver, &*key, &val)?;
-                        return Ok(val);
-                    }
-                } else {
-                    return Err(raise_type_error!("Cannot assign to property of non-object").into());
-                }
-            } else {
-                Err(raise_reference_error!("super is not available").into())
-            }
+            let (receiver, super_base) = resolve_super_assignment_base(env)?;
+            set_super_property_with_accessors(mc, env, &receiver, super_base, &key, &val)?;
+            Ok(val)
         }
         Precomputed::SuperIndex(raw_key) => {
             // Similar to SuperProperty: resolve property on prototype chain but call
@@ -6959,50 +6903,98 @@ fn evaluate_expr_assign<'gc>(
                 Value::Symbol(s) => PropertyKey::Symbol(s),
                 _ => PropertyKey::from(value_to_string(&raw_key)),
             };
-            if let Some(home_obj) = env.borrow().get_home_object() {
-                if let Some(super_obj) = home_obj.borrow().borrow().prototype {
-                    let receiver = match crate::core::env_get(env, "this") {
-                        Some(this_val_ptr) => match &*this_val_ptr.borrow() {
-                            Value::Object(o) => *o,
-                            _ => return Err(raise_type_error!("Invalid receiver for super assignment").into()),
-                        },
-                        None => return Err(raise_type_error!("Invalid receiver for super assignment").into()),
-                    };
-
-                    if let Some(prop_ptr) = object_get_key_value(&super_obj, &key) {
-                        let prop = prop_ptr.borrow().clone();
-                        match prop {
-                            Value::Property { getter, value: Some(_v), setter } => {
-                                if let Some(s) = setter {
-                                    call_setter(mc, &receiver, &*s, &val)?;
-                                    return Ok(val);
-                                } else {
-                                    object_set_key_value(mc, &receiver, &key, &val)?;
-                                    return Ok(val);
-                                }
-                            }
-                            Value::Setter(..) => {
-                                call_setter(mc, &receiver, &prop, &val)?;
-                                return Ok(val);
-                            }
-                            Value::Getter(..) => return Err(raise_type_error!("Cannot set property which has only a getter").into()),
-                            _ => {
-                                object_set_key_value(mc, &receiver, &key, &val)?;
-                                return Ok(val);
-                            }
-                        }
-                    } else {
-                        object_set_key_value(mc, &receiver, &key, &val)?;
-                        return Ok(val);
-                    }
-                } else {
-                    return Err(raise_type_error!("Cannot assign to property of non-object").into());
-                }
-            } else {
-                Err(raise_reference_error!("super is not available").into())
-            }
+            let (receiver, super_base) = resolve_super_assignment_base(env)?;
+            set_super_property_with_accessors(mc, env, &receiver, super_base, &key, &val)?;
+            Ok(val)
         }
     }
+}
+
+fn resolve_super_assignment_base<'gc>(
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<(JSObjectDataPtr<'gc>, Option<JSObjectDataPtr<'gc>>), EvalError<'gc>> {
+    let home_obj = env
+        .borrow()
+        .get_home_object()
+        .ok_or_else(|| raise_reference_error!("super is not available"))?;
+
+    let receiver = match crate::core::env_get(env, "this") {
+        Some(this_val_ptr) => match &*this_val_ptr.borrow() {
+            Value::Object(o) => *o,
+            _ => return Err(raise_type_error!("Invalid receiver for super assignment").into()),
+        },
+        None => return Err(raise_type_error!("Invalid receiver for super assignment").into()),
+    };
+
+    let super_base = {
+        let home_ptr = *home_obj.borrow();
+        home_ptr.borrow().prototype
+    };
+
+    // If the home object's prototype is null, super property assignments should throw
+    if super_base.is_none() {
+        return Err(raise_type_error!("Cannot access 'super' of a class with null prototype").into());
+    }
+
+    Ok((receiver, super_base))
+}
+
+fn set_super_property_with_accessors<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    receiver: &JSObjectDataPtr<'gc>,
+    mut super_base: Option<JSObjectDataPtr<'gc>>,
+    key: &PropertyKey<'gc>,
+    val: &Value<'gc>,
+) -> Result<(), EvalError<'gc>> {
+    let strict = crate::core::env_get_strictness(env);
+
+    while let Some(proto_obj) = super_base {
+        if let Some(prop_ptr) = get_own_property(&proto_obj, key) {
+            let prop = prop_ptr.borrow().clone();
+            match prop {
+                Value::Property { setter, getter, .. } => {
+                    if let Some(s) = setter {
+                        let s_clone = (*s).clone();
+                        return call_setter(mc, receiver, &s_clone, val);
+                    }
+                    if getter.is_some() {
+                        return Err(raise_type_error!("Cannot set property which has only a getter").into());
+                    }
+                    let writable = { proto_obj.borrow().is_writable(key) };
+                    if !writable {
+                        if strict {
+                            return Err(raise_type_error!("Cannot assign to read-only property").into());
+                        }
+                        return Ok(());
+                    }
+                    object_set_key_value(mc, receiver, key, val)?;
+                    return Ok(());
+                }
+                Value::Setter(params, body, captured_env, home_opt) => {
+                    return call_setter_raw(mc, receiver, &params, &body, &captured_env, home_opt.clone(), val);
+                }
+                Value::Getter(..) => {
+                    return Err(raise_type_error!("Cannot set property which has only a getter").into());
+                }
+                _ => {
+                    let writable = { proto_obj.borrow().is_writable(key) };
+                    if !writable {
+                        if strict {
+                            return Err(raise_type_error!("Cannot assign to read-only property").into());
+                        }
+                        return Ok(());
+                    }
+                    object_set_key_value(mc, receiver, key, val)?;
+                    return Ok(());
+                }
+            }
+        }
+        super_base = proto_obj.borrow().prototype;
+    }
+
+    object_set_key_value(mc, receiver, key, val)?;
+    Ok(())
 }
 
 // Helper: assign a precomputed runtime value to an assignment target expression
@@ -14502,7 +14494,10 @@ fn set_property_with_accessors<'gc>(
                 match inherited {
                     Value::Property { setter, getter, .. } => {
                         if let Some(s) = setter {
-                            return call_setter(mc, obj, &s, val);
+                            // Clone setter out to avoid holding a borrow on the inherited property
+                            // cell while calling into the setter, which may mutate prototypes/receiver.
+                            let s_clone = (*s).clone();
+                            return call_setter(mc, obj, &s_clone, val);
                         }
                         if getter.is_some() {
                             return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -14600,9 +14595,16 @@ fn set_property_with_accessors<'gc>(
                     if let Some(s) = setter {
                         if let Value::Setter(_, _, _, home_opt) = &*s {
                             if let Some(home_ptr) = home_opt {
+                                // Avoid holding a borrow on the home object across the call
+                                // (which may mutate the receiver). Extract the raw pointer
+                                // first so the borrow doesn't live into the `call_setter`.
+                                let home_addr = {
+                                    let h = home_ptr.borrow();
+                                    Gc::as_ptr(*h)
+                                };
                                 log::debug!(
                                     "DBG set_property: stored Property descriptor has setter with home_obj={:p}",
-                                    Gc::as_ptr(*home_ptr.borrow())
+                                    home_addr
                                 );
                             } else {
                                 log::debug!("DBG set_property: stored Property descriptor has setter with no home_obj");
@@ -14610,7 +14612,10 @@ fn set_property_with_accessors<'gc>(
                         } else {
                             log::debug!("DBG set_property: stored Property descriptor setter is not a Setter variant");
                         }
-                        return call_setter(mc, obj, &s, val);
+                        // Clone setter value to avoid holding any borrows into the property cell
+                        // while the setter executes and potentially mutates the receiver.
+                        let s_clone = (*s).clone();
+                        return call_setter(mc, obj, &s_clone, val);
                     }
                     if getter.is_some() {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -14656,7 +14661,10 @@ fn set_property_with_accessors<'gc>(
             match inherited {
                 Value::Property { setter, getter, .. } => {
                     if let Some(s) = setter {
-                        return call_setter(mc, obj, &s, val);
+                        // Clone setter to drop any borrows into the property's storage
+                        // before invoking the setter, which may mutate the receiver.
+                        let s_clone = (*s).clone();
+                        return call_setter(mc, obj, &s_clone, val);
                     }
                     if getter.is_some() {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());

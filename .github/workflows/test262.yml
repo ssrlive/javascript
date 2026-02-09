@@ -447,7 +447,7 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/grouping" - "language/expressions/optional-chaining"
+      - name: Run a small test262 subset - "language/expressions/grouping" - "language/expressions/prefix-increment"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'

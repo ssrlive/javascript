@@ -177,7 +177,7 @@ pub enum Expr {
     SuperMethod(String, Vec<Expr>),
     SuperProperty(String),
     Super,
-    Object(Vec<(Expr, Expr, bool)>),
+    Object(Vec<(Expr, Expr, bool, bool)>),
     Getter(Box<Expr>),
     Setter(Box<Expr>),
     Array(Vec<Option<Expr>>),

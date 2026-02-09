@@ -516,11 +516,12 @@ fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool)
         Expr::Object(pairs) => Expr::Object(
             pairs
                 .iter()
-                .map(|(k, v, is_method)| {
+                .map(|(k, v, is_method, _)| {
                     (
                         replace_first_yield_in_expr(k, var_name, replaced),
                         replace_first_yield_in_expr(v, var_name, replaced),
                         *is_method,
+                        false,
                     )
                 })
                 .collect(),
@@ -770,7 +771,7 @@ fn expr_contains_yield(e: &Expr) -> bool {
         Expr::Index(a, b) => expr_contains_yield(a) || expr_contains_yield(b),
         Expr::Property(a, _) => expr_contains_yield(a),
         Expr::Call(a, args) => expr_contains_yield(a) || args.iter().any(expr_contains_yield),
-        Expr::Object(pairs) => pairs.iter().any(|(k, v, _)| expr_contains_yield(k) || expr_contains_yield(v)),
+        Expr::Object(pairs) => pairs.iter().any(|(k, v, _, _)| expr_contains_yield(k) || expr_contains_yield(v)),
         Expr::Array(items) => items.iter().any(|it| it.as_ref().is_some_and(expr_contains_yield)),
         Expr::UnaryNeg(a)
         | Expr::LogicalNot(a)
@@ -1100,7 +1101,7 @@ fn find_yield_in_expr(e: &Expr) -> Option<(YieldKind, Option<Box<Expr>>)> {
         Expr::Call(a, args) => find_yield_in_expr(a).or_else(|| args.iter().find_map(find_yield_in_expr)),
         Expr::Object(pairs) => pairs
             .iter()
-            .find_map(|(k, v, _)| find_yield_in_expr(k).or_else(|| find_yield_in_expr(v))),
+            .find_map(|(k, v, _, _)| find_yield_in_expr(k).or_else(|| find_yield_in_expr(v))),
         Expr::Array(items) => items.iter().find_map(|it| it.as_ref().and_then(find_yield_in_expr)),
         Expr::UnaryNeg(a)
         | Expr::LogicalNot(a)
@@ -2338,7 +2339,7 @@ fn count_yield_vars_in_expr(expr: &Expr, prefix: &str) -> usize {
             }
             Expr::Object(pairs) => pairs
                 .iter()
-                .map(|(k, v, _)| count_yield_vars_in_expr(k, prefix) + count_yield_vars_in_expr(v, prefix))
+                .map(|(k, v, _, _)| count_yield_vars_in_expr(k, prefix) + count_yield_vars_in_expr(v, prefix))
                 .sum(),
             Expr::Array(items) => items
                 .iter()

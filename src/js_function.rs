@@ -1208,7 +1208,7 @@ fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has
             walk_expr(idx, has_super_call, has_super_prop, has_new_target, has_import_meta);
         }
         Expr::Object(kv) => {
-            for (k, v, _flag) in kv {
+            for (k, v, _flag, _is_plain) in kv {
                 walk_expr(k, has_super_call, has_super_prop, has_new_target, has_import_meta);
                 walk_expr(v, has_super_call, has_super_prop, has_new_target, has_import_meta);
             }

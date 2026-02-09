@@ -863,6 +863,12 @@ pub(crate) fn evaluate_new<'gc>(
             } else {
                 log::debug!("evaluate_new - constructor class_def slot not present");
             }
+            // If this function object has a [[HomeObject]] set, it is a
+            // method created on an object literal or class and per ECMAScript
+            // is not a constructor. Reject with TypeError.
+            if class_obj.borrow().get_home_object().is_some() {
+                return Err(raise_type_error!("Not a constructor").into());
+            }
             // If this object wraps a closure (created from a function
             // expression/declaration), treat it as a constructor by
             // extracting the internal closure and invoking it as a

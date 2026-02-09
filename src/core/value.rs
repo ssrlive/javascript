@@ -1056,6 +1056,14 @@ pub fn object_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<Prop
     let mut current = Some(*obj);
     while let Some(cur) = current {
         if let Some(val) = cur.borrow().properties.get(&key) {
+            // Diagnostic: log the exact GC cell pointer and value being returned
+            log::debug!(
+                "object_get_key_value: found on obj={:p} key={:?} val_ptr={:p} val_debug={:?}",
+                cur.as_ptr(),
+                &key,
+                val,
+                val.borrow()
+            );
             return Some(*val);
         }
         current = cur.borrow().prototype;

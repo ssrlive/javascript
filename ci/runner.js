@@ -199,8 +199,25 @@ function detectFeature(feat){
   if (feat in FEATURE_SUPPORTED) return FEATURE_SUPPORTED[feat];
   const probeFile = findProbeFile(feat);
   if (probeFile && BIN){
-    const res = spawnSync(BIN, [probeFile], {timeout:2000});
-    const out = (res.stdout||Buffer.from('')).toString();
+    // Determine whether this probe should be run as an ES module.
+    // Heuristic: if the probe file contains top-level `await`, an `import` or
+    // `export` declaration, or an explicit `// module` pragma, run with
+    // `--module` so engines requiring module context are exercised.
+    let probeIsModule = false;
+    try {
+      const src = fs.readFileSync(probeFile, 'utf8');
+      if (/^\s*\/\/\s*module\b/m.test(src)) probeIsModule = true;
+      if (/^\s*await\b/m.test(src)) probeIsModule = true;
+      if (/^\s*import\b/m.test(src)) probeIsModule = true;
+      if (/^\s*export\b/m.test(src)) probeIsModule = true;
+    } catch (e) {
+      // If we can't read the probe, assume non-module
+      probeIsModule = false;
+    }
+
+    const runArgs = probeIsModule ? ['--module', probeFile] : [probeFile];
+    const res = spawnSync(BIN, runArgs, {timeout:2000, encoding:'utf8'});
+    const out = (res && res.stdout) ? String(res.stdout) : '';
     if (out.includes('OK')) FEATURE_SUPPORTED[feat] = true; else FEATURE_SUPPORTED[feat] = false;
   } else {
     FEATURE_SUPPORTED[feat] = false;

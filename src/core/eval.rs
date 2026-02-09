@@ -6499,7 +6499,7 @@ fn evaluate_expr_assign<'gc>(
         }
 
         let mut excluded_keys: Vec<PropertyKey> = Vec::new();
-        for (key_expr, target_expr, is_spread) in properties.iter() {
+        for (key_expr, target_expr, is_spread, _is_plain) in properties.iter() {
             if *is_spread {
                 let rest_obj = new_js_object_data(mc);
                 if let Some(obj_val) = env_get(env, "Object")
@@ -7251,7 +7251,7 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
             }
 
             let mut excluded_keys: Vec<PropertyKey> = Vec::new();
-            for (key_expr, target_expr, is_spread) in properties.iter() {
+            for (key_expr, target_expr, is_spread, _is_plain) in properties.iter() {
                 if *is_spread {
                     let rest_obj = new_js_object_data(mc);
                     if let Some(obj_val) = env_get(env, "Object")
@@ -7486,7 +7486,7 @@ pub(crate) fn evaluate_binding_target_with_value<'gc>(
             }
 
             let mut excluded_keys: Vec<PropertyKey> = Vec::new();
-            for (key_expr, target_expr, is_spread) in properties.iter() {
+            for (key_expr, target_expr, is_spread, _is_plain) in properties.iter() {
                 if *is_spread {
                     let rest_obj = new_js_object_data(mc);
                     if let Some(obj_val) = env_get(env, "Object")
@@ -9085,7 +9085,7 @@ fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has
             walk_expr(idx, has_super_call, has_super_prop, has_new_target, has_arguments);
         }
         Expr::Object(kv) => {
-            for (k, v, _flag) in kv {
+            for (k, v, _flag, _) in kv {
                 walk_expr(k, has_super_call, has_super_prop, has_new_target, has_arguments);
                 walk_expr(v, has_super_call, has_super_prop, has_new_target, has_arguments);
             }
@@ -10780,7 +10780,7 @@ fn expr_contains_optional_chain(expr: &Expr) -> bool {
         Array(elements) => elements.iter().any(|opt| opt.as_ref().is_some_and(expr_contains_optional_chain)),
         Object(props) => props
             .iter()
-            .any(|(k, v, _)| expr_contains_optional_chain(k) || expr_contains_optional_chain(v)),
+            .any(|(k, v, _, _)| expr_contains_optional_chain(k) || expr_contains_optional_chain(v)),
         _ => false,
     }
 }
@@ -14209,28 +14209,7 @@ pub(crate) fn get_property_with_accessors<'gc>(
 
     let mut cur = Some(*obj);
     while let Some(cur_obj) = cur {
-        log::debug!("get_property_with_accessors: checking obj={:p}, key={:?}", cur_obj.as_ptr(), key);
-        // Extra diagnostics for Symbol keys: log the sought symbol pointer and
-        // any symbol keys present on the current object so we can detect
-        // pointer/mismatch issues during prototype traversal.
-        if let PropertyKey::Symbol(sym_ptr) = key {
-            log::debug!(
-                "get_property_with_accessors: looking for symbol ptr={:p} on obj={:p}",
-                Gc::as_ptr(*sym_ptr),
-                cur_obj.as_ptr()
-            );
-            for k in cur_obj.borrow().properties.keys() {
-                if let PropertyKey::Symbol(k_sym) = k {
-                    log::debug!(
-                        "get_property_with_accessors: obj={:p} has symbol key ptr={:p}",
-                        cur_obj.as_ptr(),
-                        Gc::as_ptr(*k_sym)
-                    );
-                }
-            }
-        }
         if let Some(val_ptr) = object_get_key_value(&cur_obj, key) {
-            log::debug!("get_property_with_accessors: found property on obj={:p}", cur_obj.as_ptr());
             let val = val_ptr.borrow().clone();
             return match val {
                 Value::Property { getter, value, .. } => {
@@ -14246,10 +14225,6 @@ pub(crate) fn get_property_with_accessors<'gc>(
                 _ => Ok(val),
             };
         }
-        log::debug!(
-            "get_property_with_accessors: not found on obj={:p}, moving to prototype",
-            cur_obj.as_ptr()
-        );
 
         // If not found in ordinary properties, check for TypedArray indexed elements when
         // the property key is a canonical numeric index string.
@@ -15942,8 +15917,8 @@ fn convert_array_pattern_inner(elms: &[DestructuringElement]) -> Vec<Option<Expr
     out
 }
 
-fn convert_object_pattern_inner(elms: &[DestructuringElement]) -> Vec<(Expr, Expr, bool)> {
-    let mut out: Vec<(Expr, Expr, bool)> = Vec::new();
+fn convert_object_pattern_inner(elms: &[DestructuringElement]) -> Vec<(Expr, Expr, bool, bool)> {
+    let mut out: Vec<(Expr, Expr, bool, bool)> = Vec::new();
     for e in elms.iter() {
         match e {
             DestructuringElement::Property(key, boxed) => {
@@ -15975,7 +15950,8 @@ fn convert_object_pattern_inner(elms: &[DestructuringElement]) -> Vec<(Expr, Exp
                     }
                     _ => Expr::Var(String::new(), None, None),
                 };
-                out.push((key_expr, val_expr, false));
+                // plain-property flag not meaningful in pattern conversion
+                out.push((key_expr, val_expr, false, false));
             }
             DestructuringElement::ComputedProperty(key_expr, boxed) => {
                 let val_expr = match &**boxed {
@@ -16005,11 +15981,11 @@ fn convert_object_pattern_inner(elms: &[DestructuringElement]) -> Vec<(Expr, Exp
                     }
                     _ => Expr::Var(String::new(), None, None),
                 };
-                out.push((key_expr.clone(), val_expr, false));
+                out.push((key_expr.clone(), val_expr, false, false));
             }
             DestructuringElement::Rest(name) => {
                 let target_expr = Expr::Var(name.clone(), None, None);
-                out.push((Expr::Var(name.clone(), None, None), target_expr, true));
+                out.push((Expr::Var(name.clone(), None, None), target_expr, true, false));
             }
             _ => {}
         }
@@ -16409,6 +16385,18 @@ fn evaluate_expr_new<'gc>(
     // Diagnostic: log resolved constructor value
     log::debug!("evaluate_expr_new - resolved constructor value = {:?}", func_val);
 
+    // If property descriptor was returned (Value::Property), unwrap its value per GetValue semantics
+    let func_val = match func_val {
+        Value::Property { value: Some(v), .. } => {
+            log::debug!(
+                "evaluate_expr_new: unwrapping Property descriptor to inner value = {:?}",
+                v.borrow()
+            );
+            v.borrow().clone()
+        }
+        other => other,
+    };
+
     match func_val {
         Value::Closure(cl) => {
             // Closure used directly as constructor (e.g., `new f();` where `f` is a closure)
@@ -16469,6 +16457,22 @@ fn evaluate_expr_new<'gc>(
                 log::debug!("evaluate_expr_new: constructor object has closure ptr = {:p}", Gc::as_ptr(obj));
                 match &*cl_ptr.borrow() {
                     Value::Closure(cl) => {
+                        // Diagnostic: log both the function object's [[HomeObject]] and the
+                        // closure's stored home object so we can see which is present.
+                        log::debug!(
+                            "evaluate_expr_new: constructor.fn_obj.home_object = {:?}",
+                            obj.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()))
+                        );
+                        log::debug!(
+                            "evaluate_expr_new: constructor.closure.home_object = {:?}",
+                            cl.home_object.as_ref().map(|h| Gc::as_ptr(*h.borrow()))
+                        );
+
+                        // If this closure or its function object has a [[HomeObject]] it was
+                        // created as a method and per ECMAScript it is not a constructor.
+                        if obj.borrow().get_home_object().is_some() || cl.home_object.is_some() {
+                            return Err(raise_type_error!("Not a constructor").into());
+                        }
                         log::debug!("evaluate_expr_new: found closure; is_arrow={} params={:?}", cl.is_arrow, cl.params);
                         // Arrow functions are not constructors per ECMAScript; throw TypeError
                         if cl.is_arrow {
@@ -16676,7 +16680,7 @@ fn evaluate_expr_new<'gc>(
 fn evaluate_expr_object<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    properties: &[(Expr, Expr, bool)],
+    properties: &[(Expr, Expr, bool, bool)],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let obj = crate::core::new_js_object_data(mc);
     if let Some(obj_val) = env_get(env, "Object")
@@ -16687,7 +16691,7 @@ fn evaluate_expr_object<'gc>(
         obj.borrow_mut(mc).prototype = Some(*proto);
     }
 
-    for (key_expr, val_expr, _is_computed) in properties {
+    for (key_expr, val_expr, is_computed, is_plain_property) in properties {
         if let Expr::Spread(target) = val_expr {
             let val = evaluate_expr(mc, env, target)?;
             if let Value::Object(source_obj) = val {
@@ -16709,10 +16713,88 @@ fn evaluate_expr_object<'gc>(
         }
 
         let key_val = evaluate_expr(mc, env, key_expr)?;
+
+        // Apply ToPropertyKey semantics (ToPrimitive(hint='string')) before
+        // evaluating the value expression. This ordering is required by the
+        // spec: ToPropertyKey is performed before evaluating the value.
+
+        let key_prim = if let Value::Object(_) = &key_val {
+            crate::core::to_primitive(mc, &key_val, "string", env)?
+        } else {
+            key_val.clone()
+        };
+
         let mut val = evaluate_expr(mc, env, val_expr)?;
 
         // If this value is a Closure/AsyncClosure/GeneratorFunction that is a method
         // defined on an object literal, set its [[HomeObject]] so that `super` works.
+        // If the evaluated value is a closure-like function, record its [[HomeObject]]
+        // on the inner closure data so runtime checks (which may inspect the
+        // closure directly) can detect method-created functions.
+        // If this evaluated value is a closure-like function created as part of
+        // an object literal method, create a new closure value that records the
+        // `[[HomeObject]]` so later constructor checks can observe it.
+        if let Value::Closure(cl) = &val {
+            let new_cl = crate::core::ClosureData {
+                params: cl.params.clone(),
+                body: cl.body.clone(),
+                env: cl.env,
+                home_object: Some(GcCell::new(obj)),
+                captured_envs: cl.captured_envs.clone(),
+                bound_this: cl.bound_this.clone(),
+                is_arrow: cl.is_arrow,
+                is_strict: cl.is_strict,
+                native_target: cl.native_target.clone(),
+                enforce_strictness_inheritance: cl.enforce_strictness_inheritance,
+            };
+            val = Value::Closure(Gc::new(mc, new_cl));
+        }
+        if let Value::AsyncClosure(cl) = &val {
+            let new_cl = crate::core::ClosureData {
+                params: cl.params.clone(),
+                body: cl.body.clone(),
+                env: cl.env,
+                home_object: Some(GcCell::new(obj)),
+                captured_envs: cl.captured_envs.clone(),
+                bound_this: cl.bound_this.clone(),
+                is_arrow: cl.is_arrow,
+                is_strict: cl.is_strict,
+                native_target: cl.native_target.clone(),
+                enforce_strictness_inheritance: cl.enforce_strictness_inheritance,
+            };
+            val = Value::AsyncClosure(Gc::new(mc, new_cl));
+        }
+        if let Value::GeneratorFunction(name_opt, cl) = &val {
+            let new_cl = crate::core::ClosureData {
+                params: cl.params.clone(),
+                body: cl.body.clone(),
+                env: cl.env,
+                home_object: Some(GcCell::new(obj)),
+                captured_envs: cl.captured_envs.clone(),
+                bound_this: cl.bound_this.clone(),
+                is_arrow: cl.is_arrow,
+                is_strict: cl.is_strict,
+                native_target: cl.native_target.clone(),
+                enforce_strictness_inheritance: cl.enforce_strictness_inheritance,
+            };
+            val = Value::GeneratorFunction(name_opt.clone(), Gc::new(mc, new_cl));
+        }
+        if let Value::AsyncGeneratorFunction(name_opt, cl) = &val {
+            let new_cl = crate::core::ClosureData {
+                params: cl.params.clone(),
+                body: cl.body.clone(),
+                env: cl.env,
+                home_object: Some(GcCell::new(obj)),
+                captured_envs: cl.captured_envs.clone(),
+                bound_this: cl.bound_this.clone(),
+                is_arrow: cl.is_arrow,
+                is_strict: cl.is_strict,
+                native_target: cl.native_target.clone(),
+                enforce_strictness_inheritance: cl.enforce_strictness_inheritance,
+            };
+            val = Value::AsyncGeneratorFunction(name_opt.clone(), Gc::new(mc, new_cl));
+        }
+
         match &mut val {
             Value::Closure(_cl) => {
                 // Wrap Closure in a function object and attach internal closure so we can set home object field
@@ -16724,10 +16806,6 @@ fn evaluate_expr_object<'gc>(
                 func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
                 // Replace the original value with the function object wrapper
                 val = Value::Object(func_obj);
-                log::debug!(
-                    "DBG object literal: wrapped closure into func_obj={:p} and attached home",
-                    Gc::as_ptr(obj)
-                );
             }
             Value::AsyncClosure(_) => {
                 // handled via function object home object setting
@@ -16746,16 +16824,6 @@ fn evaluate_expr_object<'gc>(
             _ => {}
         }
 
-        // Apply ToPropertyKey semantics: if the key is an object, perform ToPrimitive(hint='string')
-        log::debug!("DBG object literal: evaluated key expr -> {:?}", key_val);
-        let key_prim = if let Value::Object(_) = &key_val {
-            let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
-            log::debug!("DBG object literal: key ToPrimitive -> {:?}", prim);
-            prim
-        } else {
-            key_val.clone()
-        };
-
         let key_v = match key_prim {
             Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
             Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
@@ -16767,12 +16835,43 @@ fn evaluate_expr_object<'gc>(
             other => PropertyKey::String(value_to_string(&other)),
         };
 
+        // Special-case: non-computed `__proto__` property in object initializers
+        // sets the internal [[Prototype]] of the created object when the value
+        // is an object or null. Computed `['__proto__']` should create an own
+        // property instead. See Annex B.3.1 semantics.
+        if let PropertyKey::String(ref ks) = key_v
+            && ks == "__proto__"
+            && !is_computed
+            && *is_plain_property
+        {
+            match &val {
+                Value::Object(o) => {
+                    obj.borrow_mut(mc).prototype = Some(*o);
+                }
+                Value::Null => {
+                    obj.borrow_mut(mc).prototype = None;
+                }
+                _ => {
+                    // if not object or null, per spec do not set prototype
+                }
+            }
+            // Do not create an own property for this special-case
+            continue;
+        }
+
         // If the value is a function object (holds a internal closure), set home object field
         // on the function object so it can propagate [[HomeObject]] during calls
         if let Value::Object(func_obj) = &val {
             let exists_closure = func_obj.borrow().get_closure().is_some();
             if exists_closure {
                 func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
+
+                // If this is a method (not a plain property i.e. not `key: value`), remove the
+                // 'prototype' property because methods are not constructors.
+                if !is_plain_property {
+                    let key = PropertyKey::String("prototype".to_string());
+                    let _ = func_obj.borrow_mut(mc).properties.shift_remove(&key);
+                }
             }
         }
 
@@ -16805,7 +16904,23 @@ fn evaluate_expr_object<'gc>(
                         getter: getter_opt,
                         setter: setter_opt,
                     };
-                    object_set_key_value(mc, &obj, &key_v, &prop_descriptor)?;
+                    {
+                        let stored_val = &prop_descriptor;
+                        let obj_ptr = Gc::as_ptr(obj) as *const _;
+                        let stored_obj_ptr = if let Value::Object(o) = stored_val {
+                            Gc::as_ptr(*o) as *const _
+                        } else {
+                            std::ptr::null()
+                        };
+                        log::debug!(
+                            "DBG object-literal insert: obj={:p} key={:?} storing_val={:?} stored_obj_ptr={:p}",
+                            obj_ptr,
+                            &key_v,
+                            stored_val,
+                            stored_obj_ptr
+                        );
+                        object_set_key_value(mc, &obj, &key_v, &prop_descriptor)?;
+                    }
                 }
                 // If existing is a Getter/Setter, create a Property descriptor
                 (Value::Getter(_, _, _), Value::Getter(_, _, _))
@@ -16831,15 +16946,61 @@ fn evaluate_expr_object<'gc>(
                         getter: getter_opt,
                         setter: setter_opt,
                     };
-                    object_set_key_value(mc, &obj, &key_v, &prop_descriptor)?;
+                    {
+                        let stored_val = &prop_descriptor;
+                        let obj_ptr = Gc::as_ptr(obj) as *const _;
+                        let stored_obj_ptr = if let Value::Object(o) = stored_val {
+                            Gc::as_ptr(*o) as *const _
+                        } else {
+                            std::ptr::null()
+                        };
+                        log::debug!(
+                            "DBG object-literal insert: obj={:p} key={:?} storing_val={:?} stored_obj_ptr={:p}",
+                            obj_ptr,
+                            &key_v,
+                            stored_val,
+                            stored_obj_ptr
+                        );
+                        object_set_key_value(mc, &obj, &key_v, &prop_descriptor)?;
+                    }
                 }
                 // Otherwise just overwrite
                 (_other, new_val) => {
+                    let stored_val = &new_val;
+                    let obj_ptr = Gc::as_ptr(obj) as *const _;
+                    let stored_obj_ptr = if let Value::Object(o) = stored_val {
+                        Gc::as_ptr(*o) as *const _
+                    } else {
+                        std::ptr::null()
+                    };
+                    log::debug!(
+                        "DBG object-literal insert: obj={:p} key={:?} storing_val={:?} stored_obj_ptr={:p}",
+                        obj_ptr,
+                        &key_v,
+                        stored_val,
+                        stored_obj_ptr
+                    );
                     object_set_key_value(mc, &obj, &key_v, &new_val)?;
                 }
             }
         } else {
-            object_set_key_value(mc, &obj, &key_v, &val)?;
+            {
+                let stored_val = &val;
+                let obj_ptr = Gc::as_ptr(obj) as *const _;
+                let stored_obj_ptr = if let Value::Object(o) = stored_val {
+                    Gc::as_ptr(*o) as *const _
+                } else {
+                    std::ptr::null()
+                };
+                log::debug!(
+                    "DBG object-literal insert: obj={:p} key={:?} storing_val={:?} stored_obj_ptr={:p}",
+                    obj_ptr,
+                    &key_v,
+                    stored_val,
+                    stored_obj_ptr
+                );
+                object_set_key_value(mc, &obj, &key_v, &val)?;
+            }
         }
     }
     Ok(Value::Object(obj))

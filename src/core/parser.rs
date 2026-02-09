@@ -2283,13 +2283,13 @@ fn parse_array_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> Re
     Ok(elements)
 }
 
-fn parse_object_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> Result<Vec<(Expr, Expr, bool)>, JSError> {
+fn parse_object_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> Result<Vec<(Expr, Expr, bool, bool)>, JSError> {
     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
         return Err(raise_parse_error_at!(tokens.get(*index)));
     }
     *index += 1; // consume {
 
-    let mut properties: Vec<(Expr, Expr, bool)> = Vec::new();
+    let mut properties: Vec<(Expr, Expr, bool, bool)> = Vec::new();
     if *index < tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
         *index += 1; // consume }
         return Ok(properties);
@@ -2319,7 +2319,7 @@ fn parse_object_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> R
             } else {
                 parse_assignment(tokens, index)?
             };
-            properties.push((Expr::StringLit(Vec::new()), rest_expr, true));
+            properties.push((Expr::StringLit(Vec::new()), rest_expr, true, false));
 
             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                 return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -2418,7 +2418,7 @@ fn parse_object_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> R
             expr
         };
 
-        properties.push((key_expr_final, target_expr, false));
+        properties.push((key_expr_final, target_expr, false, false));
 
         while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
             *index += 1;
@@ -3729,7 +3729,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         // properties via the comma operator.
                         let expr = parse_assignment(tokens, index)?;
                         // Use empty string as key for spread
-                        properties.push((Expr::StringLit(Vec::new()), Expr::Spread(Box::new(expr)), false));
+                        properties.push((Expr::StringLit(Vec::new()), Expr::Spread(Box::new(expr)), false, false));
                     } else {
                         // Check for getter/setter: only treat as getter/setter if the
                         // identifier 'get'/'set' is followed by a property key and
@@ -3822,6 +3822,8 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
 
                         // Parse key
                         let mut is_shorthand_candidate = false;
+                        // Track whether the property name was a computed name (e.g. `[expr]`)
+                        let mut key_is_computed = false;
                         // Optional 'async' keyword indicates async concise method
                         let mut is_async_member = false;
                         if *index < tokens.len() && matches!(tokens[*index].token, Token::Async) {
@@ -3855,26 +3857,30 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                         properties.push((
                                             Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
                                             Expr::AsyncGeneratorFunction(None, params, body),
-                                            true,
+                                            false,
+                                            false,
                                         ));
                                     } else {
                                         properties.push((
                                             Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
                                             Expr::GeneratorFunction(None, params, body),
-                                            true,
+                                            false,
+                                            false,
                                         ));
                                     }
                                 } else if is_async_member {
                                     properties.push((
                                         Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
                                         Expr::AsyncFunction(None, params, body),
-                                        true,
+                                        false,
+                                        false,
                                     ));
                                 } else {
                                     properties.push((
                                         Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
                                         Expr::Function(None, params, body),
-                                        true,
+                                        false,
+                                        false,
                                     ));
                                 }
 
@@ -3904,6 +3910,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             // Use canonical JS string conversion to preserve formatting like '1e+55'
                             let s = crate::core::value_to_string(&crate::core::Value::Number(n));
                             Expr::StringLit(crate::unicode::utf8_to_utf16(&s))
+                        } else if let Some(Token::BigInt(snum)) = tokens.get(*index).map(|t| t.token.clone()) {
+                            // BigInt literal as an uncomputed property key -> use its canonical string (no 'n' suffix)
+                            *index += 1;
+                            Expr::StringLit(crate::unicode::utf8_to_utf16(&snum))
                         } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
                             *index += 1;
                             Expr::StringLit(s)
@@ -3912,6 +3922,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             // property names. Token::as_identifier_string maps those tokens to
                             // their identifier string when appropriate.
                             if let Some(id) = tok.as_identifier_string() {
+                                // Treat identifier-like tokens (including contextual keywords
+                                // such as `await`) as shorthand candidates for property
+                                // shorthand parsing (e.g. `{ await }`).
+                                is_shorthand_candidate = true;
                                 *index += 1;
                                 Expr::StringLit(crate::unicode::utf8_to_utf16(&id))
                             } else if let Some(Token::Default) = tokens.get(*index).map(|t| t.token.clone()) {
@@ -3920,6 +3934,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 Expr::StringLit(crate::unicode::utf8_to_utf16("default"))
                             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                                 // Computed key (e.g., get [Symbol.toPrimitive]())
+                                key_is_computed = true;
                                 *index += 1; // consume [
                                 let expr = parse_assignment(tokens, index)?;
                                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
@@ -3932,6 +3947,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                         } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                             // Computed key (e.g., get [Symbol.toPrimitive]())
+                            key_is_computed = true;
                             *index += 1; // consume [
                             let expr = parse_assignment(tokens, index)?;
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
@@ -3964,9 +3980,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             *index += 1; // consume }
                             if is_generator {
-                                properties.push((key_expr, Expr::GeneratorFunction(None, params, body), true));
+                                properties.push((key_expr, Expr::GeneratorFunction(None, params, body), key_is_computed, false));
                             } else {
-                                properties.push((key_expr, Expr::Function(None, params, body), true));
+                                properties.push((key_expr, Expr::Function(None, params, body), key_is_computed, false));
                             }
 
                             // After adding method, skip any newline/semicolons and handle comma/end in outer loop
@@ -4005,7 +4021,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1; // consume }
-                            properties.push((key_expr, Expr::Getter(Box::new(Expr::Function(None, Vec::new(), body))), false));
+                            properties.push((
+                                key_expr,
+                                Expr::Getter(Box::new(Expr::Function(None, Vec::new(), body))),
+                                false,
+                                false,
+                            ));
                         } else if is_setter {
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -4024,19 +4045,19 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1; // consume }
-                            properties.push((key_expr, Expr::Setter(Box::new(Expr::Function(None, params, body))), false));
+                            properties.push((key_expr, Expr::Setter(Box::new(Expr::Function(None, params, body))), false, false));
                         } else {
                             // Regular property
                             if *index < tokens.len() && matches!(tokens[*index].token, Token::Colon) {
                                 *index += 1; // consume :
                                 let value = parse_assignment(tokens, index)?;
-                                properties.push((key_expr, value, false));
+                                properties.push((key_expr, value, key_is_computed, true));
                             } else {
                                 // Shorthand property { x } -> { x: x }
                                 if is_shorthand_candidate {
                                     if let Expr::StringLit(s) = &key_expr {
                                         let name = utf16_to_utf8(s);
-                                        properties.push((key_expr, Expr::Var(name, None, None), false));
+                                        properties.push((key_expr, Expr::Var(name, None, None), key_is_computed, false));
                                     } else {
                                         return Err(raise_parse_error_at!(tokens.get(*index)));
                                     }

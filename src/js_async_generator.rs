@@ -279,7 +279,7 @@ fn expr_contains_yield_or_await(e: &Expr) -> bool {
         Expr::Call(a, args) => expr_contains_yield_or_await(a) || args.iter().any(expr_contains_yield_or_await),
         Expr::Object(pairs) => pairs
             .iter()
-            .any(|(k, v, _)| expr_contains_yield_or_await(k) || expr_contains_yield_or_await(v)),
+            .any(|(k, v, _, _)| expr_contains_yield_or_await(k) || expr_contains_yield_or_await(v)),
         Expr::Array(items) => items.iter().any(|it| it.as_ref().is_some_and(expr_contains_yield_or_await)),
         Expr::UnaryNeg(a)
         | Expr::LogicalNot(a)

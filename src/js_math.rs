@@ -5,74 +5,74 @@ use crate::error::JSError;
 /// Create the Math object with all mathematical constants and functions
 pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let math_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &math_obj, "PI", Value::Number(std::f64::consts::PI))?;
+    object_set_key_value(mc, &math_obj, "PI", &Value::Number(std::f64::consts::PI))?;
     math_obj.borrow_mut(mc).set_non_configurable("PI");
     math_obj.borrow_mut(mc).set_non_writable("PI");
 
-    object_set_key_value(mc, &math_obj, "E", Value::Number(std::f64::consts::E))?;
+    object_set_key_value(mc, &math_obj, "E", &Value::Number(std::f64::consts::E))?;
     math_obj.borrow_mut(mc).set_non_configurable("E");
     math_obj.borrow_mut(mc).set_non_writable("E");
 
-    object_set_key_value(mc, &math_obj, "LN2", Value::Number(std::f64::consts::LN_2))?;
+    object_set_key_value(mc, &math_obj, "LN2", &Value::Number(std::f64::consts::LN_2))?;
     math_obj.borrow_mut(mc).set_non_configurable("LN2");
     math_obj.borrow_mut(mc).set_non_writable("LN2");
 
-    object_set_key_value(mc, &math_obj, "LN10", Value::Number(std::f64::consts::LN_10))?;
+    object_set_key_value(mc, &math_obj, "LN10", &Value::Number(std::f64::consts::LN_10))?;
     math_obj.borrow_mut(mc).set_non_configurable("LN10");
     math_obj.borrow_mut(mc).set_non_writable("LN10");
 
-    object_set_key_value(mc, &math_obj, "LOG2E", Value::Number(std::f64::consts::LOG2_E))?;
+    object_set_key_value(mc, &math_obj, "LOG2E", &Value::Number(std::f64::consts::LOG2_E))?;
     math_obj.borrow_mut(mc).set_non_configurable("LOG2E");
     math_obj.borrow_mut(mc).set_non_writable("LOG2E");
 
-    object_set_key_value(mc, &math_obj, "LOG10E", Value::Number(std::f64::consts::LOG10_E))?;
+    object_set_key_value(mc, &math_obj, "LOG10E", &Value::Number(std::f64::consts::LOG10_E))?;
     math_obj.borrow_mut(mc).set_non_configurable("LOG10E");
     math_obj.borrow_mut(mc).set_non_writable("LOG10E");
 
-    object_set_key_value(mc, &math_obj, "SQRT1_2", Value::Number(std::f64::consts::FRAC_1_SQRT_2))?;
+    object_set_key_value(mc, &math_obj, "SQRT1_2", &Value::Number(std::f64::consts::FRAC_1_SQRT_2))?;
     math_obj.borrow_mut(mc).set_non_configurable("SQRT1_2");
     math_obj.borrow_mut(mc).set_non_writable("SQRT1_2");
-    object_set_key_value(mc, &math_obj, "SQRT2", Value::Number(std::f64::consts::SQRT_2))?;
+    object_set_key_value(mc, &math_obj, "SQRT2", &Value::Number(std::f64::consts::SQRT_2))?;
     math_obj.borrow_mut(mc).set_non_configurable("SQRT2");
     math_obj.borrow_mut(mc).set_non_writable("SQRT2");
 
-    object_set_key_value(mc, &math_obj, "floor", Value::Function("Math.floor".to_string()))?;
-    object_set_key_value(mc, &math_obj, "ceil", Value::Function("Math.ceil".to_string()))?;
-    object_set_key_value(mc, &math_obj, "round", Value::Function("Math.round".to_string()))?;
-    object_set_key_value(mc, &math_obj, "abs", Value::Function("Math.abs".to_string()))?;
-    object_set_key_value(mc, &math_obj, "sqrt", Value::Function("Math.sqrt".to_string()))?;
-    object_set_key_value(mc, &math_obj, "pow", Value::Function("Math.pow".to_string()))?;
-    object_set_key_value(mc, &math_obj, "sin", Value::Function("Math.sin".to_string()))?;
-    object_set_key_value(mc, &math_obj, "cos", Value::Function("Math.cos".to_string()))?;
-    object_set_key_value(mc, &math_obj, "tan", Value::Function("Math.tan".to_string()))?;
-    object_set_key_value(mc, &math_obj, "random", Value::Function("Math.random".to_string()))?;
-    object_set_key_value(mc, &math_obj, "clz32", Value::Function("Math.clz32".to_string()))?;
-    object_set_key_value(mc, &math_obj, "imul", Value::Function("Math.imul".to_string()))?;
-    object_set_key_value(mc, &math_obj, "max", Value::Function("Math.max".to_string()))?;
-    object_set_key_value(mc, &math_obj, "min", Value::Function("Math.min".to_string()))?;
-    object_set_key_value(mc, &math_obj, "asin", Value::Function("Math.asin".to_string()))?;
-    object_set_key_value(mc, &math_obj, "acos", Value::Function("Math.acos".to_string()))?;
-    object_set_key_value(mc, &math_obj, "atan", Value::Function("Math.atan".to_string()))?;
-    object_set_key_value(mc, &math_obj, "atan2", Value::Function("Math.atan2".to_string()))?;
-    object_set_key_value(mc, &math_obj, "sinh", Value::Function("Math.sinh".to_string()))?;
-    object_set_key_value(mc, &math_obj, "cosh", Value::Function("Math.cosh".to_string()))?;
-    object_set_key_value(mc, &math_obj, "tanh", Value::Function("Math.tanh".to_string()))?;
-    object_set_key_value(mc, &math_obj, "asinh", Value::Function("Math.asinh".to_string()))?;
-    object_set_key_value(mc, &math_obj, "acosh", Value::Function("Math.acosh".to_string()))?;
-    object_set_key_value(mc, &math_obj, "atanh", Value::Function("Math.atanh".to_string()))?;
-    object_set_key_value(mc, &math_obj, "exp", Value::Function("Math.exp".to_string()))?;
-    object_set_key_value(mc, &math_obj, "expm1", Value::Function("Math.expm1".to_string()))?;
-    object_set_key_value(mc, &math_obj, "log", Value::Function("Math.log".to_string()))?;
-    object_set_key_value(mc, &math_obj, "log10", Value::Function("Math.log10".to_string()))?;
-    object_set_key_value(mc, &math_obj, "log1p", Value::Function("Math.log1p".to_string()))?;
-    object_set_key_value(mc, &math_obj, "log2", Value::Function("Math.log2".to_string()))?;
-    object_set_key_value(mc, &math_obj, "fround", Value::Function("Math.fround".to_string()))?;
-    object_set_key_value(mc, &math_obj, "trunc", Value::Function("Math.trunc".to_string()))?;
-    object_set_key_value(mc, &math_obj, "cbrt", Value::Function("Math.cbrt".to_string()))?;
-    object_set_key_value(mc, &math_obj, "hypot", Value::Function("Math.hypot".to_string()))?;
-    object_set_key_value(mc, &math_obj, "sign", Value::Function("Math.sign".to_string()))?;
+    object_set_key_value(mc, &math_obj, "floor", &Value::Function("Math.floor".to_string()))?;
+    object_set_key_value(mc, &math_obj, "ceil", &Value::Function("Math.ceil".to_string()))?;
+    object_set_key_value(mc, &math_obj, "round", &Value::Function("Math.round".to_string()))?;
+    object_set_key_value(mc, &math_obj, "abs", &Value::Function("Math.abs".to_string()))?;
+    object_set_key_value(mc, &math_obj, "sqrt", &Value::Function("Math.sqrt".to_string()))?;
+    object_set_key_value(mc, &math_obj, "pow", &Value::Function("Math.pow".to_string()))?;
+    object_set_key_value(mc, &math_obj, "sin", &Value::Function("Math.sin".to_string()))?;
+    object_set_key_value(mc, &math_obj, "cos", &Value::Function("Math.cos".to_string()))?;
+    object_set_key_value(mc, &math_obj, "tan", &Value::Function("Math.tan".to_string()))?;
+    object_set_key_value(mc, &math_obj, "random", &Value::Function("Math.random".to_string()))?;
+    object_set_key_value(mc, &math_obj, "clz32", &Value::Function("Math.clz32".to_string()))?;
+    object_set_key_value(mc, &math_obj, "imul", &Value::Function("Math.imul".to_string()))?;
+    object_set_key_value(mc, &math_obj, "max", &Value::Function("Math.max".to_string()))?;
+    object_set_key_value(mc, &math_obj, "min", &Value::Function("Math.min".to_string()))?;
+    object_set_key_value(mc, &math_obj, "asin", &Value::Function("Math.asin".to_string()))?;
+    object_set_key_value(mc, &math_obj, "acos", &Value::Function("Math.acos".to_string()))?;
+    object_set_key_value(mc, &math_obj, "atan", &Value::Function("Math.atan".to_string()))?;
+    object_set_key_value(mc, &math_obj, "atan2", &Value::Function("Math.atan2".to_string()))?;
+    object_set_key_value(mc, &math_obj, "sinh", &Value::Function("Math.sinh".to_string()))?;
+    object_set_key_value(mc, &math_obj, "cosh", &Value::Function("Math.cosh".to_string()))?;
+    object_set_key_value(mc, &math_obj, "tanh", &Value::Function("Math.tanh".to_string()))?;
+    object_set_key_value(mc, &math_obj, "asinh", &Value::Function("Math.asinh".to_string()))?;
+    object_set_key_value(mc, &math_obj, "acosh", &Value::Function("Math.acosh".to_string()))?;
+    object_set_key_value(mc, &math_obj, "atanh", &Value::Function("Math.atanh".to_string()))?;
+    object_set_key_value(mc, &math_obj, "exp", &Value::Function("Math.exp".to_string()))?;
+    object_set_key_value(mc, &math_obj, "expm1", &Value::Function("Math.expm1".to_string()))?;
+    object_set_key_value(mc, &math_obj, "log", &Value::Function("Math.log".to_string()))?;
+    object_set_key_value(mc, &math_obj, "log10", &Value::Function("Math.log10".to_string()))?;
+    object_set_key_value(mc, &math_obj, "log1p", &Value::Function("Math.log1p".to_string()))?;
+    object_set_key_value(mc, &math_obj, "log2", &Value::Function("Math.log2".to_string()))?;
+    object_set_key_value(mc, &math_obj, "fround", &Value::Function("Math.fround".to_string()))?;
+    object_set_key_value(mc, &math_obj, "trunc", &Value::Function("Math.trunc".to_string()))?;
+    object_set_key_value(mc, &math_obj, "cbrt", &Value::Function("Math.cbrt".to_string()))?;
+    object_set_key_value(mc, &math_obj, "hypot", &Value::Function("Math.hypot".to_string()))?;
+    object_set_key_value(mc, &math_obj, "sign", &Value::Function("Math.sign".to_string()))?;
 
-    env_set(mc, env, "Math", Value::Object(math_obj))?;
+    env_set(mc, env, "Math", &Value::Object(math_obj))?;
     Ok(())
 }
 

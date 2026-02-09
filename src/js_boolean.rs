@@ -5,8 +5,8 @@ use crate::unicode::utf8_to_utf16;
 
 pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let boolean_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &boolean_ctor, "__is_constructor", Value::Boolean(true))?;
-    object_set_key_value(mc, &boolean_ctor, "__native_ctor", Value::String(utf8_to_utf16("Boolean")))?;
+    object_set_key_value(mc, &boolean_ctor, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &boolean_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Boolean")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -24,16 +24,16 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         boolean_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &boolean_ctor, "prototype", Value::Object(boolean_proto))?;
-    object_set_key_value(mc, &boolean_proto, "constructor", Value::Object(boolean_ctor))?;
+    object_set_key_value(mc, &boolean_ctor, "prototype", &Value::Object(boolean_proto))?;
+    object_set_key_value(mc, &boolean_proto, "constructor", &Value::Object(boolean_ctor))?;
 
     let val = Value::Function("Boolean.prototype.toString".to_string());
-    object_set_key_value(mc, &boolean_proto, "toString", val)?;
+    object_set_key_value(mc, &boolean_proto, "toString", &val)?;
 
     let val = Value::Function("Boolean.prototype.valueOf".to_string());
-    object_set_key_value(mc, &boolean_proto, "valueOf", val)?;
+    object_set_key_value(mc, &boolean_proto, "valueOf", &val)?;
 
-    env_set(mc, env, "Boolean", Value::Object(boolean_ctor))?;
+    env_set(mc, env, "Boolean", &Value::Object(boolean_ctor))?;
     Ok(())
 }
 
@@ -48,9 +48,9 @@ pub(crate) fn handle_boolean_constructor<'gc>(
         evaluated_args[0].to_truthy()
     };
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
-    object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string()))?;
-    object_set_key_value(mc, &obj, "__value__", Value::Boolean(bool_val))?;
+    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
+    object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
+    object_set_key_value(mc, &obj, "__value__", &Value::Boolean(bool_val))?;
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
     Ok(Value::Object(obj))
 }
@@ -61,8 +61,7 @@ pub fn boolean_prototype_to_string<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     if let Some(this_rc) = crate::core::env_get(env, "this") {
-        let this_val = this_rc.borrow().clone();
-        return handle_boolean_prototype_method(this_val, "toString");
+        return handle_boolean_prototype_method(&this_rc.borrow(), "toString");
     }
     Err(crate::raise_eval_error!("Boolean.prototype.toString called without this"))
 }
@@ -73,8 +72,7 @@ pub fn boolean_prototype_value_of<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     if let Some(this_rc) = crate::core::env_get(env, "this") {
-        let this_val = this_rc.borrow().clone();
-        return handle_boolean_prototype_method(this_val, "valueOf");
+        return handle_boolean_prototype_method(&this_rc.borrow(), "valueOf");
     }
     Err(crate::raise_eval_error!("Boolean.prototype.valueOf called without this"))
 }
@@ -87,14 +85,14 @@ pub fn boolean_constructor<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalE
     }
 }
 
-pub fn handle_boolean_prototype_method<'gc>(this_val: Value<'gc>, method: &str) -> Result<Value<'gc>, JSError> {
+pub fn handle_boolean_prototype_method<'gc>(this_val: &Value<'gc>, method: &str) -> Result<Value<'gc>, JSError> {
     match method {
         "toString" => {
-            let b = this_boolean_value(&this_val)?;
+            let b = this_boolean_value(this_val)?;
             Ok(Value::String(utf8_to_utf16(&b.to_string())))
         }
         "valueOf" => {
-            let b = this_boolean_value(&this_val)?;
+            let b = this_boolean_value(this_val)?;
             Ok(Value::Boolean(b))
         }
         _ => Err(crate::raise_type_error!(format!("Boolean.prototype.{} is not a function", method))),

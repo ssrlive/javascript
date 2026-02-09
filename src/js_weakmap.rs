@@ -84,8 +84,8 @@ fn initialize_weakmap_from_iterable<'gc>(
 /// Initialize WeakMap constructor and prototype
 pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let weakmap_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &weakmap_ctor, "__is_constructor", Value::Boolean(true))?;
-    object_set_key_value(mc, &weakmap_ctor, "__native_ctor", Value::String(utf8_to_utf16("WeakMap")))?;
+    object_set_key_value(mc, &weakmap_ctor, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &weakmap_ctor, "__native_ctor", &Value::String(utf8_to_utf16("WeakMap")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -103,21 +103,21 @@ pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         weakmap_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &weakmap_ctor, "prototype", Value::Object(weakmap_proto))?;
-    object_set_key_value(mc, &weakmap_proto, "constructor", Value::Object(weakmap_ctor))?;
+    object_set_key_value(mc, &weakmap_ctor, "prototype", &Value::Object(weakmap_proto))?;
+    object_set_key_value(mc, &weakmap_proto, "constructor", &Value::Object(weakmap_ctor))?;
 
     // Register instance methods
     let methods = vec!["set", "get", "has", "delete", "toString"];
 
     for method in methods {
         let val = Value::Function(format!("WeakMap.prototype.{method}"));
-        object_set_key_value(mc, &weakmap_proto, method, val)?;
+        object_set_key_value(mc, &weakmap_proto, method, &val)?;
         weakmap_proto.borrow_mut(mc).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
     weakmap_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    env_set(mc, env, "WeakMap", Value::Object(weakmap_ctor))?;
+    env_set(mc, env, "WeakMap", &Value::Object(weakmap_ctor))?;
     Ok(())
 }
 

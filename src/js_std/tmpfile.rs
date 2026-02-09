@@ -42,18 +42,18 @@ pub(crate) fn create_tmpfile<'gc>(mc: &MutationContext<'gc>) -> Result<Value<'gc
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
             let tmp = new_js_object_data(mc);
-            object_set_key_value(mc, &tmp, "__file_id", Value::Number(file_id as f64))?;
-            object_set_key_value(mc, &tmp, "__eof", Value::Boolean(false))?;
+            object_set_key_value(mc, &tmp, "__file_id", &Value::Number(file_id as f64))?;
+            object_set_key_value(mc, &tmp, "__eof", &Value::Boolean(false))?;
             // methods
-            object_set_key_value(mc, &tmp, "puts", Value::Function("tmp.puts".to_string()))?;
-            object_set_key_value(mc, &tmp, "readAsString", Value::Function("tmp.readAsString".to_string()))?;
-            object_set_key_value(mc, &tmp, "seek", Value::Function("tmp.seek".to_string()))?;
-            object_set_key_value(mc, &tmp, "tell", Value::Function("tmp.tell".to_string()))?;
-            object_set_key_value(mc, &tmp, "putByte", Value::Function("tmp.putByte".to_string()))?;
-            object_set_key_value(mc, &tmp, "getByte", Value::Function("tmp.getByte".to_string()))?;
-            object_set_key_value(mc, &tmp, "getline", Value::Function("tmp.getline".to_string()))?;
-            object_set_key_value(mc, &tmp, "eof", Value::Function("tmp.eof".to_string()))?;
-            object_set_key_value(mc, &tmp, "close", Value::Function("tmp.close".to_string()))?;
+            object_set_key_value(mc, &tmp, "puts", &Value::Function("tmp.puts".to_string()))?;
+            object_set_key_value(mc, &tmp, "readAsString", &Value::Function("tmp.readAsString".to_string()))?;
+            object_set_key_value(mc, &tmp, "seek", &Value::Function("tmp.seek".to_string()))?;
+            object_set_key_value(mc, &tmp, "tell", &Value::Function("tmp.tell".to_string()))?;
+            object_set_key_value(mc, &tmp, "putByte", &Value::Function("tmp.putByte".to_string()))?;
+            object_set_key_value(mc, &tmp, "getByte", &Value::Function("tmp.getByte".to_string()))?;
+            object_set_key_value(mc, &tmp, "getline", &Value::Function("tmp.getline".to_string()))?;
+            object_set_key_value(mc, &tmp, "eof", &Value::Function("tmp.eof".to_string()))?;
+            object_set_key_value(mc, &tmp, "close", &Value::Function("tmp.close".to_string()))?;
             Ok(Value::Object(tmp))
         }
         Err(e) => Err(raise_eval_error!(format!("Failed to create temporary file: {e}"))),

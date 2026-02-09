@@ -40,7 +40,7 @@ impl Repl {
         // Initialize global constructors
         arena.mutate(|mc, root| {
             initialize_global_constructors(mc, &root.global_env).unwrap();
-            env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env)).unwrap();
+            env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env)).unwrap();
         });
 
         Repl { arena }

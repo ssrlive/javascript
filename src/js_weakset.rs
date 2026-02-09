@@ -76,8 +76,8 @@ fn initialize_weakset_from_iterable<'gc>(
 /// Initialize WeakSet constructor and prototype
 pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let weakset_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &weakset_ctor, "__is_constructor", Value::Boolean(true))?;
-    object_set_key_value(mc, &weakset_ctor, "__native_ctor", Value::String(utf8_to_utf16("WeakSet")))?;
+    object_set_key_value(mc, &weakset_ctor, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &weakset_ctor, "__native_ctor", &Value::String(utf8_to_utf16("WeakSet")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -95,21 +95,21 @@ pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         weakset_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &weakset_ctor, "prototype", Value::Object(weakset_proto))?;
-    object_set_key_value(mc, &weakset_proto, "constructor", Value::Object(weakset_ctor))?;
+    object_set_key_value(mc, &weakset_ctor, "prototype", &Value::Object(weakset_proto))?;
+    object_set_key_value(mc, &weakset_proto, "constructor", &Value::Object(weakset_ctor))?;
 
     // Register instance methods
     let methods = vec!["add", "has", "delete", "toString"];
 
     for method in methods {
         let val = Value::Function(format!("WeakSet.prototype.{}", method));
-        object_set_key_value(mc, &weakset_proto, method, val)?;
+        object_set_key_value(mc, &weakset_proto, method, &val)?;
         weakset_proto.borrow_mut(mc).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
     weakset_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    env_set(mc, env, "WeakSet", Value::Object(weakset_ctor))?;
+    env_set(mc, env, "WeakSet", &Value::Object(weakset_ctor))?;
     Ok(())
 }
 

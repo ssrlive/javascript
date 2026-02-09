@@ -8,8 +8,8 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Tim
 pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     // Create Date constructor and prototype
     let date_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &date_ctor, "__is_constructor", Value::Boolean(true))?;
-    object_set_key_value(mc, &date_ctor, "__native_ctor", Value::String(utf8_to_utf16("Date")))?;
+    object_set_key_value(mc, &date_ctor, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &date_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Date")))?;
 
     // Get Object.prototype if available
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -27,8 +27,8 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
         date_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &date_ctor, "prototype", Value::Object(date_proto))?;
-    object_set_key_value(mc, &date_proto, "constructor", Value::Object(date_ctor))?;
+    object_set_key_value(mc, &date_ctor, "prototype", &Value::Object(date_proto))?;
+    object_set_key_value(mc, &date_proto, "constructor", &Value::Object(date_ctor))?;
 
     // Instance methods
     let inst_methods = vec![
@@ -57,7 +57,7 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
         "toLocaleTimeString",
     ];
     for method in inst_methods {
-        object_set_key_value(mc, &date_proto, method, Value::Function(format!("Date.prototype.{method}")))?;
+        object_set_key_value(mc, &date_proto, method, &Value::Function(format!("Date.prototype.{method}")))?;
         date_proto.borrow_mut(mc).set_non_enumerable(method);
         if let Some(val_rc) = object_get_key_value(&date_proto, method) {
             log::debug!("DBG initialize_date: method {} stored as {:?}", method, val_rc.borrow());
@@ -67,10 +67,10 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
     date_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Static methods
-    object_set_key_value(mc, &date_ctor, "now", Value::Function("Date.now".to_string()))?;
-    object_set_key_value(mc, &date_ctor, "parse", Value::Function("Date.parse".to_string()))?;
-    object_set_key_value(mc, &date_ctor, "UTC", Value::Function("Date.UTC".to_string()))?;
-    env_set(mc, env, "Date", Value::Object(date_ctor))?;
+    object_set_key_value(mc, &date_ctor, "now", &Value::Function("Date.now".to_string()))?;
+    object_set_key_value(mc, &date_ctor, "parse", &Value::Function("Date.parse".to_string()))?;
+    object_set_key_value(mc, &date_ctor, "UTC", &Value::Function("Date.UTC".to_string()))?;
+    env_set(mc, env, "Date", &Value::Object(date_ctor))?;
     Ok(())
 }
 
@@ -96,7 +96,7 @@ fn get_time_stamp_value(date_obj: &JSObjectDataPtr) -> Result<f64, JSError> {
 }
 
 fn set_time_stamp_value<'gc>(mc: &MutationContext<'gc>, date_obj: &JSObjectDataPtr<'gc>, timestamp: f64) -> Result<(), JSError> {
-    object_set_key_value(mc, date_obj, "__timestamp", Value::Number(timestamp))
+    object_set_key_value(mc, date_obj, "__timestamp", &Value::Number(timestamp))
 }
 
 /// Parse a date string into a timestamp (milliseconds since Unix epoch)

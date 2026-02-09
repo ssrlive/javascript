@@ -9,7 +9,7 @@ use crate::unicode::utf8_to_utf16;
 pub fn handle_async_closure_call<'gc>(
     mc: &MutationContext<'gc>,
     closure: &ClosureData<'gc>,
-    _this_val: Option<Value<'gc>>,
+    _this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     _fn_obj: Option<JSObjectDataPtr<'gc>>,
@@ -28,7 +28,7 @@ pub fn handle_async_closure_call<'gc>(
             if let Value::Object(gen_obj) = gen_val
                 && let Some(gen_inner) = object_get_key_value(&gen_obj, "__generator__")
                 && let Value::Generator(gen_ptr) = &*gen_inner.borrow()
-                && let Err(e) = continue_async_step_direct(mc, *gen_ptr, resolve.clone(), reject.clone(), Ok(Value::Undefined), env)
+                && let Err(e) = continue_async_step_direct(mc, *gen_ptr, &resolve, &reject, &Ok(Value::Undefined), env)
                 && let Err(e) = crate::js_promise::call_function(mc, &reject, &[Value::String(utf8_to_utf16(&e.message()))], env)
             {
                 log::debug!("error calling reject on promise: {e:?}");
@@ -42,12 +42,12 @@ pub fn handle_async_closure_call<'gc>(
                     let err_val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = &err_val {
                         if let Some(line) = je.js_line()
-                            && let Err(e) = object_set_key_value(mc, obj, "__line__", Value::Number(line as f64))
+                            && let Err(e) = object_set_key_value(mc, obj, "__line__", &Value::Number(line as f64))
                         {
                             log::debug!("error setting __line__ on error object: {:?}", e);
                         }
                         if let Some(col) = je.js_column()
-                            && let Err(e) = object_set_key_value(mc, obj, "__column__", Value::Number(col as f64))
+                            && let Err(e) = object_set_key_value(mc, obj, "__column__", &Value::Number(col as f64))
                         {
                             log::debug!("error setting __column__ on error object: {:?}", e);
                         }
@@ -69,10 +69,10 @@ pub fn handle_async_closure_call<'gc>(
 fn step<'gc>(
     mc: &MutationContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
-    resolve: Value<'gc>,
-    reject: Value<'gc>,
+    resolve: &Value<'gc>,
+    reject: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    next_val: Result<Value<'gc>, Value<'gc>>, // Ok(val) for next(val), Err(err) for throw(err)
+    next_val: &Result<Value<'gc>, Value<'gc>>, // Ok(val) for next(val), Err(err) for throw(err)
 ) -> Result<(), JSError> {
     log::trace!("DEBUG: step called");
     // Invoke generator.next(val) or generator.throw(err)
@@ -107,7 +107,7 @@ fn step<'gc>(
 
             if done {
                 // Resolve the outer promise with the return value
-                crate::js_promise::call_function(mc, &resolve, &[value], env)?;
+                crate::js_promise::call_function(mc, resolve, &[value], env)?;
             } else {
                 // Not done, "value" is the yielded promise (or value to be awaited)
                 // Promise.resolve(value).then(res => step(next(res)), err => step(throw(err)))
@@ -130,8 +130,8 @@ fn step<'gc>(
 
                 let p_val = crate::js_promise::call_function(mc, &promise_resolve, &[value], env)?;
 
-                let on_fulfilled = create_async_step_callback(mc, generator, resolve.clone(), reject.clone(), *env, false);
-                let on_rejected = create_async_step_callback(mc, generator, resolve.clone(), reject.clone(), *env, true);
+                let on_fulfilled = create_async_step_callback(mc, generator, resolve, reject, *env, false);
+                let on_rejected = create_async_step_callback(mc, generator, resolve, reject, *env, true);
 
                 log::trace!("DEBUG: p_val type: {:?}", p_val);
 
@@ -140,7 +140,7 @@ fn step<'gc>(
                         crate::js_promise::perform_promise_then(mc, promise_ref, Some(on_fulfilled), Some(on_rejected), None, env)?;
                     } else if let Some(then_method) = object_get_key_value(p_obj, "then") {
                         log::trace!("DEBUG: Calling then method with this");
-                        call_function_with_this(mc, &then_method.borrow(), Some(p_val), &[on_fulfilled, on_rejected], env)?;
+                        call_function_with_this(mc, &then_method.borrow(), Some(&p_val), &[on_fulfilled, on_rejected], env)?;
                     }
                 }
             }
@@ -154,12 +154,12 @@ fn step<'gc>(
                     let val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = &val {
                         if let Some(line) = j.js_line()
-                            && let Err(e) = object_set_key_value(mc, obj, "__line__", Value::Number(line as f64))
+                            && let Err(e) = object_set_key_value(mc, obj, "__line__", &Value::Number(line as f64))
                         {
                             log::warn!("error setting __line__ on error object: {:?}", e);
                         }
                         if let Some(col) = j.js_column()
-                            && let Err(e) = object_set_key_value(mc, obj, "__column__", Value::Number(col as f64))
+                            && let Err(e) = object_set_key_value(mc, obj, "__column__", &Value::Number(col as f64))
                         {
                             log::warn!("error setting __column__ on error object: {:?}", e);
                         }
@@ -167,7 +167,7 @@ fn step<'gc>(
                     val
                 }
             };
-            crate::js_promise::call_function(mc, &reject, &[err_val], env)?;
+            crate::js_promise::call_function(mc, reject, &[err_val], env)?;
         }
     }
     Ok(())
@@ -176,15 +176,15 @@ fn step<'gc>(
 fn create_async_step_callback<'gc>(
     mc: &MutationContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
-    resolve: Value<'gc>,
-    reject: Value<'gc>,
+    resolve: &Value<'gc>,
+    reject: &Value<'gc>,
     global_env: JSObjectDataPtr<'gc>,
     is_reject: bool,
 ) -> Value<'gc> {
     let env = crate::new_js_object_data(mc);
     env.borrow_mut(mc).prototype = Some(global_env);
 
-    object_set_key_value(mc, &env, "__async_generator", Value::Generator(generator)).unwrap();
+    object_set_key_value(mc, &env, "__async_generator", &Value::Generator(generator)).unwrap();
     object_set_key_value(mc, &env, "__async_resolve", resolve).unwrap();
     object_set_key_value(mc, &env, "__async_reject", reject).unwrap();
 
@@ -215,7 +215,7 @@ pub fn __internal_async_step_resolve<'gc>(
         log::trace!("DEBUG: __internal_async_step_resolve arg[0]={:?}", args[0]);
     }
     let value = args.first().cloned().unwrap_or(Value::Undefined);
-    queue_async_step_from_env(mc, env, value, false)
+    queue_async_step_from_env(mc, env, &value, false)
 }
 
 pub fn __internal_async_step_reject<'gc>(
@@ -225,13 +225,13 @@ pub fn __internal_async_step_reject<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     log::trace!("DEBUG: __internal_async_step_reject called with arg count {}", args.len());
     let reason = args.first().cloned().unwrap_or(Value::Undefined);
-    queue_async_step_from_env(mc, env, reason, true)
+    queue_async_step_from_env(mc, env, &reason, true)
 }
 
 fn queue_async_step_from_env<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    value: Value<'gc>,
+    value: &Value<'gc>,
     is_reject: bool,
 ) -> Result<Value<'gc>, JSError> {
     let generator_val = object_get_key_value(env, "__async_generator").unwrap().borrow().clone();
@@ -239,7 +239,7 @@ fn queue_async_step_from_env<'gc>(
     let reject_val = object_get_key_value(env, "__async_reject").unwrap().borrow().clone();
 
     if let Value::Generator(gen_ref) = generator_val {
-        queue_async_step(mc, gen_ref, resolve_val, reject_val, value, is_reject, env);
+        queue_async_step(mc, gen_ref, &resolve_val, &reject_val, value, is_reject, env);
     }
 
     Ok(Value::Undefined)
@@ -248,9 +248,9 @@ fn queue_async_step_from_env<'gc>(
 pub fn continue_async_step_direct<'gc>(
     mc: &MutationContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
-    resolve: Value<'gc>,
-    reject: Value<'gc>,
-    result: Result<Value<'gc>, Value<'gc>>,
+    resolve: &Value<'gc>,
+    reject: &Value<'gc>,
+    result: &Result<Value<'gc>, Value<'gc>>,
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
     let call_env = {

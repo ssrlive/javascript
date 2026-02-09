@@ -72,7 +72,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_error_constructor(mc, env)?;
 
     let console_obj = initialize_console_object(mc)?;
-    env_set(mc, env, "console", Value::Object(console_obj))?;
+    env_set(mc, env, "console", &Value::Object(console_obj))?;
 
     initialize_number_module(mc, env)?;
 
@@ -103,62 +103,62 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     // Initialize async generator prototype/constructor
     crate::js_async_generator::initialize_async_generator(mc, env)?;
 
-    env_set(mc, env, "undefined", Value::Undefined)?;
+    env_set(mc, env, "undefined", &Value::Undefined)?;
     // Make global 'undefined', 'NaN', and 'Infinity' non-writable and non-configurable per ECMAScript
     env.borrow_mut(mc).set_non_configurable("undefined");
     env.borrow_mut(mc).set_non_writable("undefined");
 
-    env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
+    env_set(mc, env, "NaN", &Value::Number(f64::NAN))?;
     env.borrow_mut(mc).set_non_configurable("NaN");
     env.borrow_mut(mc).set_non_writable("NaN");
 
-    env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;
+    env_set(mc, env, "Infinity", &Value::Number(f64::INFINITY))?;
     env.borrow_mut(mc).set_non_configurable("Infinity");
     env.borrow_mut(mc).set_non_writable("Infinity");
 
-    env_set(mc, env, "eval", Value::Function("eval".to_string()))?;
+    env_set(mc, env, "eval", &Value::Function("eval".to_string()))?;
 
     // This engine operates in strict mode only; mark the global environment accordingly so
     // eval() and nested function parsing can enforce strict-mode rules unconditionally.
     env_set_strictness(mc, env, true)?;
 
     // Define 'arguments' for global scope with poison pill for strict compliance
-    crate::js_class::create_arguments_object(mc, env, &[], Some(Value::Undefined))?;
+    crate::js_class::create_arguments_object(mc, env, &[], Some(&Value::Undefined))?;
 
     let val = Value::Function("__internal_async_step_resolve".to_string());
-    env_set(mc, env, "__internal_async_step_resolve", val)?;
+    env_set(mc, env, "__internal_async_step_resolve", &val)?;
 
     let val = Value::Function("__internal_async_step_reject".to_string());
-    env_set(mc, env, "__internal_async_step_reject", val)?;
+    env_set(mc, env, "__internal_async_step_reject", &val)?;
 
     // Internal helpers used by Promise implementation (e.g. finally chaining)
     let val = Value::Function("__internal_resolve_promise".to_string());
-    env_set(mc, env, "__internal_resolve_promise", val)?;
+    env_set(mc, env, "__internal_resolve_promise", &val)?;
 
     let val = Value::Function("__internal_reject_promise".to_string());
-    env_set(mc, env, "__internal_reject_promise", val)?;
+    env_set(mc, env, "__internal_reject_promise", &val)?;
 
     let val = Value::Function("__internal_allsettled_state_record_fulfilled_env".to_string());
-    env_set(mc, env, "__internal_allsettled_state_record_fulfilled_env", val)?;
+    env_set(mc, env, "__internal_allsettled_state_record_fulfilled_env", &val)?;
 
     let val = Value::Function("__internal_allsettled_state_record_rejected_env".to_string());
-    env_set(mc, env, "__internal_allsettled_state_record_rejected_env", val)?;
+    env_set(mc, env, "__internal_allsettled_state_record_rejected_env", &val)?;
 
     // Expose common global functions as callables
-    env_set(mc, env, "parseInt", Value::Function("parseInt".to_string()))?;
-    env_set(mc, env, "parseFloat", Value::Function("parseFloat".to_string()))?;
-    env_set(mc, env, "isNaN", Value::Function("isNaN".to_string()))?;
-    env_set(mc, env, "isFinite", Value::Function("isFinite".to_string()))?;
-    env_set(mc, env, "encodeURI", Value::Function("encodeURI".to_string()))?;
-    env_set(mc, env, "decodeURI", Value::Function("decodeURI".to_string()))?;
-    env_set(mc, env, "encodeURIComponent", Value::Function("encodeURIComponent".to_string()))?;
-    env_set(mc, env, "decodeURIComponent", Value::Function("decodeURIComponent".to_string()))?;
+    env_set(mc, env, "parseInt", &Value::Function("parseInt".to_string()))?;
+    env_set(mc, env, "parseFloat", &Value::Function("parseFloat".to_string()))?;
+    env_set(mc, env, "isNaN", &Value::Function("isNaN".to_string()))?;
+    env_set(mc, env, "isFinite", &Value::Function("isFinite".to_string()))?;
+    env_set(mc, env, "encodeURI", &Value::Function("encodeURI".to_string()))?;
+    env_set(mc, env, "decodeURI", &Value::Function("decodeURI".to_string()))?;
+    env_set(mc, env, "encodeURIComponent", &Value::Function("encodeURIComponent".to_string()))?;
+    env_set(mc, env, "decodeURIComponent", &Value::Function("decodeURIComponent".to_string()))?;
 
     // Timer functions
-    env_set(mc, env, "setTimeout", Value::Function("setTimeout".to_string()))?;
-    env_set(mc, env, "clearTimeout", Value::Function("clearTimeout".to_string()))?;
-    env_set(mc, env, "setInterval", Value::Function("setInterval".to_string()))?;
-    env_set(mc, env, "clearInterval", Value::Function("clearInterval".to_string()))?;
+    env_set(mc, env, "setTimeout", &Value::Function("setTimeout".to_string()))?;
+    env_set(mc, env, "clearTimeout", &Value::Function("clearTimeout".to_string()))?;
+    env_set(mc, env, "setInterval", &Value::Function("setInterval".to_string()))?;
+    env_set(mc, env, "clearInterval", &Value::Function("clearInterval".to_string()))?;
 
     #[cfg(feature = "os")]
     crate::js_os::initialize_os_module(mc, env)?;
@@ -226,16 +226,16 @@ where
 
     arena.mutate(|mc, root| {
         initialize_global_constructors(mc, &root.global_env)?;
-        env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env))?;
-        object_set_key_value(mc, &root.global_env, "this", Value::Object(root.global_env))?;
+        env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
+        object_set_key_value(mc, &root.global_env, "this", &Value::Object(root.global_env))?;
 
         let mut entry_module_exports: Option<JSObjectDataPtr<'_>> = None;
         if kind == ProgramKind::Module {
             let module_exports = new_js_object_data(mc);
-            object_set_key_value(mc, &root.global_env, "exports", Value::Object(module_exports))?;
+            object_set_key_value(mc, &root.global_env, "exports", &Value::Object(module_exports))?;
             let module_obj = new_js_object_data(mc);
-            object_set_key_value(mc, &module_obj, "exports", Value::Object(module_exports))?;
-            object_set_key_value(mc, &root.global_env, "module", Value::Object(module_obj))?;
+            object_set_key_value(mc, &module_obj, "exports", &Value::Object(module_exports))?;
+            object_set_key_value(mc, &root.global_env, "module", &Value::Object(module_obj))?;
             entry_module_exports = Some(module_exports);
         }
 
@@ -246,11 +246,11 @@ where
         if let Some(p) = script_path.as_ref() {
             let p_str = p.as_ref().to_string_lossy().to_string();
             // Store __filepath
-            object_set_key_value(mc, &root.global_env, "__filepath", Value::String(utf8_to_utf16(&p_str)))?;
+            object_set_key_value(mc, &root.global_env, "__filepath", &Value::String(utf8_to_utf16(&p_str)))?;
         }
 
         if kind == ProgramKind::Script {
-            object_set_key_value(mc, &root.global_env, "__suppress_dynamic_import_result", Value::Boolean(true))?;
+            object_set_key_value(mc, &root.global_env, "__suppress_dynamic_import_result", &Value::Boolean(true))?;
         }
 
         if kind == ProgramKind::Module
@@ -259,14 +259,14 @@ where
             let module_path = std::fs::canonicalize(p.as_ref()).unwrap_or_else(|_| p.as_ref().to_path_buf());
             let module_path_str = module_path.to_string_lossy().to_string();
             let cache = crate::js_module::get_or_create_module_cache(mc, &root.global_env)?;
-            object_set_key_value(mc, &cache, module_path_str.as_str(), Value::Object(exports_obj))?;
+            object_set_key_value(mc, &cache, module_path_str.as_str(), &Value::Object(exports_obj))?;
             let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
-            object_set_key_value(mc, &loading, module_path_str.as_str(), Value::Boolean(true))?;
+            object_set_key_value(mc, &loading, module_path_str.as_str(), &Value::Boolean(true))?;
 
             // Create import.meta for the entry module so `import.meta` is defined in module scripts
             let import_meta = new_js_object_data(mc);
-            object_set_key_value(mc, &import_meta, "url", Value::String(utf8_to_utf16(&module_path_str)))?;
-            object_set_key_value(mc, &root.global_env, "__import_meta", Value::Object(import_meta))?;
+            object_set_key_value(mc, &import_meta, "url", &Value::String(utf8_to_utf16(&module_path_str)))?;
+            object_set_key_value(mc, &root.global_env, "__import_meta", &Value::Object(import_meta))?;
         }
         match evaluate_statements(mc, &root.global_env, &statements) {
             Ok(mut result) => {
@@ -276,7 +276,7 @@ where
                     let module_path = std::fs::canonicalize(p.as_ref()).unwrap_or_else(|_| p.as_ref().to_path_buf());
                     let module_path_str = module_path.to_string_lossy().to_string();
                     let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
-                    object_set_key_value(mc, &loading, module_path_str.as_str(), Value::Boolean(false))?;
+                    object_set_key_value(mc, &loading, module_path_str.as_str(), &Value::Boolean(false))?;
                 }
                 let mut count = 0;
                 loop {

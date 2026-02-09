@@ -24,8 +24,8 @@ pub fn load_module<'gc>(
         let pi = Value::Number(std::f64::consts::PI);
         let e = Value::Number(std::f64::consts::E);
 
-        object_set_key_value(mc, &module_exports, "PI", pi)?;
-        object_set_key_value(mc, &module_exports, "E", e)?;
+        object_set_key_value(mc, &module_exports, "PI", &pi)?;
+        object_set_key_value(mc, &module_exports, "E", &e)?;
 
         // Add a simple function (just return the input for now)
         let identity_func = Value::Closure(Gc::new(
@@ -41,13 +41,13 @@ pub fn load_module<'gc>(
                 None,
             ),
         ));
-        object_set_key_value(mc, &module_exports, "identity", identity_func.clone())?;
-        object_set_key_value(mc, &module_exports, "default", identity_func)?;
+        object_set_key_value(mc, &module_exports, "identity", &identity_func.clone())?;
+        object_set_key_value(mc, &module_exports, "default", &identity_func)?;
     } else if module_name == "console" {
         // Create console module with log function
         // Create a function that directly handles console.log calls
         let log_func = Value::Function("console.log".to_string());
-        object_set_key_value(mc, &module_exports, "log", log_func)?;
+        object_set_key_value(mc, &module_exports, "log", &log_func)?;
     } else if module_name == "std" {
         #[cfg(feature = "std")]
         {
@@ -95,10 +95,10 @@ fn load_module_from_file<'gc>(
             return Err(crate::raise_syntax_error!("Circular module import").into());
         }
 
-        object_set_key_value(mc, &loading, module_path.as_str(), Value::Boolean(true))?;
+        object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(true))?;
 
         let module_exports = new_js_object_data(mc);
-        object_set_key_value(mc, &cache, module_path.as_str(), Value::Object(module_exports))?;
+        object_set_key_value(mc, &cache, module_path.as_str(), &Value::Object(module_exports))?;
 
         // Read the file
         let content = crate::core::read_script_file(&module_path).map_err(EvalError::from)?;
@@ -106,8 +106,8 @@ fn load_module_from_file<'gc>(
         // Execute the module and get the final module value
         let value = execute_module(mc, &content, &module_path, caller_env, Some(module_exports))?;
 
-        object_set_key_value(mc, &cache, module_path.as_str(), value.clone())?;
-        object_set_key_value(mc, &loading, module_path.as_str(), Value::Boolean(false))?;
+        object_set_key_value(mc, &cache, module_path.as_str(), &value.clone())?;
+        object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
         return Ok(value);
     }
 
@@ -181,7 +181,7 @@ fn execute_module<'gc>(
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__filepath` similarly to `evaluate_script`.
     let val = Value::String(crate::unicode::utf8_to_utf16(module_path));
-    object_set_key_value(mc, &env, "__filepath", val)?;
+    object_set_key_value(mc, &env, "__filepath", &val)?;
 
     // Add exports object to the environment
     env.borrow_mut(mc).insert(
@@ -203,14 +203,14 @@ fn execute_module<'gc>(
     // Create and store import.meta object for this module
     let import_meta = new_js_object_data(mc);
     // Provide a 'url' property referencing the module path; leave as raw path string
-    object_set_key_value(mc, &import_meta, "url", Value::String(crate::unicode::utf8_to_utf16(module_path)))?;
+    object_set_key_value(mc, &import_meta, "url", &Value::String(crate::unicode::utf8_to_utf16(module_path)))?;
     // Store the import.meta object on the module environment under a hidden key
-    object_set_key_value(mc, &env, "__import_meta", Value::Object(import_meta))?;
+    object_set_key_value(mc, &env, "__import_meta", &Value::Object(import_meta))?;
 
     if caller_env.is_none() {
         // Initialize global constructors for standalone module execution
         crate::core::initialize_global_constructors(mc, &env)?;
-        object_set_key_value(mc, &env, "globalThis", crate::core::Value::Object(env))?;
+        object_set_key_value(mc, &env, "globalThis", &crate::core::Value::Object(env))?;
     } else if let Some(caller) = caller_env {
         let global_obj = if let Some(global_val) = object_get_key_value(&caller, "globalThis") {
             match global_val.borrow().clone() {
@@ -220,7 +220,7 @@ fn execute_module<'gc>(
         } else {
             caller
         };
-        object_set_key_value(mc, &env, "globalThis", crate::core::Value::Object(global_obj))?;
+        object_set_key_value(mc, &env, "globalThis", &crate::core::Value::Object(global_obj))?;
     }
 
     // Parse and execute the module content
@@ -276,7 +276,7 @@ pub(crate) fn get_or_create_module_cache<'gc>(
     }
 
     let cache = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__module_cache", Value::Object(cache))?;
+    object_set_key_value(mc, env, "__module_cache", &Value::Object(cache))?;
     Ok(cache)
 }
 
@@ -291,7 +291,7 @@ pub(crate) fn get_or_create_module_loading<'gc>(
     }
 
     let loading = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__module_loading", Value::Object(loading))?;
+    object_set_key_value(mc, env, "__module_loading", &Value::Object(loading))?;
     Ok(loading)
 }
 

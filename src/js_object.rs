@@ -11,17 +11,17 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     // 1. Create Object constructor
     let object_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &object_ctor, "__is_constructor", Value::Boolean(true))?;
-    object_set_key_value(mc, &object_ctor, "__native_ctor", Value::String(utf8_to_utf16("Object")))?;
+    object_set_key_value(mc, &object_ctor, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &object_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Object")))?;
 
     // Register Object in the environment
-    crate::core::env_set(mc, env, "Object", Value::Object(object_ctor))?;
+    crate::core::env_set(mc, env, "Object", &Value::Object(object_ctor))?;
 
     // 2. Create Object.prototype
     let object_proto = new_js_object_data(mc);
     // Link prototype and constructor
-    object_set_key_value(mc, &object_ctor, "prototype", Value::Object(object_proto))?;
-    object_set_key_value(mc, &object_proto, "constructor", Value::Object(object_ctor))?;
+    object_set_key_value(mc, &object_ctor, "prototype", &Value::Object(object_proto))?;
+    object_set_key_value(mc, &object_proto, "constructor", &Value::Object(object_ctor))?;
     // Make constructor non-enumerable
     object_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
@@ -53,7 +53,7 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     ];
 
     for method in static_methods {
-        object_set_key_value(mc, &object_ctor, method, Value::Function(format!("Object.{method}")))?;
+        object_set_key_value(mc, &object_ctor, method, &Value::Function(format!("Object.{method}")))?;
     }
 
     // 4. Register prototype methods
@@ -69,7 +69,7 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     ];
 
     for method in proto_methods {
-        object_set_key_value(mc, &object_proto, method, Value::Function(format!("Object.prototype.{method}")))?;
+        object_set_key_value(mc, &object_proto, method, &Value::Function(format!("Object.prototype.{method}")))?;
         // Methods on prototypes should be non-enumerable so for..in doesn't list them
         object_proto.borrow_mut(mc).set_non_enumerable(method);
     }
@@ -351,7 +351,7 @@ pub(crate) fn define_property_internal<'gc>(
     );
 
     // Always update value
-    object_set_key_value(mc, target_obj, prop_key, prop_descriptor)?;
+    object_set_key_value(mc, target_obj, prop_key, &prop_descriptor)?;
     // Ensure explicitly-requested non-enumerable flag is applied even after
     // the property value has been stored. This guards against cases where
     // insertion order or existing property state prevented the marker from
@@ -393,7 +393,7 @@ pub fn handle_object_method<'gc>(
                     let result_obj = crate::js_array::create_array(mc, env)?;
                     let len = keys.len();
                     for (i, key) in keys.into_iter().enumerate() {
-                        object_set_key_value(mc, &result_obj, i, key)?;
+                        object_set_key_value(mc, &result_obj, i, &key)?;
                     }
                     set_array_length(mc, &result_obj, len)?;
                     Ok(Value::Object(result_obj))
@@ -433,7 +433,7 @@ pub fn handle_object_method<'gc>(
                     let result_obj = crate::js_array::create_array(mc, env)?;
                     let len = values.len();
                     for (i, value) in values.into_iter().enumerate() {
-                        object_set_key_value(mc, &result_obj, i, value)?;
+                        object_set_key_value(mc, &result_obj, i, &value)?;
                     }
                     set_array_length(mc, &result_obj, len)?;
                     Ok(Value::Object(result_obj))
@@ -683,12 +683,12 @@ pub fn handle_object_method<'gc>(
                         }
                     } else {
                         let arr = crate::js_array::create_array(mc, env)?;
-                        object_set_key_value(mc, &result_obj, &key, Value::Object(arr))?;
+                        object_set_key_value(mc, &result_obj, &key, &Value::Object(arr))?;
                         arr
                     };
 
                     let current_len = get_array_length(mc, &group_arr).unwrap_or(0);
-                    object_set_key_value(mc, &group_arr, current_len, val)?;
+                    object_set_key_value(mc, &group_arr, current_len, &val)?;
                     crate::js_array::set_array_length(mc, &group_arr, current_len + 1)?;
                 }
             }
@@ -731,7 +731,7 @@ pub fn handle_object_method<'gc>(
                             let mut desc_obj_copy = desc_obj.borrow().clone();
                             let desc_obj_ptr = new_js_object_data(mc);
                             for (k, v) in desc_obj_copy.properties.drain(..) {
-                                object_set_key_value(mc, &desc_obj_ptr, k, v.borrow().clone())?;
+                                object_set_key_value(mc, &desc_obj_ptr, k, &v.borrow().clone())?;
                             }
                             define_property_internal(mc, &new_obj, key, &desc_obj_ptr)?;
                         }
@@ -771,7 +771,7 @@ pub fn handle_object_method<'gc>(
                     let ordered = crate::core::ordinary_own_property_keys(&obj);
                     for key in ordered {
                         if let PropertyKey::Symbol(sym) = key {
-                            object_set_key_value(mc, &result_obj, idx, Value::Symbol(sym))?;
+                            object_set_key_value(mc, &result_obj, idx, &Value::Symbol(sym))?;
                             idx += 1;
                         }
                     }
@@ -792,7 +792,7 @@ pub fn handle_object_method<'gc>(
                     let ordered = crate::core::ordinary_own_property_keys(&obj);
                     for key in ordered {
                         if let PropertyKey::String(s) = key {
-                            object_set_key_value(mc, &result_obj, idx, Value::String(utf8_to_utf16(&s)))?;
+                            object_set_key_value(mc, &result_obj, idx, &Value::String(utf8_to_utf16(&s)))?;
                             idx += 1;
                         }
                     }
@@ -856,12 +856,12 @@ pub fn handle_object_method<'gc>(
                             let desc_obj = pd.to_object(mc)?; // Put descriptor onto result using the original key (string or symbol)
                             match key {
                                 PropertyKey::String(s) => {
-                                    object_set_key_value(mc, &result_obj, s, Value::Object(desc_obj))?;
+                                    object_set_key_value(mc, &result_obj, s, &Value::Object(desc_obj))?;
                                 }
                                 PropertyKey::Symbol(sym_rc) => {
                                     // Push symbol-keyed property on returned object with the same symbol key
                                     let property_key = PropertyKey::Symbol(*sym_rc);
-                                    object_set_key_value(mc, &result_obj, &property_key, Value::Object(desc_obj))?;
+                                    object_set_key_value(mc, &result_obj, &property_key, &Value::Object(desc_obj))?;
                                 }
                                 PropertyKey::Private(..) => {}
                             }
@@ -886,42 +886,42 @@ pub fn handle_object_method<'gc>(
                 Value::Undefined => return Err(raise_type_error!("Object.assign target cannot be undefined or null")),
                 Value::Number(n) => {
                     let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "valueOf", Value::Function("Number_valueOf".to_string()))?;
-                    object_set_key_value(mc, &obj, "toString", Value::Function("Number_toString".to_string()))?;
-                    object_set_key_value(mc, &obj, "__value__", Value::Number(n))?;
+                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Number_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", &Value::Function("Number_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "__value__", &Value::Number(n))?;
                     // Set prototype to Number.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number");
                     obj
                 }
                 Value::Boolean(b) => {
                     let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
-                    object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string()))?;
-                    object_set_key_value(mc, &obj, "__value__", Value::Boolean(b))?;
+                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "__value__", &Value::Boolean(b))?;
                     // Set prototype to Boolean.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean");
                     obj
                 }
                 Value::String(s) => {
                     let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "valueOf", Value::Function("String_valueOf".to_string()))?;
-                    object_set_key_value(mc, &obj, "toString", Value::Function("String_toString".to_string()))?;
-                    object_set_key_value(mc, &obj, "length", Value::Number(s.len() as f64))?;
-                    object_set_key_value(mc, &obj, "__value__", Value::String(s.clone()))?;
+                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("String_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "length", &Value::Number(s.len() as f64))?;
+                    object_set_key_value(mc, &obj, "__value__", &Value::String(s.clone()))?;
                     // Set prototype to String.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String");
                     obj
                 }
                 Value::BigInt(h) => {
                     let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "__value__", Value::BigInt(h.clone()))?;
+                    object_set_key_value(mc, &obj, "__value__", &Value::BigInt(h.clone()))?;
                     // Set prototype to BigInt.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
                     obj
                 }
                 Value::Symbol(sd) => {
                     let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "__value__", Value::Symbol(sd))?;
+                    object_set_key_value(mc, &obj, "__value__", &Value::Symbol(sd))?;
 
                     // Set prototype to Symbol.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
@@ -945,7 +945,7 @@ pub fn handle_object_method<'gc>(
                             && source_obj.borrow().is_enumerable(&key)
                             && let Some(v_rc) = object_get_key_value(&source_obj, &key)
                         {
-                            object_set_key_value(mc, &target_obj, &key, v_rc.borrow().clone())?;
+                            object_set_key_value(mc, &target_obj, &key, &v_rc.borrow().clone())?;
                         }
                     }
                 }
@@ -1098,7 +1098,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                         Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
                     ) {
                         log::debug!("DBG handle_to_string_method: calling toString implementation");
-                        let res = evaluate_call_dispatch(mc, env, actual, Some(obj_val.clone()), Vec::new())?;
+                        let res = evaluate_call_dispatch(mc, env, &actual, Some(&obj_val.clone()), &Vec::new())?;
                         log::debug!("DBG handle_to_string_method: toString returned {:?}", res);
                         return Ok(res);
                     }
@@ -1109,7 +1109,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_) => {
                     // If it's an object, it might be a function object (with an internal closure slot)
                     log::debug!("DBG handle_to_string_method: calling toString implementation");
-                    let res = evaluate_call_dispatch(mc, env, method_val, Some(obj_val.clone()), Vec::new())?;
+                    let res = evaluate_call_dispatch(mc, env, &method_val, Some(&obj_val.clone()), &Vec::new())?;
                     log::debug!("DBG handle_to_string_method: toString returned {:?}", res);
                     return Ok(res);
                 }
@@ -1325,7 +1325,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                         let func_env = prepare_function_call_env(
                             mc,
                             Some(captured_env.as_ref().unwrap()),
-                            Some(Value::Object(*obj)),
+                            Some(&Value::Object(*obj)),
                             None,
                             &[],
                             None,
@@ -1361,7 +1361,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                             return crate::js_date::handle_date_method(mc, &Value::Object(*obj), method, args, env);
                         }
 
-                        let func_env = prepare_function_call_env(mc, None, Some(Value::Object(*obj)), None, &[], None, Some(env))?;
+                        let func_env = prepare_function_call_env(mc, None, Some(&Value::Object(*obj)), None, &[], None, Some(env))?;
                         // Use the central `evaluate_call_dispatch` helper to perform the call so
                         // builtins like `Date.prototype.*` are routed correctly when represented
                         // as `Value::Function` names. This avoids falling back to `handle_global_function`
@@ -1370,9 +1370,9 @@ pub(crate) fn handle_value_of_method<'gc>(
                         let res = crate::core::evaluate_call_dispatch(
                             mc,
                             &func_env,
-                            Value::Function(func_name.clone()),
-                            Some(Value::Object(*obj)),
-                            eval_args,
+                            &Value::Function(func_name.clone()),
+                            Some(&Value::Object(*obj)),
+                            &eval_args,
                         )?;
                         if matches!(
                             res,
@@ -1395,7 +1395,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                             let func_env = prepare_function_call_env(
                                 mc,
                                 Some(captured_env.as_ref().unwrap()),
-                                Some(Value::Object(*obj)),
+                                Some(&Value::Object(*obj)),
                                 None,
                                 &[],
                                 None,

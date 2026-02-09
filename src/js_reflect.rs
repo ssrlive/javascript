@@ -10,56 +10,56 @@ use crate::{JSError, core::EvalError};
 /// Initialize the Reflect object with all reflection methods
 pub fn initialize_reflect<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let reflect_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &reflect_obj, "apply", Value::Function("Reflect.apply".to_string()))?;
-    object_set_key_value(mc, &reflect_obj, "construct", Value::Function("Reflect.construct".to_string()))?;
+    object_set_key_value(mc, &reflect_obj, "apply", &Value::Function("Reflect.apply".to_string()))?;
+    object_set_key_value(mc, &reflect_obj, "construct", &Value::Function("Reflect.construct".to_string()))?;
     object_set_key_value(
         mc,
         &reflect_obj,
         "defineProperty",
-        Value::Function("Reflect.defineProperty".to_string()),
+        &Value::Function("Reflect.defineProperty".to_string()),
     )?;
     object_set_key_value(
         mc,
         &reflect_obj,
         "deleteProperty",
-        Value::Function("Reflect.deleteProperty".to_string()),
+        &Value::Function("Reflect.deleteProperty".to_string()),
     )?;
-    object_set_key_value(mc, &reflect_obj, "get", Value::Function("Reflect.get".to_string()))?;
+    object_set_key_value(mc, &reflect_obj, "get", &Value::Function("Reflect.get".to_string()))?;
     object_set_key_value(
         mc,
         &reflect_obj,
         "getOwnPropertyDescriptor",
-        Value::Function("Reflect.getOwnPropertyDescriptor".to_string()),
+        &Value::Function("Reflect.getOwnPropertyDescriptor".to_string()),
     )?;
     object_set_key_value(
         mc,
         &reflect_obj,
         "getPrototypeOf",
-        Value::Function("Reflect.getPrototypeOf".to_string()),
+        &Value::Function("Reflect.getPrototypeOf".to_string()),
     )?;
-    object_set_key_value(mc, &reflect_obj, "has", Value::Function("Reflect.has".to_string()))?;
+    object_set_key_value(mc, &reflect_obj, "has", &Value::Function("Reflect.has".to_string()))?;
     object_set_key_value(
         mc,
         &reflect_obj,
         "isExtensible",
-        Value::Function("Reflect.isExtensible".to_string()),
+        &Value::Function("Reflect.isExtensible".to_string()),
     )?;
-    object_set_key_value(mc, &reflect_obj, "ownKeys", Value::Function("Reflect.ownKeys".to_string()))?;
+    object_set_key_value(mc, &reflect_obj, "ownKeys", &Value::Function("Reflect.ownKeys".to_string()))?;
     object_set_key_value(
         mc,
         &reflect_obj,
         "preventExtensions",
-        Value::Function("Reflect.preventExtensions".to_string()),
+        &Value::Function("Reflect.preventExtensions".to_string()),
     )?;
-    object_set_key_value(mc, &reflect_obj, "set", Value::Function("Reflect.set".to_string()))?;
+    object_set_key_value(mc, &reflect_obj, "set", &Value::Function("Reflect.set".to_string()))?;
     object_set_key_value(
         mc,
         &reflect_obj,
         "setPrototypeOf",
-        Value::Function("Reflect.setPrototypeOf".to_string()),
+        &Value::Function("Reflect.setPrototypeOf".to_string()),
     )?;
 
-    crate::core::env_set(mc, env, "Reflect", Value::Object(reflect_obj))?;
+    crate::core::env_set(mc, env, "Reflect", &Value::Object(reflect_obj))?;
     Ok(())
 }
 
@@ -128,7 +128,7 @@ pub fn handle_reflect_method<'gc>(
                     });
 
                 // Delegate invocation to existing call dispatcher which handles sync/async/native functions
-                return crate::core::evaluate_call_dispatch(mc, env, target.clone(), Some(this_arg.clone()), arg_values);
+                return crate::core::evaluate_call_dispatch(mc, env, &target, Some(&this_arg), &arg_values);
             }
 
             match target {
@@ -141,7 +141,7 @@ pub fn handle_reflect_method<'gc>(
                             let func_env = prepare_function_call_env(
                                 mc,
                                 Some(&captured_env),
-                                Some(this_arg.clone()),
+                                Some(&this_arg),
                                 Some(&params),
                                 &arg_values,
                                 None,
@@ -187,7 +187,7 @@ pub fn handle_reflect_method<'gc>(
                 }
             }
 
-            crate::js_class::evaluate_new(mc, env, target, &arg_values, Some(_new_target))
+            crate::js_class::evaluate_new(mc, env, &target, &arg_values, Some(&_new_target))
         }
         "defineProperty" => {
             if args.len() < 3 {
@@ -361,7 +361,7 @@ pub fn handle_reflect_method<'gc>(
                     // Create an array-like object for keys
                     let result_obj = crate::js_array::create_array(mc, env)?;
                     for (i, key) in keys.into_iter().enumerate() {
-                        object_set_key_value(mc, &result_obj, i, key)?;
+                        object_set_key_value(mc, &result_obj, i, &key)?;
                     }
                     // Set length property
                     set_array_length(mc, &result_obj, keys_len)?;
@@ -400,7 +400,7 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
-                    object_set_key_value(mc, &obj, &prop_key, value)?;
+                    object_set_key_value(mc, &obj, &prop_key, &value)?;
                     Ok(Value::Boolean(true))
                 }
                 _ => Err(raise_type_error!("Reflect.set target must be an object").into()),

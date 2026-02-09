@@ -14,9 +14,9 @@ use std::collections::HashSet;
 /// Create the console object with logging functions
 pub fn initialize_console_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let console_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &console_obj, "log", Value::Function("console.log".to_string()))?;
+    object_set_key_value(mc, &console_obj, "log", &Value::Function("console.log".to_string()))?;
     // Provide `console.error` as an alias to `console.log` for now
-    object_set_key_value(mc, &console_obj, "error", Value::Function("console.error".to_string()))?;
+    object_set_key_value(mc, &console_obj, "error", &Value::Function("console.error".to_string()))?;
     Ok(console_obj)
 }
 

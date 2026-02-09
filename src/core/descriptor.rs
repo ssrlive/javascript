@@ -42,16 +42,16 @@ fn compute_function_length(params: &[DestructuringElement]) -> usize {
 }
 
 fn define_function_length<'gc>(mc: &MutationContext<'gc>, func_obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
-    let desc = create_descriptor_object(mc, Value::Number(length as f64), false, false, true)?;
+    let desc = create_descriptor_object(mc, &Value::Number(length as f64), false, false, true)?;
     crate::js_object::define_property_internal(mc, func_obj, "length", &desc)?;
     Ok(())
 }
 
 impl<'gc> PropertyDescriptor<'gc> {
     /// Construct a full data descriptor from explicit values
-    pub fn new_data(value: Value<'gc>, writable: bool, enumerable: bool, configurable: bool) -> Self {
+    pub fn new_data(value: &Value<'gc>, writable: bool, enumerable: bool, configurable: bool) -> Self {
         PropertyDescriptor {
-            value: Some(value),
+            value: Some(value.clone()),
             writable: Some(writable),
             get: None,
             set: None,
@@ -119,23 +119,23 @@ impl<'gc> PropertyDescriptor<'gc> {
         let desc = new_js_object_data(mc);
         // If this is an accessor descriptor (get/set present), expose get/set and flags
         if self.get.is_some() || self.set.is_some() {
-            if let Some(g) = self.get.clone() {
+            if let Some(g) = &self.get {
                 object_set_key_value(mc, &desc, "get", g)?;
             }
-            if let Some(s) = self.set.clone() {
+            if let Some(s) = &self.set {
                 object_set_key_value(mc, &desc, "set", s)?;
             }
-            object_set_key_value(mc, &desc, "enumerable", Value::Boolean(self.enumerable.unwrap_or(false)))?;
-            object_set_key_value(mc, &desc, "configurable", Value::Boolean(self.configurable.unwrap_or(false)))?;
+            object_set_key_value(mc, &desc, "enumerable", &Value::Boolean(self.enumerable.unwrap_or(false)))?;
+            object_set_key_value(mc, &desc, "configurable", &Value::Boolean(self.configurable.unwrap_or(false)))?;
             return Ok(desc);
         }
 
         // Otherwise, data descriptor behavior
         let val = self.value.clone().unwrap_or(Value::Undefined);
-        object_set_key_value(mc, &desc, "value", val)?;
-        object_set_key_value(mc, &desc, "writable", Value::Boolean(self.writable.unwrap_or(false)))?;
-        object_set_key_value(mc, &desc, "enumerable", Value::Boolean(self.enumerable.unwrap_or(false)))?;
-        object_set_key_value(mc, &desc, "configurable", Value::Boolean(self.configurable.unwrap_or(false)))?;
+        object_set_key_value(mc, &desc, "value", &val)?;
+        object_set_key_value(mc, &desc, "writable", &Value::Boolean(self.writable.unwrap_or(false)))?;
+        object_set_key_value(mc, &desc, "enumerable", &Value::Boolean(self.enumerable.unwrap_or(false)))?;
+        object_set_key_value(mc, &desc, "configurable", &Value::Boolean(self.configurable.unwrap_or(false)))?;
         Ok(desc)
     }
 }
@@ -144,7 +144,7 @@ impl<'gc> PropertyDescriptor<'gc> {
 /// Returned object can be used as a property descriptor (e.g., for reflecting APIs).
 pub fn create_descriptor_object<'gc>(
     mc: &MutationContext<'gc>,
-    value: Value<'gc>,
+    value: &Value<'gc>,
     writable: bool,
     enumerable: bool,
     configurable: bool,
@@ -251,7 +251,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                 )
             }
             other => PropertyDescriptor::new_data(
-                other.clone(),
+                other,
                 obj.borrow().is_writable(key),
                 obj.borrow().is_enumerable(key),
                 obj.borrow().is_configurable(key),

@@ -2,7 +2,10 @@ use crate::core::{Collect, Gc, GcCell, GcPtr, GcTrace, GcWeak, MutationContext, 
 use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
-    core::{ClassDefinition, DestructuringElement, EvalError, Expr, PropertyKey, Statement, VarDeclKind, is_error},
+    core::{
+        ClassDefinition, DestructuringElement, EvalError, Expr, PropertyKey, Statement, VarDeclKind, call_closure, evaluate_call_dispatch,
+        is_error,
+    },
     raise_type_error,
 };
 use num_bigint::BigInt;
@@ -147,9 +150,10 @@ pub struct JSTypedArray<'gc> {
     pub length_tracking: bool,
 }
 
-#[derive(Clone, Collect)]
+#[derive(Clone, Collect, Default)]
 #[collect(no_drop)]
 pub enum GeneratorState<'gc> {
+    #[default]
     NotStarted,
     Running {
         pc: usize,
@@ -794,18 +798,18 @@ pub fn to_primitive<'gc>(
                     // Support closures or function objects
                     use std::slice::from_ref;
                     let res_eval: Result<Value<'gc>, crate::core::js_error::EvalError> = match func_val {
-                        Value::Closure(cl) => crate::core::call_closure(mc, &cl, Some(Value::Object(*obj)), from_ref(&arg), env, None),
-                        Value::Function(name) => crate::core::evaluate_call_dispatch(
+                        Value::Closure(cl) => call_closure(mc, &cl, Some(&Value::Object(*obj)), from_ref(&arg), env, None),
+                        Value::Function(name) => evaluate_call_dispatch(
                             mc,
                             env,
-                            Value::Function(name),
-                            Some(Value::Object(*obj)),
-                            vec![arg.clone()],
+                            &Value::Function(name),
+                            Some(&Value::Object(*obj)),
+                            std::slice::from_ref(&arg),
                         ),
                         Value::Object(func_obj) => {
                             if let Some(cl_ptr) = func_obj.borrow().get_closure() {
                                 if let Value::Closure(cl) = &*cl_ptr.borrow() {
-                                    crate::core::call_closure(mc, cl, Some(Value::Object(*obj)), from_ref(&arg), env, Some(func_obj))
+                                    call_closure(mc, cl, Some(&Value::Object(*obj)), from_ref(&arg), env, Some(func_obj))
                                 } else {
                                     return Err(raise_type_error!("@@toPrimitive is not a function").into());
                                 }
@@ -888,7 +892,7 @@ fn call_to_string_strict<'gc>(
         method_val,
         Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
     ) {
-        crate::core::evaluate_call_dispatch(mc, env, method_val, Some(Value::Object(*obj_ptr)), Vec::new())
+        evaluate_call_dispatch(mc, env, &method_val, Some(&Value::Object(*obj_ptr)), &Vec::new())
     } else {
         Ok(Value::Uninitialized)
     }
@@ -1141,7 +1145,7 @@ pub fn object_set_key_value<'gc>(
     mc: &MutationContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
-    val: Value<'gc>,
+    val: &Value<'gc>,
 ) -> Result<(), JSError> {
     let key = key.into();
 
@@ -1159,7 +1163,7 @@ pub fn object_set_key_value<'gc>(
     // store it in the object's internal slot instead of creating a visible property.
     if key_desc == "__definition_env" {
         if let Value::Object(env_obj) = val {
-            obj.borrow_mut(mc).definition_env = Some(env_obj);
+            obj.borrow_mut(mc).definition_env = Some(*env_obj);
             return Ok(());
         } else {
             // Ignore non-object assignments to the internal slot.
@@ -1197,14 +1201,14 @@ pub fn object_set_key_value<'gc>(
             let byte_offset = ta.byte_offset + idx * ta.element_size();
             match ta.kind {
                 crate::core::TypedArrayKind::Int8 => {
-                    if let Ok(n) = crate::core::eval::to_number(&val) {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
                         data[byte_offset] = n as i8 as u8;
                     }
                 }
                 crate::core::TypedArrayKind::Uint8 | crate::core::TypedArrayKind::Uint8Clamped => {
-                    if let Ok(n) = crate::core::eval::to_number(&val) {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
                         let v = n as i32;
@@ -1213,7 +1217,7 @@ pub fn object_set_key_value<'gc>(
                     }
                 }
                 crate::core::TypedArrayKind::Int16 => {
-                    if let Ok(n) = crate::core::eval::to_number(&val) {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
                         let bytes = (n as i16).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
@@ -1222,7 +1226,7 @@ pub fn object_set_key_value<'gc>(
                     }
                 }
                 crate::core::TypedArrayKind::Uint16 => {
-                    if let Ok(n) = crate::core::eval::to_number(&val) {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
                         let bytes = (n as u16).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
@@ -1231,7 +1235,7 @@ pub fn object_set_key_value<'gc>(
                     }
                 }
                 crate::core::TypedArrayKind::Int32 => {
-                    if let Ok(n) = crate::core::eval::to_number(&val) {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
                         let bytes = (n as i32).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
@@ -1242,7 +1246,7 @@ pub fn object_set_key_value<'gc>(
                     }
                 }
                 crate::core::TypedArrayKind::Uint32 => {
-                    if let Ok(n) = crate::core::eval::to_number(&val) {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
                         let bytes = (n as u32).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
@@ -1253,7 +1257,7 @@ pub fn object_set_key_value<'gc>(
                     }
                 }
                 crate::core::TypedArrayKind::Float32 => {
-                    if let Ok(n) = crate::core::eval::to_number(&val) {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
                         let bytes = (n as f32).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
@@ -1264,7 +1268,7 @@ pub fn object_set_key_value<'gc>(
                     }
                 }
                 crate::core::TypedArrayKind::Float64 => {
-                    if let Ok(n) = crate::core::eval::to_number(&val) {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
                         let bytes = n.to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
@@ -1285,7 +1289,7 @@ pub fn object_set_key_value<'gc>(
                         }
                         _ => {
                             // Try to convert to BigInt if not already
-                            if let Ok(n) = crate::core::eval::to_number(&val) {
+                            if let Ok(n) = crate::core::eval::to_number(val) {
                                 let buffer_guard = ta.buffer.borrow();
                                 let mut data = buffer_guard.data.lock().unwrap();
                                 let bytes = (n as i64).to_le_bytes();
@@ -1308,7 +1312,7 @@ pub fn object_set_key_value<'gc>(
                         }
                         _ => {
                             // Try to convert to BigInt if not already
-                            if let Ok(n) = crate::core::eval::to_number(&val) {
+                            if let Ok(n) = crate::core::eval::to_number(val) {
                                 let buffer_guard = ta.buffer.borrow();
                                 let mut data = buffer_guard.data.lock().unwrap();
                                 let bytes = (n as u64).to_le_bytes();
@@ -1341,7 +1345,7 @@ pub fn object_set_key_value<'gc>(
         }
     }
 
-    let val_ptr = new_gc_cell_ptr(mc, val);
+    let val_ptr = new_gc_cell_ptr(mc, val.clone());
     obj.borrow_mut(mc).insert(key.clone(), val_ptr);
     Ok(())
 }
@@ -1361,7 +1365,7 @@ pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, 
     None
 }
 
-pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: Value<'gc>) -> Result<(), JSError> {
+pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
     if (*env.borrow()).is_const(key) {
         log::trace!(
             "env_set: assignment to const detected: env_ptr={:p} key={} constants={:?} lexical_decls={:?} own_props={:?}",
@@ -1373,7 +1377,7 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
         );
         return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
     }
-    let val_ptr = new_gc_cell_ptr(mc, val);
+    let val_ptr = new_gc_cell_ptr(mc, val.clone());
     env.borrow_mut(mc).insert(PropertyKey::String(key.to_string()), val_ptr);
     Ok(())
 }
@@ -1421,7 +1425,7 @@ pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'
     }
 }
 
-pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: Value<'gc>) -> Result<(), JSError> {
+pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
     let mut current = *env;
     loop {
         let existing = {
@@ -1475,6 +1479,6 @@ pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'
             let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
         }
     }
-    object_set_key_value(mc, obj, "length", Value::Number(length as f64))?;
+    object_set_key_value(mc, obj, "length", &Value::Number(length as f64))?;
     Ok(())
 }

@@ -106,7 +106,7 @@ pub fn handle_async_generator_function_call<'gc>(
     );
 
     // Store it on the object under a hidden key
-    object_set_key_value(mc, &gen_obj, "__async_generator__", Value::AsyncGenerator(async_gen))?;
+    object_set_key_value(mc, &gen_obj, "__async_generator__", &Value::AsyncGenerator(async_gen))?;
 
     // Determine prototype for the async generator object.
     // Prefer the function object's own `prototype` if it's an object; otherwise
@@ -166,12 +166,12 @@ pub fn handle_async_generator_function_call<'gc>(
 
     // Create 'next' function as a native Function; name it so call_native_function can route
     let next_func = Value::Function("AsyncGenerator.prototype.next".to_string());
-    object_set_key_value(mc, &gen_obj, "next", next_func)?;
+    object_set_key_value(mc, &gen_obj, "next", &next_func)?;
     // Create 'throw' and 'return' functions
     let throw_func = Value::Function("AsyncGenerator.prototype.throw".to_string());
-    object_set_key_value(mc, &gen_obj, "throw", throw_func)?;
+    object_set_key_value(mc, &gen_obj, "throw", &throw_func)?;
     let return_func = Value::Function("AsyncGenerator.prototype.return".to_string());
-    object_set_key_value(mc, &gen_obj, "return", return_func)?;
+    object_set_key_value(mc, &gen_obj, "return", &return_func)?;
     // Return the object
     Ok(Value::Object(gen_obj))
 }
@@ -195,52 +195,52 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
 
     // Attach prototype methods as named functions that dispatch to the async generator handler
     let val = Value::Function("AsyncGenerator.prototype.next".to_string());
-    object_set_key_value(mc, &async_gen_proto, "next", val)?;
+    object_set_key_value(mc, &async_gen_proto, "next", &val)?;
 
     let val = Value::Function("AsyncGenerator.prototype.return".to_string());
-    object_set_key_value(mc, &async_gen_proto, "return", val)?;
+    object_set_key_value(mc, &async_gen_proto, "return", &val)?;
 
     let val = Value::Function("AsyncGenerator.prototype.throw".to_string());
-    object_set_key_value(mc, &async_gen_proto, "throw", val)?;
+    object_set_key_value(mc, &async_gen_proto, "throw", &val)?;
 
     // Register internal helpers for awaits
     crate::core::env_set(
         mc,
         env,
         "__internal_async_gen_await_resolve",
-        Value::Function("__internal_async_gen_await_resolve".to_string()),
+        &Value::Function("__internal_async_gen_await_resolve".to_string()),
     )?;
     crate::core::env_set(
         mc,
         env,
         "__internal_async_gen_await_reject",
-        Value::Function("__internal_async_gen_await_reject".to_string()),
+        &Value::Function("__internal_async_gen_await_reject".to_string()),
     )?;
 
     crate::core::env_set(
         mc,
         env,
         "__internal_async_gen_yield_resolve",
-        Value::Function("__internal_async_gen_yield_resolve".to_string()),
+        &Value::Function("__internal_async_gen_yield_resolve".to_string()),
     )?;
     crate::core::env_set(
         mc,
         env,
         "__internal_async_gen_yield_reject",
-        Value::Function("__internal_async_gen_yield_reject".to_string()),
+        &Value::Function("__internal_async_gen_yield_reject".to_string()),
     )?;
 
     crate::core::env_set(
         mc,
         env,
         "__internal_async_gen_yield_star_resolve",
-        Value::Function("__internal_async_gen_yield_star_resolve".to_string()),
+        &Value::Function("__internal_async_gen_yield_star_resolve".to_string()),
     )?;
     crate::core::env_set(
         mc,
         env,
         "__internal_async_gen_yield_star_reject",
-        Value::Function("__internal_async_gen_yield_star_reject".to_string()),
+        &Value::Function("__internal_async_gen_yield_star_reject".to_string()),
     )?;
 
     // Register Symbol.asyncIterator on AsyncGenerator.prototype -> returns the generator object itself
@@ -250,7 +250,7 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         && let Value::Symbol(async_iter_sym) = &*async_iter_sym_val.borrow()
     {
         let val = Value::Function("AsyncGenerator.prototype.asyncIterator".to_string());
-        object_set_key_value(mc, &async_gen_proto, async_iter_sym, val)?;
+        object_set_key_value(mc, &async_gen_proto, async_iter_sym, &val)?;
         async_gen_proto
             .borrow_mut(mc)
             .set_non_enumerable(crate::core::PropertyKey::Symbol(*async_iter_sym));
@@ -258,12 +258,12 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
 
     // Link prototype to constructor and expose on global env
     // Set 'constructor' on prototype with proper attributes
-    let desc_ctor = crate::core::create_descriptor_object(mc, Value::Object(async_gen_ctor), true, false, true)?;
+    let desc_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_ctor), true, false, true)?;
     crate::js_object::define_property_internal(mc, &async_gen_proto, "constructor", &desc_ctor)?;
     // Set 'prototype' on constructor with proper attributes
-    let desc_proto = crate::core::create_descriptor_object(mc, Value::Object(async_gen_proto), true, false, false)?;
+    let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_proto), true, false, false)?;
     crate::js_object::define_property_internal(mc, &async_gen_ctor, "prototype", &desc_proto)?;
-    crate::core::env_set(mc, env, "AsyncGenerator", Value::Object(async_gen_ctor))?;
+    crate::core::env_set(mc, env, "AsyncGenerator", &Value::Object(async_gen_ctor))?;
     Ok(())
 }
 
@@ -367,8 +367,8 @@ fn stmt_contains_yield_or_await(s: &Statement) -> bool {
 
 fn create_iterator_result_obj<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, done: bool) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "value", value)?;
-    object_set_key_value(mc, &obj, "done", Value::Boolean(done))?;
+    object_set_key_value(mc, &obj, "value", &value)?;
+    object_set_key_value(mc, &obj, "done", &Value::Boolean(done))?;
     Ok(obj)
 }
 
@@ -436,7 +436,7 @@ fn get_for_await_iterator<'gc>(
     {
         let method = crate::core::get_property_with_accessors(mc, env, obj, async_iter_sym_data)?;
         if !matches!(method, Value::Undefined | Value::Null) {
-            let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+            let res = evaluate_call_dispatch(mc, env, &method, Some(iter_val), &[])?;
             let res = await_value(mc, env, res).map_err(|v| EvalError::Throw(v, None, None))?;
             if let Value::Object(iter_obj) = res {
                 iterator = Some(iter_obj);
@@ -454,7 +454,7 @@ fn get_for_await_iterator<'gc>(
     {
         let method = crate::core::get_property_with_accessors(mc, env, obj, iter_sym_data)?;
         if !matches!(method, Value::Undefined | Value::Null) {
-            let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+            let res = evaluate_call_dispatch(mc, env, &method, Some(iter_val), &[])?;
             if let Value::Object(iter_obj) = res {
                 iterator = Some(iter_obj);
                 is_async_iter = false;
@@ -480,7 +480,7 @@ fn for_await_next_value<'gc>(
         return Err(EvalError::Js(raise_type_error!("Iterator has no next method")));
     }
 
-    let mut next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
+    let mut next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
     if is_async_iter {
         next_res_val = await_value(mc, env, next_res_val).map_err(|v| EvalError::Throw(v, None, None))?;
     }
@@ -585,7 +585,7 @@ fn process_one_pending<'gc>(
                         if let Some(VarDeclKind::Let) | Some(VarDeclKind::Const) = decl_kind_opt {
                             let he = new_js_object_data(mc);
                             he.borrow_mut(mc).prototype = Some(func_env);
-                            env_set(mc, &he, var_name, Value::Uninitialized)?;
+                            env_set(mc, &he, var_name, &Value::Uninitialized)?;
                             head_env = Some(he);
                         }
                         let iter_eval_env = head_env.as_ref().unwrap_or(&func_env);
@@ -609,10 +609,10 @@ fn process_one_pending<'gc>(
                                 let iter_env = if let Some(VarDeclKind::Let) | Some(VarDeclKind::Const) = decl_kind_opt {
                                     let e = new_js_object_data(mc);
                                     e.borrow_mut(mc).prototype = Some(func_env);
-                                    env_set(mc, &e, var_name, value.clone())?;
+                                    env_set(mc, &e, var_name, &value.clone())?;
                                     e
                                 } else {
-                                    env_set_recursive(mc, &func_env, var_name, value.clone())?;
+                                    env_set_recursive(mc, &func_env, var_name, &value.clone())?;
                                     func_env
                                 };
 
@@ -679,7 +679,7 @@ fn process_one_pending<'gc>(
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
                         let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", Value::Undefined)?;
+                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", &Value::Undefined)?;
                         match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == crate::js_generator::YieldKind::YieldStar {
@@ -727,8 +727,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", promise_cell_val.clone())?;
+                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -754,8 +754,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val)?;
-                                                            env_set(mc, &e, "__p", promise_cell_val)?;
+                                                            env_set(mc, &e, "__gen", &gen_val)?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -853,8 +853,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", promise_cell_val.clone())?;
+                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -876,8 +876,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val)?;
-                                                            env_set(mc, &e, "__p", promise_cell_val)?;
+                                                            env_set(mc, &e, "__gen", &gen_val)?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -975,10 +975,10 @@ fn process_one_pending<'gc>(
                             let iter_env = if let Some(VarDeclKind::Let) | Some(VarDeclKind::Const) = for_await.decl_kind {
                                 let e = new_js_object_data(mc);
                                 e.borrow_mut(mc).prototype = Some(func_env);
-                                env_set(mc, &e, &for_await.var_name, value.clone())?;
+                                env_set(mc, &e, &for_await.var_name, &value.clone())?;
                                 e
                             } else {
-                                env_set_recursive(mc, &func_env, &for_await.var_name, value.clone())?;
+                                env_set_recursive(mc, &func_env, &for_await.var_name, &value.clone())?;
                                 func_env
                             };
 
@@ -1060,7 +1060,7 @@ fn process_one_pending<'gc>(
 
                 // Prefer the queued send value if it is concrete; otherwise fall back
                 // to the cached initially-yielded value if present.
-                object_set_key_value(mc, &func_env, &var_name, _send_value.clone())?;
+                object_set_key_value(mc, &func_env, &var_name, &_send_value.clone())?;
 
                 if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = crate::js_generator::find_first_yield_in_statements(&tail) {
                     if idx > 0 {
@@ -1098,7 +1098,7 @@ fn process_one_pending<'gc>(
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
                         let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", Value::Undefined)?;
+                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", &Value::Undefined)?;
                         match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == crate::js_generator::YieldKind::YieldStar {
@@ -1146,8 +1146,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", promise_cell_val.clone())?;
+                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -1173,8 +1173,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val)?;
-                                                            env_set(mc, &e, "__p", promise_cell_val)?;
+                                                            env_set(mc, &e, "__gen", &gen_val)?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -1265,8 +1265,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", promise_cell_val.clone())?;
+                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -1288,8 +1288,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val)?;
-                                                            env_set(mc, &e, "__p", promise_cell_val)?;
+                                                            env_set(mc, &e, "__gen", &gen_val)?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -1384,7 +1384,7 @@ fn process_one_pending<'gc>(
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
                         let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", Value::Undefined)?;
+                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", &Value::Undefined)?;
                         match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == YieldKind::YieldStar {
@@ -1458,8 +1458,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", promise_cell_val.clone())?;
+                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -1481,8 +1481,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", gen_val)?;
-                                                            env_set(mc, &e, "__p", promise_cell_val)?;
+                                                            env_set(mc, &e, "__gen", &gen_val)?;
+                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
                                                             Some(e)
                                                         },
                                                         None,
@@ -1572,7 +1572,7 @@ fn process_one_pending<'gc>(
                 } else {
                     crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                 };
-                object_set_key_value(mc, &func_env, "__gen_throw_val", throw_val.clone())?;
+                object_set_key_value(mc, &func_env, "__gen_throw_val", &throw_val.clone())?;
 
                 match crate::core::evaluate_statements(mc, &func_env, &tail) {
                     Ok(v) => {
@@ -1617,7 +1617,7 @@ fn process_one_pending<'gc>(
                 } else {
                     crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                 };
-                object_set_key_value(mc, &func_env, "__gen_throw_val", ret_val.clone())?;
+                object_set_key_value(mc, &func_env, "__gen_throw_val", &ret_val.clone())?;
 
                 match crate::core::evaluate_statements(mc, &func_env, &tail) {
                     Ok(v) => {
@@ -1957,7 +1957,7 @@ fn handle_yield_star_call<'gc>(
                 }
             };
             if !matches!(fetched, Value::Undefined | Value::Null) {
-                object_set_key_value(mc, &iter_obj, "__yield_star_next_method", fetched.clone())?;
+                object_set_key_value(mc, &iter_obj, "__yield_star_next_method", &fetched.clone())?;
                 iter_obj.borrow_mut(mc).set_non_enumerable("__yield_star_next_method");
             }
             fetched
@@ -1976,7 +1976,7 @@ fn handle_yield_star_call<'gc>(
         }
     };
     if !matches!(method_func, Value::Undefined) {
-        let call_res = evaluate_call_dispatch(mc, env, method_func, Some(Value::Object(iter_obj)), args);
+        let call_res = evaluate_call_dispatch(mc, env, &method_func, Some(&Value::Object(iter_obj)), &args);
 
         let res_val = match call_res {
             Ok(v) => v,
@@ -2014,14 +2014,14 @@ fn handle_yield_star_call<'gc>(
                         let call_env = crate::js_class::prepare_call_env_with_this(
                             mc,
                             Some(env),
-                            Some(Value::Object(obj)),
+                            Some(&Value::Object(obj)),
                             None,
                             &[],
                             None,
                             Some(env),
                             None,
                         )?;
-                        if let Err(e) = evaluate_call_dispatch(mc, &call_env, then_val, Some(Value::Object(obj)), vec![resolve, reject]) {
+                        if let Err(e) = evaluate_call_dispatch(mc, &call_env, &then_val, Some(&Value::Object(obj)), &[resolve, reject]) {
                             reject_promise(mc, &p, eval_error_to_value(mc, env, e), env);
                         }
                     } else {
@@ -2055,8 +2055,8 @@ fn handle_yield_star_call<'gc>(
                 {
                     let e = new_js_object_data(mc);
                     e.borrow_mut(mc).prototype = Some(*env);
-                    env_set(mc, &e, "__gen", gen_val.clone())?;
-                    env_set(mc, &e, "__p", p_val.clone())?;
+                    env_set(mc, &e, "__gen", &gen_val.clone())?;
+                    env_set(mc, &e, "__p", &p_val.clone())?;
                     Some(e)
                 },
                 None,
@@ -2078,8 +2078,8 @@ fn handle_yield_star_call<'gc>(
                 {
                     let e = new_js_object_data(mc);
                     e.borrow_mut(mc).prototype = Some(*env);
-                    env_set(mc, &e, "__gen", gen_val.clone())?;
-                    env_set(mc, &e, "__p", p_val.clone())?;
+                    env_set(mc, &e, "__gen", &gen_val.clone())?;
+                    env_set(mc, &e, "__p", &p_val.clone())?;
                     Some(e)
                 },
                 None,

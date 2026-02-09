@@ -25,8 +25,8 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, Statement,
-    StatementKind, Value, env_set, evaluate_statements, extract_closure_from_value, generate_unique_id, object_get_key_value,
-    object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    StatementKind, Value, env_set, evaluate_call_dispatch, evaluate_statements, extract_closure_from_value, generate_unique_id,
+    object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -162,21 +162,21 @@ pub fn call_function<'gc>(
 pub fn call_function_with_this<'gc>(
     mc: &MutationContext<'gc>,
     func: &Value<'gc>,
-    this_val: Option<Value<'gc>>,
+    this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match func {
         Value::Closure(cl) => crate::core::call_closure(mc, cl, this_val, args, env, None),
         Value::Function(name) => {
-            if let Some(res) = crate::core::call_native_function(mc, name, this_val.clone(), args, env)? {
+            if let Some(res) = crate::core::call_native_function(mc, name, this_val, args, env)? {
                 Ok(res)
             } else if let Some(this) = this_val {
                 let call_env = crate::core::new_js_object_data(mc);
                 // Use the existing env as the parent scope loop up
                 call_env.borrow_mut(mc).prototype = Some(*env);
                 call_env.borrow_mut(mc).is_function_scope = true;
-                object_set_key_value(mc, &call_env, "this", this.clone())?;
+                object_set_key_value(mc, &call_env, "this", this)?;
                 crate::js_function::handle_global_function(mc, name, args, &call_env)
             } else {
                 crate::js_function::handle_global_function(mc, name, args, env)
@@ -221,7 +221,7 @@ fn ensure_promise_runtime<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     }
     // create runtime object and set it
     let runtime = new_js_object_data(mc);
-    object_set_key_value(mc, &global, "__promise_runtime", Value::Object(runtime))?;
+    object_set_key_value(mc, &global, "__promise_runtime", &Value::Object(runtime))?;
     Ok(runtime)
 }
 
@@ -235,7 +235,7 @@ fn get_runtime_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
     }
     // create array and set
     let arr = crate::js_array::create_array(mc, &runtime)?;
-    object_set_key_value(mc, &runtime, name, Value::Object(arr))?;
+    object_set_key_value(mc, &runtime, name, &Value::Object(arr))?;
     Ok(arr)
 }
 
@@ -249,15 +249,15 @@ fn runtime_push_pending_unhandled<'gc>(
 ) -> Result<(), JSError> {
     let arr = get_runtime_array(mc, env, "__pending_unhandled")?;
     let entry = new_js_object_data(mc);
-    object_set_key_value(mc, &entry, "promise", Value::Promise(promise))?;
-    object_set_key_value(mc, &entry, "reason", reason)?;
-    object_set_key_value(mc, &entry, "tick", Value::Number(tick as f64))?;
+    object_set_key_value(mc, &entry, "promise", &Value::Promise(promise))?;
+    object_set_key_value(mc, &entry, "reason", &reason)?;
+    object_set_key_value(mc, &entry, "tick", &Value::Number(tick as f64))?;
     // Also store the env where this rejection was observed so later processing can re-create a proper UnhandledCheck task
-    object_set_key_value(mc, &entry, "env", Value::Object(*env))?;
+    object_set_key_value(mc, &entry, "env", &Value::Object(*env))?;
 
     // append to array
     let idx = crate::core::object_get_length(&arr).unwrap_or(0);
-    object_set_key_value(mc, &arr, idx, Value::Object(entry))?;
+    object_set_key_value(mc, &arr, idx, &Value::Object(entry))?;
     // Debug: log pending count to help diagnose why entries may never mature
     log::debug!(
         "runtime_push_pending_unhandled: added entry for promise ptr={:p} tick={} pending_count={}",
@@ -275,7 +275,7 @@ pub fn take_unhandled_rejection<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
         && let Value::String(s) = &*rc.borrow()
     {
         // consume it
-        object_set_key_value(mc, &runtime, "__unhandled_rejection", Value::Undefined).unwrap();
+        object_set_key_value(mc, &runtime, "__unhandled_rejection", &Value::Undefined).unwrap();
         return Some(Value::String(s.clone()));
     }
     None
@@ -289,8 +289,8 @@ pub fn clear_runtime_unhandled_for_promise<'gc>(mc: &MutationContext<'gc>, env: 
         && *n as usize == ptr
     {
         // Clear both the reason and the pointer
-        object_set_key_value(mc, &runtime, "__unhandled_rejection", Value::Undefined)?;
-        object_set_key_value(mc, &runtime, "__unhandled_rejection_promise_ptr", Value::Undefined)?;
+        object_set_key_value(mc, &runtime, "__unhandled_rejection", &Value::Undefined)?;
+        object_set_key_value(mc, &runtime, "__unhandled_rejection_promise_ptr", &Value::Undefined)?;
     }
     Ok(())
 }
@@ -320,12 +320,12 @@ pub fn runtime_remove_pending_unhandled_for_promise<'gc>(
                     keep = false;
                 }
                 if keep {
-                    object_set_key_value(mc, &new_arr, write_idx, Value::Object(*entry))?;
+                    object_set_key_value(mc, &new_arr, write_idx, &Value::Object(*entry))?;
                     write_idx += 1;
                 }
             }
         }
-        object_set_key_value(mc, &runtime, "__pending_unhandled", Value::Object(new_arr))?;
+        object_set_key_value(mc, &runtime, "__pending_unhandled", &Value::Object(new_arr))?;
     }
     Ok(())
 }
@@ -389,22 +389,22 @@ pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &J
                             queued_any = true;
                         } else {
                             // Not a Promise? keep it
-                            object_set_key_value(mc, &new_arr, write_idx, Value::Object(*entry))?;
+                            object_set_key_value(mc, &new_arr, write_idx, &Value::Object(*entry))?;
                             write_idx += 1;
                         }
                     } else {
                         // malformed entry: keep it
-                        object_set_key_value(mc, &new_arr, write_idx, Value::Object(*entry))?;
+                        object_set_key_value(mc, &new_arr, write_idx, &Value::Object(*entry))?;
                         write_idx += 1;
                     }
                 } else {
                     // Not yet matured: keep it for later
-                    object_set_key_value(mc, &new_arr, write_idx, Value::Object(*entry))?;
+                    object_set_key_value(mc, &new_arr, write_idx, &Value::Object(*entry))?;
                     write_idx += 1;
                 }
             }
         }
-        object_set_key_value(mc, &runtime, "__pending_unhandled", Value::Object(new_arr))?;
+        object_set_key_value(mc, &runtime, "__pending_unhandled", &Value::Object(new_arr))?;
         // Debug: report how many pending entries remain after processing
         log::debug!(
             "process_runtime_pending_unhandled: queued_any={} pending_count={}",
@@ -788,9 +788,9 @@ fn queue_task_front<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
 pub fn queue_async_step<'gc>(
     mc: &MutationContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
-    resolve: Value<'gc>,
-    reject: Value<'gc>,
-    result: Value<'gc>,
+    resolve: &Value<'gc>,
+    reject: &Value<'gc>,
+    result: &Value<'gc>,
     is_reject: bool,
     env: &JSObjectDataPtr<'gc>,
 ) {
@@ -798,9 +798,9 @@ pub fn queue_async_step<'gc>(
         mc,
         Task::AsyncStep {
             generator,
-            resolve,
-            reject,
-            result,
+            resolve: resolve.clone(),
+            reject: reject.clone(),
+            result: result.clone(),
             is_reject,
             env: *env,
         },
@@ -1234,9 +1234,9 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
             log::trace!("Processing ExecuteClosure task");
             // Call the closure/function
             let result = match &function {
-                Value::Closure(cl) => crate::core::call_closure(mc, cl, this_val, &args, &env, None),
-                Value::Function(_) => call_function_with_this(mc, &function, this_val, &args, &env),
-                _ => call_function_with_this(mc, &function, this_val, &args, &env),
+                Value::Closure(cl) => crate::core::call_closure(mc, cl, this_val.as_ref(), &args, &env, None),
+                Value::Function(_) => call_function_with_this(mc, &function, this_val.as_ref(), &args, &env),
+                _ => call_function_with_this(mc, &function, this_val.as_ref(), &args, &env),
             };
 
             match result {
@@ -1274,7 +1274,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
             env,
         } => {
             let step_result = if is_reject { Err(result) } else { Ok(result) };
-            crate::js_async::continue_async_step_direct(mc, generator, resolve, reject, step_result, &env)?;
+            crate::js_async::continue_async_step_direct(mc, generator, &resolve, &reject, &step_result, &env)?;
         }
         Task::Timeout { id, callback, args, .. } => {
             log::trace!("Processing Timeout task");
@@ -1309,7 +1309,8 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                     // Our runtime is strict-only, so the `this` value for a plain function
                     // call should be `undefined` (not the global object).
                     let this_val = Some(Value::Undefined);
-                    let func_env = prepare_function_call_env(mc, Some(&captured_env), this_val, Some(&params[..]), &args, None, None)?;
+                    let func_env =
+                        prepare_function_call_env(mc, Some(&captured_env), this_val.as_ref(), Some(&params[..]), &args, None, None)?;
                     let _ = evaluate_statements(mc, &func_env, &body)?;
                 }
             }
@@ -1368,7 +1369,8 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                 } else {
                     // Strict-mode: use undefined as `this` for plain function calls
                     let this_val = Some(Value::Undefined);
-                    let func_env = prepare_function_call_env(mc, Some(&captured_env), this_val, Some(&params[..]), &args, None, None)?;
+                    let func_env =
+                        prepare_function_call_env(mc, Some(&captured_env), this_val.as_ref(), Some(&params[..]), &args, None, None)?;
                     let _ = evaluate_statements(mc, &func_env, &body)?;
                 }
 
@@ -1418,10 +1420,10 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                     // Store the stringified reason into runtime property for later pick-up
                     let s = utf8_to_utf16(&value_to_string(&reason));
                     if let Ok(runtime) = ensure_promise_runtime(mc, &env) {
-                        object_set_key_value(mc, &runtime, "__unhandled_rejection", Value::String(s))?;
+                        object_set_key_value(mc, &runtime, "__unhandled_rejection", &Value::String(s))?;
                         // Record which promise ptr caused this so it can be cleared if a handler attaches later
                         let ptr_num = (Gc::as_ptr(promise) as usize) as f64;
-                        object_set_key_value(mc, &runtime, "__unhandled_rejection_promise_ptr", Value::Number(ptr_num))?;
+                        object_set_key_value(mc, &runtime, "__unhandled_rejection_promise_ptr", &Value::Number(ptr_num))?;
                     }
                 } else {
                     // Not yet elapsed: defer to the runtime pending list to avoid tight requeue loops
@@ -1869,9 +1871,9 @@ pub fn make_promise_js_object<'gc>(
 
     // Assign a stable object-side id for debugging/tracking
     let id = generate_unique_id();
-    object_set_key_value(mc, &promise_obj, "__promise_obj_id", Value::Number(id as f64))?;
+    object_set_key_value(mc, &promise_obj, "__promise_obj_id", &Value::Number(id as f64))?;
 
-    object_set_key_value(mc, &promise_obj, "__promise", Value::Promise(promise))?;
+    object_set_key_value(mc, &promise_obj, "__promise", &Value::Promise(promise))?;
     Ok(promise_obj)
 }
 
@@ -2027,7 +2029,7 @@ pub fn resolve_promise<'gc>(
                         // setting the new env's prototype to the caller's env
                         new_env.borrow_mut(mc).prototype = Some(*env);
                         // Bind current promise on the env so the helper can access it
-                        if let Err(e) = env_set(mc, &new_env, "__current_promise", Value::Promise(current_promise)) {
+                        if let Err(e) = env_set(mc, &new_env, "__current_promise", &Value::Promise(current_promise)) {
                             log::error!("resolve_promise: failed to set __current_promise in env: {}", e);
                         }
                         Some(new_env)
@@ -2052,7 +2054,7 @@ pub fn resolve_promise<'gc>(
                         // Ensure the helper names and globals are reachable via prototype chain by
                         // setting the new env's prototype to the caller's env
                         new_env.borrow_mut(mc).prototype = Some(*env);
-                        if let Err(e) = env_set(mc, &new_env, "__current_promise", Value::Promise(current_promise)) {
+                        if let Err(e) = env_set(mc, &new_env, "__current_promise", &Value::Promise(current_promise)) {
                             log::error!("resolve_promise: failed to set __current_promise in env: {}", e);
                         }
                         Some(new_env)
@@ -2240,10 +2242,10 @@ pub fn __internal_promise_allsettled_resolve<'gc>(
         {
             // Create settled result
             let settled = new_gc_cell_ptr(mc, JSObjectData::new());
-            object_set_key_value(mc, &settled, "status", Value::String(utf8_to_utf16("fulfilled")))?;
-            object_set_key_value(mc, &settled, "value", value)?;
+            object_set_key_value(mc, &settled, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
+            object_set_key_value(mc, &settled, "value", &value)?;
             // Add to results array at idx
-            object_set_key_value(mc, results_obj, idx as usize, Value::Object(settled))?;
+            object_set_key_value(mc, results_obj, idx as usize, &Value::Object(settled))?;
         }
 
         // Increment completed
@@ -2251,7 +2253,7 @@ pub fn __internal_promise_allsettled_resolve<'gc>(
             && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
-            object_set_key_value(mc, &shared_state_obj, "completed", Value::Number(new_completed))?;
+            object_set_key_value(mc, &shared_state_obj, "completed", &Value::Number(new_completed))?;
 
             // Check if all completed
             if let Some(total_val_rc) = object_get_key_value(&shared_state_obj, "total")
@@ -2301,11 +2303,11 @@ pub fn __internal_promise_allsettled_reject<'gc>(
         {
             // Create settled result
             let settled = new_gc_cell_ptr(mc, JSObjectData::new());
-            object_set_key_value(mc, &settled, "status", Value::String(utf8_to_utf16("rejected")))?;
-            object_set_key_value(mc, &settled, "reason", reason)?;
+            object_set_key_value(mc, &settled, "status", &Value::String(utf8_to_utf16("rejected")))?;
+            object_set_key_value(mc, &settled, "reason", &reason)?;
 
             // Add to results array at idx
-            object_set_key_value(mc, results_obj, idx as usize, Value::Object(settled))?;
+            object_set_key_value(mc, results_obj, idx as usize, &Value::Object(settled))?;
         }
 
         // Increment completed
@@ -2313,7 +2315,7 @@ pub fn __internal_promise_allsettled_reject<'gc>(
             && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
-            object_set_key_value(mc, &shared_state_obj, "completed", Value::Number(new_completed))?;
+            object_set_key_value(mc, &shared_state_obj, "completed", &Value::Number(new_completed))?;
 
             // Check if all completed
             if let Some(total_val_rc) = object_get_key_value(&shared_state_obj, "total")
@@ -2386,22 +2388,22 @@ pub fn __internal_promise_any_reject<'gc>(
     if *rejected_count.borrow() == total {
         // All promises rejected, create AggregateError
         let aggregate_error = new_gc_cell_ptr(mc, JSObjectData::new());
-        object_set_key_value(mc, &aggregate_error, "name", Value::String(utf8_to_utf16("AggregateError"))).unwrap();
+        object_set_key_value(mc, &aggregate_error, "name", &Value::String(utf8_to_utf16("AggregateError"))).unwrap();
         object_set_key_value(
             mc,
             &aggregate_error,
             "message",
-            Value::String(utf8_to_utf16("All promises were rejected")),
+            &Value::String(utf8_to_utf16("All promises were rejected")),
         )?;
 
         let errors_array = new_gc_cell_ptr(mc, JSObjectData::new());
         let rejections_vec = rejections.borrow();
         for (i, rejection) in rejections_vec.iter().enumerate() {
             if let Some(err) = rejection {
-                object_set_key_value(mc, &errors_array, i, err.clone())?;
+                object_set_key_value(mc, &errors_array, i, &err.clone())?;
             }
         }
-        object_set_key_value(mc, &aggregate_error, "errors", Value::Object(errors_array))?;
+        object_set_key_value(mc, &aggregate_error, "errors", &Value::Object(errors_array))?;
 
         crate::js_promise::reject_promise(mc, &result_promise, Value::Object(aggregate_error), env);
     }
@@ -2466,15 +2468,15 @@ pub fn __internal_allsettled_state_record_fulfilled_env<'gc>(
         {
             // create result object
             let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-            object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
-            object_set_key_value(mc, &result_obj, "value", value.clone())?;
-            object_set_key_value(mc, results_arr, index, Value::Object(result_obj))?;
+            object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
+            object_set_key_value(mc, &result_obj, "value", &value.clone())?;
+            object_set_key_value(mc, results_arr, index, &Value::Object(result_obj))?;
         }
         // increment completed
         if let Some(comp_rc) = object_get_key_value(state_obj, "__completed")
             && let Value::Number(n) = &*comp_rc.borrow()
         {
-            object_set_key_value(mc, state_obj, "__completed", Value::Number(n + 1.0))?;
+            object_set_key_value(mc, state_obj, "__completed", &Value::Number(n + 1.0))?;
             // check for completion
             if let Some(total_rc) = object_get_key_value(state_obj, "__total")
                 && let Value::Number(total) = &*total_rc.borrow()
@@ -2518,15 +2520,15 @@ pub fn __internal_allsettled_state_record_rejected_env<'gc>(
         {
             // create result object
             let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-            object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("rejected")))?;
-            object_set_key_value(mc, &result_obj, "reason", reason.clone())?;
-            object_set_key_value(mc, results_arr, index, Value::Object(result_obj))?;
+            object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("rejected")))?;
+            object_set_key_value(mc, &result_obj, "reason", &reason.clone())?;
+            object_set_key_value(mc, results_arr, index, &Value::Object(result_obj))?;
         }
         // increment completed
         if let Some(comp_rc) = object_get_key_value(state_obj, "__completed")
             && let Value::Number(n) = &*comp_rc.borrow()
         {
-            object_set_key_value(mc, state_obj, "__completed", Value::Number(n + 1.0))?;
+            object_set_key_value(mc, state_obj, "__completed", &Value::Number(n + 1.0))?;
             // check for completion
             if let Some(total_rc) = object_get_key_value(state_obj, "__total")
                 && let Value::Number(total) = &*total_rc.borrow()
@@ -2582,7 +2584,7 @@ fn create_allsettled_resolve_callback<'gc>(
             {
                 let env = new_js_object_data(mc);
                 env.borrow_mut(mc).prototype = Some(parent_env);
-                env_set(mc, &env, "__state_env", Value::Object(state_env)).unwrap();
+                env_set(mc, &env, "__state_env", &Value::Object(state_env)).unwrap();
                 Some(env)
             },
             None,
@@ -2615,7 +2617,7 @@ fn create_allsettled_reject_callback<'gc>(
             {
                 let env = new_js_object_data(mc);
                 env.borrow_mut(mc).prototype = Some(parent_env);
-                env_set(mc, &env, "__state_env", Value::Object(state_env)).unwrap();
+                env_set(mc, &env, "__state_env", &Value::Object(state_env)).unwrap();
                 Some(env)
             },
             None,
@@ -2865,27 +2867,32 @@ pub fn handle_clear_interval_val<'gc>(
 /// Initialize Promise constructor and prototype
 pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let promise_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &promise_ctor, "__is_constructor", Value::Boolean(true))?;
-    object_set_key_value(mc, &promise_ctor, "__native_ctor", Value::String(utf8_to_utf16("Promise")))?;
-    object_set_key_value(mc, &promise_ctor, "name", Value::String(utf8_to_utf16("Promise")))?;
+    object_set_key_value(mc, &promise_ctor, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &promise_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Promise")))?;
+    object_set_key_value(mc, &promise_ctor, "name", &Value::String(utf8_to_utf16("Promise")))?;
 
     // Setup prototype
     let promise_proto = new_js_object_data(mc);
     // Ensure Promise.prototype inherits from Object.prototype so ToPrimitive works.
     let _ = crate::core::set_internal_prototype_from_constructor(mc, &promise_proto, env, "Object");
-    object_set_key_value(mc, &promise_ctor, "prototype", Value::Object(promise_proto))?;
-    object_set_key_value(mc, &promise_proto, "constructor", Value::Object(promise_ctor))?;
+    object_set_key_value(mc, &promise_ctor, "prototype", &Value::Object(promise_proto))?;
+    object_set_key_value(mc, &promise_proto, "constructor", &Value::Object(promise_ctor))?;
 
     // Static methods
     let static_methods = vec!["all", "race", "any", "allSettled", "resolve", "reject"];
     for method in static_methods {
-        object_set_key_value(mc, &promise_ctor, method, Value::Function(format!("Promise.{}", method)))?;
+        object_set_key_value(mc, &promise_ctor, method, &Value::Function(format!("Promise.{}", method)))?;
     }
 
     // Prototype methods
     let methods = vec!["then", "catch", "finally"];
     for method in methods {
-        object_set_key_value(mc, &promise_proto, method, Value::Function(format!("Promise.prototype.{}", method)))?;
+        object_set_key_value(
+            mc,
+            &promise_proto,
+            method,
+            &Value::Function(format!("Promise.prototype.{}", method)),
+        )?;
     }
 
     // Symbol.toStringTag
@@ -2894,28 +2901,28 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(s) = &*tag_sym.borrow()
     {
-        object_set_key_value(mc, &promise_proto, s, Value::String(utf8_to_utf16("Promise")))?;
+        object_set_key_value(mc, &promise_proto, s, &Value::String(utf8_to_utf16("Promise")))?;
     }
 
-    crate::core::env_set(mc, env, "Promise", Value::Object(promise_ctor))?;
+    crate::core::env_set(mc, env, "Promise", &Value::Object(promise_ctor))?;
 
     // Preserve the intrinsic Promise constructor/prototype for internal uses
     // like dynamic import, even if the global Promise binding is later replaced.
-    object_set_key_value(mc, env, "__intrinsic_promise_ctor", Value::Object(promise_ctor))?;
-    object_set_key_value(mc, env, "__intrinsic_promise_proto", Value::Object(promise_proto))?;
+    object_set_key_value(mc, env, "__intrinsic_promise_ctor", &Value::Object(promise_ctor))?;
+    object_set_key_value(mc, env, "__intrinsic_promise_proto", &Value::Object(promise_proto))?;
 
     // Internal helpers for resolution/rejection captures
     crate::core::env_set(
         mc,
         env,
         "__internal_promise_resolve_captured",
-        Value::Function("__internal_promise_resolve_captured".to_string()),
+        &Value::Function("__internal_promise_resolve_captured".to_string()),
     )?;
     crate::core::env_set(
         mc,
         env,
         "__internal_promise_reject_captured",
-        Value::Function("__internal_promise_reject_captured".to_string()),
+        &Value::Function("__internal_promise_reject_captured".to_string()),
     )?;
 
     // Register finally internal helpers so closures can call into them by name
@@ -2923,13 +2930,13 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         mc,
         env,
         "__internal_promise_finally_resolve",
-        Value::Function("__internal_promise_finally_resolve".to_string()),
+        &Value::Function("__internal_promise_finally_resolve".to_string()),
     )?;
     crate::core::env_set(
         mc,
         env,
         "__internal_promise_finally_reject",
-        Value::Function("__internal_promise_finally_reject".to_string()),
+        &Value::Function("__internal_promise_finally_reject".to_string()),
     )?;
 
     // Register Promise.all internal helpers
@@ -2937,13 +2944,13 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         mc,
         env,
         "__internal_promise_all_resolve",
-        Value::Function("__internal_promise_all_resolve".to_string()),
+        &Value::Function("__internal_promise_all_resolve".to_string()),
     )?;
     crate::core::env_set(
         mc,
         env,
         "__internal_promise_all_reject",
-        Value::Function("__internal_promise_all_reject".to_string()),
+        &Value::Function("__internal_promise_all_reject".to_string()),
     )?;
 
     Ok(())
@@ -2970,13 +2977,13 @@ pub fn __internal_promise_all_resolve<'gc>(
             Value::Number(n) => n.to_string(),
             _ => return Ok(Value::Undefined),
         };
-        object_set_key_value(mc, results_obj, &idx_str, value.clone())?;
+        object_set_key_value(mc, results_obj, &idx_str, &value.clone())?;
 
         if let Some(completed_val_rc) = object_get_key_value(state_obj, "completed")
             && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
-            object_set_key_value(mc, state_obj, "completed", Value::Number(new_completed))?;
+            object_set_key_value(mc, state_obj, "completed", &Value::Number(new_completed))?;
 
             if let Some(total_val_rc) = object_get_key_value(state_obj, "total")
                 && let Value::Number(total) = &*total_val_rc.borrow()
@@ -3076,10 +3083,10 @@ pub fn handle_promise_static_method_val<'gc>(
 
             let results_array = crate::js_array::create_array(mc, env)?;
             let state_env = crate::core::new_js_object_data(mc);
-            object_set_key_value(mc, &state_env, "__results", Value::Object(results_array))?;
-            object_set_key_value(mc, &state_env, "__completed", Value::Number(0.0))?;
-            object_set_key_value(mc, &state_env, "__total", Value::Number(num_promises as f64))?;
-            object_set_key_value(mc, &state_env, "__result_promise", Value::Promise(result_promise))?;
+            object_set_key_value(mc, &state_env, "__results", &Value::Object(results_array))?;
+            object_set_key_value(mc, &state_env, "__completed", &Value::Number(0.0))?;
+            object_set_key_value(mc, &state_env, "__total", &Value::Number(num_promises as f64))?;
+            object_set_key_value(mc, &state_env, "__result_promise", &Value::Promise(result_promise))?;
 
             for (idx, promise_val) in promises.into_iter().enumerate() {
                 match promise_val {
@@ -3089,13 +3096,13 @@ pub fn handle_promise_static_method_val<'gc>(
                             match promise_state {
                                 PromiseState::Fulfilled(val) => {
                                     let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-                                    object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
-                                    object_set_key_value(mc, &result_obj, "value", val.clone())?;
-                                    object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
+                                    object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
+                                    object_set_key_value(mc, &result_obj, "value", &val.clone())?;
+                                    object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
                                     if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
                                         && let Value::Number(n) = &*comp_rc.borrow()
                                     {
-                                        object_set_key_value(mc, &state_env, "__completed", Value::Number(n + 1.0))?;
+                                        object_set_key_value(mc, &state_env, "__completed", &Value::Number(n + 1.0))?;
                                         if let Some(total_rc) = object_get_key_value(&state_env, "__total")
                                             && let Value::Number(total) = &*total_rc.borrow()
                                             && (n + 1.0) == *total
@@ -3107,13 +3114,13 @@ pub fn handle_promise_static_method_val<'gc>(
                                 }
                                 PromiseState::Rejected(reason) => {
                                     let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-                                    object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("rejected")))?;
-                                    object_set_key_value(mc, &result_obj, "reason", reason.clone())?;
-                                    object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
+                                    object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("rejected")))?;
+                                    object_set_key_value(mc, &result_obj, "reason", &reason.clone())?;
+                                    object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
                                     if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
                                         && let Value::Number(n) = &*comp_rc.borrow()
                                     {
-                                        object_set_key_value(mc, &state_env, "__completed", Value::Number(n + 1.0))?;
+                                        object_set_key_value(mc, &state_env, "__completed", &Value::Number(n + 1.0))?;
                                     }
                                 }
                                 PromiseState::Pending => {
@@ -3131,25 +3138,25 @@ pub fn handle_promise_static_method_val<'gc>(
                             }
                         } else {
                             let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-                            object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
-                            object_set_key_value(mc, &result_obj, "value", Value::Object(obj))?;
-                            object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
+                            object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
+                            object_set_key_value(mc, &result_obj, "value", &Value::Object(obj))?;
+                            object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
                             if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
                                 && let Value::Number(n) = &*comp_rc.borrow()
                             {
-                                object_set_key_value(mc, &state_env, "__completed", Value::Number(n + 1.0))?;
+                                object_set_key_value(mc, &state_env, "__completed", &Value::Number(n + 1.0))?;
                             }
                         }
                     }
                     val => {
                         let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-                        object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
-                        object_set_key_value(mc, &result_obj, "value", val.clone())?;
-                        object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
+                        object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
+                        object_set_key_value(mc, &result_obj, "value", &val.clone())?;
+                        object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
                         if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
                             && let Value::Number(n) = &*comp_rc.borrow()
                         {
-                            object_set_key_value(mc, &state_env, "__completed", Value::Number(n + 1.0))?;
+                            object_set_key_value(mc, &state_env, "__completed", &Value::Number(n + 1.0))?;
                         }
                     }
                 }
@@ -3197,10 +3204,10 @@ pub fn handle_promise_static_method_val<'gc>(
             // Create state object for coordination
             let state_obj = new_js_object_data(mc);
             let results_obj = crate::js_array::create_array(mc, env)?;
-            object_set_key_value(mc, &state_obj, "results", Value::Object(results_obj))?;
-            object_set_key_value(mc, &state_obj, "completed", Value::Number(0.0))?;
-            object_set_key_value(mc, &state_obj, "total", Value::Number(num_promises as f64))?;
-            object_set_key_value(mc, &state_obj, "result_promise", Value::Promise(result_promise))?;
+            object_set_key_value(mc, &state_obj, "results", &Value::Object(results_obj))?;
+            object_set_key_value(mc, &state_obj, "completed", &Value::Number(0.0))?;
+            object_set_key_value(mc, &state_obj, "total", &Value::Number(num_promises as f64))?;
+            object_set_key_value(mc, &state_obj, "result_promise", &Value::Promise(result_promise))?;
 
             for (idx, promise_val) in promises.into_iter().enumerate() {
                 let state_obj_clone = state_obj;
@@ -3212,12 +3219,12 @@ pub fn handle_promise_static_method_val<'gc>(
                             let promise_state = &promise_ref.borrow().state;
                             match promise_state {
                                 PromiseState::Fulfilled(val) => {
-                                    object_set_key_value(mc, &results_obj, idx, val.clone())?;
+                                    object_set_key_value(mc, &results_obj, idx, &val.clone())?;
                                     if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
                                         && let Value::Number(completed) = &*completed_val_rc.borrow()
                                     {
                                         let new_completed = completed + 1.0;
-                                        object_set_key_value(mc, &state_obj, "completed", Value::Number(new_completed))?;
+                                        object_set_key_value(mc, &state_obj, "completed", &Value::Number(new_completed))?;
                                         if let Some(total_val_rc) = object_get_key_value(&state_obj, "total")
                                             && let Value::Number(total) = &*total_val_rc.borrow()
                                             && new_completed == *total
@@ -3255,7 +3262,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                             ))],
                                             {
                                                 let new_env = *env;
-                                                object_set_key_value(mc, &new_env, "__state", Value::Object(state_obj_clone))?;
+                                                object_set_key_value(mc, &new_env, "__state", &Value::Object(state_obj_clone))?;
                                                 Some(new_env)
                                             },
                                             None,
@@ -3275,7 +3282,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                             ))],
                                             {
                                                 let new_env = *env;
-                                                object_set_key_value(mc, &new_env, "__state", Value::Object(state_obj_clone))?;
+                                                object_set_key_value(mc, &new_env, "__state", &Value::Object(state_obj_clone))?;
                                                 Some(new_env)
                                             },
                                             None,
@@ -3288,21 +3295,21 @@ pub fn handle_promise_static_method_val<'gc>(
                             }
                         } else {
                             let val = Value::Object(obj);
-                            object_set_key_value(mc, &results_obj, idx, val)?;
+                            object_set_key_value(mc, &results_obj, idx, &val)?;
                             if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
                                 && let Value::Number(completed) = &*completed_val_rc.borrow()
                             {
-                                object_set_key_value(mc, &state_obj, "completed", Value::Number(completed + 1.0))?;
+                                object_set_key_value(mc, &state_obj, "completed", &Value::Number(completed + 1.0))?;
                                 // We'll check for completion below
                             }
                         }
                     }
                     val => {
-                        object_set_key_value(mc, &results_obj, idx, val.clone())?;
+                        object_set_key_value(mc, &results_obj, idx, &val.clone())?;
                         if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
                             && let Value::Number(completed) = &*completed_val_rc.borrow()
                         {
-                            object_set_key_value(mc, &state_obj, "completed", Value::Number(completed + 1.0))?;
+                            object_set_key_value(mc, &state_obj, "completed", &Value::Number(completed + 1.0))?;
                         }
                     }
                 }
@@ -3375,7 +3382,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                                     mc,
                                                     &new_env,
                                                     "__result_promise",
-                                                    Value::Promise(result_promise_clone),
+                                                    &Value::Promise(result_promise_clone),
                                                 )?;
                                                 Some(new_env)
                                             },
@@ -3400,7 +3407,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                                     mc,
                                                     &new_env,
                                                     "__result_promise",
-                                                    Value::Promise(result_promise_clone),
+                                                    &Value::Promise(result_promise_clone),
                                                 )?;
                                                 Some(new_env)
                                             },
@@ -3473,7 +3480,12 @@ pub fn handle_promise_constructor_val<'gc>(
     let promise = new_gc_cell_ptr(mc, JSPromise::new());
     let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
     // Also store the internal id on the object for correlation
-    object_set_key_value(mc, &promise_obj, "__promise_internal_id", Value::Number(promise.borrow().id as f64))?;
+    object_set_key_value(
+        mc,
+        &promise_obj,
+        "__promise_internal_id",
+        &Value::Number(promise.borrow().id as f64),
+    )?;
 
     let resolve_func = create_resolve_function_direct(mc, promise, env);
     let reject_func = create_reject_function_direct(mc, promise, env);
@@ -3501,7 +3513,7 @@ pub fn handle_promise_constructor_val<'gc>(
                         let _ = crate::core::call_closure(mc, cl, None, std::slice::from_ref(&reason), &executor_env, None);
                     }
                     Value::Function(name) => {
-                        if let Ok(call_env) = crate::js_class::prepare_call_env_with_this(
+                        if let Ok(call) = crate::js_class::prepare_call_env_with_this(
                             mc,
                             Some(&executor_env),
                             None,
@@ -3511,13 +3523,7 @@ pub fn handle_promise_constructor_val<'gc>(
                             Some(&executor_env),
                             None,
                         ) {
-                            let _ = crate::core::evaluate_call_dispatch(
-                                mc,
-                                &call_env,
-                                Value::Function(name.clone()),
-                                None,
-                                vec![reason.clone()],
-                            );
+                            let _ = evaluate_call_dispatch(mc, &call, &Value::Function(name.clone()), None, std::slice::from_ref(&reason));
                         }
                     }
                     _ => {}
@@ -3591,8 +3597,8 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
-                                        object_set_key_value(mc, &new_env, "__orig_value", orig_value.clone())?;
+                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                        object_set_key_value(mc, &new_env, "__orig_value", &orig_value.clone())?;
                                         Some(new_env)
                                     },
                                     None,
@@ -3611,7 +3617,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
+                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
                                         Some(new_env)
                                     },
                                     None,
@@ -3659,8 +3665,8 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                         ))],
                                         {
                                             let new_env = *env;
-                                            object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
-                                            object_set_key_value(mc, &new_env, "__orig_value", orig_value.clone())?;
+                                            object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                            object_set_key_value(mc, &new_env, "__orig_value", &orig_value.clone())?;
                                             Some(new_env)
                                         },
                                         None,
@@ -3679,7 +3685,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                         ))],
                                         {
                                             let new_env = *env;
-                                            object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
+                                            object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
                                             Some(new_env)
                                         },
                                         None,
@@ -3726,8 +3732,8 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
-                                        object_set_key_value(mc, &new_env, "__orig_value", orig_value.clone())?;
+                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                        object_set_key_value(mc, &new_env, "__orig_value", &orig_value.clone())?;
                                         Some(new_env)
                                     },
                                     None,
@@ -3746,7 +3752,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
+                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
                                         Some(new_env)
                                     },
                                     None,
@@ -3815,8 +3821,8 @@ pub fn __internal_promise_finally_reject<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
-                                        object_set_key_value(mc, &new_env, "__orig_reason", orig_reason.clone())?;
+                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                        object_set_key_value(mc, &new_env, "__orig_reason", &orig_reason.clone())?;
                                         Some(new_env)
                                     },
                                     None,
@@ -3835,7 +3841,7 @@ pub fn __internal_promise_finally_reject<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
+                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
                                         Some(new_env)
                                     },
                                     None,
@@ -3878,8 +3884,8 @@ pub fn __internal_promise_finally_reject<'gc>(
                                 ))],
                                 {
                                     let new_env = *env;
-                                    object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
-                                    object_set_key_value(mc, &new_env, "__orig_reason", orig_reason.clone())?;
+                                    object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                    object_set_key_value(mc, &new_env, "__orig_reason", &orig_reason.clone())?;
                                     Some(new_env)
                                 },
                                 None,
@@ -3898,7 +3904,7 @@ pub fn __internal_promise_finally_reject<'gc>(
                                 ))],
                                 {
                                     let new_env = *env;
-                                    object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise))?;
+                                    object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
                                     Some(new_env)
                                 },
                                 None,
@@ -3948,8 +3954,8 @@ pub fn handle_promise_finally_val<'gc>(
             ))],
             {
                 let new_env = *env;
-                object_set_key_value(mc, &new_env, "__on_finally", on_finally_val.clone())?;
-                object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(new_promise))?;
+                object_set_key_value(mc, &new_env, "__on_finally", &on_finally_val.clone())?;
+                object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(new_promise))?;
                 Some(new_env)
             },
             None,
@@ -3970,8 +3976,8 @@ pub fn handle_promise_finally_val<'gc>(
             ))],
             {
                 let new_env = *env;
-                object_set_key_value(mc, &new_env, "__on_finally", on_finally_val.clone())?;
-                object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(new_promise))?;
+                object_set_key_value(mc, &new_env, "__on_finally", &on_finally_val.clone())?;
+                object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(new_promise))?;
                 Some(new_env)
             },
             None,

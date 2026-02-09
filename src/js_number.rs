@@ -9,35 +9,35 @@ use num_traits::ToPrimitive;
 
 pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let number_obj = make_number_object(mc, env)?;
-    env_set(mc, env, "Number", Value::Object(number_obj))?;
+    env_set(mc, env, "Number", &Value::Object(number_obj))?;
     Ok(())
 }
 
 /// Create the Number object with all number constants and functions
 fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let number_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &number_obj, "__is_constructor", Value::Boolean(true))?;
-    object_set_key_value(mc, &number_obj, "__native_ctor", Value::String(utf8_to_utf16("Number")))?;
+    object_set_key_value(mc, &number_obj, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &number_obj, "__native_ctor", &Value::String(utf8_to_utf16("Number")))?;
 
-    object_set_key_value(mc, &number_obj, "MAX_VALUE", Value::Number(f64::MAX))?;
-    object_set_key_value(mc, &number_obj, "MIN_VALUE", Value::Number(f64::from_bits(1)))?;
-    object_set_key_value(mc, &number_obj, "NaN", Value::Number(f64::NAN))?;
-    object_set_key_value(mc, &number_obj, "POSITIVE_INFINITY", Value::Number(f64::INFINITY))?;
-    object_set_key_value(mc, &number_obj, "NEGATIVE_INFINITY", Value::Number(f64::NEG_INFINITY))?;
-    object_set_key_value(mc, &number_obj, "EPSILON", Value::Number(f64::EPSILON))?;
-    object_set_key_value(mc, &number_obj, "MAX_SAFE_INTEGER", Value::Number(9007199254740991.0))?;
-    object_set_key_value(mc, &number_obj, "MIN_SAFE_INTEGER", Value::Number(-9007199254740991.0))?;
-    object_set_key_value(mc, &number_obj, "isNaN", Value::Function("Number.isNaN".to_string()))?;
-    object_set_key_value(mc, &number_obj, "isFinite", Value::Function("Number.isFinite".to_string()))?;
-    object_set_key_value(mc, &number_obj, "isInteger", Value::Function("Number.isInteger".to_string()))?;
+    object_set_key_value(mc, &number_obj, "MAX_VALUE", &Value::Number(f64::MAX))?;
+    object_set_key_value(mc, &number_obj, "MIN_VALUE", &Value::Number(f64::from_bits(1)))?;
+    object_set_key_value(mc, &number_obj, "NaN", &Value::Number(f64::NAN))?;
+    object_set_key_value(mc, &number_obj, "POSITIVE_INFINITY", &Value::Number(f64::INFINITY))?;
+    object_set_key_value(mc, &number_obj, "NEGATIVE_INFINITY", &Value::Number(f64::NEG_INFINITY))?;
+    object_set_key_value(mc, &number_obj, "EPSILON", &Value::Number(f64::EPSILON))?;
+    object_set_key_value(mc, &number_obj, "MAX_SAFE_INTEGER", &Value::Number(9007199254740991.0))?;
+    object_set_key_value(mc, &number_obj, "MIN_SAFE_INTEGER", &Value::Number(-9007199254740991.0))?;
+    object_set_key_value(mc, &number_obj, "isNaN", &Value::Function("Number.isNaN".to_string()))?;
+    object_set_key_value(mc, &number_obj, "isFinite", &Value::Function("Number.isFinite".to_string()))?;
+    object_set_key_value(mc, &number_obj, "isInteger", &Value::Function("Number.isInteger".to_string()))?;
     object_set_key_value(
         mc,
         &number_obj,
         "isSafeInteger",
-        Value::Function("Number.isSafeInteger".to_string()),
+        &Value::Function("Number.isSafeInteger".to_string()),
     )?;
-    object_set_key_value(mc, &number_obj, "parseFloat", Value::Function("Number.parseFloat".to_string()))?;
-    object_set_key_value(mc, &number_obj, "parseInt", Value::Function("Number.parseInt".to_string()))?;
+    object_set_key_value(mc, &number_obj, "parseFloat", &Value::Function("Number.parseFloat".to_string()))?;
+    object_set_key_value(mc, &number_obj, "parseInt", &Value::Function("Number.parseInt".to_string()))?;
 
     // Make static Number properties non-enumerable
     number_obj.borrow_mut(mc).set_non_enumerable("MAX_VALUE");
@@ -105,37 +105,37 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         mc,
         &number_prototype,
         "toString",
-        Value::Function("Number.prototype.toString".to_string()),
+        &Value::Function("Number.prototype.toString".to_string()),
     )?;
     object_set_key_value(
         mc,
         &number_prototype,
         "valueOf",
-        Value::Function("Number.prototype.valueOf".to_string()),
+        &Value::Function("Number.prototype.valueOf".to_string()),
     )?;
     object_set_key_value(
         mc,
         &number_prototype,
         "toLocaleString",
-        Value::Function("Number.prototype.toLocaleString".to_string()),
+        &Value::Function("Number.prototype.toLocaleString".to_string()),
     )?;
     object_set_key_value(
         mc,
         &number_prototype,
         "toExponential",
-        Value::Function("Number.prototype.toExponential".to_string()),
+        &Value::Function("Number.prototype.toExponential".to_string()),
     )?;
     object_set_key_value(
         mc,
         &number_prototype,
         "toFixed",
-        Value::Function("Number.prototype.toFixed".to_string()),
+        &Value::Function("Number.prototype.toFixed".to_string()),
     )?;
     object_set_key_value(
         mc,
         &number_prototype,
         "toPrecision",
-        Value::Function("Number.prototype.toPrecision".to_string()),
+        &Value::Function("Number.prototype.toPrecision".to_string()),
     )?;
 
     // Make number prototype methods non-enumerable and mark constructor non-enumerable
@@ -148,13 +148,13 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     number_prototype.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Set prototype on Number constructor
-    object_set_key_value(mc, &number_obj, "prototype", Value::Object(number_prototype))?;
+    object_set_key_value(mc, &number_obj, "prototype", &Value::Object(number_prototype))?;
 
     // Ensure Number.prototype.constructor points back to Number
     if let Some(proto_val) = object_get_key_value(&number_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
-        object_set_key_value(mc, proto_obj, "constructor", Value::Object(number_obj))?;
+        object_set_key_value(mc, proto_obj, "constructor", &Value::Object(number_obj))?;
         // Non-enumerable already set above, but ensure it's non-enumerable
         proto_obj.borrow_mut(mc).set_non_enumerable("constructor");
     }
@@ -466,11 +466,11 @@ pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'
 }
 
 /// Handle Number prototype method calls
-pub fn handle_number_prototype_method<'gc>(this_val: Option<Value<'gc>>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
-    if let Some(Value::Number(n)) = this_val {
-        handle_number_instance_method(&n, method, args)
-    } else if let Some(Value::Object(obj)) = this_val {
-        if let Some(val) = object_get_key_value(&obj, "__value__") {
+pub fn handle_number_prototype_method<'gc>(this: Option<&Value<'gc>>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
+    if let Some(Value::Number(n)) = this {
+        handle_number_instance_method(n, method, args)
+    } else if let Some(Value::Object(obj)) = this {
+        if let Some(val) = object_get_key_value(obj, "__value__") {
             if let Value::Number(n) = &*val.borrow() {
                 handle_number_instance_method(n, method, args)
             } else {

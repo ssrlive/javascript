@@ -55,11 +55,11 @@ pub(crate) fn bigint_constructor<'gc>(
 }
 
 /// Handle BigInt object methods (toString, valueOf)
-pub fn handle_bigint_object_method<'gc>(this_val: Value<'gc>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
+pub fn handle_bigint_object_method<'gc>(this_val: &Value<'gc>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
     let h = match this_val {
-        Value::BigInt(b) => b,
+        Value::BigInt(b) => b.clone(),
         Value::Object(obj) => {
-            if let Some(value_val) = object_get_key_value(&obj, "__value__") {
+            if let Some(value_val) = object_get_key_value(obj, "__value__") {
                 if let Value::BigInt(h) = &*value_val.borrow() {
                     h.clone()
                 } else {
@@ -302,11 +302,11 @@ pub fn compare_bigint_and_number(b: &BigInt, n: f64) -> Option<std::cmp::Orderin
 
 pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let bigint_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &bigint_ctor, "__native_ctor", Value::String(utf8_to_utf16("BigInt")))?;
+    object_set_key_value(mc, &bigint_ctor, "__native_ctor", &Value::String(utf8_to_utf16("BigInt")))?;
 
     // Add static methods
-    object_set_key_value(mc, &bigint_ctor, "asIntN", Value::Function("BigInt.asIntN".to_string()))?;
-    object_set_key_value(mc, &bigint_ctor, "asUintN", Value::Function("BigInt.asUintN".to_string()))?;
+    object_set_key_value(mc, &bigint_ctor, "asIntN", &Value::Function("BigInt.asIntN".to_string()))?;
+    object_set_key_value(mc, &bigint_ctor, "asUintN", &Value::Function("BigInt.asUintN".to_string()))?;
     // Create prototype
     let bigint_proto = new_js_object_data(mc);
     // Set BigInt.prototype's prototype to Object.prototype if available
@@ -319,20 +319,20 @@ pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     }
 
     let to_string = Value::Function("BigInt.prototype.toString".to_string());
-    object_set_key_value(mc, &bigint_proto, "toString", to_string)?;
+    object_set_key_value(mc, &bigint_proto, "toString", &to_string)?;
     let value_of = Value::Function("BigInt.prototype.valueOf".to_string());
-    object_set_key_value(mc, &bigint_proto, "valueOf", value_of)?;
+    object_set_key_value(mc, &bigint_proto, "valueOf", &value_of)?;
 
     // Wire up
-    object_set_key_value(mc, &bigint_ctor, "prototype", Value::Object(bigint_proto))?;
-    object_set_key_value(mc, &bigint_proto, "constructor", Value::Object(bigint_ctor))?;
+    object_set_key_value(mc, &bigint_ctor, "prototype", &Value::Object(bigint_proto))?;
+    object_set_key_value(mc, &bigint_proto, "constructor", &Value::Object(bigint_ctor))?;
 
     // Mark prototype methods and constructor non-enumerable
     bigint_proto.borrow_mut(mc).set_non_enumerable("toString");
     bigint_proto.borrow_mut(mc).set_non_enumerable("valueOf");
     bigint_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    env_set(mc, env, "BigInt", Value::Object(bigint_ctor))?;
+    env_set(mc, env, "BigInt", &Value::Object(bigint_ctor))?;
 
     Ok(())
 }

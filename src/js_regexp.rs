@@ -9,8 +9,8 @@ use regress::Regex;
 
 pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let regexp_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &regexp_ctor, "__is_constructor", Value::Boolean(true))?;
-    object_set_key_value(mc, &regexp_ctor, "__native_ctor", Value::String(utf8_to_utf16("RegExp")))?;
+    object_set_key_value(mc, &regexp_ctor, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &regexp_ctor, "__native_ctor", &Value::String(utf8_to_utf16("RegExp")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -28,20 +28,20 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         regexp_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &regexp_ctor, "prototype", Value::Object(regexp_proto))?;
-    object_set_key_value(mc, &regexp_proto, "constructor", Value::Object(regexp_ctor))?;
+    object_set_key_value(mc, &regexp_ctor, "prototype", &Value::Object(regexp_proto))?;
+    object_set_key_value(mc, &regexp_proto, "constructor", &Value::Object(regexp_ctor))?;
 
     // Register instance methods
     let methods = vec!["exec", "test", "toString"];
 
     for method in methods {
         let val = Value::Function(format!("RegExp.prototype.{method}"));
-        object_set_key_value(mc, &regexp_proto, method, val)?;
+        object_set_key_value(mc, &regexp_proto, method, &val)?;
         regexp_proto.borrow_mut(mc).set_non_enumerable(method);
     }
     regexp_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    env_set(mc, env, "RegExp", Value::Object(regexp_ctor))?;
+    env_set(mc, env, "RegExp", &Value::Object(regexp_ctor))?;
     Ok(())
 }
 
@@ -201,39 +201,39 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
     let regexp_obj = new_js_object_data(mc);
 
     // Store regex and flags as properties
-    object_set_key_value(mc, &regexp_obj, "__regex", Value::String(utf8_to_utf16(&pattern)))?;
-    object_set_key_value(mc, &regexp_obj, "__flags", Value::String(utf8_to_utf16(&flags)))?;
-    object_set_key_value(mc, &regexp_obj, "__global", Value::Boolean(global))?;
-    object_set_key_value(mc, &regexp_obj, "__ignoreCase", Value::Boolean(ignore_case))?;
-    object_set_key_value(mc, &regexp_obj, "__multiline", Value::Boolean(multiline))?;
-    object_set_key_value(mc, &regexp_obj, "__dotAll", Value::Boolean(dot_matches_new_line))?;
-    object_set_key_value(mc, &regexp_obj, "__unicode", Value::Boolean(unicode))?;
-    object_set_key_value(mc, &regexp_obj, "__sticky", Value::Boolean(sticky))?;
-    object_set_key_value(mc, &regexp_obj, "__swapGreed", Value::Boolean(swap_greed))?;
-    object_set_key_value(mc, &regexp_obj, "__crlf", Value::Boolean(crlf))?;
-    object_set_key_value(mc, &regexp_obj, "__hasIndices", Value::Boolean(has_indices))?;
-    object_set_key_value(mc, &regexp_obj, "__unicodeSets", Value::Boolean(unicode_sets))?;
+    object_set_key_value(mc, &regexp_obj, "__regex", &Value::String(utf8_to_utf16(&pattern)))?;
+    object_set_key_value(mc, &regexp_obj, "__flags", &Value::String(utf8_to_utf16(&flags)))?;
+    object_set_key_value(mc, &regexp_obj, "__global", &Value::Boolean(global))?;
+    object_set_key_value(mc, &regexp_obj, "__ignoreCase", &Value::Boolean(ignore_case))?;
+    object_set_key_value(mc, &regexp_obj, "__multiline", &Value::Boolean(multiline))?;
+    object_set_key_value(mc, &regexp_obj, "__dotAll", &Value::Boolean(dot_matches_new_line))?;
+    object_set_key_value(mc, &regexp_obj, "__unicode", &Value::Boolean(unicode))?;
+    object_set_key_value(mc, &regexp_obj, "__sticky", &Value::Boolean(sticky))?;
+    object_set_key_value(mc, &regexp_obj, "__swapGreed", &Value::Boolean(swap_greed))?;
+    object_set_key_value(mc, &regexp_obj, "__crlf", &Value::Boolean(crlf))?;
+    object_set_key_value(mc, &regexp_obj, "__hasIndices", &Value::Boolean(has_indices))?;
+    object_set_key_value(mc, &regexp_obj, "__unicodeSets", &Value::Boolean(unicode_sets))?;
 
     // Expose user-visible properties
-    object_set_key_value(mc, &regexp_obj, "lastIndex", Value::Number(0.0))?;
-    object_set_key_value(mc, &regexp_obj, "global", Value::Boolean(global))?;
-    object_set_key_value(mc, &regexp_obj, "ignoreCase", Value::Boolean(ignore_case))?;
-    object_set_key_value(mc, &regexp_obj, "multiline", Value::Boolean(multiline))?;
-    object_set_key_value(mc, &regexp_obj, "dotAll", Value::Boolean(dot_matches_new_line))?;
-    object_set_key_value(mc, &regexp_obj, "unicode", Value::Boolean(unicode))?;
-    object_set_key_value(mc, &regexp_obj, "sticky", Value::Boolean(sticky))?;
-    object_set_key_value(mc, &regexp_obj, "hasIndices", Value::Boolean(has_indices))?;
-    object_set_key_value(mc, &regexp_obj, "unicodeSets", Value::Boolean(unicode_sets))?;
-    object_set_key_value(mc, &regexp_obj, "flags", Value::String(utf8_to_utf16(&flags)))?; // This should be a getter on prototype, but for now...
+    object_set_key_value(mc, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
+    object_set_key_value(mc, &regexp_obj, "global", &Value::Boolean(global))?;
+    object_set_key_value(mc, &regexp_obj, "ignoreCase", &Value::Boolean(ignore_case))?;
+    object_set_key_value(mc, &regexp_obj, "multiline", &Value::Boolean(multiline))?;
+    object_set_key_value(mc, &regexp_obj, "dotAll", &Value::Boolean(dot_matches_new_line))?;
+    object_set_key_value(mc, &regexp_obj, "unicode", &Value::Boolean(unicode))?;
+    object_set_key_value(mc, &regexp_obj, "sticky", &Value::Boolean(sticky))?;
+    object_set_key_value(mc, &regexp_obj, "hasIndices", &Value::Boolean(has_indices))?;
+    object_set_key_value(mc, &regexp_obj, "unicodeSets", &Value::Boolean(unicode_sets))?;
+    object_set_key_value(mc, &regexp_obj, "flags", &Value::String(utf8_to_utf16(&flags)))?; // This should be a getter on prototype, but for now...
 
     // Add methods
-    object_set_key_value(mc, &regexp_obj, "exec", Value::Function("RegExp.prototype.exec".to_string()))?;
-    object_set_key_value(mc, &regexp_obj, "test", Value::Function("RegExp.prototype.test".to_string()))?;
+    object_set_key_value(mc, &regexp_obj, "exec", &Value::Function("RegExp.prototype.exec".to_string()))?;
+    object_set_key_value(mc, &regexp_obj, "test", &Value::Function("RegExp.prototype.test".to_string()))?;
     object_set_key_value(
         mc,
         &regexp_obj,
         "toString",
-        Value::Function("RegExp.prototype.toString".to_string()),
+        &Value::Function("RegExp.prototype.toString".to_string()),
     )?;
 
     Ok(Value::Object(regexp_obj))
@@ -344,16 +344,16 @@ pub(crate) fn handle_regexp_method<'gc>(
                     let result_array = create_array(mc, env)?;
 
                     let full_match_u16 = input_u16[orig_start..orig_end].to_vec();
-                    object_set_key_value(mc, &result_array, "0", Value::String(full_match_u16))?;
+                    object_set_key_value(mc, &result_array, "0", &Value::String(full_match_u16))?;
 
                     let indices_array = if has_indices { Some(create_array(mc, env)?) } else { None };
 
                     if let Some(indices) = &indices_array {
                         let match_indices = create_array(mc, env)?;
-                        object_set_key_value(mc, &match_indices, "0", Value::Number(orig_start as f64))?;
-                        object_set_key_value(mc, &match_indices, "1", Value::Number(orig_end as f64))?;
+                        object_set_key_value(mc, &match_indices, "0", &Value::Number(orig_start as f64))?;
+                        object_set_key_value(mc, &match_indices, "1", &Value::Number(orig_end as f64))?;
                         set_array_length(mc, &match_indices, 2)?;
-                        object_set_key_value(mc, indices, "0", Value::Object(match_indices))?;
+                        object_set_key_value(mc, indices, "0", &Value::Object(match_indices))?;
                     }
 
                     let mut group_index = 1;
@@ -365,42 +365,42 @@ pub(crate) fn handle_regexp_method<'gc>(
                                 (range.start, range.end)
                             };
                             let cap_str = input_u16[cs..ce].to_vec();
-                            object_set_key_value(mc, &result_array, group_index, Value::String(cap_str))?;
+                            object_set_key_value(mc, &result_array, group_index, &Value::String(cap_str))?;
 
                             if let Some(indices) = &indices_array {
                                 let group_indices = create_array(mc, env)?;
-                                object_set_key_value(mc, &group_indices, "0", Value::Number(cs as f64))?;
-                                object_set_key_value(mc, &group_indices, "1", Value::Number(ce as f64))?;
+                                object_set_key_value(mc, &group_indices, "0", &Value::Number(cs as f64))?;
+                                object_set_key_value(mc, &group_indices, "1", &Value::Number(ce as f64))?;
                                 set_array_length(mc, &group_indices, 2)?;
-                                object_set_key_value(mc, indices, group_index, Value::Object(group_indices))?;
+                                object_set_key_value(mc, indices, group_index, &Value::Object(group_indices))?;
                             }
                         } else {
-                            object_set_key_value(mc, &result_array, group_index, Value::Undefined)?;
+                            object_set_key_value(mc, &result_array, group_index, &Value::Undefined)?;
                             if let Some(indices) = &indices_array {
-                                object_set_key_value(mc, indices, group_index, Value::Undefined)?;
+                                object_set_key_value(mc, indices, group_index, &Value::Undefined)?;
                             }
                         }
                         group_index += 1;
                     }
                     set_array_length(mc, &result_array, group_index)?;
 
-                    object_set_key_value(mc, &result_array, "index", Value::Number(orig_start as f64))?;
-                    object_set_key_value(mc, &result_array, "input", Value::String(input_u16.clone()))?;
-                    object_set_key_value(mc, &result_array, "groups", Value::Undefined)?;
+                    object_set_key_value(mc, &result_array, "index", &Value::Number(orig_start as f64))?;
+                    object_set_key_value(mc, &result_array, "input", &Value::String(input_u16.clone()))?;
+                    object_set_key_value(mc, &result_array, "groups", &Value::Undefined)?;
 
                     if let Some(indices) = indices_array {
-                        object_set_key_value(mc, &result_array, "indices", Value::Object(indices))?;
+                        object_set_key_value(mc, &result_array, "indices", &Value::Object(indices))?;
                     }
 
                     if use_last {
-                        object_set_key_value(mc, object, "lastIndex", Value::Number(orig_end as f64))?;
+                        object_set_key_value(mc, object, "lastIndex", &Value::Number(orig_end as f64))?;
                     }
 
                     Ok(Value::Object(result_array))
                 }
                 None => {
                     if global {
-                        object_set_key_value(mc, object, "lastIndex", Value::Number(0.0))?;
+                        object_set_key_value(mc, object, "lastIndex", &Value::Number(0.0))?;
                     }
                     Ok(Value::Null)
                 }
@@ -475,13 +475,13 @@ pub(crate) fn handle_regexp_method<'gc>(
                     if use_last {
                         let end = m.range.end;
                         let orig_end = if mapping { map_index_back(&input_u16, end) } else { end };
-                        object_set_key_value(mc, object, "lastIndex", Value::Number(orig_end as f64))?;
+                        object_set_key_value(mc, object, "lastIndex", &Value::Number(orig_end as f64))?;
                     }
                     Ok(Value::Boolean(true))
                 }
                 None => {
                     if global {
-                        object_set_key_value(mc, object, "lastIndex", Value::Number(0.0))?;
+                        object_set_key_value(mc, object, "lastIndex", &Value::Number(0.0))?;
                     }
                     Ok(Value::Boolean(false))
                 }

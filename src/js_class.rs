@@ -384,7 +384,13 @@ fn find_binding<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<Value<'gc
 fn find_binding_env<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<JSObjectDataPtr<'gc>> {
     let mut current = *env;
     loop {
-        if object_get_key_value(&current, name).is_some() {
+        // We need to check *own* properties only when locating the lexical
+        // environment that declares a binding. Using `object_get_key_value`
+        // here was incorrect because it searches the prototype chain and may
+        // return true even when the current object doesn't own the binding.
+        // Use `get_own_property` to ensure we return the actual declaring
+        // environment.
+        if crate::core::get_own_property(&current, name).is_some() {
             return Some(current);
         }
         if let Some(proto) = current.borrow().prototype {
@@ -920,14 +926,7 @@ pub(crate) fn evaluate_new<'gc>(
                     // constructor object itself (`class_obj`). Pass the chosen function
                     // object pointer into `prepare_call_env_with_this` so `__function` is
                     // bound appropriately for `new.target` lookup.
-                    let fn_obj_ptr: Option<crate::core::JSObjectDataPtr<'_>> = if let Some(nt) = &new_target {
-                        match nt {
-                            Value::Object(o) => Some(*o),
-                            _ => Some(*class_obj),
-                        }
-                    } else {
-                        Some(*class_obj)
-                    };
+                    let fn_obj_ptr: Option<crate::core::JSObjectDataPtr<'_>> = Some(*class_obj);
                     let func_env = prepare_call_env_with_this(
                         mc,
                         captured_env.as_ref(),
@@ -938,6 +937,9 @@ pub(crate) fn evaluate_new<'gc>(
                         Some(env),
                         fn_obj_ptr,
                     )?;
+                    if let Some(nt) = &new_target {
+                        crate::core::object_set_key_value(mc, &func_env, "__new_target", nt)?;
+                    }
                     log::trace!("evaluate_new: called prepare_call_env_with_this");
 
                     // Create the arguments object
@@ -2592,16 +2594,27 @@ pub(crate) fn evaluate_super_call<'gc>(
 
             for member in &parent_class_def_ptr.borrow().members {
                 if let ClassMember::Constructor(params, body) = member {
+                    let parent_is_derived = parent_class_def_ptr.borrow().extends.is_some();
+                    let this_for_parent = if parent_is_derived {
+                        Some(&Value::Uninitialized)
+                    } else {
+                        Some(&Value::Object(instance))
+                    };
                     let func_env = prepare_call_env_with_this(
                         mc,
                         parent_captured_env.as_ref(),
-                        Some(&Value::Object(instance)),
+                        this_for_parent,
                         Some(params),
                         evaluated_args,
-                        None,
+                        Some(instance),
                         Some(env),
                         Some(parent_class_obj),
                     )?;
+                    if let Some(nt_val) = find_binding(env, "__new_target") {
+                        crate::core::object_set_key_value(mc, &func_env, "__new_target", &nt_val)?;
+                    } else if let Value::Object(_) = &current_function {
+                        crate::core::object_set_key_value(mc, &func_env, "__new_target", &current_function)?;
+                    }
                     // Set __super for the parent constructor (should be undefined for base classes)
                     crate::core::object_set_key_value(mc, &func_env, "__super", &Value::Undefined)?;
                     // Create the arguments object
@@ -2638,7 +2651,21 @@ pub(crate) fn evaluate_super_call<'gc>(
             && let Value::String(_) = &*native_ctor_name_rc.borrow()
         {
             // Call native constructor as a constructor (not a normal call)
-            let res = evaluate_new(mc, env, &Value::Object(parent_class_obj), evaluated_args, None)?;
+            let new_target_for_parent = if let Some(nt_val) = find_binding(env, "__new_target") {
+                Some(nt_val)
+            } else {
+                match &current_function {
+                    Value::Object(_) => Some(current_function.clone()),
+                    _ => None,
+                }
+            };
+            let res = evaluate_new(
+                mc,
+                env,
+                &Value::Object(parent_class_obj),
+                evaluated_args,
+                new_target_for_parent.as_ref(),
+            )?;
             if let Value::Object(new_instance) = res {
                 // If we have a derived constructor, ensure the returned instance
                 // has the subclass prototype as its [[Prototype]].

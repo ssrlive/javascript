@@ -452,7 +452,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/grouping,language/expressions/import.meta,language/expressions/in,language/expressions/instanceof,language/expressions/left-shift,language/expressions/right-shift,language/expressions/optional-chaining
+          node ci/runner.js --limit 10000 --focus language/expressions/grouping,language/expressions/import.meta,language/expressions/in,language/expressions/instanceof,language/expressions/left-shift,language/expressions/right-shift,language/expressions/optional-chaining,language/expressions/member-expression,language/expressions/modulus,language/expressions/multiplication,language/expressions/new,language/expressions/new.target,language/expressions/postfix-decrement,language/expressions/postfix-increment,language/expressions/prefix-decrement,language/expressions/prefix-increment
 
       - name: Upload results
         if: ${{ !cancelled() }}

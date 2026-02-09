@@ -173,62 +173,6 @@ pub(crate) fn handle_array_static_method<'gc>(
                     }
                 }
                 Value::Object(object) => {
-                    // let maybe_set = {
-                    //     let borrow = object.borrow();
-                    //     borrow.get(&PropertyKey::String("__set__".to_string()))
-                    // };
-
-                    // let maybe_map = if maybe_set.is_none() {
-                    //     let borrow = object.borrow();
-                    //     borrow.get(&PropertyKey::String("__map__".to_string()))
-                    // } else {
-                    //     None
-                    // };
-
-                    // if let Some(set_val) = maybe_set {
-                    //     if let Value::Set(set) = &*set_val.borrow() {
-                    //         for (i, val) in set.borrow().values.iter().enumerate() {
-                    //             if let Some(ref fn_val) = map_fn {
-                    //                 if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
-                    //                     let args = vec![val.clone(), Value::Number(i as f64)];
-                    //                     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                    //                     let mut body_clone = body.clone();
-                    //                     let mapped = evaluate_statements(mc, &func_env, &mut body_clone)?;
-                    //                     result.push(mapped);
-                    //                 } else {
-                    //                     return Err(raise_eval_error!("Array.from map function must be a function"));
-                    //                 }
-                    //             } else {
-                    //                 result.push(val.clone());
-                    //             }
-                    //         }
-                    //     }
-                    // } else if let Some(map_val) = maybe_map {
-                    //     if let Value::Map(map) = &*map_val.borrow() {
-                    //         for (i, (key, val)) in map.borrow().entries.iter().enumerate() {
-                    //             let entry_obj = create_array(mc, env)?;
-                    //             set_array_length(mc, &entry_obj, 2)?;
-                    //             object_set_key_value(mc, &entry_obj, &"0".into(), &key.clone())?;
-                    //             object_set_key_value(mc, &entry_obj, &"1".into(), &val.clone())?;
-                    //             let entry_val = Value::Object(entry_obj);
-
-                    //             if let Some(ref fn_val) = map_fn {
-                    //                 if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
-                    //                     let args = vec![entry_val.clone(), Value::Number(i as f64)];
-                    //                     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                    //                     let mut body_clone = body.clone();
-                    //                     let mapped = evaluate_statements(mc, &func_env, &mut body_clone)?;
-                    //                     result.push(mapped);
-                    //                 } else {
-                    //                     return Err(raise_eval_error!("Array.from map function must be a function"));
-                    //                 }
-                    //             } else {
-                    //                 result.push(entry_val);
-                    //             }
-                    //         }
-                    //     }
-                    // } else if let Some(len) = get_array_length(mc, &object) {
-
                     // Support generic iterables via Symbol.iterator: call the iterator method and consume next() until done
                     if let Some(sym_ctor) = object_get_key_value(env, "Symbol") {
                         if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
@@ -380,21 +324,18 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                         };
 
                                                         if let Value::Object(res_obj) = res {
-                                                            let done = if let Some(done_rc) = object_get_key_value(&res_obj, "done") {
-                                                                if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
-                                                            } else {
-                                                                false
-                                                            };
+                                                            // Use accessor-aware reads for 'done' and 'value' per spec
+                                                            // so that getters on the iterator result may throw.
+                                                            let done_val =
+                                                                crate::core::get_property_with_accessors(mc, env, &res_obj, "done")?;
+                                                            let done = matches!(done_val, Value::Boolean(b) if b);
 
                                                             if done {
                                                                 break;
                                                             }
 
-                                                            let value = if let Some(val_rc) = object_get_key_value(&res_obj, "value") {
-                                                                val_rc.borrow().clone()
-                                                            } else {
-                                                                Value::Undefined
-                                                            };
+                                                            let value =
+                                                                crate::core::get_property_with_accessors(mc, env, &res_obj, "value")?;
 
                                                             if let Some(ref fn_val) = map_fn {
                                                                 // Support closures or function names for map function

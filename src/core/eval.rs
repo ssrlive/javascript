@@ -11688,16 +11688,26 @@ fn evaluate_expr_binary<'gc>(
                 (lprim, rprim) => Ok(Value::Number(to_number(&lprim)? + to_number(&rprim)?)),
             }
         }
-        BinaryOp::Sub => match (l_val, r_val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln - *rn))),
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? - to_number_with_env(mc, env, &r)?)),
-        },
-        BinaryOp::Mul => match (l_val, r_val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln * *rn))),
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? * to_number_with_env(mc, env, &r)?)),
-        },
+        BinaryOp::Sub => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln - *rn))),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
+                (l, r) => Ok(Value::Number(to_number(&l)? - to_number(&r)?)),
+            }
+        }
+        BinaryOp::Mul => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(Box::new(*ln * *rn))),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
+                (l, r) => Ok(Value::Number(to_number(&l)? * to_number(&r)?)),
+            }
+        }
         BinaryOp::Div => {
             let lnum = to_numeric_with_env(mc, env, &l_val)?;
             let rnum = to_numeric_with_env(mc, env, &r_val)?;
@@ -12098,16 +12108,21 @@ fn evaluate_expr_binary<'gc>(
                 Ok(Value::Boolean(!ln.is_nan() && !rn.is_nan() && ln <= rn))
             }
         },
-        BinaryOp::Mod => match (l_val, r_val) {
-            (Value::BigInt(ln), Value::BigInt(rn)) => {
-                if rn.is_zero() {
-                    return Err(raise_range_error!("Division by zero").into());
+        BinaryOp::Mod => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    if rn.is_zero() {
+                        return Err(raise_range_error!("Division by zero").into());
+                    }
+                    Ok(Value::BigInt(Box::new(*ln % *rn)))
                 }
-                Ok(Value::BigInt(Box::new(*ln % *rn)))
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
+                (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln % rn)),
+                (l, r) => Ok(Value::Number(to_number(&l)? % to_number(&r)?)),
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
-            (l, r) => Ok(Value::Number(to_number_with_env(mc, env, &l)? % to_number_with_env(mc, env, &r)?)),
-        },
+        }
         BinaryOp::Pow => {
             // Perform ToNumeric on both operands first (handles wrapped primitives)
             let lnum = to_numeric_with_env(mc, env, &l_val)?;
@@ -13092,6 +13107,16 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             } else {
                 evaluate_expr(mc, env, obj_expr)?
             };
+
+            // Per spec, ToObject(base) (i.e. checking for null/undefined base) must occur
+            // before ToPropertyKey(key) and any evaluation of the key's coercion, so
+            // if base is nullish we should throw a TypeError immediately and not
+            // evaluate `key_expr` which could have side effects.
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                log::debug!("Expr::Index: attempting property access on nullish base: obj_expr={obj_expr:?}");
+                return Err(raise_type_error!("Cannot read properties of null or undefined").into());
+            }
+
             let key_val = evaluate_expr(mc, env, key_expr)?;
 
             let key = match key_val {
@@ -13129,8 +13154,6 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 } else {
                     get_primitive_prototype_property(mc, env, &obj_val, &key)
                 }
-            } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                Err(raise_eval_error!("Cannot read properties of null or undefined").into())
             } else {
                 get_primitive_prototype_property(mc, env, &obj_val, &key)
             }
@@ -13344,9 +13367,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
                     if let Some(inst_rc) = object_get_key_value(&e, "__instance")
                         && !matches!(*inst_rc.borrow(), Value::Undefined)
-                        && let Some(func_rc) = object_get_key_value(&e, "__function")
                     {
-                        return Ok(func_rc.borrow().clone());
+                        if let Some(nt_rc) = object_get_key_value(&e, "__new_target") {
+                            return Ok(nt_rc.borrow().clone());
+                        }
+                        if let Some(func_rc) = object_get_key_value(&e, "__function") {
+                            return Ok(func_rc.borrow().clone());
+                        }
                     }
                     return Ok(Value::Undefined);
                 }
@@ -15687,15 +15714,25 @@ fn evaluate_update_expression<'gc>(
     let (old_val, new_val) = match target {
         Expr::Var(name, _, _) => {
             let current = evaluate_var(mc, env, name)?;
-            let current_num = match current {
-                Value::Number(n) => n,
-                Value::BigInt(_) => return Err(raise_type_error!("BigInt update not supported yet").into()),
-                _ => f64::NAN,
-            };
-            let new_num = current_num + delta;
-            let new_v = Value::Number(new_num);
-            crate::core::env_set_recursive(mc, env, name, &new_v)?;
-            (current, new_v)
+            // Use ToNumeric/ToNumber semantics so objects are coerced via ToPrimitive
+            let prim_numeric = to_numeric_with_env(mc, env, &current)?;
+            match prim_numeric {
+                Value::BigInt(b) => {
+                    let mut nb = (*b).clone();
+                    let delta_i = delta as i64;
+                    nb += BigInt::from(delta_i);
+                    let new_v = Value::BigInt(Box::new(nb));
+                    crate::core::env_set_recursive(mc, env, name, &new_v)?;
+                    (current, new_v)
+                }
+                Value::Number(n) => {
+                    let new_num = n + delta;
+                    let new_v = Value::Number(new_num);
+                    crate::core::env_set_recursive(mc, env, name, &new_v)?;
+                    (current, new_v)
+                }
+                _ => unreachable!("to_numeric_with_env returned non-numeric"),
+            }
         }
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
@@ -15703,14 +15740,25 @@ fn evaluate_update_expression<'gc>(
                 // Use get_property_with_accessors so getters are invoked for reads
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
 
-                let current_num = match current {
-                    Value::Number(n) => n,
-                    _ => f64::NAN,
-                };
-                let new_num = current_num + delta;
-                let new_v = Value::Number(new_num);
-                set_property_with_accessors(mc, env, &obj, key, &new_v)?;
-                (current, new_v)
+                // Coerce per ToNumeric/ToNumber (objects -> ToPrimitive with hint 'number')
+                let prim_numeric = to_numeric_with_env(mc, env, &current)?;
+                match prim_numeric {
+                    Value::BigInt(b) => {
+                        let mut nb = (*b).clone();
+                        let delta_i = delta as i64;
+                        nb += BigInt::from(delta_i);
+                        let new_v = Value::BigInt(Box::new(nb));
+                        set_property_with_accessors(mc, env, &obj, key, &new_v)?;
+                        (current, new_v)
+                    }
+                    Value::Number(n) => {
+                        let new_num = n + delta;
+                        let new_v = Value::Number(new_num);
+                        set_property_with_accessors(mc, env, &obj, key, &new_v)?;
+                        (current, new_v)
+                    }
+                    _ => unreachable!("to_numeric_with_env returned non-numeric"),
+                }
             } else {
                 return Err(raise_type_error!("Cannot update property of non-object").into());
             }
@@ -15727,14 +15775,24 @@ fn evaluate_update_expression<'gc>(
                 // Use get_property_with_accessors so getters are invoked for reads
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
 
-                let current_num = match current {
-                    Value::Number(n) => n,
-                    _ => f64::NAN,
-                };
-                let new_num = current_num + delta;
-                let new_v = Value::Number(new_num);
-                set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
-                (current, new_v)
+                let prim_numeric = to_numeric_with_env(mc, env, &current)?;
+                match prim_numeric {
+                    Value::BigInt(b) => {
+                        let mut nb = (*b).clone();
+                        let delta_i = delta as i64;
+                        nb += BigInt::from(delta_i);
+                        let new_v = Value::BigInt(Box::new(nb));
+                        set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
+                        (current, new_v)
+                    }
+                    Value::Number(n) => {
+                        let new_num = n + delta;
+                        let new_v = Value::Number(new_num);
+                        set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
+                        (current, new_v)
+                    }
+                    _ => unreachable!("to_numeric_with_env returned non-numeric"),
+                }
             } else {
                 return Err(raise_type_error!("Cannot update property of non-object").into());
             }
@@ -15745,17 +15803,25 @@ fn evaluate_update_expression<'gc>(
             if let Value::Object(obj) = obj_val {
                 if let Value::PrivateName(n, id) = pv {
                     let key = PropertyKey::Private(n, id);
-
                     let current = get_property_with_accessors(mc, env, &obj, &key)?;
-
-                    let current_num = match current {
-                        Value::Number(n) => n,
-                        _ => f64::NAN,
-                    };
-                    let new_num = current_num + delta;
-                    let new_v = Value::Number(new_num);
-                    set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
-                    (current, new_v)
+                    let prim_numeric = to_numeric_with_env(mc, env, &current)?;
+                    match prim_numeric {
+                        Value::BigInt(b) => {
+                            let mut nb = (*b).clone();
+                            let delta_i = delta as i64;
+                            nb += BigInt::from(delta_i);
+                            let new_v = Value::BigInt(Box::new(nb));
+                            set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
+                            (current, new_v)
+                        }
+                        Value::Number(n) => {
+                            let new_num = n + delta;
+                            let new_v = Value::Number(new_num);
+                            set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
+                            (current, new_v)
+                        }
+                        _ => unreachable!("to_numeric_with_env returned non-numeric"),
+                    }
                 } else {
                     return Err(raise_syntax_error!(format!("Private field '{}' must be declared in an enclosing class", name)).into());
                 }
@@ -15767,9 +15833,15 @@ fn evaluate_update_expression<'gc>(
     };
 
     if is_post {
-        // For post-increment/decrement, return ToNumber(oldValue)
-        let num = to_number(&old_val)?;
-        Ok(Value::Number(num))
+        // For post-increment/decrement, return the original value.
+        // If it's a BigInt, return it as BigInt; otherwise return ToNumber(oldValue).
+        match old_val {
+            Value::BigInt(_) => Ok(old_val),
+            _ => {
+                let num = to_number_with_env(mc, env, &old_val)?;
+                Ok(Value::Number(num))
+            }
+        }
     } else {
         Ok(new_val)
     }
@@ -16153,12 +16225,21 @@ fn evaluate_expr_new<'gc>(
                     }
                 } else {
                     // Support iterable spread for constructors: if object has Symbol.iterator, iterate and push
+                    let mut iter_fn_opt: Option<crate::core::GcPtr<'gc, Value<'gc>>> = None;
                     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                         && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
                         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
-                        && let Some(iter_fn_val) = object_get_key_value(&obj, iter_sym)
                     {
+                        // Use accessor-aware property read to support getters that return the iterator method
+                        let iter_fn_val = get_property_with_accessors(mc, env, &obj, iter_sym)?;
+                        // If the accessor returned undefined, there's no iterator
+                        if !matches!(iter_fn_val, crate::core::Value::Undefined) {
+                            // Wrap the returned Value into a GC pointer so code below can inspect/call it uniformly
+                            iter_fn_opt = Some(crate::core::new_gc_cell_ptr(mc, iter_fn_val));
+                        }
+                    }
+                    if let Some(iter_fn_val) = iter_fn_opt {
                         // Call iterator method on the object to get an iterator
                         let iterator = match &*iter_fn_val.borrow() {
                             Value::Function(name) => {
@@ -16167,6 +16248,37 @@ fn evaluate_expr_new<'gc>(
                                 evaluate_call_dispatch(mc, &call_env, &Value::Function(name.clone()), Some(&Value::Object(obj)), &[])?
                             }
                             Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(obj)), &[], env, None)?,
+                            Value::Object(o) => {
+                                // Function objects are represented as objects with an internal closure; unwrap and call if possible
+                                if let Some(cl_ptr) = o.borrow().get_closure() {
+                                    match &*cl_ptr.borrow() {
+                                        Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(*o)), &[], env, None)?,
+                                        Value::Function(name) => {
+                                            let call_env = prepare_call_env_with_this(
+                                                mc,
+                                                Some(env),
+                                                Some(&Value::Object(*o)),
+                                                None,
+                                                &[],
+                                                None,
+                                                Some(env),
+                                                None,
+                                            )?;
+                                            evaluate_call_dispatch(
+                                                mc,
+                                                &call_env,
+                                                &Value::Function(name.clone()),
+                                                Some(&Value::Object(*o)),
+                                                &[],
+                                            )?
+                                        }
+                                        _ => return Err(raise_type_error!("Spread target is not iterable").into()),
+                                    }
+                                } else {
+                                    log::trace!("Spread target is not iterable: iterator property is object but not callable");
+                                    return Err(raise_type_error!("Spread target is not iterable").into());
+                                }
+                            }
                             _ => return Err(raise_type_error!("Spread target is not iterable").into()),
                         };
 
@@ -16195,25 +16307,50 @@ fn evaluate_expr_new<'gc>(
                                             )?
                                         }
                                         Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?,
+                                        Value::Object(o) => {
+                                            if let Some(cl_ptr) = o.borrow().get_closure() {
+                                                match &*cl_ptr.borrow() {
+                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(*o)), &[], env, None)?,
+                                                    Value::Function(name) => {
+                                                        let call_env = prepare_call_env_with_this(
+                                                            mc,
+                                                            Some(env),
+                                                            Some(&Value::Object(*o)),
+                                                            None,
+                                                            &[],
+                                                            None,
+                                                            Some(env),
+                                                            None,
+                                                        )?;
+                                                        evaluate_call_dispatch(
+                                                            mc,
+                                                            &call_env,
+                                                            &Value::Function(name.clone()),
+                                                            Some(&Value::Object(*o)),
+                                                            &[],
+                                                        )?
+                                                    }
+                                                    _ => return Err(raise_type_error!("Iterator.next is not callable").into()),
+                                                }
+                                            } else {
+                                                return Err(raise_type_error!("Iterator.next is not callable").into());
+                                            }
+                                        }
                                         _ => return Err(raise_type_error!("Iterator.next is not callable").into()),
                                     };
 
                                     if let Value::Object(res_obj) = res {
-                                        let done = if let Some(done_rc) = object_get_key_value(&res_obj, "done") {
-                                            if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
-                                        } else {
-                                            false
-                                        };
+                                        // Per spec, IteratorValue uses Get(resObj, "done") and Get(resObj, "value"),
+                                        // which must observe accessors (getters) and therefore may throw. Use
+                                        // accessor-aware reads here so getter side-effects/exceptions propagate.
+                                        let done_val = get_property_with_accessors(mc, env, &res_obj, "done")?;
+                                        let done = matches!(done_val, Value::Boolean(b) if b);
 
                                         if done {
                                             break;
                                         }
 
-                                        let value = if let Some(val_rc) = object_get_key_value(&res_obj, "value") {
-                                            val_rc.borrow().clone()
-                                        } else {
-                                            Value::Undefined
-                                        };
+                                        let value = get_property_with_accessors(mc, env, &res_obj, "value")?;
 
                                         eval_args.push(value);
 

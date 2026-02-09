@@ -1657,13 +1657,11 @@ pub fn generator_next<'gc>(
                                 let iter_res = evaluate_call_dispatch(mc, &func_env, &next_method, Some(&Value::Object(iterator)), &[])?;
 
                                 if let Value::Object(res_obj) = iter_res {
-                                    let done_val = object_get_key_value(&res_obj, "done")
-                                        .map(|v| v.borrow().clone())
-                                        .unwrap_or(Value::Boolean(false));
+                                    // Use accessor-aware reads for 'done' and 'value' per spec so getters
+                                    // on the iterator result may throw and side-effects are observed.
+                                    let done_val = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "done")?;
                                     let done = matches!(done_val, Value::Boolean(true));
-                                    let value = object_get_key_value(&res_obj, "value")
-                                        .map(|v| v.borrow().clone())
-                                        .unwrap_or(Value::Undefined);
+                                    let value = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "value")?;
 
                                     if !done {
                                         gen_obj.yield_star_iterator = Some(iterator);
@@ -1806,13 +1804,11 @@ pub fn generator_next<'gc>(
                     std::slice::from_ref(_send_value),
                 )?;
                 if let Value::Object(res_obj) = iter_res {
-                    let done_val = object_get_key_value(&res_obj, "done")
-                        .map(|v| v.borrow().clone())
-                        .unwrap_or(Value::Boolean(false));
+                    // Use accessor-aware reads for 'done' and 'value' per spec so getters
+                    // on the iterator result may throw and side-effects are observed.
+                    let done_val = crate::core::get_property_with_accessors(mc, &gen_obj.env, &res_obj, "done")?;
                     let done = matches!(done_val, Value::Boolean(true));
-                    let value = object_get_key_value(&res_obj, "value")
-                        .map(|v| v.borrow().clone())
-                        .unwrap_or(Value::Undefined);
+                    let value = crate::core::get_property_with_accessors(mc, &gen_obj.env, &res_obj, "value")?;
 
                     if !done {
                         gen_obj.state = GeneratorState::Suspended {

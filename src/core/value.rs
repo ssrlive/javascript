@@ -453,6 +453,14 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_home_object(&mut self, home: Option<GcCell<JSObjectDataPtr<'gc>>>) {
+        let had = self.home_object.is_some();
+        let is_some = home.is_some();
+        log::trace!(
+            "set_home_object: self_ptr={:p} had_home={} setting_home={}",
+            self as *const _,
+            had,
+            is_some
+        );
         self.home_object = home;
     }
 

@@ -517,12 +517,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/property-accessors"
+      - name: Run a small test262 subset - "language/expressions/property-accessors" - "language/expressions/subtraction"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/property-accessors
+          node ci/runner.js --limit 10000 --focus language/expressions/property-accessors,language/expressions/relational,language/expressions/strict-does-not-equals,language/expressions/strict-equals,language/expressions/subtraction
 
       - name: Upload results
         if: ${{ !cancelled() }}

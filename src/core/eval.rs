@@ -2610,6 +2610,13 @@ fn eval_res<'gc>(
     labels: &[String],
     own_labels: &[String],
 ) -> Result<Option<ControlFlow<'gc>>, EvalError<'gc>> {
+    log::trace!(
+        "eval_res: env_ptr={:p} stmt_line={} stmt_kind={:?}",
+        env.as_ptr(),
+        stmt.line,
+        stmt.kind
+    );
+
     match &*stmt.kind {
         StatementKind::Expr(expr) => {
             log::trace!(
@@ -7252,12 +7259,46 @@ fn evaluate_expr_assign<'gc>(
 fn resolve_super_assignment_base<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, Option<JSObjectDataPtr<'gc>>), EvalError<'gc>> {
-    let home_obj = env
-        .borrow()
-        .get_home_object()
-        .ok_or_else(|| raise_reference_error!("super is not available"))?;
+    // Implement GetThisEnvironment semantics: walk the environment chain to find
+    // the nearest environment record that has a 'this' binding.
+    let mut cur_env = Some(*env);
+    let mut this_env_opt: Option<JSObjectDataPtr<'gc>> = None;
+    while let Some(e) = cur_env {
+        // Use env_get_own to ensure we only consider environments that *own* a 'this' binding
+        if crate::core::env_get_own(&e, "this").is_some() {
+            this_env_opt = Some(e);
+            break;
+        }
+        cur_env = e.borrow().prototype;
+    }
 
-    let receiver = match crate::core::env_get(env, "this") {
+    if let Some(te) = &this_env_opt {
+        let has_function_binding = te.borrow().get_property("__function").is_some();
+        let has_frame = te.borrow().get_property("__frame").is_some();
+        log::trace!(
+            "resolve_super_assignment_base: this_env_ptr={:p} has_function={} has_frame={}",
+            te.as_ptr(),
+            has_function_binding,
+            has_frame
+        );
+    } else {
+        log::trace!(
+            "resolve_super_assignment_base: no this environment found starting from env_ptr={:p}",
+            env.as_ptr()
+        );
+    }
+
+    let this_env = this_env_opt.ok_or_else(|| raise_reference_error!("super is not available"))?;
+
+    // HasSuperBinding(): check that the found env has a [[HomeObject]] internal slot (set on call/closure)
+    let home_obj_opt = this_env.borrow().get_home_object();
+    if home_obj_opt.is_none() {
+        return Err(raise_reference_error!("super is not available").into());
+    }
+    let home_obj = home_obj_opt.unwrap();
+
+    // Get the actual this binding from the this environment
+    let receiver = match crate::core::env_get(&this_env, "this") {
         Some(this_val_ptr) => match &*this_val_ptr.borrow() {
             Value::Object(o) => *o,
             _ => return Err(raise_type_error!("Invalid receiver for super assignment").into()),
@@ -7271,6 +7312,11 @@ fn resolve_super_assignment_base<'gc>(
     };
 
     // If the home object's prototype is null, super property assignments should throw
+    log::trace!(
+        "resolve_super_assignment_base: home_obj_ptr={:p} super_base_present={}",
+        Gc::as_ptr(*home_obj.borrow()),
+        super_base.is_some()
+    );
     if super_base.is_none() {
         return Err(raise_type_error!("Cannot access 'super' of a class with null prototype").into());
     }
@@ -10736,6 +10782,7 @@ fn evaluate_expr_call<'gc>(
     }
 
     log::trace!("DEBUG-EVALUATE-CALL: func_expr={:?} args={:?}", func_expr, args);
+    log::warn!("DIAG evaluate_expr_call: callee AST = {:?}", func_expr);
     OPT_CHAIN_RECURSION_DEPTH.with(|c| log::trace!("ENTER evaluate_expr_call opt_depth={} func_expr={:?}", c.get(), func_expr));
     let (func_val, this_val) = match func_expr {
         Expr::OptionalProperty(obj_expr, key) => {
@@ -10823,9 +10870,25 @@ fn evaluate_expr_call<'gc>(
             (f_val, Some(obj_val))
         }
         Expr::Property(obj_expr, key) => {
+            // Special-case when the object expression is `super` so we can
+            // correctly use the *actualThis* (GetThisBinding) as the call receiver.
+            if let crate::core::Expr::Super = &**obj_expr {
+                // Evaluate the `super[...]` property (handles accessors/getters)
+                let prop_val = crate::js_class::evaluate_super_computed_property(mc, env, key.clone())?;
+                // Determine the appropriate receiver (`this`). Prefer any direct `this` on
+                // the current env (preserves exact receiver used by property evaluation),
+                // otherwise fall back to the general `evaluate_this` walker.
+                let this_val = if let Some(tv_rc) = crate::core::object_get_key_value(env, "this") {
+                    tv_rc.borrow().clone()
+                } else {
+                    crate::js_class::evaluate_this(mc, env)?
+                };
+                // Return the property value as callee and the *actualThis* as receiver
+                (prop_val, Some(this_val))
+            }
             // Fast special-case for `import.meta` when used as a callee (e.g. `import.meta()`)
             // to avoid evaluating the base `import` (which would throw ReferenceError).
-            if let crate::core::Expr::Var(name, ..) = &**obj_expr
+            else if let crate::core::Expr::Var(name, ..) = &**obj_expr
                 && name == "import"
                 && key == "meta"
             {
@@ -10907,37 +10970,12 @@ fn evaluate_expr_call<'gc>(
             (f_val, Some(obj_val))
         }
         Expr::Index(obj_expr, key_expr) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
-                match evaluate_optional_chain_base(mc, env, obj_expr)? {
-                    Some(val) => val,
-                    None => return Ok(Value::Undefined),
-                }
-            } else {
-                evaluate_expr(mc, env, obj_expr)?
-            };
-            let key_val = evaluate_expr(mc, env, key_expr)?;
-
-            let key = match key_val {
-                Value::Symbol(s) => PropertyKey::Symbol(s),
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::Number(n) => PropertyKey::from(n.to_string()),
-                _ => PropertyKey::from(value_to_string(&key_val)),
-            };
-
-            let f_val = if let Value::Object(obj) = &obj_val {
-                // Use accessor-aware lookup so getters are invoked
-                let prop_val = get_property_with_accessors(mc, env, obj, &key)?;
-                if !matches!(prop_val, Value::Undefined) {
-                    prop_val
-                } else {
-                    Value::Undefined
-                }
-            } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                return Err(raise_type_error!("Cannot read properties of null or undefined").into());
-            } else {
-                get_primitive_prototype_property(mc, env, &obj_val, &key)?
-            };
-            (f_val, Some(obj_val))
+            let pair = evaluate_expr_index_call(mc, env, obj_expr, key_expr)?;
+            if pair.1.is_none() {
+                // Optional chain short-circuited to undefined
+                return Ok(pair.0);
+            }
+            pair
         }
         _ => (evaluate_expr(mc, env, func_expr)?, None),
     };
@@ -11170,6 +11208,169 @@ fn evaluate_expr_call<'gc>(
 
     // Dispatch, handling indirect `eval` marker on the global env when necessary.
     dispatch_with_indirect_eval_marker(mc, &env_for_call, &func_val, this_val.as_ref(), &eval_args, is_indirect_eval_call)
+}
+
+fn evaluate_expr_index_call<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_expr: &Expr,
+    key_expr: &Expr,
+) -> Result<(Value<'gc>, Option<Value<'gc>>), EvalError<'gc>> {
+    // Special-case `super[expr]` so that `super[expr]()` uses GetThisBinding as receiver
+    if let crate::core::Expr::Super = obj_expr {
+        log::warn!("DIAG evaluate_expr_call: special-case super[expr] triggered");
+        // 1) Evaluate the property expression to a value (propertyNameValue) but do NOT convert to PropertyKey yet
+        let key_val = evaluate_expr(mc, env, key_expr)?;
+        // 2) Capture the super base *before* ToPropertyKey (per spec)
+        let super_base = crate::js_class::evaluate_super(mc, env)?;
+        log::warn!("DIAG super_index: captured super_base={:?}", super_base);
+        // 3) Convert propertyNameValue -> PropertyKey (this may call ToString and cause side-effects)
+        let key = match key_val {
+            Value::Symbol(s) => PropertyKey::Symbol(s),
+            Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+            Value::Number(n) => PropertyKey::from(n.to_string()),
+            _ => PropertyKey::from(value_to_string(&key_val)),
+        };
+        log::warn!(
+            "DIAG super_index: after ToPropertyKey key={:?} obj.__proto__ ptr={:?}",
+            key,
+            object_get_key_value(env, "this").and_then(|v| if let Value::Object(o) = &*v.borrow() {
+                o.borrow().prototype.map(Gc::as_ptr)
+            } else {
+                None
+            })
+        );
+
+        // Determine the proper receiver (actualThis) to use for any eventual call
+        let actual_this = if let Some(tv_rc) = object_get_key_value(env, "this") {
+            tv_rc.borrow().clone()
+        } else {
+            crate::js_class::evaluate_this(mc, env)?
+        };
+
+        // 4) Now perform property lookup on the captured super base and prepare the callee+receiver pair
+        match super_base {
+            Value::Object(super_obj) => {
+                log::warn!("DIAG super_index: super_obj ptr={:p}", Gc::as_ptr(super_obj));
+                // If property exists on super prototype, compute the value that GetValue(ref) would return.
+                if let Some(prop_rc) = object_get_key_value(&super_obj, &key) {
+                    // If this is an accessor, invoke the getter now (GetValue semantics) but preserve
+                    // the original Reference nature so the eventual Call will use `actual_this` as receiver.
+                    match &*prop_rc.borrow() {
+                        Value::Property { getter: Some(getter), .. } => {
+                            if let Some(receiver_val_rc) = object_get_key_value(env, "this")
+                                && let Value::Object(receiver) = &*receiver_val_rc.borrow()
+                            {
+                                // Invoke getter and obtain its result
+                                let getter_result = match &**getter {
+                                    Value::Getter(body, captured_env, _) => {
+                                        let call_env = crate::core::new_js_object_data(mc);
+                                        call_env.borrow_mut(mc).prototype = Some(*captured_env);
+                                        call_env.borrow_mut(mc).is_function_scope = true;
+                                        crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                        let body_clone = body.clone();
+                                        crate::core::evaluate_statements(mc, &call_env, &body_clone)?
+                                    }
+                                    Value::Closure(cl) => {
+                                        let cl_data = cl;
+                                        let call_env = crate::core::new_js_object_data(mc);
+                                        call_env.borrow_mut(mc).prototype = cl_data.env;
+                                        call_env.borrow_mut(mc).is_function_scope = true;
+                                        crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                        let body_clone = cl_data.body.clone();
+                                        crate::core::evaluate_statements(mc, &call_env, &body_clone)?
+                                    }
+                                    Value::Object(obj) => {
+                                        if let Some(cl_rc) = obj.borrow().get_closure()
+                                            && let Value::Closure(cl) = &*cl_rc.borrow()
+                                        {
+                                            let cl_data = cl;
+                                            let call_env = crate::core::new_js_object_data(mc);
+                                            call_env.borrow_mut(mc).prototype = cl_data.env;
+                                            call_env.borrow_mut(mc).is_function_scope = true;
+                                            crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                            let body_clone = cl_data.body.clone();
+                                            crate::core::evaluate_statements(mc, &call_env, &body_clone)?
+                                        } else {
+                                            return Err(raise_eval_error!("Accessor is not a function").into());
+                                        }
+                                    }
+                                    _ => return Err(raise_eval_error!("Accessor is not a function").into()),
+                                };
+                                // Use the getter result as the callee value and preserve `actual_this` as the call receiver
+                                Ok((getter_result, Some(actual_this)))
+                            } else {
+                                // If no receiver, GetValue would return undefined
+                                Ok((Value::Undefined, Some(actual_this)))
+                            }
+                        }
+                        Value::Getter(..) => {
+                            if let Some(receiver_val_rc) = object_get_key_value(env, "this")
+                                && let Value::Object(receiver) = &*receiver_val_rc.borrow()
+                            {
+                                let (body, captured_env, _home) = match &*prop_rc.borrow() {
+                                    Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
+                                    _ => return Err(raise_eval_error!("Accessor is not a function").into()),
+                                };
+                                let call_env = crate::core::new_js_object_data(mc);
+                                call_env.borrow_mut(mc).prototype = Some(captured_env);
+                                call_env.borrow_mut(mc).is_function_scope = true;
+                                object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                let body_clone = body.clone();
+                                let getter_result = evaluate_statements(mc, &call_env, &body_clone)?;
+                                Ok((getter_result, Some(actual_this)))
+                            } else {
+                                Ok((Value::Undefined, Some(actual_this)))
+                            }
+                        }
+                        _ => {
+                            // For data properties, return the stored value but ensure the call receiver is `actual_this`.
+                            let ret = match &*prop_rc.borrow() {
+                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                other => other.clone(),
+                            };
+                            Ok((ret, Some(actual_this)))
+                        }
+                    }
+                } else {
+                    Ok((Value::Undefined, Some(actual_this)))
+                }
+            }
+            _ => Ok((Value::Undefined, Some(actual_this))),
+        }
+    } else {
+        let obj_val = if is_optional_chain_expr(obj_expr) {
+            match evaluate_optional_chain_base(mc, env, obj_expr)? {
+                Some(val) => val,
+                None => return Ok((Value::Undefined, None)),
+            }
+        } else {
+            evaluate_expr(mc, env, obj_expr)?
+        };
+        let key_val = evaluate_expr(mc, env, key_expr)?;
+
+        let key = match key_val {
+            Value::Symbol(s) => PropertyKey::Symbol(s),
+            Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+            Value::Number(n) => PropertyKey::from(n.to_string()),
+            _ => PropertyKey::from(value_to_string(&key_val)),
+        };
+
+        let f_val = if let Value::Object(obj) = &obj_val {
+            // Use accessor-aware lookup so getters are invoked
+            let prop_val = get_property_with_accessors(mc, env, obj, &key)?;
+            if !matches!(prop_val, Value::Undefined) {
+                prop_val
+            } else {
+                Value::Undefined
+            }
+        } else if matches!(obj_val, Value::Undefined | Value::Null) {
+            return Err(raise_type_error!("Cannot read properties of null or undefined").into());
+        } else {
+            get_primitive_prototype_property(mc, env, &obj_val, &key)?
+        };
+        Ok((f_val, Some(obj_val)))
+    }
 }
 
 fn is_optional_chain_expr(expr: &Expr) -> bool {
@@ -13528,91 +13729,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Err(raise_type_error!("Cannot access private field on non-object").into())
             }
         }
-        Expr::Index(obj_expr, key_expr) => {
-            if let Expr::Super = &**obj_expr {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
-                let key = match key_val {
-                    Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                    Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
-                    Value::Symbol(s) => PropertyKey::Symbol(s),
-                    Value::Object(_) => {
-                        let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
-                        match prim {
-                            Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
-                            Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
-                            Value::Symbol(s) => PropertyKey::Symbol(s),
-                            other => PropertyKey::String(value_to_string(&other)),
-                        }
-                    }
-                    _ => PropertyKey::String(value_to_string(&key_val)),
-                };
-                // Capture backtrace at the evaluator call-site delegating to
-                // `evaluate_super_computed_property` so we can correlate the
-                // lookup-time environment with where the evaluator invoked it.
-                let bt = std::backtrace::Backtrace::capture();
-                log::trace!("eval::Index(super): backtrace before evaluate_super_computed_property: {:?}", bt);
-                return Ok(crate::js_class::evaluate_super_computed_property(mc, env, key)?);
-            }
-
-            let obj_val = if expr_contains_optional_chain(obj_expr) {
-                match evaluate_optional_chain_base(mc, env, obj_expr)? {
-                    Some(val) => val,
-                    None => return Ok(Value::Undefined),
-                }
-            } else {
-                evaluate_expr(mc, env, obj_expr)?
-            };
-
-            // Per spec, ToObject(base) (i.e. checking for null/undefined base) must occur
-            // before ToPropertyKey(key) and any evaluation of the key's coercion, so
-            // if base is nullish we should throw a TypeError immediately and not
-            // evaluate `key_expr` which could have side effects.
-            if matches!(obj_val, Value::Undefined | Value::Null) {
-                log::debug!("Expr::Index: attempting property access on nullish base: obj_expr={obj_expr:?}");
-                return Err(raise_type_error!("Cannot read properties of null or undefined").into());
-            }
-
-            let key_val = evaluate_expr(mc, env, key_expr)?;
-
-            let key = match key_val {
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
-                Value::Symbol(s) => PropertyKey::Symbol(s),
-                Value::Object(_) => {
-                    // ToPropertyKey semantics: ToPrimitive with hint 'string'
-                    let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
-                    match prim {
-                        Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
-                        Value::Symbol(s) => PropertyKey::Symbol(s),
-                        other => PropertyKey::String(value_to_string(&other)),
-                    }
-                }
-                _ => PropertyKey::String(value_to_string(&key_val)),
-            };
-
-            if let Value::Object(obj) = &obj_val {
-                get_property_with_accessors(mc, env, obj, &key)
-            } else if let Value::String(s) = &obj_val {
-                if let PropertyKey::String(k_str) = &key {
-                    if k_str == "length" {
-                        Ok(Value::Number(s.len() as f64))
-                    } else if let Ok(idx) = k_str.parse::<usize>() {
-                        if idx < s.len() {
-                            Ok(Value::String(vec![s[idx]]))
-                        } else {
-                            Ok(Value::Undefined)
-                        }
-                    } else {
-                        get_primitive_prototype_property(mc, env, &obj_val, &key)
-                    }
-                } else {
-                    get_primitive_prototype_property(mc, env, &obj_val, &key)
-                }
-            } else {
-                get_primitive_prototype_property(mc, env, &obj_val, &key)
-            }
-        }
+        Expr::Index(obj_expr, key_expr) => evaluate_expr_index(mc, env, obj_expr, key_expr),
         Expr::PostIncrement(target) => evaluate_update_expression(mc, env, target, 1.0, true),
         Expr::PostDecrement(target) => evaluate_update_expression(mc, env, target, -1.0, true),
         Expr::Increment(target) => evaluate_update_expression(mc, env, target, 1.0, false),
@@ -14434,6 +14551,179 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::ValuePlaceholder => Ok(Value::Undefined),
         _ => todo!("{expr:?}"),
+    }
+}
+
+fn evaluate_expr_index<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_expr: &Expr,
+    key_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    log::warn!("DIAG Expr::Index: obj_expr AST = {:?}", obj_expr);
+    if let Expr::Super = obj_expr {
+        log::warn!("DIAG Expr::Index: detected Super index access");
+        // Evaluate the index expression to a value but delay ToPropertyKey
+        // until after we've captured the super base (per spec ordering).
+        let key_val = evaluate_expr(mc, env, key_expr)?;
+        // Capture super base now (GetSuperBase semantics)
+        let super_base = crate::js_class::evaluate_super(mc, env)?;
+        log::warn!("DIAG Expr::Index(super): captured super_base={:?}", super_base);
+
+        // Now coerce key_val -> PropertyKey (this may call ToString and run side-effects)
+        let key = match key_val {
+            Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+            Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+            Value::Symbol(s) => PropertyKey::Symbol(s),
+            Value::Object(_) => {
+                // ToPropertyKey semantics: ToPrimitive with hint 'string'
+                let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+                match prim {
+                    Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                    Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                    Value::Symbol(s) => PropertyKey::Symbol(s),
+                    other => PropertyKey::String(value_to_string(&other)),
+                }
+            }
+            _ => PropertyKey::String(value_to_string(&key_val)),
+        };
+
+        // Now perform the lookup on the captured super base
+        log::warn!("DIAG Expr::Index(super): after capture super_base={:?} key={:?}", super_base, key);
+        if let Value::Object(super_obj) = super_base {
+            log::warn!("DIAG Expr::Index(super): super_obj ptr={:p}", Gc::as_ptr(super_obj));
+            if let Some(prop_rc) = object_get_key_value(&super_obj, &key) {
+                match &*prop_rc.borrow() {
+                    Value::Property { getter: Some(getter), .. } => {
+                        if let Some(this_rc) = object_get_key_value(env, "this")
+                            && let Value::Object(receiver) = &*this_rc.borrow()
+                        {
+                            // Call accessor/getter with receiver set to current this
+                            match &**getter {
+                                Value::Getter(body, captured_env, _) => {
+                                    let call_env = crate::core::new_js_object_data(mc);
+                                    call_env.borrow_mut(mc).prototype = Some(*captured_env);
+                                    call_env.borrow_mut(mc).is_function_scope = true;
+                                    crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                    let body_clone = body.clone();
+                                    return crate::core::evaluate_statements(mc, &call_env, &body_clone);
+                                }
+                                Value::Closure(cl) => {
+                                    let cl_data = cl;
+                                    let call_env = crate::core::new_js_object_data(mc);
+                                    call_env.borrow_mut(mc).prototype = cl_data.env;
+                                    call_env.borrow_mut(mc).is_function_scope = true;
+                                    crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                    let body_clone = cl_data.body.clone();
+                                    return crate::core::evaluate_statements(mc, &call_env, &body_clone);
+                                }
+                                Value::Object(obj) => {
+                                    if let Some(cl_rc) = obj.borrow().get_closure()
+                                        && let Value::Closure(cl) = &*cl_rc.borrow()
+                                    {
+                                        let cl_data = cl;
+                                        let call_env = crate::core::new_js_object_data(mc);
+                                        call_env.borrow_mut(mc).prototype = cl_data.env;
+                                        call_env.borrow_mut(mc).is_function_scope = true;
+                                        crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                        let body_clone = cl_data.body.clone();
+                                        return crate::core::evaluate_statements(mc, &call_env, &body_clone);
+                                    }
+                                    return Err(raise_eval_error!("Accessor is not a function").into());
+                                }
+                                _ => return Err(raise_eval_error!("Accessor is not a function").into()),
+                            }
+                        }
+                        // No receiver -> undefined
+                        return Ok(Value::Undefined);
+                    }
+                    Value::Getter(..) => {
+                        if let Some(this_rc) = object_get_key_value(env, "this")
+                            && let Value::Object(receiver) = &*this_rc.borrow()
+                        {
+                            let (body, captured_env, _home) = match &*prop_rc.borrow() {
+                                Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
+                                _ => return Err(raise_eval_error!("Accessor is not a function").into()),
+                            };
+                            let call_env = crate::core::new_js_object_data(mc);
+                            call_env.borrow_mut(mc).prototype = Some(captured_env);
+                            call_env.borrow_mut(mc).is_function_scope = true;
+                            crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                            let body_clone = body.clone();
+                            return crate::core::evaluate_statements(mc, &call_env, &body_clone);
+                        }
+                        return Ok(Value::Undefined);
+                    }
+                    _ => {
+                        return match &*prop_rc.borrow() {
+                            Value::Property { value: Some(v), .. } => Ok(v.borrow().clone()),
+                            other => Ok(other.clone()),
+                        };
+                    }
+                }
+            }
+        }
+        // If property not found on super base, return undefined
+        return Ok(Value::Undefined);
+    }
+
+    let obj_val = if expr_contains_optional_chain(obj_expr) {
+        match evaluate_optional_chain_base(mc, env, obj_expr)? {
+            Some(val) => val,
+            None => return Ok(Value::Undefined),
+        }
+    } else {
+        evaluate_expr(mc, env, obj_expr)?
+    };
+
+    // Per spec, ToObject(base) (i.e. checking for null/undefined base) must occur
+    // before ToPropertyKey(key) and any evaluation of the key's coercion, so
+    // if base is nullish we should throw a TypeError immediately and not
+    // evaluate `key_expr` which could have side effects.
+    if matches!(obj_val, Value::Undefined | Value::Null) {
+        log::debug!("Expr::Index: attempting property access on nullish base: obj_expr={obj_expr:?}");
+        return Err(raise_type_error!("Cannot read properties of null or undefined").into());
+    }
+
+    let key_val = evaluate_expr(mc, env, key_expr)?;
+
+    let key = match key_val {
+        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+        Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+        Value::Symbol(s) => PropertyKey::Symbol(s),
+        Value::Object(_) => {
+            // ToPropertyKey semantics: ToPrimitive with hint 'string'
+            let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+            match prim {
+                Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                other => PropertyKey::String(value_to_string(&other)),
+            }
+        }
+        _ => PropertyKey::String(value_to_string(&key_val)),
+    };
+
+    if let Value::Object(obj) = &obj_val {
+        get_property_with_accessors(mc, env, obj, &key)
+    } else if let Value::String(s) = &obj_val {
+        if let PropertyKey::String(k_str) = &key {
+            if k_str == "length" {
+                Ok(Value::Number(s.len() as f64))
+            } else if let Ok(idx) = k_str.parse::<usize>() {
+                if idx < s.len() {
+                    Ok(Value::String(vec![s[idx]]))
+                } else {
+                    Ok(Value::Undefined)
+                }
+            } else {
+                get_primitive_prototype_property(mc, env, &obj_val, &key)
+            }
+        } else {
+            get_primitive_prototype_property(mc, env, &obj_val, &key)
+        }
+    } else {
+        get_primitive_prototype_property(mc, env, &obj_val, &key)
     }
 }
 
@@ -15843,6 +16133,7 @@ pub fn call_closure<'gc>(
         // determine `new.target` early-error applicability even when the
         // environment does not carry a `__function` binding.
         object_set_key_value(mc, &v, "__is_arrow_function", &Value::Boolean(cl.is_arrow))?;
+        log::trace!("call_closure: created param_env={:p} var_env={:p}", p.as_ptr(), v.as_ptr());
         (p, v)
     };
 
@@ -15984,7 +16275,10 @@ pub fn call_closure<'gc>(
     // Bind 'this' into the var_env (function body environment) so the body can access it.
     if let Some(tv) = effective_this {
         object_set_key_value(mc, &var_env, "this", &tv)?;
-        log::trace!("DBG call_closure: bound this into var_env = {:?}", tv);
+        match &tv {
+            Value::Object(o) => log::trace!("DBG call_closure: bound this into var_env = {:?} ptr={:p}", tv, o.as_ptr()),
+            _ => log::trace!("DBG call_closure: bound this into var_env = {:?}", tv),
+        }
         if cl.is_arrow && matches!(tv, Value::Uninitialized) {
             // If it's an arrow function capturing an uninitialized 'this' (e.g. in derived constructor before super()),
             // we should also mark the call environment as uninitialized.
@@ -16001,6 +16295,12 @@ pub fn call_closure<'gc>(
     if let Some(fn_obj_ptr) = fn_obj
         && let Some(home_obj) = fn_obj_ptr.borrow().get_home_object()
     {
+        log::trace!(
+            "call_closure: fn_obj has home_object ptr={:p} - propagating into var_env={:p} param_env={:p}",
+            Gc::as_ptr(*home_obj.borrow()),
+            var_env.as_ptr(),
+            param_env.as_ptr()
+        );
         var_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
         param_env.borrow_mut(mc).set_home_object(Some(home_obj));
     }

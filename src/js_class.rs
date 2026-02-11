@@ -338,14 +338,16 @@ fn find_home_object_in_env<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<GcCell<JSO
     // Capture a short backtrace at lookup time so we can correlate the
     // environment lookup site with where [[HomeObject]] was set.
     let bt = std::backtrace::Backtrace::capture();
-    log::trace!("find_home_object_in_env: backtrace (short): {:?}", bt);
+    log::warn!("find_home_object_in_env: backtrace (short): {:?}", bt);
+    // TEMP DIAG: print immediate env pointer to stderr to help triage
+    log::warn!("DIAG: find_home_object_in_env called env_ptr={:p}", env.as_ptr());
 
     let mut cur = Some(*env);
     while let Some(e) = cur {
         // Diagnostic: log the environment being checked
         let has_home = e.borrow().get_home_object().is_some();
         let has_fn = object_get_key_value(&e, "__function").is_some();
-        log::trace!(
+        log::warn!(
             "find_home_object_in_env: checking env ptr={:p} has_home={} has___function={}",
             Gc::as_ptr(e),
             has_home,
@@ -2508,18 +2510,71 @@ pub(crate) fn call_class_method<'gc>(
 }
 
 pub(crate) fn evaluate_super<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
-    // super refers to the parent class prototype
-    // We need to find it from the current class context
-    if let Some(this_val) = object_get_key_value(env, "this")
-        && let Value::Object(instance) = &*this_val.borrow()
-        && let Some(proto_val) = object_get_key_value(instance, "__proto__")
-        && let Value::Object(proto_obj) = &*proto_val.borrow()
-    {
-        // Get the parent prototype from the current prototype's __proto__
-        if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__") {
-            return Ok(parent_proto_val.borrow().clone());
+    // Debug trace to help find why 'super' isn't resolving in some call contexts
+    log::trace!(
+        "TRACE: evaluate_super: env_ptr={:p} env_has_this_own={} env_has_this_any={}",
+        env.as_ptr(),
+        env.borrow().get_property("this").is_some(),
+        crate::core::env_get(env, "this").is_some()
+    );
+
+    // Per spec: GetThisEnvironment — walk the environment chain until we find
+    // a record that *owns* a 'this' binding. That environment is used for
+    // HasSuperBinding/GetThisBinding/GetSuperBase semantics.
+    let mut cur_env = Some(*env);
+    let mut this_env_opt: Option<JSObjectDataPtr<'gc>> = None;
+    while let Some(e) = cur_env {
+        if crate::core::env_get_own(&e, "this").is_some() {
+            this_env_opt = Some(e);
+            break;
         }
+        cur_env = e.borrow().prototype;
     }
+
+    if let Some(this_env) = this_env_opt {
+        log::warn!("TRACE: evaluate_super: this_env_ptr={:p}", this_env.as_ptr());
+        if let Some(this_val_rc) = object_get_key_value(&this_env, "this") {
+            log::warn!("TRACE: evaluate_super: this_val = {:?}", *this_val_rc.borrow());
+
+            // Prefer using an explicit [[HomeObject]] found on the environment chain
+            // since it captures the static home where the method was defined (class
+            // prototype or object literal). If present, the `super` base is the
+            // home object's internal prototype (home.prototype).
+            if let Some(home_seen) = find_home_object_in_env(env) {
+                if let Some(home_proto) = home_seen.borrow().borrow().prototype {
+                    log::warn!("TRACE: evaluate_super: using home_object proto ptr={:p}", Gc::as_ptr(home_proto));
+                    return Ok(Value::Object(home_proto));
+                } else {
+                    log::warn!("TRACE: evaluate_super: home_object prototype is null");
+                    return Err(raise_type_error!("Cannot access 'super' of a class with null prototype"));
+                }
+            }
+
+            // Fallback: use the instance's internal prototype as the super base
+            if let Value::Object(instance) = &*this_val_rc.borrow() {
+                if let Some(proto_ptr) = instance.borrow().prototype {
+                    log::warn!(
+                        "TRACE: evaluate_super: using instance.__proto__ as super base: instance ptr={:p} proto_ptr={:p}",
+                        Gc::as_ptr(*instance),
+                        Gc::as_ptr(proto_ptr)
+                    );
+                    return Ok(Value::Object(proto_ptr));
+                } else {
+                    log::warn!("TRACE: evaluate_super: instance present but no internal prototype");
+                }
+            } else {
+                log::warn!("TRACE: evaluate_super: 'this' binding exists but is not an object");
+            }
+        } else {
+            log::warn!("TRACE: evaluate_super: this binding not found on this_env (unexpected)");
+        }
+    } else {
+        log::warn!(
+            "TRACE: evaluate_super: no this environment found starting from env_ptr={:p}",
+            env.as_ptr()
+        );
+    }
+
     Err(raise_eval_error!("super can only be used in class methods or constructors"))
 }
 
@@ -2764,6 +2819,12 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
         "DBG evaluate_super_computed_property: called key='{key:?}' env_ptr={env:p} env_gc_ptr={:p}",
         Gc::as_ptr(*env)
     );
+    // TEMP DIAG: echo to stderr so we always see this when running the single test
+    log::trace!(
+        "DIAG: evaluate_super_computed_property called key={:?} env_ptr={:p}",
+        key,
+        env.as_ptr()
+    );
     // Diagnostic: report whether [[HomeObject]] is present on the env chain and show its prototype pointer
     if let Some(home_seen) = find_home_object_in_env(env) {
         let home_proto_ptr = home_seen.borrow().borrow().prototype.map(Gc::as_ptr);
@@ -2811,7 +2872,14 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
     // Use [[HomeObject]] if available; search up environment prototype chain
     if let Some(home_obj) = find_home_object_in_env(env) {
         // Super is the prototype of HomeObject
-        if let Some(super_obj) = home_obj.borrow().borrow().prototype {
+        let super_base = home_obj.borrow().borrow().prototype;
+        // If the home object's prototype is null/undefined, per spec RequireObjectCoercible
+        // should throw a TypeError. Match behavior of property assignment resolution.
+        if super_base.is_none() {
+            return Err(raise_type_error!("Cannot access 'super' of a class with null prototype"));
+        }
+
+        if let Some(super_obj) = super_base {
             // Look up property on super object
             if let Some(prop_val) = object_get_key_value(&super_obj, key.clone()) {
                 log::trace!(
@@ -2897,7 +2965,15 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
                         }
                         return Ok(Value::Undefined);
                     }
-                    _ => return Ok(prop_val.borrow().clone()),
+                    _ => {
+                        // If the stored slot is a property descriptor with a stored value, return that
+                        // actual value instead of the descriptor itself. This aligns with object's
+                        // [[Get]] behavior where data properties expose their value.
+                        return match &*prop_val.borrow() {
+                            Value::Property { value: Some(v), .. } => Ok(v.borrow().clone()),
+                            other => Ok(other.clone()),
+                        };
+                    }
                 }
             }
             log::trace!(
@@ -2981,7 +3057,13 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
                         }
                         return Ok(Value::Undefined);
                     }
-                    _ => return Ok(prop_val.borrow().clone()),
+                    _ => {
+                        // Return actual stored value for data properties instead of descriptor
+                        return match &*prop_val.borrow() {
+                            Value::Property { value: Some(v), .. } => Ok(v.borrow().clone()),
+                            other => Ok(other.clone()),
+                        };
+                    }
                 }
             }
             log::trace!(
@@ -3012,6 +3094,26 @@ pub(crate) fn evaluate_super_method<'gc>(
         object_get_key_value(env, "this").is_some() && object_get_key_value(env, "this").is_some(),
         env.borrow().get_home_object().is_some()
     );
+    // Additional diagnostics to help triage failing cases
+    let home_exists = env.borrow().get_home_object().is_some();
+    let home_ptr = env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+    log::warn!(
+        "DIAG evaluate_super_method start: env_ptr={:p} this_binding={:?} __instance={:?} home_exists={} home_ptr={:?}",
+        env.as_ptr(),
+        object_get_key_value(env, "this"),
+        object_get_key_value(env, "__instance"),
+        home_exists,
+        home_ptr
+    );
+    if let Some(home_seen) = find_home_object_in_env(env) {
+        log::warn!(
+            "DIAG evaluate_super_method: find_home_object_in_env -> home_ptr={:p} home.prototype={:?}",
+            Gc::as_ptr(*home_seen.borrow()),
+            home_seen.borrow().borrow().prototype.map(Gc::as_ptr)
+        );
+    } else {
+        log::warn!("DIAG evaluate_super_method: find_home_object_in_env -> NONE");
+    }
 
     // Use [[HomeObject]] if available; search up env prototype chain
     if let Some(home_obj) = find_home_object_in_env(env) {
@@ -3024,6 +3126,11 @@ pub(crate) fn evaluate_super_method<'gc>(
                 Gc::as_ptr(*home_obj.borrow()),
                 Gc::as_ptr(super_obj),
                 method
+            );
+            // Print property keys for debugging
+            log::warn!(
+                "TRACE: evaluate_super_method: super_obj properties: {:?}",
+                super_obj.borrow().properties.keys().collect::<Vec<_>>()
             );
             // Look up method on super object
             log::trace!(
@@ -3039,6 +3146,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                     method_val.borrow(),
                     object_get_key_value(env, "this")
                 );
+                log::warn!("TRACE: evaluate_super_method: found method_val = {:?}", method_val.borrow());
                 let method_type = match &*method_val.borrow() {
                     Value::Closure(..) => "Closure",
                     Value::AsyncClosure(..) => "AsyncClosure",

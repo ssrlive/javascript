@@ -83,8 +83,15 @@ fn test_pathological_if_do_for_combo() {
         f();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"E0-0,E0-1,O1-0,O1-1,E2-0,E2-1\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"E0-0,E0-1,O1-0,O1-1,E2-0,E2-1\"");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

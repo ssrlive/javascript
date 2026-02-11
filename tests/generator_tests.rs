@@ -144,3 +144,189 @@ fn test_yield_without_generator() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn test_generator_method_prototype_links_to_intrinsic() {
+    // Test that generator methods defined on object literals have a 'prototype'
+    // object whose internal prototype points to the realm's Generator.prototype
+    let result = evaluate_script(
+        r#"
+        var GeneratorPrototype = Object.getPrototypeOf(function* () {}).prototype;
+        var method = { *method() {} }.method;
+        Object.getPrototypeOf(method.prototype) === GeneratorPrototype;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_yield_as_expression_without_rhs_g1() {
+    let v = evaluate_script(
+        r#"
+        var obj = { *g1() { (yield) } };
+        var iter = obj.g1();
+        var result = iter.next();
+        result.value;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(v, "undefined");
+
+    let d = evaluate_script(
+        r#"
+        var obj = { *g1() { (yield) } };
+        var iter = obj.g1();
+        var _ = iter.next();
+        var result = iter.next();
+        result.done;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(d, "true");
+}
+
+#[test]
+fn test_yield_as_expression_without_rhs_g2() {
+    let v = evaluate_script(
+        r#"
+        var obj = { *g2() { [yield] } };
+        var iter = obj.g2();
+        var result = iter.next();
+        result.value;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(v, "undefined");
+
+    let d = evaluate_script(
+        r#"
+        var obj = { *g2() { [yield] } };
+        var iter = obj.g2();
+        var _ = iter.next();
+        var result = iter.next();
+        result.done;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(d, "true");
+}
+
+#[test]
+fn test_yield_as_expression_without_rhs_g3() {
+    let v = evaluate_script(
+        r#"
+        var obj = { *g3() { {yield} } };
+        var iter = obj.g3();
+        var result = iter.next();
+        result.value;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(v, "undefined");
+
+    let d = evaluate_script(
+        r#"
+        var obj = { *g3() { {yield} } };
+        var iter = obj.g3();
+        var _ = iter.next();
+        var result = iter.next();
+        result.done;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(d, "true");
+}
+
+#[test]
+fn test_yield_as_expression_without_rhs_g4() {
+    // comma expression: two yields before completion
+    let v1 = evaluate_script(
+        r#"
+        var obj = { *g4() { yield, yield; } };
+        var iter = obj.g4();
+        var result = iter.next();
+        result.value;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(v1, "undefined");
+
+    let v2 = evaluate_script(
+        r#"
+        var obj = { *g4() { yield, yield; } };
+        var iter = obj.g4();
+        iter.next();
+        var result = iter.next();
+        result.value;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(v2, "undefined");
+
+    let d = evaluate_script(
+        r#"
+        var obj = { *g4() { yield, yield; } };
+        var iter = obj.g4();
+        iter.next();
+        iter.next();
+        var result = iter.next();
+        result.done;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(d, "true");
+}
+
+#[test]
+fn test_yield_as_expression_without_rhs_g5() {
+    // conditional operator with bare yields
+    let v1 = evaluate_script(
+        r#"
+        var obj = { *g5() { (yield) ? yield : yield; } };
+        var iter = obj.g5();
+        var result = iter.next();
+        result.value;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(v1, "undefined");
+
+    let v2 = evaluate_script(
+        r#"
+        var obj = { *g5() { (yield) ? yield : yield; } };
+        var iter = obj.g5();
+        iter.next();
+        var result = iter.next();
+        result.value;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(v2, "undefined");
+
+    let d = evaluate_script(
+        r#"
+        var obj = { *g5() { (yield) ? yield : yield; } };
+        var iter = obj.g5();
+        iter.next();
+        iter.next();
+        var result = iter.next();
+        result.done;
+    "#,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(d, "true");
+}

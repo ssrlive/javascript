@@ -83,7 +83,7 @@ pub fn define_properties<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'
         _ => return Err(raise_type_error!("Property descriptors must be an object").into()),
     };
 
-    let keys = crate::core::ordinary_own_property_keys(&props_obj);
+    let keys = crate::core::ordinary_own_property_keys_mc(mc, &props_obj)?;
     let mut descriptors = Vec::new();
 
     for key in keys {
@@ -379,7 +379,7 @@ pub fn handle_object_method<'gc>(
             match args[0] {
                 Value::Object(obj) => {
                     let mut keys = Vec::new();
-                    let ordered = crate::core::ordinary_own_property_keys(&obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
                     for key in ordered {
                         if !obj.borrow().is_enumerable(&key) {
                             continue;
@@ -417,7 +417,7 @@ pub fn handle_object_method<'gc>(
             match args[0] {
                 Value::Object(obj) => {
                     let mut values = Vec::new();
-                    let ordered = crate::core::ordinary_own_property_keys(&obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
                     for key in ordered {
                         if !obj.borrow().is_enumerable(&key) {
                             continue;
@@ -503,8 +503,14 @@ pub fn handle_object_method<'gc>(
             match obj_val {
                 Value::Object(obj) => {
                     if let Some(proto_rc) = obj.borrow().prototype {
+                        log::debug!(
+                            "DBG Object.getPrototypeOf: obj ptr={:p} -> proto ptr={:p}",
+                            Gc::as_ptr(obj),
+                            Gc::as_ptr(proto_rc)
+                        );
                         Ok(Value::Object(proto_rc))
                     } else {
+                        log::debug!("DBG Object.getPrototypeOf: obj ptr={:p} -> proto NULL", Gc::as_ptr(obj));
                         Ok(Value::Null)
                     }
                 }
@@ -549,7 +555,7 @@ pub fn handle_object_method<'gc>(
             match &args[0] {
                 Value::Object(obj) => {
                     // Make all own properties non-configurable
-                    let ordered = crate::core::ordinary_own_property_keys(obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
                     for k in ordered {
                         obj.borrow_mut(mc).set_non_configurable(k.clone());
                     }
@@ -570,7 +576,7 @@ pub fn handle_object_method<'gc>(
                     if obj.borrow().is_extensible() {
                         return Ok(Value::Boolean(false));
                     }
-                    let ordered = crate::core::ordinary_own_property_keys(&obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
                     for k in ordered {
                         if obj.borrow().is_configurable(&k) {
                             return Ok(Value::Boolean(false));
@@ -589,7 +595,7 @@ pub fn handle_object_method<'gc>(
             match &args[0] {
                 Value::Object(obj) => {
                     // For every own property: if data property -> make non-writable; in any case make non-configurable
-                    let ordered = crate::core::ordinary_own_property_keys(obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
                     for k in ordered.clone() {
                         if let Some(desc_rc) = crate::core::object_get_key_value(obj, &k) {
                             match &*desc_rc.borrow() {
@@ -619,7 +625,7 @@ pub fn handle_object_method<'gc>(
                     if obj.borrow().is_extensible() {
                         return Ok(Value::Boolean(false));
                     }
-                    let ordered = crate::core::ordinary_own_property_keys(&obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
                     for k in ordered {
                         if obj.borrow().is_configurable(&k) {
                             return Ok(Value::Boolean(false));
@@ -768,7 +774,7 @@ pub fn handle_object_method<'gc>(
                 Value::Object(obj) => {
                     let result_obj = crate::js_array::create_array(mc, env)?;
                     let mut idx = 0;
-                    let ordered = crate::core::ordinary_own_property_keys(&obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
                     for key in ordered {
                         if let PropertyKey::Symbol(sym) = key {
                             object_set_key_value(mc, &result_obj, idx, &Value::Symbol(sym))?;
@@ -789,7 +795,7 @@ pub fn handle_object_method<'gc>(
                 Value::Object(obj) => {
                     let result_obj = crate::js_array::create_array(mc, env)?;
                     let mut idx = 0;
-                    let ordered = crate::core::ordinary_own_property_keys(&obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
                     for key in ordered {
                         if let PropertyKey::String(s) = key {
                             object_set_key_value(mc, &result_obj, idx, &Value::String(utf8_to_utf16(&s)))?;
@@ -850,7 +856,7 @@ pub fn handle_object_method<'gc>(
                 Value::Object(ref obj) => {
                     let result_obj = new_js_object_data(mc);
 
-                    let ordered = crate::core::ordinary_own_property_keys(obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
                     for key in &ordered {
                         if let Some(pd) = crate::core::build_property_descriptor(mc, obj, key) {
                             let desc_obj = pd.to_object(mc)?; // Put descriptor onto result using the original key (string or symbol)
@@ -935,7 +941,7 @@ pub fn handle_object_method<'gc>(
             for src_expr in args.iter().skip(1) {
                 let src_val = src_expr.clone();
                 if let Value::Object(source_obj) = src_val {
-                    let ordered = crate::core::ordinary_own_property_keys(&source_obj);
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &source_obj)?;
                     for key in ordered {
                         if key == "__proto__".into() {
                             continue;

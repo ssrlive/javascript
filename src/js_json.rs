@@ -138,7 +138,10 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: &Value<'gc>)
                 Some(serde_json::Value::Array(arr))
             } else {
                 let mut map = serde_json::Map::new();
-                let ordered = crate::core::ordinary_own_property_keys(obj);
+                let ordered = match crate::core::ordinary_own_property_keys_mc(mc, obj) {
+                    Ok(v) => v,
+                    Err(_) => return None,
+                };
                 for key in ordered {
                     if let PropertyKey::String(s) = &key
                         && s != "length"
@@ -214,7 +217,10 @@ fn inner<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>, depth: usize) -> Option
                 Some(format!("[{}]", parts.join(",")))
             } else {
                 let mut parts: Vec<String> = Vec::new();
-                let ordered = crate::core::ordinary_own_property_keys(obj);
+                let ordered = match crate::core::ordinary_own_property_keys_mc(mc, obj) {
+                    Ok(v) => v,
+                    Err(_) => return None,
+                };
                 for key in ordered {
                     if let PropertyKey::String(s) = &key {
                         if s == "length" {

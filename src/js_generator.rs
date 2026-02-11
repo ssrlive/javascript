@@ -1,9 +1,9 @@
-use crate::core::{Gc, GcCell, GeneratorState, MutationContext};
+use crate::core::{Gc, GcCell, GcPtr, GeneratorState, MutationContext};
 use crate::{
     core::{
-        ClassDefinition, ClassMember, EvalError, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, VarDeclKind, env_get,
-        env_get_strictness, env_set, env_set_recursive, env_set_strictness, evaluate_call_dispatch, evaluate_expr, new_js_object_data,
-        object_get_key_value, object_set_key_value, prepare_function_call_env,
+        ClassDefinition, ClassMember, EvalError, Expr, JSGenerator, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value,
+        VarDeclKind, env_get, env_get_strictness, env_set, env_set_recursive, env_set_strictness, evaluate_call_dispatch, evaluate_expr,
+        new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env, prepare_function_call_env_with_home,
     },
     error::JSError,
 };
@@ -140,8 +140,44 @@ pub fn handle_generator_function_call<'gc>(
     let func_env = if has_param_expressions {
         // Build a separate parameter environment so default initializers do not
         // capture body-level declarations.
-        let param_env = prepare_function_call_env(mc, closure.env.as_ref(), this_val, Some(&closure.params[..]), args, None, None)?;
+        let home_opt = if let Some(home_obj) = &closure.home_object {
+            Some(home_obj.clone())
+        } else if let Some(fn_obj_ptr) = fn_obj {
+            fn_obj_ptr.borrow().get_home_object()
+        } else {
+            None
+        };
+        let param_env = prepare_function_call_env_with_home(
+            mc,
+            closure.env.as_ref(),
+            this_val,
+            Some(&closure.params[..]),
+            args,
+            None,
+            None,
+            home_opt,
+        )?;
         log::debug!("handle_generator_function_call: prepared param_env");
+        // Early: propagate [[HomeObject]] into the parameter environment so
+        // any frames created during parameter initialization or early evaluation
+        // can see it when resolving `super`.
+        if let Some(home_obj) = &closure.home_object {
+            param_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
+            log::trace!(
+                "handle_generator_function_call: early-set param_env.home from closure -> {:p}",
+                Gc::as_ptr(*home_obj.borrow())
+            );
+            let bt = std::backtrace::Backtrace::capture();
+            log::trace!("handle_generator_function_call: backtrace at early-set home: {:?}", bt);
+        } else if let Some(fn_obj_ptr) = fn_obj
+            && let Some(home) = fn_obj_ptr.borrow().get_home_object()
+        {
+            param_env.borrow_mut(mc).set_home_object(Some(home.clone()));
+            log::trace!(
+                "handle_generator_function_call: early-set param_env.home from fn_obj -> {:p}",
+                Gc::as_ptr(*home.borrow())
+            );
+        }
         let var_env = new_js_object_data(mc);
         var_env.borrow_mut(mc).prototype = Some(param_env);
         var_env.borrow_mut(mc).is_function_scope = true;
@@ -174,6 +210,43 @@ pub fn handle_generator_function_call<'gc>(
 
         if let Some(home_obj) = &closure.home_object {
             var_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
+            // Also set on the parameter environment so frames whose prototype is
+            // the param env can still locate [[HomeObject]]
+            param_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
+            log::trace!(
+                "handle_generator_function_call: set var_env.home_object from closure -> {:p} and param_env.home -> {:p}",
+                Gc::as_ptr(*home_obj.borrow()),
+                Gc::as_ptr(*home_obj.borrow())
+            );
+        } else if let Some(fn_obj_ptr) = fn_obj {
+            // If the closure itself has no [[HomeObject]], prefer the function
+            // object's [[HomeObject]] (if present). This covers cases like
+            // concise methods where the function object wrapper holds the
+            // home object but the underlying closure data may not.
+            let fn_home_ptr = fn_obj_ptr.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+            log::trace!(
+                "handle_generator_function_call: fn_obj ptr={:p} fn_home={:?}",
+                Gc::as_ptr(fn_obj_ptr),
+                fn_home_ptr
+            );
+            if let Some(home) = fn_obj_ptr.borrow().get_home_object() {
+                var_env.borrow_mut(mc).set_home_object(Some(home.clone()));
+                param_env.borrow_mut(mc).set_home_object(Some(home.clone()));
+                log::trace!(
+                    "handle_generator_function_call: set var_env.home_object from fn_obj -> {:p} and param_env.home -> {:p}",
+                    Gc::as_ptr(*home.borrow()),
+                    Gc::as_ptr(*home.borrow())
+                );
+                let bt = std::backtrace::Backtrace::capture();
+                log::trace!("handle_generator_function_call: backtrace at fn_obj-home-set: {:?}", bt);
+            }
+        }
+        // Diagnostic: final var_env home pointer
+        let var_home_ptr = var_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+        log::trace!("handle_generator_function_call: final var_env.home={:?}", var_home_ptr);
+        if var_home_ptr.is_some() {
+            let bt = std::backtrace::Backtrace::capture();
+            log::trace!("handle_generator_function_call: backtrace at final var_env.home: {:?}", bt);
         }
 
         // Ensure the body environment has its own arguments object.
@@ -221,6 +294,16 @@ pub fn handle_generator_function_call<'gc>(
             }
         }
         let fn_is_strict = closure.is_strict || env_strict_ancestor;
+
+        // Propagate [[HomeObject]] into the call environment so `super` resolves correctly
+        // for generator functions that do not use parameter expressions.
+        if let Some(home_obj) = &closure.home_object {
+            call_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
+        } else if let Some(fn_obj_ptr) = fn_obj
+            && let Some(home) = fn_obj_ptr.borrow().get_home_object()
+        {
+            call_env.borrow_mut(mc).set_home_object(Some(home.clone()));
+        }
 
         // If a function object was provided, bind the name into the call env (parameter env alias)
         if let Some(fn_obj_ptr) = fn_obj
@@ -468,7 +551,7 @@ fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool)
             if *replaced {
                 Expr::Yield(new_inner)
             } else {
-                log::trace!("Replacing Yield");
+                log::trace!("replace_first_yield_in_expr: Replacing Yield {:?} with var='{}'", inner, var_name);
                 *replaced = true;
                 Expr::Var(var_name.to_string(), None, None)
             }
@@ -478,7 +561,11 @@ fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool)
             if *replaced {
                 *new_inner
             } else {
-                log::trace!("Replacing YieldStar");
+                log::trace!(
+                    "replace_first_yield_in_expr: Replacing YieldStar {:?} with var='{}'",
+                    inner,
+                    var_name
+                );
                 *replaced = true;
                 Expr::Var(var_name.to_string(), None, None)
             }
@@ -488,7 +575,7 @@ fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool)
             if *replaced {
                 Expr::Await(new_inner)
             } else {
-                log::trace!("Replacing Await");
+                log::trace!("replace_first_yield_in_expr: Replacing Await {:?} with var='{}'", inner, var_name);
                 *replaced = true;
                 Expr::Var(var_name.to_string(), None, None)
             }
@@ -1488,8 +1575,8 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
 /// Execute generator.next()
 pub fn generator_next<'gc>(
     mc: &MutationContext<'gc>,
-    generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
-    _send_value: &Value<'gc>,
+    generator: &GcPtr<'gc, JSGenerator<'gc>>,
+    send_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut gen_obj = generator.borrow_mut(mc);
 
@@ -1650,6 +1737,13 @@ pub fn generator_next<'gc>(
                         return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
                     }
 
+                    let func_home = func_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+                    log::trace!(
+                        "generator_next: NotStarted inner eval env_ptr={:p} env.home={:?} gen_ptr={:p}",
+                        Gc::as_ptr(func_env),
+                        func_home,
+                        Gc::as_ptr(*generator)
+                    );
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => {
                             if matches!(yield_kind, YieldKind::YieldStar) {
@@ -1705,6 +1799,13 @@ pub fn generator_next<'gc>(
                 // - If a Return occurred, use its value
                 // - If normal completion (no Return), completion value is undefined
                 // - If a Throw occurred, propagate the throw
+                let func_home = func_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+                log::trace!(
+                    "generator_next: NotStarted executing body func_env={:p} env.home={:?} gen_ptr={:p}",
+                    Gc::as_ptr(func_env),
+                    func_home,
+                    Gc::as_ptr(*generator)
+                );
                 let (cf, _last) = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &gen_obj.body, &[])?;
                 gen_obj.state = GeneratorState::Completed;
                 match cf {
@@ -1716,6 +1817,17 @@ pub fn generator_next<'gc>(
             }
         }
         GeneratorState::Suspended { pc, stack: _, pre_env } => {
+            // Restore generator state to Suspended early so evaluations that may
+            // call back into JavaScript (and possibly call generator.next()) do
+            // not observe the generator as `Running` and trigger re-entrancy errors.
+            let saved_pre_env = pre_env;
+            gen_obj.state = GeneratorState::Suspended {
+                pc,
+                stack: vec![],
+                pre_env: saved_pre_env,
+            };
+            log::trace!("generator_next: restored Suspended state pc={}", pc);
+
             if let Some(mut for_await) = gen_obj.pending_for_await.take() {
                 let func_env = gen_obj.env;
                 let pc_val = pc;
@@ -1724,10 +1836,10 @@ pub fn generator_next<'gc>(
                     let iter_env = if let Some(VarDeclKind::Let) | Some(VarDeclKind::Const) = for_await.decl_kind {
                         let e = crate::core::new_js_object_data(mc);
                         e.borrow_mut(mc).prototype = Some(func_env);
-                        env_set(mc, &e, &for_await.var_name, &_send_value.clone())?;
+                        env_set(mc, &e, &for_await.var_name, send_value)?;
                         e
                     } else {
-                        env_set_recursive(mc, &func_env, &for_await.var_name, &_send_value.clone())?;
+                        env_set_recursive(mc, &func_env, &for_await.var_name, send_value)?;
                         func_env
                     };
 
@@ -1751,7 +1863,7 @@ pub fn generator_next<'gc>(
                     return Ok(create_iterator_result(mc, &next_res_val, false)?);
                 }
 
-                let next_res = if let Value::Object(obj) = _send_value {
+                let next_res = if let Value::Object(obj) = send_value {
                     obj
                 } else {
                     return Err(raise_type_error!("Iterator result is not an object").into());
@@ -1802,7 +1914,7 @@ pub fn generator_next<'gc>(
                     &gen_obj.env,
                     &next_method,
                     Some(&Value::Object(iter)),
-                    std::slice::from_ref(_send_value),
+                    std::slice::from_ref(send_value),
                 )?;
                 if let Value::Object(res_obj) = iter_res {
                     // Use accessor-aware reads for 'done' and 'value' per spec so getters
@@ -1838,44 +1950,381 @@ pub fn generator_next<'gc>(
             // first `yield` in that statement with the sent value before
             // executing.
             let pc_val = pc;
-            log::debug!("DEBUG: generator_next Suspended. pc={}, send_value={:?}", pc_val, _send_value);
+            log::debug!("DEBUG: generator_next Suspended. pc={}, send_value={:?}", pc_val, send_value);
             gen_obj.pending_iterator = None;
             gen_obj.pending_iterator_done = false;
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = GeneratorState::Completed;
                 return Ok(create_iterator_result(mc, &Value::Undefined, true)?);
             }
-            // Generate a unique variable name for this yield point (based on PC and count)
-            // This ensures that subsequent yields don't overwrite the value of this yield in the environment
+            // Create a base name for yield variables for this PC; replace ALL yield
+            // occurrences in the containing top-level statement with distinct
+            // temporary variables so nested yields are placeholders for later
+            // send-value binding.
             let base_name = format!("__gen_yield_val_{}_", pc_val);
-            let next_idx = if let Some(s) = gen_obj.body.get(pc_val) {
-                count_yield_vars_in_statement(s, &base_name)
-            } else {
-                0
-            };
-            let var_name = format!("{}{}", base_name, next_idx);
 
-            // Modify the AST in place to reflect progress (remove init, replace yield)
-            let mut replaced = false;
-            if let Some(first_stmt) = gen_obj.body.get_mut(pc_val) {
-                replace_first_yield_in_statement(first_stmt, &var_name, &mut replaced);
-                log::debug!("DEBUG: body[{}] after: replaced={}, kind={:?}", pc_val, replaced, first_stmt.kind);
-            }
-
-            // Clone the tail for execution (now contains modifications)
-            let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
-
-            // Use the pre-execution environment if available so bindings created
-            // by pre-statements remain visible when we resume execution.
+            // Prepare the function environment early so we can evaluate
+            // conditional sub-expressions before mutating the AST.
             let func_env = if let Some(env) = pre_env.as_ref() {
                 *env
             } else {
                 prepare_function_call_env(mc, Some(&gen_obj.env), gen_obj.this_val.clone().as_ref(), None, &[], None, None)?
             };
 
-            object_set_key_value(mc, &func_env, &var_name, &_send_value.clone())?;
-            if let Some(stmt) = gen_obj.body.get(pc_val) {
-                bind_replaced_yield_decl(mc, &func_env, stmt, &var_name)?;
+            // Special-case: precompute conditional branch inner yield's operand
+            // value so we can return it now while still installing placeholders
+            // for subsequent resumes. Also record which branch was chosen so we
+            // can ensure we replace the chosen branch's yield in the AST to
+            // avoid re-yielding it on the next resume.
+            let mut precomputed_yield: Option<Value> = None;
+            let mut precomputed_choice_is_then: Option<bool> = None;
+            if let Some(prestmt) = gen_obj.body.get(pc_val)
+                && let StatementKind::Expr(e) = &*prestmt.kind
+                && let Expr::Conditional(cond, then_expr, else_expr) = e
+            {
+                // Only precompute the chosen branch inner yield if the
+                // condition can be evaluated without encountering a
+                // `yield`. Evaluating a `Yield` node directly via
+                // `evaluate_expr` is invalid and will throw, so skip
+                // precomputation when the condition contains yields.
+                if !expr_contains_yield(cond) {
+                    let cond_val = crate::core::evaluate_expr(mc, &func_env, cond)?;
+                    let (chosen, is_then) = if cond_val.to_truthy() {
+                        (then_expr, true)
+                    } else {
+                        (else_expr, false)
+                    };
+                    if let Some((_, chosen_inner)) = find_yield_in_expr(chosen)
+                        && let Some(inner_expr) = chosen_inner
+                    {
+                        let val = crate::core::evaluate_expr(mc, &func_env, &inner_expr)?;
+                        precomputed_yield = Some(val);
+                        precomputed_choice_is_then = Some(is_then);
+                        log::trace!(
+                            "generator_next: Precomputed conditional-branch inner yield value -> {:?}",
+                            precomputed_yield
+                        );
+                    }
+                }
+            }
+
+            // Collect name of the first replaced var (install placeholder for the yield being resumed)
+            let mut replaced_vars: Vec<String> = vec![];
+            if let Some(first_stmt) = gen_obj.body.get_mut(pc_val) {
+                // If we precomputed a chosen branch in a conditional, prefer to
+                // replace the yield in that chosen branch so that the yielded
+                // value does not remain in the AST and get re-yielded on the
+                // following resume. The `precomputed_choice_is_then` value is
+                // only set when the condition could be evaluated without
+                // encountering `yield` nodes.
+                if let Some(is_then) = precomputed_choice_is_then {
+                    // Compute an index for naming the placeholder now (avoid holding
+                    // simultaneous mutable/immutable borrows of the statement).
+                    let next_idx = count_yield_vars_in_statement(first_stmt, &base_name);
+                    let candidate = format!("{}{}", base_name, next_idx);
+                    if let StatementKind::Expr(e) = &mut *first_stmt.kind
+                        && let Expr::Conditional(_cond, then_expr, else_expr) = e
+                    {
+                        let mut did_replace = false;
+                        if is_then {
+                            **then_expr = replace_first_yield_in_expr(then_expr, &candidate, &mut did_replace);
+                        } else {
+                            **else_expr = replace_first_yield_in_expr(else_expr, &candidate, &mut did_replace);
+                        }
+                        if did_replace {
+                            replaced_vars.push(candidate.clone());
+                            log::debug!(
+                                "DEBUG: body[{}] after chosen-branch replacement, kind={:?}",
+                                pc_val,
+                                first_stmt.kind
+                            );
+                        }
+                    }
+                }
+
+                // Special-case: if the first top-level statement is a conditional
+                // whose condition contains a `yield`, *do not* perform the generic
+                // first-yield replacement here. Instead let the conditional-specific
+                // resume logic re-evaluate the condition and replace the chosen
+                // branch's yield so we don't replace the wrong branch (and cause
+                // extra yields later).
+                let skip_initial_replacement = if let StatementKind::Expr(e) = &*first_stmt.kind
+                    && let Expr::Conditional(cond, _, _) = e
+                    && expr_contains_yield(cond)
+                {
+                    true
+                } else {
+                    false
+                };
+
+                if replaced_vars.is_empty() && !skip_initial_replacement {
+                    let next_idx = count_yield_vars_in_statement(first_stmt, &base_name);
+                    let candidate = format!("{}{}", base_name, next_idx);
+                    let mut did_replace = false;
+                    replace_first_yield_in_statement(first_stmt, &candidate, &mut did_replace);
+                    if did_replace {
+                        replaced_vars.push(candidate.clone());
+                        log::debug!("DEBUG: body[{}] after next replacement, kind={:?}", pc_val, first_stmt.kind);
+                    }
+                } else if skip_initial_replacement {
+                    log::trace!("generator_next: skip_initial_replacement=true for pc={}", pc_val);
+                }
+
+                // Handle the case where the first top-level statement is a
+                // Conditional whose *condition* contains a `yield`. In this
+                // resume path we must replace the yield inside the condition
+                // with a placeholder bound to the provided `send_value`, then
+                // re-evaluate the condition to determine the chosen branch and
+                // process that branch's yield accordingly. This ensures the
+                // condition's yield is not re-yielded on the next resume.
+                if skip_initial_replacement && let Some(first_stmt) = gen_obj.body.get_mut(pc_val) {
+                    // First, check immutably whether the first statement is a
+                    // conditional whose condition contains a yield. We avoid
+                    // taking a mutable borrow until we've computed indices and
+                    // other values needed to perform replacement to satisfy
+                    // the borrow checker.
+                    if let StatementKind::Expr(e_imm) = &*first_stmt.kind
+                        && let Expr::Conditional(cond_imm, _then_imm, _else_imm) = e_imm
+                        && expr_contains_yield(cond_imm)
+                    {
+                        // Compute an index for naming the placeholder now
+                        // (avoid holding conflicting mutable/immutable borrows).
+                        let next_idx = count_yield_vars_in_statement(first_stmt, &base_name);
+                        let candidate = format!("{}{}", base_name, next_idx);
+
+                        // Now take a mutable borrow to replace the first yield
+                        // inside the condition and bind it to the provided
+                        // send value for this resume.
+                        // Perform the replacement within a limited mutable
+                        // borrow scope so we can bind the placeholder without
+                        // holding on to mutable borrows while calling other
+                        // helpers that require immutable access.
+                        let mut did_replace = false;
+                        {
+                            if let StatementKind::Expr(e_mut) = &mut *first_stmt.kind
+                                && let Expr::Conditional(cond_mut, _then_mut, _else_mut) = e_mut
+                            {
+                                **cond_mut = replace_first_yield_in_expr(cond_mut, &candidate, &mut did_replace);
+                                if did_replace {
+                                    object_set_key_value(mc, &func_env, &candidate, send_value)?;
+                                }
+                            }
+                        }
+
+                        if did_replace {
+                            bind_replaced_yield_decl(mc, &func_env, first_stmt, &candidate)?;
+
+                            // Re-evaluate the newly-modified condition so we
+                            // can inspect the chosen branch.
+                            if let StatementKind::Expr(e_ref2) = &*first_stmt.kind
+                                && let Expr::Conditional(cond_ref2, then_ref2, else_ref2) = e_ref2
+                            {
+                                let cond_val = crate::core::evaluate_expr(mc, &func_env, cond_ref2)?;
+                                let chosen_ref: &Expr = if cond_val.to_truthy() { then_ref2 } else { else_ref2 };
+
+                                if let Some((_, chosen_inner)) = find_yield_in_expr(chosen_ref) {
+                                    // If the chosen branch has a bare yield, install a
+                                    // placeholder for it and return undefined as the
+                                    // yielded value so subsequent resumes won't re-yield.
+                                    if chosen_inner.is_none() {
+                                        let next_idx = count_yield_vars_in_statement(first_stmt, &base_name);
+                                        let candidate2 = format!("{}{}", base_name, next_idx);
+                                        if let StatementKind::Expr(e) = &mut *first_stmt.kind
+                                            && let Expr::Conditional(_cond, then_expr2, else_expr2) = e
+                                        {
+                                            let mut did_replace2 = false;
+                                            if cond_val.to_truthy() {
+                                                **then_expr2 = replace_first_yield_in_expr(then_expr2, &candidate2, &mut did_replace2);
+                                            } else {
+                                                **else_expr2 = replace_first_yield_in_expr(else_expr2, &candidate2, &mut did_replace2);
+                                            }
+                                            if did_replace2 {
+                                                object_set_key_value(mc, &func_env, &candidate2, &Value::Undefined)?;
+                                                bind_replaced_yield_decl(mc, &func_env, first_stmt, &candidate2)?;
+                                            }
+                                        }
+
+                                        gen_obj.cached_initial_yield = Some(Value::Undefined);
+                                        return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                                    } else if let Some(inner_expr) = chosen_inner {
+                                        // Evaluate the chosen branch's inner expression and
+                                        // return it as the yielded value, while also
+                                        // replacing that yield in the AST so it won't be
+                                        // re-yielded on subsequent resumes.
+                                        match crate::core::evaluate_expr(mc, &func_env, &inner_expr) {
+                                            Ok(val) => {
+                                                // Replace chosen branch's yield with placeholder
+                                                let body_idx = pc_val;
+                                                if let Some(body_stmt) = gen_obj.body.get_mut(body_idx) {
+                                                    let next_idx = count_yield_vars_in_statement(body_stmt, &base_name);
+                                                    let candidate = format!("{}{}", base_name, next_idx);
+                                                    if let StatementKind::Expr(e) = &mut *body_stmt.kind
+                                                        && let Expr::Conditional(_cond, then_expr3, else_expr3) = e
+                                                    {
+                                                        let mut did_replace3 = false;
+                                                        if cond_val.to_truthy() {
+                                                            **then_expr3 =
+                                                                replace_first_yield_in_expr(then_expr3, &candidate, &mut did_replace3);
+                                                        } else {
+                                                            **else_expr3 =
+                                                                replace_first_yield_in_expr(else_expr3, &candidate, &mut did_replace3);
+                                                        }
+                                                        if did_replace3 {
+                                                            object_set_key_value(mc, &func_env, &candidate, &Value::Undefined)?;
+                                                            bind_replaced_yield_decl(mc, &func_env, body_stmt, &candidate)?;
+                                                        }
+                                                    }
+                                                }
+
+                                                gen_obj.cached_initial_yield = Some(val.clone());
+                                                return Ok(create_iterator_result(mc, &val, false)?);
+                                            }
+                                            Err(e) => return Err(e),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clone the tail for execution (now contains all replacements)
+            let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
+
+            // If we replaced yields, bind the first replaced var to this resume's
+            // send value and initialize other placeholders to `undefined` so they
+            // are ready to be updated on future resumes. If no replacements
+            // occurred, fall back to the old single-var behavior.
+            if !replaced_vars.is_empty() {
+                object_set_key_value(mc, &func_env, &replaced_vars[0], send_value)?;
+                log::trace!(
+                    "generator_next: bound yield var '{}' -> {:?} in func_env ptr={:p}",
+                    replaced_vars[0],
+                    send_value,
+                    Gc::as_ptr(func_env)
+                );
+                for v in replaced_vars.iter().skip(1) {
+                    object_set_key_value(mc, &func_env, v, &Value::Undefined)?;
+                    log::trace!(
+                        "generator_next: initialised placeholder yield var '{}' = undefined in func_env ptr={:p}",
+                        v,
+                        Gc::as_ptr(func_env)
+                    );
+                }
+                if let Some(stmt) = gen_obj.body.get(pc_val) {
+                    for v in &replaced_vars {
+                        bind_replaced_yield_decl(mc, &func_env, stmt, v)?;
+                    }
+                }
+
+                // If the top-level statement is a Conditional whose condition
+                // contains a yield, evaluate the condition now and replace the
+                // chosen branch's yield with a placeholder so we don't replace
+                // the wrong branch later during resume.
+                if let Some(first_stmt) = gen_obj.body.get_mut(pc_val) {
+                    // Snapshot yield vars count before taking mutable borrows so we
+                    // don't create conflicting simultaneous borrows.
+                    let snapshot_next_idx = count_yield_vars_in_statement(&*first_stmt, &base_name);
+
+                    // If the statement is a conditional, examine it. Compute the
+                    // condition value first, then look for yields only in the
+                    // chosen branch. Do not hold conflicting borrows across calls.
+                    if let StatementKind::Expr(e) = &mut *first_stmt.kind
+                        && let Expr::Conditional(cond, then_expr, else_expr) = e
+                    {
+                        let cond_val = crate::core::evaluate_expr(mc, &func_env, cond)?;
+                        log::trace!(
+                            "generator_next: early conditional handling cond_val.truthy={}",
+                            cond_val.to_truthy()
+                        );
+
+                        // Create an immutable reference to the chosen branch's expr
+                        // for inspection so we don't move the mutable references.
+                        let chosen_ref: &Expr = if cond_val.to_truthy() { then_expr } else { else_expr };
+
+                        if let Some((_, chosen_inner)) = find_yield_in_expr(chosen_ref) {
+                            // Use the previously computed snapshot index for candidate naming
+                            let candidate = format!("{}{}", base_name, snapshot_next_idx);
+                            let mut did_replace = false;
+                            if cond_val.to_truthy() {
+                                **then_expr = replace_first_yield_in_expr(then_expr, &candidate, &mut did_replace);
+                            } else {
+                                **else_expr = replace_first_yield_in_expr(else_expr, &candidate, &mut did_replace);
+                            }
+                            if did_replace {
+                                object_set_key_value(mc, &func_env, &candidate, &Value::Undefined)?;
+                                bind_replaced_yield_decl(mc, &func_env, first_stmt, &candidate)?;
+                            }
+
+                            // If the chosen branch's yield is bare, return undefined
+                            // immediately as the yielded value so later resumes won't re-yield.
+                            if chosen_inner.is_none() {
+                                gen_obj.cached_initial_yield = Some(Value::Undefined);
+                                return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                            } else if let Some(inner_expr) = chosen_inner {
+                                match crate::core::evaluate_expr(mc, &func_env, &inner_expr) {
+                                    Ok(val) => {
+                                        gen_obj.cached_initial_yield = Some(val.clone());
+                                        return Ok(create_iterator_result(mc, &val, false)?);
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Fallback: no fresh yields found to replace. Try to locate an
+                // existing placeholder (from a prior resume) and update it with
+                // the current send value. If none found, allocate a new var.
+                let mut updated_existing = false;
+                for i in 0..128usize {
+                    let candidate = format!("{}{}", base_name, i);
+                    if let Some(val_rc) = object_get_key_value(&func_env, &candidate)
+                        && matches!(&*val_rc.borrow(), Value::Undefined)
+                    {
+                        object_set_key_value(mc, &func_env, &candidate, send_value)?;
+                        log::trace!(
+                            "generator_next: updated existing placeholder '{}' -> {:?} in func_env ptr={:p}",
+                            candidate,
+                            send_value,
+                            Gc::as_ptr(func_env)
+                        );
+                        if let Some(stmt) = gen_obj.body.get(pc_val) {
+                            bind_replaced_yield_decl(mc, &func_env, stmt, &candidate)?;
+                        }
+                        updated_existing = true;
+                        break;
+                    }
+                }
+
+                if !updated_existing {
+                    let next_idx = if let Some(s) = gen_obj.body.get(pc_val) {
+                        count_yield_vars_in_statement(s, &base_name)
+                    } else {
+                        0
+                    };
+                    let var_name = format!("{}{}", base_name, next_idx);
+                    object_set_key_value(mc, &func_env, &var_name, send_value)?;
+                    log::trace!(
+                        "generator_next: bound yield var '{}' -> {:?} in func_env ptr={:p} (fallback new)",
+                        var_name,
+                        send_value,
+                        Gc::as_ptr(func_env)
+                    );
+                    if let Some(stmt) = gen_obj.body.get(pc_val) {
+                        bind_replaced_yield_decl(mc, &func_env, stmt, &var_name)?;
+                    }
+                }
+            }
+
+            // If we precomputed a yield value (conditional branch case), return it
+            // immediately as the yielded value while leaving placeholders
+            // installed for subsequent resumes.
+            if let Some(val) = precomputed_yield {
+                gen_obj.cached_initial_yield = Some(val.clone());
+                return Ok(create_iterator_result(mc, &val, false)?);
             }
 
             if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = find_first_yield_in_statements(&tail) {
@@ -1885,7 +2334,7 @@ pub fn generator_next<'gc>(
                     Some(func_env)
                 } else if let Some(inner_idx) = inner_idx_opt {
                     if inner_idx > 0 {
-                        let pre_key = format!("__gen_pre_exec_{}_{}", var_name, inner_idx);
+                        let pre_key = format!("__gen_pre_exec_{}_{}", pc_val, inner_idx);
                         if object_get_key_value(&func_env, &pre_key).is_none() {
                             match &*tail[idx].kind {
                                 StatementKind::Block(inner_stmts) => {
@@ -1960,11 +2409,101 @@ pub fn generator_next<'gc>(
                     }
 
                     object_set_key_value(mc, &func_env, "__gen_throw_val", &Value::Undefined)?;
+
+                    // Special-case conditional expressions: the next yield in the
+                    // statement may be inside the consequent or alternate. Re-evaluate
+                    // the condition to determine which branch will be taken and only
+                    // evaluate the yield's inner expression for the selected branch.
+                    if let StatementKind::Expr(e) = &*tail[idx].kind
+                        && let Expr::Conditional(cond, then_expr, else_expr) = e
+                    {
+                        let cond_val = crate::core::evaluate_expr(mc, &func_env, cond)?;
+                        let chosen: &Expr = if cond_val.to_truthy() { then_expr } else { else_expr };
+                        if let Some((_, chosen_inner)) = find_yield_in_expr(chosen) {
+                            let func_home = func_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+                            log::trace!(
+                                "generator_next: Resume inner eval for conditional branch env_ptr={:p} env.home={:?} gen_ptr={:p} branch_chosen={}",
+                                Gc::as_ptr(func_env),
+                                func_home,
+                                Gc::as_ptr(*generator),
+                                if cond_val.to_truthy() { "then" } else { "else" }
+                            );
+
+                            // If the chosen branch has a nested expression for the yield
+                            // (e.g., `yield <expr>`), evaluate it and return that value.
+                            if let Some(inner_expr) = chosen_inner {
+                                match crate::core::evaluate_expr(mc, &func_env, &inner_expr) {
+                                    Ok(val) => {
+                                        // Replace the chosen branch's yield with a placeholder so
+                                        // the yielded value is not re-yielded on the next resume.
+                                        let body_idx = pc_val + idx;
+                                        if let Some(body_stmt) = gen_obj.body.get_mut(body_idx) {
+                                            let next_idx = count_yield_vars_in_statement(body_stmt, &base_name);
+                                            let candidate = format!("{}{}", base_name, next_idx);
+                                            if let StatementKind::Expr(e) = &mut *body_stmt.kind
+                                                && let Expr::Conditional(_cond, then_expr, else_expr) = e
+                                            {
+                                                let mut did_replace = false;
+                                                if cond_val.to_truthy() {
+                                                    **then_expr = replace_first_yield_in_expr(then_expr, &candidate, &mut did_replace);
+                                                } else {
+                                                    **else_expr = replace_first_yield_in_expr(else_expr, &candidate, &mut did_replace);
+                                                }
+                                                if did_replace {
+                                                    object_set_key_value(mc, &func_env, &candidate, &Value::Undefined)?;
+                                                    bind_replaced_yield_decl(mc, &func_env, body_stmt, &candidate)?;
+                                                }
+                                            }
+                                        }
+
+                                        gen_obj.cached_initial_yield = Some(val.clone());
+                                        return Ok(create_iterator_result(mc, &val, false)?);
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+                            } else {
+                                // Chosen branch contains a bare `yield` (no inner expr). Install
+                                // a placeholder for that yield, initialize it to `undefined`,
+                                // and return `undefined` as the yielded value so subsequent
+                                // resumes don't re-yield the same yield.
+                                let body_idx = pc_val + idx;
+                                if let Some(body_stmt) = gen_obj.body.get_mut(body_idx) {
+                                    let next_idx = count_yield_vars_in_statement(body_stmt, &base_name);
+                                    let candidate = format!("{}{}", base_name, next_idx);
+                                    if let StatementKind::Expr(e) = &mut *body_stmt.kind
+                                        && let Expr::Conditional(_cond, then_expr, else_expr) = e
+                                    {
+                                        let mut did_replace = false;
+                                        if cond_val.to_truthy() {
+                                            **then_expr = replace_first_yield_in_expr(then_expr, &candidate, &mut did_replace);
+                                        } else {
+                                            **else_expr = replace_first_yield_in_expr(else_expr, &candidate, &mut did_replace);
+                                        }
+                                        if did_replace {
+                                            object_set_key_value(mc, &func_env, &candidate, &Value::Undefined)?;
+                                            bind_replaced_yield_decl(mc, &func_env, body_stmt, &candidate)?;
+                                        }
+                                    }
+                                }
+
+                                gen_obj.cached_initial_yield = Some(Value::Undefined);
+                                return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                            }
+                        }
+                    }
+
                     if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
                         gen_obj.cached_initial_yield = Some(Value::Undefined);
                         return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
                     }
 
+                    let func_home = func_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+                    log::trace!(
+                        "generator_next: Resume inner eval env_ptr={:p} env.home={:?} gen_ptr={:p}",
+                        Gc::as_ptr(func_env),
+                        func_home,
+                        Gc::as_ptr(*generator)
+                    );
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => {
                             gen_obj.cached_initial_yield = Some(val.clone());
@@ -2087,6 +2626,13 @@ pub fn generator_throw<'gc>(
 
             // Execute the modified tail. If the throw is uncaught, evaluate_statements
             // will return Err and we should propagate that to the caller.
+            let func_home = func_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+            log::trace!(
+                "generator_throw: func_env={:p} env.home={:?} gen_ptr={:p}",
+                Gc::as_ptr(func_env),
+                func_home,
+                Gc::as_ptr(*generator)
+            );
             let result = crate::core::evaluate_statements(mc, &func_env, &tail);
             // Don't blindly set Completed; check if it returned from a yield or completion
             // NOTE: Current implementation of evaluate_statements does not support Yield.
@@ -2109,6 +2655,9 @@ pub fn generator_throw<'gc>(
 fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: &Value<'gc>, done: bool) -> Result<Value<'gc>, JSError> {
     // Iterator result objects should be extensible by default
     let obj = crate::core::new_js_object_data(mc);
+
+    // Debug: report iterator result being created
+    log::trace!("create_iterator_result: value={:?} done={}", value, done);
 
     // Set value property
     object_set_key_value(mc, &obj, "value", value)?;
@@ -2136,6 +2685,8 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     log::debug!("js_generator::init: gen_proto ptr = {:p}", Gc::as_ptr(gen_proto));
     // Ensure Generator.prototype inherits from Object.prototype so ToPrimitive works.
     let _ = crate::core::set_internal_prototype_from_constructor(mc, &gen_proto, env, "Object");
+    // DEBUG: report gen_proto and later when GeneratorFunction.prototype is linked
+    log::debug!("init_generator: gen_proto created at {:p}", Gc::as_ptr(gen_proto));
 
     // Attach prototype methods as named functions that dispatch to the generator handler
     let val = Value::Function("Generator.prototype.next".to_string());

@@ -1214,6 +1214,9 @@ fn parse_var_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     DestructuringElement::Property(key, boxed) => {
                         obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
                     }
+                    DestructuringElement::ComputedProperty(expr, boxed) => {
+                        obj_pattern.push(ObjectDestructuringElement::ComputedProperty { key: expr, value: *boxed });
+                    }
                     DestructuringElement::Rest(name) => {
                         obj_pattern.push(ObjectDestructuringElement::Rest(name));
                     }
@@ -1290,6 +1293,9 @@ fn parse_let_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 match elem {
                     DestructuringElement::Property(key, boxed) => {
                         obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                    }
+                    DestructuringElement::ComputedProperty(expr, boxed) => {
+                        obj_pattern.push(ObjectDestructuringElement::ComputedProperty { key: expr, value: *boxed });
                     }
                     DestructuringElement::Rest(name) => {
                         obj_pattern.push(ObjectDestructuringElement::Rest(name));
@@ -2347,6 +2353,9 @@ fn parse_object_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> R
         } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
             *index += 1;
             key_name = Some(n.to_string());
+        } else if let Some(Token::BigInt(s)) = tokens.get(*index).map(|t| t.token.clone()) {
+            *index += 1;
+            key_name = Some(s);
         } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
             *index += 1;
             key_name = Some(utf16_to_utf8(&s));
@@ -2945,6 +2954,10 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                     prop_expr_opt = Some(Expr::Number(*n));
                     *index += 1;
                 }
+                Token::BigInt(s) => {
+                    prop_expr_opt = Some(Expr::BigInt(crate::unicode::utf8_to_utf16(s)));
+                    *index += 1;
+                }
                 Token::PrivateIdentifier(name) => {
                     prop_name_str = Some(name.clone());
                     is_private = true;
@@ -3051,6 +3064,10 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             Token::Number(n) => {
                 computed_key_expr = Some(Expr::Number(*n));
+                *index += 1;
+            }
+            Token::BigInt(s) => {
+                computed_key_expr = Some(Expr::BigInt(crate::unicode::utf8_to_utf16(s)));
                 *index += 1;
             }
             Token::LBracket => {
@@ -3836,6 +3853,78 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             is_generator = true;
                             *index += 1; // consume '*'
                         }
+
+                        // Special-case: if we saw '*' and the tokenizer emitted a Yield token
+                        // where an IdentifierName 'yield' would be expected (e.g. `*yield()`),
+                        // treat that Yield token as the identifier name "yield" and parse the
+                        // concise generator method accordingly. This keeps changes local and
+                        // avoids reworking the surrounding logic.
+                        if is_generator && *index < tokens.len() && matches!(tokens[*index].token, Token::Yield) {
+                            // Only handle concise method form: name + ( ... )
+                            if !is_getter && !is_setter && tokens.len() > *index + 1 && matches!(tokens[*index + 1].token, Token::LParen) {
+                                *index += 1; // consume the Yield token (as name)
+                                *index += 1; // consume (
+                                let params = parse_parameters(tokens, index)?;
+                                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                                }
+                                *index += 1; // consume {
+                                let body = parse_statements(tokens, index)?;
+                                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
+                                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                                }
+                                *index += 1; // consume }
+                                if is_generator {
+                                    if is_async_member {
+                                        properties.push((
+                                            Expr::StringLit(crate::unicode::utf8_to_utf16("yield")),
+                                            Expr::AsyncGeneratorFunction(None, params, body),
+                                            false,
+                                            false,
+                                        ));
+                                    } else {
+                                        properties.push((
+                                            Expr::StringLit(crate::unicode::utf8_to_utf16("yield")),
+                                            Expr::GeneratorFunction(None, params, body),
+                                            false,
+                                            false,
+                                        ));
+                                    }
+                                } else if is_async_member {
+                                    properties.push((
+                                        Expr::StringLit(crate::unicode::utf8_to_utf16("yield")),
+                                        Expr::AsyncFunction(None, params, body),
+                                        false,
+                                        false,
+                                    ));
+                                } else {
+                                    properties.push((
+                                        Expr::StringLit(crate::unicode::utf8_to_utf16("yield")),
+                                        Expr::Function(None, params, body),
+                                        false,
+                                        false,
+                                    ));
+                                }
+
+                                // After adding method, skip any newline/semicolons and handle comma/end in outer loop
+                                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                                    *index += 1;
+                                }
+                                if *index >= tokens.len() {
+                                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                                }
+                                if matches!(tokens[*index].token, Token::RBrace) {
+                                    *index += 1;
+                                    break;
+                                }
+                                if matches!(tokens[*index].token, Token::Comma) {
+                                    *index += 1;
+                                    continue;
+                                }
+                                continue;
+                            }
+                        }
+
                         let key_expr = if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                             // Check for concise method: Identifier + (
                             if !is_getter && !is_setter && tokens.len() > *index + 1 && matches!(tokens[*index + 1].token, Token::LParen) {
@@ -5241,6 +5330,9 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
             } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
                 *index += 1;
                 key_name = Some(n.to_string());
+            } else if let Some(Token::BigInt(s)) = tokens.get(*index).map(|t| t.token.clone()) {
+                *index += 1;
+                key_name = Some(s);
             } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
                 *index += 1;
                 key_name = Some(utf16_to_utf8(&s));

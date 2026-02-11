@@ -275,6 +275,7 @@ fn collect_names_from_object_destructuring(pattern: &[ObjectDestructuringElement
     for element in pattern {
         match element {
             ObjectDestructuringElement::Property { key: _, value } => collect_names_from_destructuring_element(value, names),
+            ObjectDestructuringElement::ComputedProperty { key: _, value } => collect_names_from_destructuring_element(value, names),
             ObjectDestructuringElement::Rest(name) => names.push(name.clone()),
         }
     }
@@ -362,6 +363,8 @@ fn bind_object_inner_for_letconst<'gc>(
                 }
             },
             DestructuringElement::ComputedProperty(key_expr, boxed) => {
+                // Diagnostic: record which GC env pointer is used to evaluate the computed key
+                log::trace!("DBG pre-eval super computed key: env_gc_ptr={:p}", Gc::as_ptr(*env));
                 let key_val = evaluate_expr(mc, env, key_expr)?;
                 let prop_key = match key_val {
                     Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
@@ -434,9 +437,33 @@ fn bind_object_inner_for_letconst<'gc>(
             }
             DestructuringElement::Rest(name) => {
                 let rest_obj = new_js_object_data(mc);
-                let ordered = crate::core::ordinary_own_property_keys(obj);
+                let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
                 for k in ordered {
                     if excluded_keys.iter().any(|ex| ex == &k) {
+                        continue;
+                    }
+                    // If this object is a proxy wrapper, delegate descriptor/get to proxy traps
+                    if let Some(proxy_cell) = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        println!(
+                            "TRACE: bind_object_inner_for_letconst Rest: obj_ptr={:p} proxy_ptr={:p} key={:?}",
+                            obj.as_ptr(),
+                            Gc::as_ptr(*proxy),
+                            k
+                        );
+                        // Ask proxy for own property descriptor and check [[Enumerable]]
+                        let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
+                        if desc_enum_opt.is_none() {
+                            continue;
+                        }
+                        if !desc_enum_opt.unwrap() {
+                            continue;
+                        }
+                        // Get property value via proxy get trap
+                        let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
+                        let v = val_opt.unwrap_or(Value::Undefined);
+                        object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                         continue;
                     }
                     if !obj.borrow().is_enumerable(&k) {
@@ -615,9 +642,40 @@ fn bind_object_inner_for_var<'gc>(
             }
             DestructuringElement::Rest(name) => {
                 let rest_obj = new_js_object_data(mc);
-                let ordered = crate::core::ordinary_own_property_keys(obj);
+                // Diagnostic: log at start of Rest binding to verify proxy detection
+                let obj_ptr = obj.as_ptr();
+                let has_proxy = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string())).is_some();
+                println!(
+                    "TRACE: bind_object_inner_for_var Rest: obj_ptr={:p} has_proxy={}",
+                    obj_ptr, has_proxy
+                );
+                let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
                 for k in ordered {
                     if excluded_keys.iter().any(|ex| ex == &k) {
+                        continue;
+                    }
+                    // If this object is a proxy wrapper, delegate descriptor/get to proxy traps
+                    if let Some(proxy_cell) = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        println!(
+                            "TRACE: bind_object_inner_for_var Rest: proxy detected obj_ptr={:p} proxy_ptr={:p} key={:?}",
+                            obj.as_ptr(),
+                            Gc::as_ptr(*proxy),
+                            k
+                        );
+                        // Ask proxy for own property descriptor and check [[Enumerable]]
+                        let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
+                        if desc_enum_opt.is_none() {
+                            continue;
+                        }
+                        if !desc_enum_opt.unwrap() {
+                            continue;
+                        }
+                        // Get property value via proxy get trap
+                        let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
+                        let v = val_opt.unwrap_or(Value::Undefined);
+                        object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                         continue;
                     }
                     if !obj.borrow().is_enumerable(&k) {
@@ -2318,7 +2376,9 @@ fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr:
         | Expr::AsyncFunction(None, ..)
         | Expr::ArrowFunction(..)
         | Expr::AsyncArrowFunction(..) => true,
-        Expr::Class(def) => def.name.is_empty(),
+        // Class expressions do not receive inferred names from surrounding
+        // variable/lexical bindings per the spec; name inference for classes is
+        // handled in object literals and other specific contexts.
         _ => false,
     };
 
@@ -2585,6 +2645,10 @@ fn eval_res<'gc>(
                     if let Expr::Class(class_def) = expr
                         && class_def.name.is_empty()
                     {
+                        // For variable/lexical declaration initializers that are anonymous
+                        // class expressions, create the class object with the binding name
+                        // so that static initializers see the inferred class-name during
+                        // evaluation (per Test262 semantics).
                         crate::js_class::create_class_object(mc, name, &class_def.extends, &class_def.members, env, false)
                             .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?
                     } else {
@@ -2610,6 +2674,10 @@ fn eval_res<'gc>(
                     let val = if let Expr::Class(class_def) = expr
                         && class_def.name.is_empty()
                     {
+                        // For variable/lexical declaration initializers that are anonymous
+                        // class expressions, create the class object with the binding name
+                        // so that static initializers see the inferred class-name during
+                        // evaluation (per Test262 semantics).
                         crate::js_class::create_class_object(mc, name, &class_def.extends, &class_def.members, env, false)
                             .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?
                     } else {
@@ -2640,6 +2708,10 @@ fn eval_res<'gc>(
                 let val = if let Expr::Class(class_def) = expr
                     && class_def.name.is_empty()
                 {
+                    // For variable/lexical declaration initializers that are anonymous
+                    // class expressions, create the class object with the binding name
+                    // so that static initializers see the inferred class-name during
+                    // evaluation (per Test262 semantics).
                     crate::js_class::create_class_object(mc, name, &class_def.extends, &class_def.members, env, false)
                         .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?
                 } else {
@@ -2925,6 +2997,7 @@ fn eval_res<'gc>(
                 Ok(v) => v,
                 Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
             };
+            log::trace!("TRACE: LetDestructuringObject: val={:?}", val);
 
             // If RHS is undefined/null, throw a helpful error referencing first property name
             if matches!(val, Value::Undefined) || matches!(val, Value::Null) {
@@ -2942,7 +3015,44 @@ fn eval_res<'gc>(
                 return Err(raise_type_error!(format!("Cannot destructure property '{}' of {}", prop_name, val)).into());
             }
 
-            for prop in pattern.iter() {
+            // Collect excluded names (and evaluate computed keys) so rest can skip them
+            let mut excluded_names: Vec<crate::core::PropertyKey<'gc>> = Vec::new();
+            let mut computed_keys: Vec<Option<crate::core::PropertyKey<'gc>>> = vec![None; pattern.len()];
+
+            // DEBUG: print pattern element types and evaluate computed keys
+            log::trace!("TRACE: LetDestructuringObject: pattern.len={}", pattern.len());
+            for (i, p) in pattern.iter().enumerate() {
+                match p {
+                    ObjectDestructuringElement::Property { key, .. } => {
+                        log::trace!("TRACE: pattern[{}] Property key={}", i, key);
+                        excluded_names.push(crate::core::PropertyKey::String(key.clone()));
+                    }
+                    ObjectDestructuringElement::ComputedProperty { key: key_expr, .. } => {
+                        log::trace!("TRACE: pattern[{}] ComputedProperty", i);
+                        let key_val = evaluate_expr(mc, env, key_expr)?;
+                        let prop_key = match key_val {
+                            Value::Symbol(sd) => crate::core::PropertyKey::Symbol(sd),
+                            Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                            Value::Number(n) => crate::core::PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                            Value::Object(_) => {
+                                let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+                                match prim {
+                                    Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
+                                    Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                                    Value::Number(n) => crate::core::PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                                    other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
+                                }
+                            }
+                            other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
+                        };
+                        log::trace!("TRACE: LetDestructuringObject: computed_key[{}] = {:?}", i, prop_key);
+                        excluded_names.push(prop_key.clone());
+                        computed_keys[i] = Some(prop_key);
+                    }
+                    ObjectDestructuringElement::Rest(name) => log::trace!("TRACE: pattern[{}] Rest name={}", i, name),
+                }
+            }
+            for (i, prop) in pattern.iter().enumerate() {
                 match prop {
                     ObjectDestructuringElement::Property { key, value } => {
                         match value {
@@ -3027,32 +3137,77 @@ fn eval_res<'gc>(
                             }
                         }
                     }
+                    ObjectDestructuringElement::ComputedProperty { key: _key_expr, value } => {
+                        // Use precomputed key to avoid re-evaluating computed property expr
+                        let prop_key = computed_keys[i].as_ref().expect("computed key evaluated").clone();
+                        match value {
+                            DestructuringElement::Variable(name, default_expr) => {
+                                let mut prop_val = Value::Undefined;
+                                if let Value::Object(obj) = &val
+                                    && let Some(cell) = object_get_key_value(obj, &prop_key)
+                                {
+                                    prop_val = cell.borrow().clone();
+                                }
+                                if matches!(prop_val, Value::Undefined)
+                                    && let Some(def) = default_expr
+                                {
+                                    prop_val = evaluate_expr(mc, env, def)?;
+                                }
+                                env_set(mc, env, name, &prop_val)?;
+                                if matches!(*stmt.kind, StatementKind::ConstDestructuringObject(_, _)) {
+                                    env.borrow_mut(mc).set_const(name.clone());
+                                }
+                            }
+                            _ => {
+                                return Err(raise_eval_error!("Computed property value patterns not implemented").into());
+                            }
+                        }
+                    }
                     ObjectDestructuringElement::Rest(name) => {
                         // Create a new object with remaining properties
                         let obj = new_js_object_data(mc);
                         if let Value::Object(orig) = &val {
+                            println!(
+                                "TRACE: LetRest: orig_ptr={:p} has_proxy? {}",
+                                orig.as_ptr(),
+                                orig.borrow()
+                                    .properties
+                                    .get(&PropertyKey::String("__proxy__".to_string()))
+                                    .is_some()
+                            );
                             // copy all own properties except those in pattern keys
-                            let ordered = crate::core::ordinary_own_property_keys(orig);
+                            let ordered = crate::core::ordinary_own_property_keys_mc(mc, orig)?;
                             for k in ordered {
-                                if let PropertyKey::String(s) = &k {
-                                    // check if s is in pattern
-                                    let mut skip = false;
-                                    for p in pattern.iter() {
-                                        if let ObjectDestructuringElement::Property { key: k2, .. } = p
-                                            && s == k2
-                                        {
-                                            skip = true;
-                                            break;
-                                        }
-                                    }
-                                    if !skip {
-                                        if !orig.borrow().is_enumerable(&k) {
-                                            continue;
-                                        }
-                                        let v = get_property_with_accessors(mc, env, orig, &k)?;
-                                        object_set_key_value(mc, &obj, k.clone(), &v)?;
-                                    }
+                                // Skip if listed in the excluded names (precomputed earlier)
+                                if excluded_names.iter().any(|ek| ek == &k) {
+                                    continue;
                                 }
+
+                                // If this object is a proxy wrapper, delegate descriptor/get to proxy traps
+                                if let Some(proxy_cell) = orig.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+                                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                                {
+                                    // Ask proxy for own property descriptor and check [[Enumerable]]
+                                    let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
+                                    println!("TRACE: LetRest: key={:?} desc_enum_opt={:?}", k, desc_enum_opt);
+                                    if desc_enum_opt.is_none() {
+                                        continue;
+                                    }
+                                    if !desc_enum_opt.unwrap() {
+                                        continue;
+                                    }
+                                    // Get property value via proxy get trap
+                                    println!("TRACE: LetRest: calling proxy_get_property for key={:?}", k);
+                                    let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
+                                    let v = val_opt.unwrap_or(Value::Undefined);
+                                    object_set_key_value(mc, &obj, k.clone(), &v)?;
+                                    continue;
+                                }
+                                if !orig.borrow().is_enumerable(&k) {
+                                    continue;
+                                }
+                                let v = get_property_with_accessors(mc, env, orig, &k)?;
+                                object_set_key_value(mc, &obj, k.clone(), &v)?;
                             }
                         }
                         env_set(mc, env, name, &Value::Object(obj))?;
@@ -3085,7 +3240,45 @@ fn eval_res<'gc>(
                 return Err(raise_type_error!(format!("Cannot destructure property '{}' of {}", prop_name, val)).into());
             }
 
-            for prop in pattern.iter() {
+            // Collect excluded names (and evaluate computed keys) so rest can skip them
+            let mut excluded_names: Vec<crate::core::PropertyKey<'gc>> = Vec::new();
+            let mut computed_keys: Vec<Option<crate::core::PropertyKey<'gc>>> = vec![None; pattern.len()];
+
+            // DEBUG: print pattern element types and evaluate computed keys
+            println!("TRACE: VarDestructuringObject: pattern.len={}", pattern.len());
+            for (i, p) in pattern.iter().enumerate() {
+                match p {
+                    ObjectDestructuringElement::Property { key, .. } => {
+                        println!("TRACE: pattern[{}] Property key={}", i, key);
+                        excluded_names.push(crate::core::PropertyKey::String(key.clone()));
+                    }
+                    ObjectDestructuringElement::ComputedProperty { key: key_expr, .. } => {
+                        println!("TRACE: pattern[{}] ComputedProperty", i);
+                        let key_val = evaluate_expr(mc, env, key_expr)?;
+                        let prop_key = match key_val {
+                            Value::Symbol(sd) => crate::core::PropertyKey::Symbol(sd),
+                            Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                            Value::Number(n) => crate::core::PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                            Value::Object(_) => {
+                                let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+                                match prim {
+                                    Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
+                                    Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                                    Value::Number(n) => crate::core::PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                                    other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
+                                }
+                            }
+                            other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
+                        };
+                        println!("TRACE: VarDestructuringObject: computed_key[{}] = {:?}", i, prop_key);
+                        excluded_names.push(prop_key.clone());
+                        computed_keys[i] = Some(prop_key);
+                    }
+                    ObjectDestructuringElement::Rest(name) => println!("TRACE: pattern[{}] Rest name={}", i, name),
+                }
+            }
+
+            for (i, prop) in pattern.iter().enumerate() {
                 match prop {
                     ObjectDestructuringElement::Property { key, value } => {
                         match value {
@@ -3171,24 +3364,76 @@ fn eval_res<'gc>(
                             }
                         }
                     }
+                    ObjectDestructuringElement::ComputedProperty { key: _key_expr, value } => {
+                        // Use precomputed key to avoid re-evaluating computed property expr
+                        let prop_key = computed_keys[i].as_ref().expect("computed key evaluated").clone();
+                        match value {
+                            DestructuringElement::Variable(name, default_expr) => {
+                                let mut prop_val = Value::Undefined;
+                                if let Value::Object(obj) = &val
+                                    && let Some(cell) = object_get_key_value(obj, &prop_key)
+                                {
+                                    prop_val = cell.borrow().clone();
+                                }
+                                if matches!(prop_val, Value::Undefined)
+                                    && let Some(def) = default_expr
+                                {
+                                    prop_val = evaluate_expr(mc, env, def)?;
+                                }
+                                // Bind var in function scope
+                                let mut target_env = *env;
+                                while !target_env.borrow().is_function_scope {
+                                    if let Some(proto) = target_env.borrow().prototype {
+                                        target_env = proto;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                env_set_recursive(mc, &target_env, name, &prop_val)?;
+                            }
+                            _ => {
+                                return Err(raise_eval_error!("Computed property value patterns not implemented").into());
+                            }
+                        }
+                    }
+
                     ObjectDestructuringElement::Rest(name) => {
                         let obj = new_js_object_data(mc);
                         if let Value::Object(orig) = &val {
-                            for (k, cell) in orig.borrow().properties.iter() {
-                                if let PropertyKey::String(s) = k.clone() {
-                                    let mut skip = false;
-                                    for p in pattern.iter() {
-                                        if let ObjectDestructuringElement::Property { key: k2, .. } = p
-                                            && &s == k2
-                                        {
-                                            skip = true;
-                                            break;
-                                        }
-                                    }
-                                    if !skip {
-                                        obj.borrow_mut(mc).insert(k.clone(), *cell);
-                                    }
+                            // Use ordinary own property keys to ensure proxies are observed
+                            let ordered = crate::core::ordinary_own_property_keys_mc(mc, orig)?;
+                            for k in ordered {
+                                // Skip if listed in the excluded names (precomputed earlier)
+                                if excluded_names.iter().any(|ek| ek == &k) {
+                                    continue;
                                 }
+
+                                // If this object is a proxy wrapper, delegate descriptor/get to proxy traps
+                                if let Some(proxy_cell) = orig.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+                                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                                {
+                                    // Ask proxy for own property descriptor and check [[Enumerable]]
+                                    let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
+                                    println!("TRACE: VarRest: key={:?} desc_enum_opt={:?}", k, desc_enum_opt);
+                                    if desc_enum_opt.is_none() {
+                                        continue;
+                                    }
+                                    if !desc_enum_opt.unwrap() {
+                                        continue;
+                                    }
+                                    // Get property value via proxy get trap
+                                    println!("TRACE: VarRest: calling proxy_get_property for key={:?}", k);
+                                    let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
+                                    let v = val_opt.unwrap_or(Value::Undefined);
+                                    object_set_key_value(mc, &obj, k.clone(), &v)?;
+                                    continue;
+                                }
+
+                                if !orig.borrow().is_enumerable(&k) {
+                                    continue;
+                                }
+                                let v = get_property_with_accessors(mc, env, orig, &k)?;
+                                object_set_key_value(mc, &obj, k.clone(), &v)?;
                             }
                         }
                         // Bind var in function scope
@@ -4441,7 +4686,7 @@ fn eval_res<'gc>(
                     // Obtain the object's own property keys in ordinary own property keys order
                     // (array index keys sorted numerically, followed by other string keys,
                     // then symbol keys). This ensures per-object ordering matches the spec.
-                    let own_keys = crate::core::value::ordinary_own_property_keys(&o);
+                    let own_keys = crate::core::ordinary_own_property_keys_mc(mc, &o)?;
                     for key in own_keys.iter() {
                         if let PropertyKey::String(s) = key {
                             if s == "length" {
@@ -4840,6 +5085,28 @@ fn eval_res<'gc>(
                                     }
                                 }
                             }
+                            ObjectDestructuringElement::ComputedProperty { key: key_expr, value } => {
+                                // Evaluate computed key, then lookup property on boxed string
+                                let key_val = evaluate_expr(mc, &iter_env, key_expr)?;
+                                let key_str = match key_val {
+                                    Value::String(s) => crate::unicode::utf16_to_utf8(&s),
+                                    other => crate::core::value_to_string(&other),
+                                };
+                                let mut prop_val = Value::Undefined;
+                                if let Some(cell) = object_get_key_value(&boxed, &key_str) {
+                                    prop_val = cell.borrow().clone();
+                                }
+                                if let DestructuringElement::Variable(name, _) = value {
+                                    match decl_kind_opt {
+                                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                        }
+                                        _ => {
+                                            crate::core::env_set_recursive(mc, env, name, &prop_val)?;
+                                        }
+                                    }
+                                }
+                            }
                             ObjectDestructuringElement::Rest(_name) => {
                                 // Simplified rest handling
                             }
@@ -5084,6 +5351,29 @@ fn eval_res<'gc>(
                                     }
                                 }
                             }
+                            ObjectDestructuringElement::ComputedProperty { key: key_expr, value } => {
+                                // Evaluate computed key and convert to string key for property lookup on object
+                                let key_val = evaluate_expr(mc, &iter_env, key_expr)?;
+                                let key_str = match key_val {
+                                    Value::String(s) => crate::unicode::utf16_to_utf8(&s),
+                                    other => crate::core::value_to_string(&other),
+                                };
+                                let prop_val = if let Value::Object(o) = &val {
+                                    get_property_with_accessors(mc, env, o, &key_str)?
+                                } else {
+                                    Value::Undefined
+                                };
+                                if let DestructuringElement::Variable(name, _) = value {
+                                    match decl_kind_opt {
+                                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                        }
+                                        _ => {
+                                            crate::core::env_set_recursive(mc, env, name, &prop_val)?;
+                                        }
+                                    }
+                                }
+                            }
                             ObjectDestructuringElement::Rest(_name) => {}
                         }
                     }
@@ -5171,6 +5461,29 @@ fn eval_res<'gc>(
                             ObjectDestructuringElement::Property { key, value } => {
                                 let prop_val = if let Value::Object(o) = &val {
                                     get_property_with_accessors(mc, env, o, key)?
+                                } else {
+                                    Value::Undefined
+                                };
+                                if let DestructuringElement::Variable(name, _) = value {
+                                    match decl_kind_opt {
+                                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                        }
+                                        _ => {
+                                            crate::core::env_set_recursive(mc, env, name, &prop_val)?;
+                                        }
+                                    }
+                                }
+                            }
+                            ObjectDestructuringElement::ComputedProperty { key: key_expr, value } => {
+                                // Evaluate computed key expression and perform lookup
+                                let key_val = evaluate_expr(mc, &iter_env, key_expr)?;
+                                let key_str = match key_val {
+                                    Value::String(s) => crate::unicode::utf16_to_utf8(&s),
+                                    other => crate::core::value_to_string(&other),
+                                };
+                                let prop_val = if let Value::Object(o) = &val {
+                                    get_property_with_accessors(mc, env, o, &key_str)?
                                 } else {
                                     Value::Undefined
                                 };
@@ -6510,20 +6823,44 @@ fn evaluate_expr_assign<'gc>(
                     rest_obj.borrow_mut(mc).prototype = Some(*proto);
                 }
                 let ordered = if let Value::Object(obj) = &rhs {
-                    crate::core::ordinary_own_property_keys(obj)
+                    crate::core::ordinary_own_property_keys_mc(mc, obj)?
                 } else {
                     Vec::new()
                 };
                 if let Value::Object(obj) = &rhs {
-                    for k in ordered {
-                        if !obj.borrow().is_enumerable(&k) {
-                            continue;
+                    // If this object is a proxy wrapper, delegate descriptor/get to proxy traps
+                    // so that Proxy traps are observed (ownKeys was already delegated above).
+                    if let Some(proxy_cell) = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        for k in ordered {
+                            if excluded_keys.iter().any(|ex| ex == &k) {
+                                continue;
+                            }
+                            // Ask proxy for own property descriptor and check [[Enumerable]]
+                            let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
+                            if desc_enum_opt.is_none() {
+                                continue;
+                            }
+                            if !desc_enum_opt.unwrap() {
+                                continue;
+                            }
+                            // Get property value via proxy get trap
+                            let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
+                            let v = val_opt.unwrap_or(Value::Undefined);
+                            object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                         }
-                        if excluded_keys.iter().any(|ex| ex == &k) {
-                            continue;
+                    } else {
+                        for k in ordered {
+                            if !obj.borrow().is_enumerable(&k) {
+                                continue;
+                            }
+                            if excluded_keys.iter().any(|ex| ex == &k) {
+                                continue;
+                            }
+                            let v = get_property_with_accessors(mc, env, obj, &k)?;
+                            object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                         }
-                        let v = get_property_with_accessors(mc, env, obj, &k)?;
-                        object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                     }
                 } else if let Value::String(s) = &rhs {
                     let len = s.len();
@@ -6697,7 +7034,9 @@ fn evaluate_expr_assign<'gc>(
         && class_def.name.is_empty()
         && maybe_name_to_set.is_some()
     {
-        // Specialized NamedEvaluation for class expressions to ensure static initializers see the name
+        // Specialized NamedEvaluation for class expressions to ensure static initializers
+        // and other class-internal steps see the inferred name when the RHS is an
+        // anonymous class expression being assigned to a target identifier.
         let inferred_name = maybe_name_to_set.clone().unwrap();
         create_class_object(mc, &inferred_name, &class_def.extends, &class_def.members, env, false)?
     } else {
@@ -7336,20 +7675,55 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
                         rest_obj.borrow_mut(mc).prototype = Some(*proto);
                     }
                     let ordered = if let Value::Object(obj) = &rhs {
-                        crate::core::ordinary_own_property_keys(obj)
+                        crate::core::ordinary_own_property_keys_mc(mc, obj)?
                     } else {
                         Vec::new()
                     };
                     if let Value::Object(obj) = &rhs {
-                        for k in ordered {
-                            if !obj.borrow().is_enumerable(&k) {
-                                continue;
+                        // If this object is a proxy wrapper, delegate descriptor/get to proxy traps
+                        // so that Proxy traps are observed (ownKeys was already delegated above).
+                        if let Some(proxy_cell) = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+                            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                        {
+                            for k in ordered {
+                                if excluded_keys.iter().any(|ex| ex == &k) {
+                                    continue;
+                                }
+                                println!(
+                                    "TRACE: object-literal spread proxy: obj_ptr={:p} proxy_ptr={:p} key={:?}",
+                                    obj.as_ptr(),
+                                    Gc::as_ptr(*proxy),
+                                    k
+                                );
+                                // Ask proxy for own property descriptor and check [[Enumerable]]
+                                let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
+                                println!(
+                                    "TRACE: object-literal spread proxy: desc_enum_opt={:?} for key={:?}",
+                                    desc_enum_opt, k
+                                );
+                                if desc_enum_opt.is_none() {
+                                    continue;
+                                }
+                                if !desc_enum_opt.unwrap() {
+                                    continue;
+                                }
+                                // Get property value via proxy get trap
+                                let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
+                                println!("TRACE: object-literal spread proxy: got val_opt={:?} for key={:?}", val_opt, k);
+                                let v = val_opt.unwrap_or(Value::Undefined);
+                                object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                             }
-                            if excluded_keys.iter().any(|ex| ex == &k) {
-                                continue;
+                        } else {
+                            for k in ordered {
+                                if !obj.borrow().is_enumerable(&k) {
+                                    continue;
+                                }
+                                if excluded_keys.iter().any(|ex| ex == &k) {
+                                    continue;
+                                }
+                                let v = get_property_with_accessors(mc, env, obj, &k)?;
+                                object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                             }
-                            let v = get_property_with_accessors(mc, env, obj, &k)?;
-                            object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                         }
                     } else if let Value::String(s) = &rhs {
                         let len = s.len();
@@ -7571,7 +7945,7 @@ pub(crate) fn evaluate_binding_target_with_value<'gc>(
                         rest_obj.borrow_mut(mc).prototype = Some(*proto);
                     }
                     let ordered = if let Value::Object(obj) = &rhs {
-                        crate::core::ordinary_own_property_keys(obj)
+                        crate::core::ordinary_own_property_keys_mc(mc, obj)?
                     } else {
                         Vec::new()
                     };
@@ -12960,7 +13334,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
             crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
 
-            // By default, anonymous arrow functions expose an own `name` property with the empty string
+            // Anonymous arrow functions should expose an own 'name' property with the
+            // empty string and standard attributes: writable:false, enumerable:false, configurable:true
             let desc = create_descriptor_object(mc, &Value::String(vec![]), false, false, true)?;
             crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
 
@@ -13070,13 +13445,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 let val = get_property_with_accessors(mc, env, obj, key)?;
                 // Special-case `__proto__` getter: if not present as an own property, return
                 // the internal prototype pointer (or null).
-                if let Value::Undefined = val
-                    && key == "__proto__"
-                {
-                    if let Some(proto_ptr) = obj.borrow().prototype {
-                        return Ok(Value::Object(proto_ptr));
-                    } else {
-                        return Ok(Value::Null);
+                if key == "__proto__" {
+                    let proto_key = PropertyKey::String("__proto__".to_string());
+                    if get_own_property(obj, &proto_key).is_none() {
+                        if let Some(proto_ptr) = obj.borrow().prototype {
+                            return Ok(Value::Object(proto_ptr));
+                        } else {
+                            return Ok(Value::Null);
+                        }
                     }
                 }
                 Ok(val)
@@ -13170,6 +13546,11 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
                     _ => PropertyKey::String(value_to_string(&key_val)),
                 };
+                // Capture backtrace at the evaluator call-site delegating to
+                // `evaluate_super_computed_property` so we can correlate the
+                // lookup-time environment with where the evaluator invoked it.
+                let bt = std::backtrace::Backtrace::capture();
+                log::trace!("eval::Index(super): backtrace before evaluate_super_computed_property: {:?}", bt);
                 return Ok(crate::js_class::evaluate_super_computed_property(mc, env, key)?);
             }
 
@@ -15615,18 +15996,21 @@ pub fn call_closure<'gc>(
     log::debug!("call_closure: is_arrow={} returning env_ptr={:p}", cl.is_arrow, var_env.as_ptr());
 
     // If the function was stored as an object with a home object, propagate
-    // that into the function body environment (this covers methods defined in object-literals).
+    // that into the function body and parameter environments (this covers methods defined in object-literals
+    // where default parameter initializers must see [[HomeObject]] when they evaluate).
     if let Some(fn_obj_ptr) = fn_obj
         && let Some(home_obj) = fn_obj_ptr.borrow().get_home_object()
     {
-        var_env.borrow_mut(mc).set_home_object(Some(home_obj));
+        var_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
+        param_env.borrow_mut(mc).set_home_object(Some(home_obj));
     }
 
-    // FIX: propagate [[HomeObject]] into var_env so `super` resolves parent prototype and avoids recursive lookup
-    // Propagate home object into the function body environment so `super.*` can resolve
+    // FIX: propagate [[HomeObject]] into var_env and param_env so `super` resolves parent prototype and avoids recursive lookup
+    // Propagate home object into the function body and parameter environments so `super.*` can resolve
     // the proper parent prototype during method calls.
     if let Some(home_obj) = &cl.home_object {
         var_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
+        param_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
     }
 
     if !cl.is_arrow {
@@ -16083,6 +16467,110 @@ fn convert_object_pattern_inner(elms: &[DestructuringElement]) -> Vec<(Expr, Exp
     out
 }
 
+fn init_function_call_env<'gc>(
+    mc: &MutationContext<'gc>,
+    call_env: &JSObjectDataPtr<'gc>,
+    params_opt: Option<&[DestructuringElement]>,
+    args: &[Value<'gc>],
+) -> Result<(), EvalError<'gc>> {
+    // Create the arguments object before default parameter evaluation so
+    // defaults can reference `arguments` correctly.
+    if crate::core::get_own_property(call_env, "arguments").is_none() {
+        crate::js_class::create_arguments_object(mc, call_env, args, None)?;
+    }
+
+    if let Some(params) = params_opt {
+        // Predeclare parameter bindings as Uninitialized so TDZ is enforced
+        // during evaluation of default initializers.
+        let mut param_names: Vec<String> = Vec::new();
+        for param in params.iter() {
+            collect_names_from_destructuring_element(param, &mut param_names);
+        }
+        for name in param_names {
+            if env_get_own(call_env, &name).is_none() {
+                env_set(mc, call_env, &name, &Value::Uninitialized)?;
+            }
+        }
+
+        for (i, param) in params.iter().enumerate() {
+            match param {
+                DestructuringElement::Variable(name, default_expr) => {
+                    let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                    if matches!(arg_val, Value::Undefined)
+                        && let Some(def) = default_expr
+                    {
+                        arg_val = evaluate_expr(mc, call_env, def)?;
+                        maybe_set_function_name_for_default(mc, name, def, &arg_val)?;
+                    }
+                    env_set(mc, call_env, name, &arg_val)?;
+                }
+                DestructuringElement::Rest(name) => {
+                    let rest_args = if i < args.len() { args[i..].to_vec() } else { Vec::new() };
+                    let array_obj = crate::js_array::create_array(mc, call_env)?;
+                    for (j, val) in rest_args.iter().enumerate() {
+                        object_set_key_value(mc, &array_obj, j, val)?;
+                    }
+                    crate::js_array::set_array_length(mc, &array_obj, rest_args.len())?;
+                    env_set(mc, call_env, name, &Value::Object(array_obj))?;
+                }
+                DestructuringElement::Property(key, boxed) => {
+                    // Handle simple object destructuring param like ({ type }) => type
+                    if let DestructuringElement::Variable(name, default_expr) = &**boxed {
+                        let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                        if matches!(arg_val, Value::Undefined | Value::Null) {
+                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
+                        }
+                        let mut prop_val = match &arg_val {
+                            Value::Object(o) => get_property_with_accessors(mc, call_env, o, key)?,
+                            _ => get_primitive_prototype_property(mc, call_env, &arg_val, key)?,
+                        };
+                        if matches!(prop_val, Value::Undefined)
+                            && let Some(def) = default_expr
+                        {
+                            prop_val = evaluate_expr(mc, call_env, def)?;
+                            maybe_set_function_name_for_default(mc, name, def, &prop_val)?;
+                        }
+                        env_set(mc, call_env, name, &prop_val)?;
+                    }
+                }
+                DestructuringElement::NestedArray(inner, nested_default) => {
+                    let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+
+                    if matches!(arg_val, Value::Undefined)
+                        && let Some(def) = nested_default
+                    {
+                        arg_val = evaluate_expr(mc, call_env, def)?;
+                    }
+
+                    evaluate_destructuring_array_assignment(mc, call_env, inner, &arg_val, false, None, None)?;
+                }
+                DestructuringElement::NestedObject(inner, nested_default) => {
+                    // Bind object destructuring parameters like ({ type }) directly
+                    let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                    // If arg is null/undefined and there is no parameter-level default, throw a TypeError
+                    if matches!(arg_val, Value::Undefined | Value::Null) {
+                        if let Some(def) = nested_default {
+                            arg_val = evaluate_expr(mc, call_env, def)?;
+                        }
+                        if matches!(arg_val, Value::Undefined | Value::Null) {
+                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
+                        }
+                    }
+                    let pattern = Expr::Object(convert_object_pattern_inner(inner));
+                    let mut pattern_with_default = pattern;
+                    if let Some(d) = nested_default {
+                        pattern_with_default = Expr::Assign(Box::new(pattern_with_default), Box::new((**d).clone()));
+                    }
+                    evaluate_binding_target_with_value(mc, call_env, &pattern_with_default, &arg_val)?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn prepare_function_call_env<'gc>(
     mc: &MutationContext<'gc>,
     captured_env: Option<&JSObjectDataPtr<'gc>>,
@@ -16103,100 +16591,37 @@ pub fn prepare_function_call_env<'gc>(
         object_set_key_value(mc, &call_env, "this", tv)?;
     }
 
-    // Create the arguments object before default parameter evaluation so
-    // defaults can reference `arguments` correctly.
-    if crate::core::get_own_property(&call_env, "arguments").is_none() {
-        crate::js_class::create_arguments_object(mc, &call_env, args, None)?;
+    init_function_call_env(mc, &call_env, params_opt, args)?;
+    Ok(call_env)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_function_call_env_with_home<'gc>(
+    mc: &MutationContext<'gc>,
+    captured_env: Option<&JSObjectDataPtr<'gc>>,
+    this_val: Option<&Value<'gc>>,
+    params_opt: Option<&[DestructuringElement]>,
+    args: &[Value<'gc>],
+    _new_target: Option<&Value<'gc>>,
+    _caller_env: Option<&JSObjectDataPtr<'gc>>,
+    home_opt: Option<GcCell<JSObjectDataPtr<'gc>>>,
+) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+    let call_env = new_js_object_data(mc);
+
+    if let Some(c_env) = captured_env {
+        call_env.borrow_mut(mc).prototype = Some(*c_env);
+    }
+    call_env.borrow_mut(mc).is_function_scope = true;
+
+    if let Some(home) = home_opt {
+        call_env.borrow_mut(mc).set_home_object(Some(home));
     }
 
-    if let Some(params) = params_opt {
-        // Predeclare parameter bindings as Uninitialized so TDZ is enforced
-        // during evaluation of default initializers.
-        let mut param_names: Vec<String> = Vec::new();
-        for param in params.iter() {
-            collect_names_from_destructuring_element(param, &mut param_names);
-        }
-        for name in param_names {
-            if env_get_own(&call_env, &name).is_none() {
-                env_set(mc, &call_env, &name, &Value::Uninitialized)?;
-            }
-        }
-
-        for (i, param) in params.iter().enumerate() {
-            match param {
-                DestructuringElement::Variable(name, default_expr) => {
-                    let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-                    if matches!(arg_val, Value::Undefined)
-                        && let Some(def) = default_expr
-                    {
-                        arg_val = evaluate_expr(mc, &call_env, def)?;
-                        maybe_set_function_name_for_default(mc, name, def, &arg_val)?;
-                    }
-                    env_set(mc, &call_env, name, &arg_val)?;
-                }
-                DestructuringElement::Rest(name) => {
-                    let rest_args = if i < args.len() { args[i..].to_vec() } else { Vec::new() };
-                    let array_obj = crate::js_array::create_array(mc, &call_env)?;
-                    for (j, val) in rest_args.iter().enumerate() {
-                        object_set_key_value(mc, &array_obj, j, val)?;
-                    }
-                    crate::js_array::set_array_length(mc, &array_obj, rest_args.len())?;
-                    env_set(mc, &call_env, name, &Value::Object(array_obj))?;
-                }
-                DestructuringElement::Property(key, boxed) => {
-                    // Handle simple object destructuring param like ({ type }) => type
-                    if let DestructuringElement::Variable(name, default_expr) = &**boxed {
-                        let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-                        if matches!(arg_val, Value::Undefined | Value::Null) {
-                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
-                        }
-                        let mut prop_val = match &arg_val {
-                            Value::Object(o) => get_property_with_accessors(mc, &call_env, o, key)?,
-                            _ => get_primitive_prototype_property(mc, &call_env, &arg_val, key)?,
-                        };
-                        if matches!(prop_val, Value::Undefined)
-                            && let Some(def) = default_expr
-                        {
-                            prop_val = evaluate_expr(mc, &call_env, def)?;
-                            maybe_set_function_name_for_default(mc, name, def, &prop_val)?;
-                        }
-                        env_set(mc, &call_env, name, &prop_val)?;
-                    }
-                }
-                DestructuringElement::NestedArray(inner, nested_default) => {
-                    let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-
-                    if matches!(arg_val, Value::Undefined)
-                        && let Some(def) = nested_default
-                    {
-                        arg_val = evaluate_expr(mc, &call_env, def)?;
-                    }
-
-                    evaluate_destructuring_array_assignment(mc, &call_env, inner, &arg_val, false, None, None)?;
-                }
-                DestructuringElement::NestedObject(inner, nested_default) => {
-                    // Bind object destructuring parameters like ({ type }) directly
-                    let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-                    // If arg is null/undefined and there is no parameter-level default, throw a TypeError
-                    if matches!(arg_val, Value::Undefined | Value::Null) {
-                        if let Some(def) = nested_default {
-                            arg_val = evaluate_expr(mc, &call_env, def)?;
-                        }
-                        if matches!(arg_val, Value::Undefined | Value::Null) {
-                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
-                        }
-                    }
-                    let pattern = Expr::Object(convert_object_pattern_inner(inner));
-                    let mut pattern_with_default = pattern;
-                    if let Some(d) = nested_default {
-                        pattern_with_default = Expr::Assign(Box::new(pattern_with_default), Box::new((**d).clone()));
-                    }
-                    evaluate_binding_target_with_value(mc, &call_env, &pattern_with_default, &arg_val)?;
-                }
-                _ => {}
-            }
-        }
+    if let Some(tv) = this_val {
+        object_set_key_value(mc, &call_env, "this", tv)?;
     }
+
+    init_function_call_env(mc, &call_env, params_opt, args)?;
     Ok(call_env)
 }
 
@@ -16785,18 +17210,53 @@ fn evaluate_expr_object<'gc>(
         if let Expr::Spread(target) = val_expr {
             let val = evaluate_expr(mc, env, target)?;
             if let Value::Object(source_obj) = val {
-                let ordered = crate::core::ordinary_own_property_keys(&source_obj);
-                for k in ordered {
-                    if k == "__proto__".into() {
-                        continue;
+                let ordered = crate::core::ordinary_own_property_keys_mc(mc, &source_obj)?;
+                // If this object is a proxy wrapper, delegate descriptor/get to proxy traps
+                // so that Proxy traps are observed (ownKeys is already delegated above).
+                if let Some(proxy_cell) = source_obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    for k in ordered {
+                        if k == "__proto__".into() {
+                            continue;
+                        }
+                        println!(
+                            "TRACE: object-literal spread proxy: obj_ptr={:p} proxy_ptr={:p} key={:?}",
+                            source_obj.as_ptr(),
+                            Gc::as_ptr(*proxy),
+                            k
+                        );
+                        // Ask proxy for own property descriptor and check [[Enumerable]]
+                        let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
+                        println!(
+                            "TRACE: object-literal spread proxy: desc_enum_opt={:?} for key={:?}",
+                            desc_enum_opt, k
+                        );
+                        if desc_enum_opt.is_none() {
+                            continue;
+                        }
+                        if !desc_enum_opt.unwrap() {
+                            continue;
+                        }
+                        // Get property value via proxy get trap
+                        let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
+                        println!("TRACE: object-literal spread proxy: got val_opt={:?} for key={:?}", val_opt, k);
+                        let v = val_opt.unwrap_or(Value::Undefined);
+                        object_set_key_value(mc, &obj, &k, &v)?;
                     }
-                    // Only process enumerable own properties (both string and symbol)
-                    if !source_obj.borrow().is_enumerable(&k) {
-                        continue;
+                } else {
+                    for k in ordered {
+                        if k == "__proto__".into() {
+                            continue;
+                        }
+                        // Only process enumerable own properties (both string and symbol)
+                        if !source_obj.borrow().is_enumerable(&k) {
+                            continue;
+                        }
+                        // Use accessor-aware property lookup so getters are executed
+                        let v = get_property_with_accessors(mc, env, &source_obj, &k)?;
+                        object_set_key_value(mc, &obj, &k, &v)?;
                     }
-                    // Use accessor-aware property lookup so getters are executed
-                    let v = get_property_with_accessors(mc, env, &source_obj, &k)?;
-                    object_set_key_value(mc, &obj, &k, &v)?;
                 }
             }
             continue;
@@ -16901,7 +17361,59 @@ fn evaluate_expr_object<'gc>(
                 // handled via function object home object setting
             }
             Value::GeneratorFunction(_, _) => {
-                // handled via function object home object setting
+                // Wrap generator function in an object wrapper so it has the usual
+                // function-object semantics (including an own 'prototype' property
+                // whose internal prototype points to Generator.prototype).
+                let gen_val = val.clone();
+                let func_obj = crate::core::new_js_object_data(mc);
+                // Set internal prototype to Function.prototype when available
+                if let Some(func_ctor_val) = env_get(env, "Function")
+                    && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                    && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+                    && let Value::Object(proto) = &*proto_val.borrow()
+                {
+                    func_obj.borrow_mut(mc).prototype = Some(*proto);
+                }
+                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, gen_val)));
+                // Attach the home object so `super` resolves to the object's prototype
+                func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
+
+                // Create prototype object with [[Prototype]] -> Generator.prototype
+                let proto_obj = crate::core::new_js_object_data(mc);
+                if let Some(gen_ctor_val) = env_get(env, "Generator")
+                    && let Value::Object(gen_ctor) = &*gen_ctor_val.borrow()
+                    && let Some(gen_proto_val) = object_get_key_value(gen_ctor, "prototype")
+                {
+                    let proto_value = match &*gen_proto_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Object(gen_proto) = proto_value {
+                        proto_obj.borrow_mut(mc).prototype = Some(gen_proto);
+                    }
+                }
+                let proto_desc = crate::core::create_descriptor_object(mc, &Value::Object(proto_obj), true, false, false)?;
+                crate::js_object::define_property_internal(mc, &func_obj, "prototype", &proto_desc)?;
+
+                // DEBUG: report pointers for generator prototype linkage
+                if let Some(gen_ctor_val) = env_get(env, "Generator")
+                    && let Value::Object(gen_ctor) = &*gen_ctor_val.borrow()
+                    && let Some(gen_proto_val) = object_get_key_value(gen_ctor, "prototype")
+                {
+                    let proto_value = match &*gen_proto_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Object(gen_proto) = proto_value {
+                        log::debug!(
+                            "DBG: created method.func_obj={:p} .prototype -> gen_proto={:p}",
+                            Gc::as_ptr(func_obj),
+                            Gc::as_ptr(gen_proto)
+                        );
+                    }
+                }
+
+                val = Value::Object(func_obj);
             }
 
             // For getter/setter variants, wrap them with home object so super resolves
@@ -16952,15 +17464,146 @@ fn evaluate_expr_object<'gc>(
         // If the value is a function object (holds a internal closure), set home object field
         // on the function object so it can propagate [[HomeObject]] during calls
         if let Value::Object(func_obj) = &val {
-            let exists_closure = func_obj.borrow().get_closure().is_some();
-            if exists_closure {
+            // Determine whether this object is a function-like value (closure-based
+            // functions) or a class constructor (has internal class_def). We must
+            // support SetFunctionName for both function and class values created
+            // as object literal property initializers.
+            let is_closure = func_obj.borrow().get_closure().is_some();
+            let is_class_ctor = func_obj.borrow().class_def.is_some();
+
+            // If this is a closure-based function, propagate home object into the
+            // wrapper and inner closure so that `super` resolves correctly.
+            if is_closure {
+                // Set [[HomeObject]] on the function object wrapper so `super` resolves
+                // from methods defined on object literals.
                 func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
 
-                // If this is a method (not a plain property i.e. not `key: value`), remove the
-                // 'prototype' property because methods are not constructors.
+                // Also propagate the home object into the underlying Closure data so
+                // calls that execute the closure directly (e.g., generator continuations)
+                // can still resolve `super` by walking the environment chain.
+                // Read closure value without holding a long-lived borrow on the function object
+                let cl_val_opt = {
+                    let f = func_obj.borrow();
+                    f.get_closure().map(|p| p.borrow().clone())
+                };
+                if let Some(cl_val) = cl_val_opt {
+                    // Replace the closure value with a copy that has the home_object set
+                    // so that both the function wrapper and the inner closure agree.
+                    let new_cl_val = match cl_val {
+                        Value::Closure(data) => {
+                            let mut new_data = (*data).clone();
+                            new_data.home_object = Some(GcCell::new(obj));
+                            Value::Closure(Gc::new(mc, new_data))
+                        }
+                        Value::AsyncClosure(data) => {
+                            let mut new_data = (*data).clone();
+                            new_data.home_object = Some(GcCell::new(obj));
+                            Value::AsyncClosure(Gc::new(mc, new_data))
+                        }
+                        Value::GeneratorFunction(name, data) => {
+                            let mut new_data = (*data).clone();
+                            new_data.home_object = Some(GcCell::new(obj));
+                            Value::GeneratorFunction(name.clone(), Gc::new(mc, new_data))
+                        }
+                        Value::AsyncGeneratorFunction(name, data) => {
+                            let mut new_data = (*data).clone();
+                            new_data.home_object = Some(GcCell::new(obj));
+                            Value::AsyncGeneratorFunction(name.clone(), Gc::new(mc, new_data))
+                        }
+                        other => other,
+                    };
+                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, new_cl_val)));
+                }
                 if !is_plain_property {
-                    let key = PropertyKey::String("prototype".to_string());
-                    let _ = func_obj.borrow_mut(mc).properties.shift_remove(&key);
+                    // Methods defined as object literal properties typically do not
+                    // create an own 'prototype' property. However, per the
+                    // specification generator and async generator methods *do*
+                    // require a 'prototype' so that instances' [[Prototype]] can
+                    // inherit from the intrinsic Generator.prototype.
+                    // Therefore only remove the 'prototype' property for ordinary
+                    // closures (non-generator).
+                    let mut keep_prototype = false;
+                    {
+                        let f = func_obj.borrow();
+                        if let Some(cl_val) = f.get_closure() {
+                            let inner = cl_val.borrow().clone();
+                            match inner {
+                                Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => {
+                                    keep_prototype = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if !keep_prototype {
+                        let key = PropertyKey::String("prototype".to_string());
+                        let _ = func_obj.borrow_mut(mc).properties.shift_remove(&key);
+                    }
+                }
+            }
+
+            // Per spec: for anonymous function/class definitions produced by object literal
+            // property initializers, if the function/class object does not have an own
+            // 'name' property **or** that own property resolves to the empty string,
+            // perform SetFunctionName so the name reflects the property key.
+            if is_closure || is_class_ctor {
+                // Inspect the existing name property (if any) without holding long-lived borrows
+                let existing_name_opt = {
+                    let f = func_obj.borrow();
+                    f.properties
+                        .get(&PropertyKey::String("name".to_string()))
+                        .map(|p| p.borrow().clone())
+                };
+
+                let mut should_set_name = false;
+                if let Some(existing) = existing_name_opt {
+                    // Normalize stored value to a Value and convert to a string
+                    let existing_val = match existing {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    let existing_str = crate::core::value_to_string(&existing_val);
+                    if existing_str.is_empty() {
+                        should_set_name = true;
+                    }
+                } else {
+                    should_set_name = true;
+                }
+
+                // Only infer a name when the original value expression is itself a
+                // function/class definition (i.e., not an arbitrary expression that
+                // evaluates to a function, such as a comma expression `(0, function(){})`).
+                let value_expr_is_anonymous_definition = matches!(
+                    val_expr,
+                    Expr::Function(..)
+                        | Expr::ArrowFunction(..)
+                        | Expr::GeneratorFunction(..)
+                        | Expr::AsyncFunction(..)
+                        | Expr::AsyncGeneratorFunction(..)
+                        | Expr::AsyncArrowFunction(..)
+                        | Expr::Class(..)
+                );
+
+                if should_set_name && value_expr_is_anonymous_definition {
+                    let prop_name = match &key_v {
+                        PropertyKey::String(s) => s.clone(),
+                        PropertyKey::Symbol(sd) => {
+                            if let Some(desc) = sd.description() {
+                                format!("[{}]", desc)
+                            } else {
+                                String::new()
+                            }
+                        }
+                        PropertyKey::Private(s, _) => s.clone(),
+                    };
+                    log::debug!(
+                        "SetFunctionName: func_obj={:p} key={:?} should_set_name={}",
+                        Gc::as_ptr(*func_obj),
+                        &key_v,
+                        should_set_name
+                    );
+                    let desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(&prop_name)), false, false, true)?;
+                    let _ = crate::js_object::define_property_internal(mc, func_obj, "name", &desc);
                 }
             }
         }
@@ -16968,7 +17611,75 @@ fn evaluate_expr_object<'gc>(
         // Merge accessors if existing property is a getter or setter; otherwise set normally
         if let Some(existing_ptr) = object_get_key_value(&obj, &key_v) {
             let existing = existing_ptr.borrow().clone();
-            let new_val = val.clone();
+            let mut new_val = val.clone();
+            // If this is a concise method (not a plain property), propagate the object's
+            // [[HomeObject]] into any closure value so `super` can be resolved at
+            // runtime even for generator continuations.
+            if !is_plain_property {
+                new_val = match new_val {
+                    Value::Closure(data) => {
+                        let mut nd = (*data).clone();
+                        nd.home_object = Some(GcCell::new(obj));
+                        Value::Closure(Gc::new(mc, nd))
+                    }
+                    Value::AsyncClosure(data) => {
+                        let mut nd = (*data).clone();
+                        nd.home_object = Some(GcCell::new(obj));
+                        Value::AsyncClosure(Gc::new(mc, nd))
+                    }
+                    Value::GeneratorFunction(name, data) => {
+                        let mut nd = (*data).clone();
+                        nd.home_object = Some(GcCell::new(obj));
+                        Value::GeneratorFunction(name.clone(), Gc::new(mc, nd))
+                    }
+                    Value::AsyncGeneratorFunction(name, data) => {
+                        let mut nd = (*data).clone();
+                        nd.home_object = Some(GcCell::new(obj));
+                        Value::AsyncGeneratorFunction(name.clone(), Gc::new(mc, nd))
+                    }
+                    Value::Object(func_obj) => {
+                        // Ensure wrapper object also gets [[HomeObject]] and propagate into inner closure
+                        let exists = func_obj.borrow().get_closure().is_some();
+                        if exists {
+                            func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
+                            // Replace inner closure with one that has home_object set
+                            let cl_val_opt = {
+                                let f = func_obj.borrow();
+                                f.get_closure().map(|p| p.borrow().clone())
+                            };
+                            if let Some(cl_val) = cl_val_opt {
+                                let new_cl = match cl_val {
+                                    Value::Closure(d) => {
+                                        let mut nd = (*d).clone();
+                                        nd.home_object = Some(GcCell::new(obj));
+                                        Value::Closure(Gc::new(mc, nd))
+                                    }
+                                    Value::AsyncClosure(d) => {
+                                        let mut nd = (*d).clone();
+                                        nd.home_object = Some(GcCell::new(obj));
+                                        Value::AsyncClosure(Gc::new(mc, nd))
+                                    }
+                                    Value::GeneratorFunction(nm, d) => {
+                                        let mut nd = (*d).clone();
+                                        nd.home_object = Some(GcCell::new(obj));
+                                        Value::GeneratorFunction(nm.clone(), Gc::new(mc, nd))
+                                    }
+                                    Value::AsyncGeneratorFunction(nm, d) => {
+                                        let mut nd = (*d).clone();
+                                        nd.home_object = Some(GcCell::new(obj));
+                                        Value::AsyncGeneratorFunction(nm.clone(), Gc::new(mc, nd))
+                                    }
+                                    other => other,
+                                };
+                                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, new_cl)));
+                            }
+                        }
+                        Value::Object(func_obj)
+                    }
+                    other => other,
+                };
+            }
+
             match (existing, new_val) {
                 // If existing is a Property descriptor, merge appropriately
                 (

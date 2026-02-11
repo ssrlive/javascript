@@ -251,4 +251,99 @@ mod object_literal_tests {
             _ => panic!("Expected theProtoObj error, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_arrow_function_name_on_property() {
+        let script = r#"
+            let o = { id: () => {} };
+            let d = Object.getOwnPropertyDescriptor(o.id, 'name');
+            d.value === 'id' && d.enumerable === false && d.writable === false && d.configurable === true
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+    #[test]
+    fn test_cover_parenthesized_expression_name_on_property() {
+        let script = r#"
+            var namedSym = Symbol('test262');
+            var anonSym = Symbol();
+            var o;
+
+            o = {
+              xId: (0, function() {}),
+              id: (function() {}),
+              [anonSym]: (function() {}),
+              [namedSym]: (function() {})
+            };
+
+            if (o.xId.name === 'xId') throw new Error('xId should not have inferred name');
+
+            var dId = Object.getOwnPropertyDescriptor(o.id, 'name');
+            if (!(dId.value === 'id' && dId.enumerable === false && dId.writable === false && dId.configurable === true)) throw new Error('o.id name descriptor mismatch');
+
+            var dAnon = Object.getOwnPropertyDescriptor(o[anonSym], 'name');
+            if (!(dAnon.value === '' && dAnon.enumerable === false && dAnon.writable === false && dAnon.configurable === true)) throw new Error('o[anonSym] name descriptor mismatch');
+
+            var dNamed = Object.getOwnPropertyDescriptor(o[namedSym], 'name');
+            if (!(dNamed.value === '[test262]' && dNamed.enumerable === false && dNamed.writable === false && dNamed.configurable === true)) throw new Error('o[namedSym] name descriptor mismatch');
+
+            true
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+    #[test]
+    fn test_class_expression_name_on_property() {
+        let script = r#"
+            let o = { id: class {} };
+            let d = Object.getOwnPropertyDescriptor(o.id, 'name');
+            d.value === 'id' && d.enumerable === false && d.writable === false && d.configurable === true
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_anonymous_class_has_binding_name() {
+        let script = r#"
+            let c = class {};
+            let d = Object.getOwnPropertyDescriptor(c, 'name');
+            d.value === 'c' && d.enumerable === false && d.writable === false && d.configurable === true
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_test262_class_expression_property_names() {
+        let script = r#"
+            var namedSym = Symbol('test262');
+            var anonSym = Symbol();
+            var o;
+
+            o = {
+              xId: class x {},
+              id: class {},
+              [anonSym]: class {},
+              [namedSym]: class {}
+            };
+
+            // Assert the named-class case does not use inferred property name
+            if (o.xId.name === 'xId') throw new Error('xId should not have inferred name');
+
+            // Property-initializer class expressions should get name from property key
+            var dId = Object.getOwnPropertyDescriptor(o.id, 'name');
+            if (!(dId.value === 'id' && dId.enumerable === false && dId.writable === false && dId.configurable === true)) throw new Error('o.id name descriptor mismatch');
+
+            var dAnon = Object.getOwnPropertyDescriptor(o[anonSym], 'name');
+            if (!(dAnon.value === '' && dAnon.enumerable === false && dAnon.writable === false && dAnon.configurable === true)) throw new Error('o[anonSym] name descriptor mismatch');
+
+            var dNamed = Object.getOwnPropertyDescriptor(o[namedSym], 'name');
+            if (!(dNamed.value === '[test262]' && dNamed.enumerable === false && dNamed.writable === false && dNamed.configurable === true)) throw new Error('o[namedSym] name descriptor mismatch');
+
+            true
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
 }

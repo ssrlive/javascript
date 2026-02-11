@@ -1,7 +1,7 @@
 use crate::core::{
     AsyncGeneratorRequest, ClosureData, EvalError, Expr, JSAsyncGenerator, JSObjectDataPtr, JSPromise, Statement, StatementKind, Value,
     VarDeclKind, env_set, env_set_recursive, evaluate_call_dispatch, evaluate_expr, evaluate_statements, get_own_property,
-    new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env,
+    new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env, prepare_function_call_env_with_home,
 };
 use crate::core::{Gc, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::{JSError, JSErrorKind};
@@ -80,7 +80,15 @@ pub fn handle_async_generator_function_call<'gc>(
     let closure_env = closure.env.expect("closure env must exist");
     // Prepare call-time environment and bind parameters immediately.
     // This ensures parameter destructuring/defaults throw at call time, matching spec.
-    let call_env = prepare_function_call_env(mc, Some(&closure_env), None, Some(&closure.params[..]), args, None, None)?;
+    let home_opt = if let Some(home_obj) = &closure.home_object {
+        Some(home_obj.clone())
+    } else if let Some(fn_obj_ptr) = fn_obj {
+        fn_obj_ptr.borrow().get_home_object()
+    } else {
+        None
+    };
+    let call_env =
+        prepare_function_call_env_with_home(mc, Some(&closure_env), None, Some(&closure.params[..]), args, None, None, home_opt)?;
 
     // Ensure an `arguments` object is available on the call environment.
     crate::js_class::create_arguments_object(mc, &call_env, args, None)?;

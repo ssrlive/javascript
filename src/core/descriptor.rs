@@ -181,6 +181,29 @@ pub(crate) fn build_property_descriptor<'gc>(
                             let closure_val = Value::Closure(Gc::new(mc, closure_data));
                             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                             let _ = define_function_length(mc, &func_obj, 0);
+                            // Per spec, accessor functions created from object literal should have a name
+                            // of the form "get <prop>". Compute property name string for Symbol/String keys.
+                            let prop_name = match key {
+                                PropertyKey::String(s) => s.clone(),
+                                PropertyKey::Symbol(sd) => {
+                                    if let Some(desc) = sd.description() {
+                                        format!("[{}]", desc)
+                                    } else {
+                                        String::new()
+                                    }
+                                }
+                                PropertyKey::Private(s, _) => s.clone(),
+                            };
+                            let full_name = format!("get {}", prop_name);
+                            let desc = crate::core::create_descriptor_object(
+                                mc,
+                                &Value::String(crate::unicode::utf8_to_utf16(&full_name)),
+                                false,
+                                false,
+                                true,
+                            )
+                            .unwrap();
+                            let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
                             pd.get = Some(Value::Object(func_obj));
                         }
                         other => {
@@ -224,6 +247,30 @@ pub(crate) fn build_property_descriptor<'gc>(
                 let closure_val = Value::Closure(Gc::new(mc, closure_data));
                 func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                 let _ = define_function_length(mc, &func_obj, 0);
+
+                // Set accessor function name: "get <prop>"
+                let prop_name = match key {
+                    PropertyKey::String(s) => s.clone(),
+                    PropertyKey::Symbol(sd) => {
+                        if let Some(desc) = sd.description() {
+                            format!("[{}]", desc)
+                        } else {
+                            String::new()
+                        }
+                    }
+                    PropertyKey::Private(s, _) => s.clone(),
+                };
+                let full_name = format!("get {}", prop_name);
+                let desc = crate::core::create_descriptor_object(
+                    mc,
+                    &Value::String(crate::unicode::utf8_to_utf16(&full_name)),
+                    false,
+                    false,
+                    true,
+                )
+                .unwrap();
+                let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
+
                 PropertyDescriptor::new_accessor(
                     Some(Value::Object(func_obj)),
                     None,
@@ -243,6 +290,30 @@ pub(crate) fn build_property_descriptor<'gc>(
                 let closure_val = Value::Closure(Gc::new(mc, closure_data));
                 func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                 let _ = define_function_length(mc, &func_obj, compute_function_length(params));
+
+                // Set accessor function name: "set <prop>"
+                let prop_name = match key {
+                    PropertyKey::String(s) => s.clone(),
+                    PropertyKey::Symbol(sd) => {
+                        if let Some(desc) = sd.description() {
+                            format!("[{}]", desc)
+                        } else {
+                            String::new()
+                        }
+                    }
+                    PropertyKey::Private(s, _) => s.clone(),
+                };
+                let full_name = format!("set {}", prop_name);
+                let desc = crate::core::create_descriptor_object(
+                    mc,
+                    &Value::String(crate::unicode::utf8_to_utf16(&full_name)),
+                    false,
+                    false,
+                    true,
+                )
+                .unwrap();
+                let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
+
                 PropertyDescriptor::new_accessor(
                     None,
                     Some(Value::Object(func_obj)),

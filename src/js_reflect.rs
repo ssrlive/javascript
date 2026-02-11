@@ -351,10 +351,18 @@ pub fn handle_reflect_method<'gc>(
             }
             match args[0] {
                 Value::Object(obj) => {
-                    let mut keys = Vec::new();
-                    for key in obj.borrow().properties.keys() {
-                        if let PropertyKey::String(s) = key {
-                            keys.push(Value::String(utf8_to_utf16(s)));
+                    // Diagnostic trace to ensure proxy wrapper is visible here
+                    let obj_ptr = obj.as_ptr();
+                    let has_proxy = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string())).is_some();
+                    log::trace!("Reflect.ownKeys: obj_ptr={:p} has_proxy={}", obj_ptr, has_proxy);
+                    // Use proxy-aware ownKeys so Proxy handlers are observed
+                    let keys_vec: Vec<crate::core::PropertyKey> = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+                    let mut keys: Vec<Value> = Vec::new();
+                    for key in keys_vec.iter() {
+                        match key {
+                            crate::core::PropertyKey::String(s) => keys.push(Value::String(utf8_to_utf16(s))),
+                            crate::core::PropertyKey::Symbol(sd) => keys.push(Value::Symbol(*sd)),
+                            _ => {}
                         }
                     }
                     let keys_len = keys.len();

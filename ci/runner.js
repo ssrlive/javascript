@@ -401,7 +401,6 @@ async function runAll(){
           summaryText = '<no output>';
           log(summaryText);
         }
-        log('----------------');
         // Also print concise failure summary to terminal (stderr)
         try {
           console.error(`\nFAIL ${f}`);
@@ -436,7 +435,6 @@ async function runAll(){
       log('---- OUTPUT ----');
       const errText = String(err);
       log(errText);
-      log('----------------');
       // Also print exception to terminal (stderr)
       try {
         console.error(`FAIL ${f}`);
@@ -459,6 +457,9 @@ async function runAll(){
         }
       } catch (e) {
         // ignore
+      }
+      if (!currentSucceeds) {
+        log('----------------');
       }
     }
   }

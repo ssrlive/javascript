@@ -236,8 +236,9 @@ unsafe impl<'gc> Collect<'gc> for BinaryOp {
 
 #[derive(Debug, Clone)]
 pub enum ObjectDestructuringElement {
-    Property { key: String, value: DestructuringElement }, // a: b or a
-    Rest(String),                                          // ...rest
+    Property { key: String, value: DestructuringElement },       // a: b or a
+    ComputedProperty { key: Expr, value: DestructuringElement }, // [expr]: val
+    Rest(String),                                                // ...rest
 }
 
 #[derive(Debug, Clone, Collect)]

@@ -169,3 +169,39 @@ fn parse_inner_object_plus_function_expr_alone() {
         res.err()
     );
 }
+
+#[test]
+fn bigint_in_object_and_class_and_destructuring() {
+    // Object literal method using BigInt property name
+    let res_obj = evaluate_script("let o = { 1n() { return 'bar'; } }; o['1']();", None::<&std::path::Path>).unwrap();
+    // evaluate_script returns JS values using JS's string representation (with quotes)
+    assert_eq!(res_obj, "\"bar\"");
+
+    // Class method using BigInt property name
+    let res_class = evaluate_script(
+        "class C { 1n() { return 'baz'; } } let c = new C(); c['1']();",
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(res_class, "\"baz\"");
+
+    // Destructuring with BigInt property name
+    let tokens = vec![
+        Token::LBrace,
+        Token::BigInt("1".to_string()),
+        Token::Colon,
+        Token::Identifier("a".to_string()),
+        Token::RBrace,
+    ];
+    let token_data: Vec<javascript::TokenData> = tokens
+        .into_iter()
+        .map(|t| javascript::TokenData {
+            token: t,
+            line: 0,
+            column: 0,
+        })
+        .collect();
+    let mut idx = 0usize;
+    let pattern = parse_object_destructuring_pattern(&token_data, &mut idx).expect("should parse bigint key in destructuring");
+    assert_eq!(pattern.len(), 1);
+}

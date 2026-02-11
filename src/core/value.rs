@@ -1042,6 +1042,7 @@ pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value
         (Value::Proxy(p1), Value::Proxy(p2)) => Gc::ptr_eq(*p1, *p2),
         (Value::ArrayBuffer(b1), Value::ArrayBuffer(b2)) => Gc::ptr_eq(*b1, *b2),
         (Value::DataView(d1), Value::DataView(d2)) => Gc::ptr_eq(*d1, *d2),
+        (Value::Symbol(s1), Value::Symbol(s2)) => Gc::ptr_eq(*s1, *s2),
         (Value::TypedArray(t1), Value::TypedArray(t2)) => Gc::ptr_eq(*t1, *t2),
         // Getter/Setter equality is tricky if they have Vecs.
         // But usually we just check reference equality if they were allocated, but here they are variants.
@@ -1142,6 +1143,37 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
     out.extend(string_keys);
     out.extend(symbol_keys);
     out
+}
+
+/// Like `ordinary_own_property_keys` but will invoke a Proxy "ownKeys" trap
+/// when the object is a proxy wrapper (stores `__proxy__`). Returns a
+/// Result because invoking proxy traps can trigger user code and therefore
+/// can fail with an exception.
+pub fn ordinary_own_property_keys_mc<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<PropertyKey<'gc>>, JSError> {
+    // Debug: show whether object is a proxy wrapper so we can diagnose missing trap calls
+    let obj_ptr = obj.as_ptr();
+    let has_proxy = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string())).is_some();
+    // Also print directly to stdout to ensure diagnostic is visible even if log filters hide it
+    println!(
+        "TRACE: ordinary_own_property_keys_mc: obj_ptr={:p} has_proxy={}",
+        obj_ptr, has_proxy
+    );
+    log::trace!("ordinary_own_property_keys_mc: obj_ptr={:p} has_proxy={}", obj_ptr, has_proxy);
+
+    // If this is a proxy wrapper object, delegate to the proxy helper so
+    // traps are observed. The proxy is stored in an internal `__proxy__`
+    // property as a `Value::Proxy`.
+    if let Some(proxy_cell) = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+    {
+        // Use the proxy helper to obtain the key list
+        log::trace!(
+            "ordinary_own_property_keys_mc: delegating to proxy_own_keys, proxy_ptr={:p}",
+            Gc::as_ptr(*proxy)
+        );
+        return crate::js_proxy::proxy_own_keys(mc, proxy).map_err(|e| e.into());
+    }
+    Ok(ordinary_own_property_keys(obj))
 }
 
 pub fn get_own_property<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<PropertyKey<'gc>>) -> Option<GcPtr<'gc, Value<'gc>>> {

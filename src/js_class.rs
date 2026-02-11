@@ -335,10 +335,28 @@ pub(crate) fn evaluate_this_allow_uninitialized<'gc>(
 // direct eval creates a fresh declarative environment whose prototype points
 // at the function's environment). Return `Some(home_obj)` if found.
 fn find_home_object_in_env<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<GcCell<JSObjectDataPtr<'gc>>> {
+    // Capture a short backtrace at lookup time so we can correlate the
+    // environment lookup site with where [[HomeObject]] was set.
+    let bt = std::backtrace::Backtrace::capture();
+    log::trace!("find_home_object_in_env: backtrace (short): {:?}", bt);
+
     let mut cur = Some(*env);
     while let Some(e) = cur {
+        // Diagnostic: log the environment being checked
+        let has_home = e.borrow().get_home_object().is_some();
+        let has_fn = object_get_key_value(&e, "__function").is_some();
+        log::trace!(
+            "find_home_object_in_env: checking env ptr={:p} has_home={} has___function={}",
+            Gc::as_ptr(e),
+            has_home,
+            has_fn
+        );
         // Prefer explicit [[HomeObject]] on the environment itself
         if let Some(home) = e.borrow().get_home_object() {
+            log::trace!(
+                "find_home_object_in_env: returning home_object ptr={:p}",
+                Gc::as_ptr(*home.borrow())
+            );
             return Some(home);
         }
         // If there is a __function binding in this environment, try to extract the
@@ -350,11 +368,13 @@ fn find_home_object_in_env<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<GcCell<JSO
             match f_val {
                 Value::Object(obj) => {
                     if let Some(h) = obj.borrow().get_home_object() {
+                        log::trace!("find_home_object_in_env: found home on bound function ptr={:p}", Gc::as_ptr(obj));
                         return Some(h);
                     }
                 }
                 Value::Closure(cl) => {
                     if let Some(h) = cl.home_object.clone() {
+                        log::trace!("find_home_object_in_env: found home on bound closure");
                         return Some(h);
                     }
                 }
@@ -1438,7 +1458,15 @@ pub(crate) fn create_class_object<'gc>(
     class_obj.borrow_mut(mc).set_non_writable("length");
 
     // Set class name (non-writable, non-enumerable, configurable)
-    let name_desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(name)), false, false, true)?;
+    // For class expressions (named or anonymous), expose an own 'name' property
+    // as required by the spec. Anonymous class expressions should have an own
+    // 'name' property whose value is the empty string.
+    let name_val = if !name.is_empty() {
+        Value::String(utf8_to_utf16(name))
+    } else {
+        Value::String(vec![])
+    };
+    let name_desc = create_descriptor_object(mc, &name_val, false, false, true)?;
     crate::js_object::define_property_internal(mc, &class_obj, "name", &name_desc)?;
 
     // Create the prototype object first
@@ -2732,7 +2760,53 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
     key: impl Into<PropertyKey<'gc>>,
 ) -> Result<Value<'gc>, JSError> {
     let key = key.into();
-    log::trace!("DBG evaluate_super_computed_property: called key='{key:?}' env_ptr={env:p}");
+    log::trace!(
+        "DBG evaluate_super_computed_property: called key='{key:?}' env_ptr={env:p} env_gc_ptr={:p}",
+        Gc::as_ptr(*env)
+    );
+    // Diagnostic: report whether [[HomeObject]] is present on the env chain and show its prototype pointer
+    if let Some(home_seen) = find_home_object_in_env(env) {
+        let home_proto_ptr = home_seen.borrow().borrow().prototype.map(Gc::as_ptr);
+        log::trace!(
+            "DBG evaluate_super_computed_property: witness home_object ptr={:p} home.prototype={:?}",
+            Gc::as_ptr(*home_seen.borrow()),
+            home_proto_ptr
+        );
+    } else {
+        log::trace!("DBG evaluate_super_computed_property: witness no [[HomeObject]] found");
+        // Diagnostic: dump the entire environment chain starting at `env` so we
+        // can correlate which lexical environments are visible at the lookup site.
+        log::trace!(
+            "DBG evaluate_super_computed_property: dumping env chain starting at env_ptr={:p}",
+            Gc::as_ptr(*env)
+        );
+        let mut cur_chain = Some(*env);
+        while let Some(e) = cur_chain {
+            let has_home = e.borrow().get_home_object().is_some();
+            let home_ptr = e.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
+            let has_fn = object_get_key_value(&e, "__function").is_some();
+            let fn_ptr = if let Some(f_rc) = object_get_key_value(&e, "__function") {
+                match &*f_rc.borrow() {
+                    Value::Object(o) => Some(Gc::as_ptr(*o)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            log::trace!(
+                "DBG evaluate_super_computed_property: env_chain item env_ptr={:p} has_home={} home_ptr={:?} has___function={} __function_ptr={:?}",
+                Gc::as_ptr(e),
+                has_home,
+                home_ptr,
+                has_fn,
+                fn_ptr
+            );
+            cur_chain = e.borrow().prototype;
+        }
+        // Also capture a short backtrace to help correlate caller frames when available.
+        let bt = std::backtrace::Backtrace::capture();
+        log::trace!("DBG evaluate_super_computed_property: backtrace (short): {:?}", bt);
+    }
     // super.property (or super[expr]) accesses parent class properties
     // Use [[HomeObject]] if available; search up environment prototype chain
     if let Some(home_obj) = find_home_object_in_env(env) {
@@ -3070,6 +3144,95 @@ pub(crate) fn evaluate_super_method<'gc>(
         }
     }
 
+    // Fallback: if [[HomeObject]] is not available, try to resolve `super` from the current
+    // `this` binding (useful for methods defined as object literal properties where our
+    // home propagation may not have occurred yet).
+    if let Some(this_val_rc) = object_get_key_value(env, "this")
+        && let Value::Object(this_obj) = &*this_val_rc.borrow()
+        && let Some(super_obj) = this_obj.borrow().prototype
+    {
+        log::trace!(
+            "evaluate_super_method (fallback via this): this={:p} super={:p} method={}",
+            Gc::as_ptr(*this_obj),
+            Gc::as_ptr(super_obj),
+            method
+        );
+        if let Some(method_val) = object_get_key_value(&super_obj, method) {
+            // Call similar to above with the found method value
+            if let Some(this_val) = object_get_key_value(env, "this") {
+                match &*method_val.borrow() {
+                    Value::Closure(data) | Value::AsyncClosure(data) => {
+                        let params = &data.params;
+                        let body = &data.body;
+                        let captured_env = &data.env;
+                        let home_obj_opt = data.home_object.clone();
+
+                        let func_env = prepare_call_env_with_this(
+                            mc,
+                            captured_env.as_ref(),
+                            Some(&this_val.borrow().clone()),
+                            Some(params),
+                            evaluated_args,
+                            None,
+                            Some(env),
+                            None,
+                        )?;
+
+                        if let Some(home_object) = home_obj_opt {
+                            func_env.borrow_mut(mc).set_home_object(Some(home_object));
+                        }
+
+                        return Ok(evaluate_statements(mc, &func_env, body)?);
+                    }
+                    Value::Function(func_name) => {
+                        if func_name == "Object.prototype.toString" {
+                            return Ok(crate::core::handle_object_prototype_to_string(
+                                mc,
+                                &this_val_rc.borrow().clone(),
+                                env,
+                            ));
+                        }
+                        if func_name == "Object.prototype.valueOf" {
+                            return Ok(this_val_rc.borrow().clone());
+                        }
+                        return Err(raise_eval_error!(format!("Method '{}' not found in parent class", method)));
+                    }
+                    Value::Object(func_obj) => {
+                        if let Some(cl_rc) = func_obj.borrow().get_closure() {
+                            match &*cl_rc.borrow() {
+                                Value::Closure(data) | Value::AsyncClosure(data) => {
+                                    let params = &data.params;
+                                    let body = &data.body;
+                                    let captured_env = &data.env;
+                                    let home_obj_opt = data.home_object.clone();
+
+                                    let func_env = prepare_call_env_with_this(
+                                        mc,
+                                        captured_env.as_ref(),
+                                        Some(&this_val_rc.borrow().clone()),
+                                        Some(params),
+                                        evaluated_args,
+                                        None,
+                                        Some(env),
+                                        Some(*func_obj),
+                                    )?;
+
+                                    if let Some(home_object) = home_obj_opt {
+                                        func_env.borrow_mut(mc).set_home_object(Some(home_object));
+                                    }
+
+                                    return Ok(evaluate_statements(mc, &func_env, body)?);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     // Fallback for legacy class implementation
     if let Some(this_val) = object_get_key_value(env, "this")
         && let Value::Object(instance) = &*this_val.borrow()
@@ -3238,6 +3401,19 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let new_env = crate::core::new_js_object_data(mc);
     new_env.borrow_mut(mc).is_function_scope = true;
+
+    // Diagnostic: log newly created call environment and its immediate links
+    log::trace!(
+        "prepare_call_env_with_this: new_env ptr={:p} captured_env_gc_ptr={:?} scope_gc_ptr={:?} fn_obj_gc_ptr={:?}",
+        new_env.as_ptr(),
+        captured_env.map(|c| Gc::as_ptr(*c)),
+        scope.map(|s| Gc::as_ptr(*s)),
+        fn_obj.map(Gc::as_ptr)
+    );
+    // Capture a short backtrace here to correlate the call-site that created
+    // this environment with super/home-object lookups later.
+    let bt = std::backtrace::Backtrace::capture();
+    log::trace!("prepare_call_env_with_this: backtrace at new_env creation: {:?}", bt);
 
     if let Some(c) = captured_env {
         new_env.borrow_mut(mc).prototype = Some(*c);

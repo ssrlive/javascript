@@ -15,7 +15,7 @@ use crate::js_typedarray::{ensure_typedarray_in_bounds, get_array_like_element, 
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BinaryOp, ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, ImportSpecifier, JSObjectDataPtr,
+        BinaryOp, ClassDefinition, ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, ImportSpecifier, JSObjectDataPtr,
         ObjectDestructuringElement, Statement, StatementKind, create_error, env_get, env_get_own, env_get_strictness, env_set,
         env_set_recursive, env_set_strictness, get_own_property, is_error, new_js_object_data, object_get_key_value, object_get_length,
         object_set_key_value, object_set_length, to_primitive, value_to_string,
@@ -13116,32 +13116,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             evaluate_expr(mc, env, left)?;
             evaluate_expr(mc, env, right)
         }
-        Expr::Assign(target, value_expr) => {
-            // Diagnostic: log the assignment target variant to help identify unsupported targets
-            let target_variant = match &**target {
-                Expr::Var(_, _, _) => "Var",
-                Expr::Property(_, _) => "Property",
-                Expr::Index(_, _) => "Index",
-                Expr::Spread(inner) => {
-                    // log inner variant for better diagnostics
-                    let inner_variant = match &**inner {
-                        Expr::Array(_) => "Array",
-                        Expr::Index(_, _) => "Index",
-                        Expr::Property(_, _) => "Property",
-                        Expr::Var(_, _, _) => "Var",
-                        Expr::Call(_, _) => "Call",
-                        _ => "Other",
-                    };
-                    log::debug!("evaluate_expr: Assign target is Spread with inner variant = {}", inner_variant);
-                    "Spread"
-                }
-                Expr::Array(_) => "Array",
-                Expr::Object(_) => "Object",
-                _ => "Other",
-            };
-            log::debug!("evaluate_expr: Assign target variant = {}", target_variant);
-            evaluate_expr_assign(mc, env, target, value_expr)
-        }
+        Expr::Assign(target, value_expr) => evaluate_expr_assign_in_main(mc, env, target, value_expr),
         Expr::AddAssign(target, value_expr) => evaluate_expr_add_assign(mc, env, target, value_expr),
         Expr::SubAssign(target, value_expr) => evaluate_expr_sub_assign(mc, env, target, value_expr),
         Expr::MulAssign(target, value_expr) => evaluate_expr_mul_assign(mc, env, target, value_expr),
@@ -13188,632 +13163,23 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let mut body_clone = body.clone();
             Ok(evaluate_function_expression(mc, env, name.clone(), params, &mut body_clone)?)
         }
-        Expr::GeneratorFunction(name, params, body) => {
-            // Similar to Function but produces a GeneratorFunction value
-            let func_obj = crate::core::new_js_object_data(mc);
-            // Set internal [[Prototype]] to `GeneratorFunction.prototype` when available
-            // so generator functions inherit from a distinct function prototype.
-            if let Some(gen_func_ctor_val) = env_get(env, "GeneratorFunction")
-                && let Value::Object(gen_func_ctor) = &*gen_func_ctor_val.borrow()
-                && let Some(gen_func_proto_val) = object_get_key_value(gen_func_ctor, "prototype")
-            {
-                let proto_opt = match &*gen_func_proto_val.borrow() {
-                    Value::Object(o) => Some(*o),
-                    Value::Property { value: Some(v), .. } => {
-                        let inner = v.borrow().clone();
-                        if let Value::Object(o2) = inner { Some(o2) } else { None }
-                    }
-                    _ => None,
-                };
-                if let Some(gen_func_proto) = proto_opt {
-                    func_obj.borrow_mut(mc).prototype = Some(gen_func_proto);
-                    // DEBUG: report that the new generator function object's [[Prototype]] was set
-                    log::trace!(
-                        "eval: created generator function func_obj.ptr={:p} [[Prototype]] -> {:p}",
-                        Gc::as_ptr(func_obj),
-                        Gc::as_ptr(gen_func_proto)
-                    );
-                }
-            } else if let Some(func_ctor_val) = env_get(env, "Function")
-                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-                && let Value::Object(proto) = &*proto_val.borrow()
-            {
-                // Fallback: use Function.prototype
-                func_obj.borrow_mut(mc).prototype = Some(*proto);
-            }
-
-            let is_strict = body.first()
-                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
-                .unwrap_or(false);
-            let closure_data = ClosureData {
-                params: params.to_vec(),
-                body: body.clone(),
-                env: Some(*env),
-                is_strict,
-                enforce_strictness_inheritance: true,
-                ..ClosureData::default()
-            };
-            let closure_val = Value::GeneratorFunction(name.clone(), Gc::new(mc, closure_data));
-            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-            match name {
-                Some(n) if !n.is_empty() => {
-                    let desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(n)), false, false, true)?;
-                    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
-                }
-                _ => {
-                    // Anonymous generator functions should expose an own 'name' property with the empty string
-                    // and the standard attributes: writable:false, enumerable:false, configurable:true
-                    let desc = crate::core::create_descriptor_object(mc, &Value::String(vec![]), false, false, true)?;
-                    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
-                }
-            }
-
-            // Set 'length' property for generator function
-            let mut fn_length = 0_usize;
-            for p in params.iter() {
-                match p {
-                    crate::core::DestructuringElement::Variable(_, default_opt) => {
-                        if default_opt.is_some() {
-                            break;
-                        }
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Rest(_) => break,
-                    crate::core::DestructuringElement::NestedArray(..) | crate::core::DestructuringElement::NestedObject(..) => {
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Empty => {}
-                    _ => {}
-                }
-            }
-            let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
-
-            // Create prototype object
-            let proto_obj = crate::core::new_js_object_data(mc);
-            // Set prototype of prototype object to Generator.prototype if available
-            // (fallback to Object.prototype otherwise).
-            if let Some(gen_val) = env_get(env, "Generator")
-                && let Value::Object(gen_ctor) = &*gen_val.borrow()
-                && let Some(gen_proto_val) = object_get_key_value(gen_ctor, "prototype")
-            {
-                log::debug!("GeneratorFunction: found Generator constructor ptr = {:p}", Gc::as_ptr(*gen_ctor));
-                log::debug!("GeneratorFunction: raw prototype value ptr = {:p}", Gc::as_ptr(gen_proto_val));
-                let proto_value = match &*gen_proto_val.borrow() {
-                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                    other => other.clone(),
-                };
-                if let Value::Object(gen_proto) = proto_value {
-                    log::debug!(
-                        "GeneratorFunction: setting proto_obj.prototype to Generator.prototype {:p}",
-                        Gc::as_ptr(gen_proto)
-                    );
-                    proto_obj.borrow_mut(mc).prototype = Some(gen_proto);
-                } else {
-                    log::debug!("GeneratorFunction: Generator.prototype is not an object");
-                }
-            } else {
-                log::debug!("GeneratorFunction: could not find Generator.prototype");
-                if let Some(obj_val) = env_get(env, "Object")
-                    && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                    && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                {
-                    let proto_value = match &*obj_proto_val.borrow() {
-                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                        other => other.clone(),
-                    };
-                    if let Value::Object(obj_proto) = proto_value {
-                        log::debug!("GeneratorFunction: falling back to Object.prototype {:p}", Gc::as_ptr(obj_proto));
-                        proto_obj.borrow_mut(mc).prototype = Some(obj_proto);
-                    }
-                }
-            }
-
-            // For generator functions, do NOT create an own 'constructor'
-            // property on the prototype object (per test262 expectations).
-            // Only define the `prototype` property on the function itself
-            // with writable:true, enumerable:false, configurable:false.
-            let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(proto_obj), true, false, false)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
-            // DEBUG: report the enumerable flag for the newly-defined `prototype` property
-            log::trace!(
-                "eval: func_obj.ptr={:p} prototype enumerable={} non_enumerable={}",
-                Gc::as_ptr(func_obj),
-                func_obj.borrow().is_enumerable("prototype"),
-                func_obj
-                    .borrow()
-                    .non_enumerable
-                    .contains(&crate::core::PropertyKey::String("prototype".to_string()))
-            );
-            // Ensure non-enumerable as spec requires for function `prototype` property
-            func_obj.borrow_mut(mc).set_non_enumerable("prototype");
-
-            Ok(Value::Object(func_obj))
-        }
-        Expr::AsyncGeneratorFunction(name, params, body) => {
-            // Async generator functions are represented as objects with an AsyncGeneratorFunction stored
-            // in an internal closure slot. They inherit from Function.prototype.
-            let func_obj = crate::core::new_js_object_data(mc);
-
-            // Set __proto__ to Function.prototype
-            if let Some(func_ctor_val) = env_get(env, "Function")
-                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-                && let Value::Object(proto) = &*proto_val.borrow()
-            {
-                func_obj.borrow_mut(mc).prototype = Some(*proto);
-            }
-
-            let is_strict = body.first()
-                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
-                .unwrap_or(false);
-            let closure_data = ClosureData {
-                params: params.to_vec(),
-                body: body.clone(),
-                env: Some(*env),
-                is_strict,
-                enforce_strictness_inheritance: true,
-                ..ClosureData::default()
-            };
-            let closure_val = Value::AsyncGeneratorFunction(name.clone(), Gc::new(mc, closure_data));
-            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-            let name_val = match name {
-                Some(n) if !n.is_empty() => Value::String(utf8_to_utf16(n)),
-                _ => Value::String(vec![]),
-            };
-            let desc = create_descriptor_object(mc, &name_val, false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
-
-            // Set 'length' property for async generator function
-            let mut fn_length = 0_usize;
-            for p in params.iter() {
-                match p {
-                    crate::core::DestructuringElement::Variable(_, default_opt) => {
-                        if default_opt.is_some() {
-                            break;
-                        }
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Rest(_) => break,
-                    crate::core::DestructuringElement::NestedArray(..) | crate::core::DestructuringElement::NestedObject(..) => {
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Empty => {}
-                    _ => {}
-                }
-            }
-            let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
-
-            // Create prototype object
-            let proto_obj = crate::core::new_js_object_data(mc);
-            // Set prototype of prototype object to AsyncGenerator.prototype if available
-            // (fallback to Object.prototype otherwise).
-            if let Some(async_gen_val) = env_get(env, "AsyncGenerator")
-                && let Value::Object(async_gen_ctor) = &*async_gen_val.borrow()
-                && let Some(async_proto_val) = object_get_key_value(async_gen_ctor, "prototype")
-            {
-                let proto_value = match &*async_proto_val.borrow() {
-                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                    other => other.clone(),
-                };
-                if let Value::Object(async_proto) = proto_value {
-                    proto_obj.borrow_mut(mc).prototype = Some(async_proto);
-                }
-            } else if let Some(obj_val) = env_get(env, "Object")
-                && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-            {
-                let proto_value = match &*obj_proto_val.borrow() {
-                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                    other => other.clone(),
-                };
-                if let Value::Object(obj_proto) = proto_value {
-                    proto_obj.borrow_mut(mc).prototype = Some(obj_proto);
-                }
-            }
-            // Record the intrinsic async generator prototype (if any) for fallback
-            if let Some(proto) = proto_obj.borrow().prototype {
-                object_set_key_value(mc, &func_obj, "__async_generator_proto", &Value::Object(proto))?;
-            }
-
-            // For async generator functions, do NOT create an own 'constructor'
-            // property on the prototype object (per Test262 expectations).
-            // Only define the `prototype` property on the function itself
-            // with writable:true, enumerable:false, configurable:false.
-            let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(proto_obj), true, false, false)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
-
-            Ok(Value::Object(func_obj))
-        }
-        Expr::AsyncFunction(name, params, body) => {
-            // Async functions are represented as objects with an AsyncClosure stored
-            // in an internal closure slot. They inherit from Function.prototype.
-            let func_obj = new_js_object_data(mc);
-
-            // Set __proto__ to Function.prototype
-            if let Some(func_ctor_val) = env_get(env, "Function")
-                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-                && let Value::Object(proto) = &*proto_val.borrow()
-            {
-                func_obj.borrow_mut(mc).prototype = Some(*proto);
-            }
-
-            let is_strict = body.first()
-                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
-                .unwrap_or(false);
-            let closure_data = ClosureData {
-                params: params.to_vec(),
-                body: body.clone(),
-                env: Some(*env),
-                is_strict,
-                enforce_strictness_inheritance: true,
-                ..ClosureData::default()
-            };
-            let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
-            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-            let val = match name {
-                Some(n) if !n.is_empty() => Value::String(utf8_to_utf16(n)),
-                _ => Value::String(vec![]),
-            };
-            let desc = create_descriptor_object(mc, &val, false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
-
-            // Set 'length' property for async functions
-            let mut fn_length = 0_usize;
-            for p in params.iter() {
-                match p {
-                    crate::core::DestructuringElement::Variable(_, default_opt) => {
-                        if default_opt.is_some() {
-                            break;
-                        }
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Rest(_) => break,
-                    crate::core::DestructuringElement::NestedArray(..) | crate::core::DestructuringElement::NestedObject(..) => {
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Empty => {}
-                    _ => {}
-                }
-            }
-            let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
-
-            Ok(Value::Object(func_obj))
-        }
-        Expr::ArrowFunction(params, body) => {
-            // Create an arrow function object which captures the current `this` lexically
-            let func_obj = crate::core::new_js_object_data(mc);
-            // Set __proto__ to Function.prototype
-            if let Some(func_ctor_val) = env_get(env, "Function")
-                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-                && let Value::Object(proto) = &*proto_val.borrow()
-            {
-                func_obj.borrow_mut(mc).prototype = Some(*proto);
-            }
-
-            let is_strict = body.first()
-                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
-                .unwrap_or(false);
-
-            let closure_data = ClosureData {
-                params: params.to_vec(),
-                body: body.clone(),
-                env: Some(*env),
-                bound_this: None,
-                is_arrow: true,
-                is_strict,
-                enforce_strictness_inheritance: true,
-                home_object: env.borrow().get_home_object(),
-                ..ClosureData::default()
-            };
-            let closure_val = Value::Closure(Gc::new(mc, closure_data));
-            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-
-            // Set 'length' for arrow functions
-            let mut fn_length = 0_usize;
-            for p in params.iter() {
-                match p {
-                    crate::core::DestructuringElement::Variable(_, default_opt) => {
-                        if default_opt.is_some() {
-                            break;
-                        }
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Rest(_) => break,
-                    crate::core::DestructuringElement::NestedArray(..) | crate::core::DestructuringElement::NestedObject(..) => {
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Empty => {}
-                    _ => {}
-                }
-            }
-            let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
-
-            // Anonymous arrow functions should expose an own 'name' property with the
-            // empty string and standard attributes: writable:false, enumerable:false, configurable:true
-            let desc = create_descriptor_object(mc, &Value::String(vec![]), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
-
-            // Arrow functions do not have a 'prototype' property (not constructible)
-
-            Ok(Value::Object(func_obj))
-        }
+        Expr::GeneratorFunction(name, params, body) => evaluate_expr_generator_function(mc, env, name, params, body),
+        Expr::AsyncGeneratorFunction(name, params, body) => evaluate_expr_async_generator_function(mc, env, name, params, body),
+        Expr::AsyncFunction(name, params, body) => evaluate_expr_async_function(mc, env, name, params, body),
+        Expr::ArrowFunction(params, body) => evaluate_expr_arrow_function(mc, env, params, body),
         Expr::Call(func_expr, args) => evaluate_expr_call(mc, env, func_expr, args),
         Expr::New(ctor, args) => evaluate_expr_new(mc, env, ctor, args),
-        Expr::DynamicImport(specifier) => {
-            // Evaluate the specifier before creating the promise capability so
-            // abrupt completion at this stage throws synchronously.
-            let spec_val = evaluate_expr(mc, env, specifier)?;
-
-            let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
-            let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
-
-            let module_result: Result<Value<'gc>, EvalError<'gc>> = (|| {
-                let prim = crate::core::to_primitive(mc, &spec_val, "string", env)?;
-                let module_name = match prim {
-                    Value::Symbol(_) => {
-                        return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
-                    }
-                    _ => crate::core::value_to_string(&prim),
-                };
-
-                let base_path = if let Some(cell) = env_get(env, "__filepath")
-                    && let Value::String(s) = cell.borrow().clone()
-                {
-                    Some(utf16_to_utf8(&s))
-                } else {
-                    None
-                };
-
-                crate::js_module::load_module(mc, &module_name, base_path.as_deref(), Some(*env))
-            })();
-
-            match module_result {
-                Ok(module_value) => {
-                    crate::js_promise::resolve_promise(mc, &promise, module_value, env);
-                }
-                Err(err) => {
-                    let reason = match err {
-                        EvalError::Throw(val, _line, _column) => val,
-                        EvalError::Js(js_err) => js_error_to_value(mc, env, &js_err),
-                    };
-                    crate::js_promise::reject_promise(mc, &promise, reason, env);
-                }
-            }
-            Ok(Value::Object(promise_obj))
-        }
-
-        Expr::Property(obj_expr, key) => {
-            // Special-case `import.meta` when executing in a module environment. We treat
-            // `import.meta` as a per-module ordinary object stored under env.__import_meta.
-            if let crate::core::Expr::Var(name, _, _) = &**obj_expr
-                && name == "import"
-                && key == "meta"
-            {
-                // Prefer the immediate environment but fall back to the root global environment
-                let meta_rc = crate::core::object_get_key_value(env, "__import_meta").or_else(|| {
-                    let mut root = *env;
-                    while let Some(proto) = root.borrow().prototype {
-                        root = proto;
-                    }
-                    crate::core::object_get_key_value(&root, "__import_meta")
-                });
-                if let Some(meta_rc) = meta_rc
-                    && let Value::Object(meta_obj) = &*meta_rc.borrow()
-                {
-                    log::trace!("eval Expr::Property: special-case import.meta matched, returning module import.meta object");
-                    return Ok(Value::Object(*meta_obj));
-                } else {
-                    log::trace!(
-                        "eval Expr::Property: special-case import.meta not matched in current env chain, creating fallback import.meta on root env"
-                    );
-                    // Fallback: create an import.meta object on the root environment so
-                    // `import.meta` accessors always produce an ordinary object in
-                    // module contexts. Use __filepath on the root env to populate the
-                    // 'url' property when available.
-                    let mut root = *env;
-                    while let Some(proto) = root.borrow().prototype {
-                        root = proto;
-                    }
-                    // Create a new ordinary object for import.meta
-                    let import_meta = new_js_object_data(mc);
-                    if let Some(cell) = env_get(&root, "__filepath")
-                        && let Value::String(s) = cell.borrow().clone()
-                    {
-                        object_set_key_value(mc, &import_meta, "url", &Value::String(s))?;
-                    }
-                    object_set_key_value(mc, &root, "__import_meta", &Value::Object(import_meta))?;
-                    return Ok(Value::Object(import_meta));
-                }
-            }
-
-            let obj_val = if expr_contains_optional_chain(obj_expr) {
-                match evaluate_optional_chain_base(mc, env, obj_expr)? {
-                    Some(val) => val,
-                    None => return Ok(Value::Undefined),
-                }
-            } else {
-                evaluate_expr(mc, env, obj_expr)?
-            };
-
-            if let Value::Object(obj) = &obj_val {
-                let val = get_property_with_accessors(mc, env, obj, key)?;
-                // Special-case `__proto__` getter: if not present as an own property, return
-                // the internal prototype pointer (or null).
-                if key == "__proto__" {
-                    let proto_key = PropertyKey::String("__proto__".to_string());
-                    if get_own_property(obj, &proto_key).is_none() {
-                        if let Some(proto_ptr) = obj.borrow().prototype {
-                            return Ok(Value::Object(proto_ptr));
-                        } else {
-                            return Ok(Value::Null);
-                        }
-                    }
-                }
-                Ok(val)
-            } else if let Value::String(s) = &obj_val
-                && key == "length"
-            {
-                Ok(Value::Number(s.len() as f64))
-            } else if key == "length"
-                && matches!(
-                    obj_val,
-                    Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..)
-                )
-            {
-                let params = match obj_val {
-                    Value::Closure(ref c) => &c.params,
-                    Value::AsyncClosure(ref c) => &c.params,
-                    Value::GeneratorFunction(_, ref c) => &c.params,
-                    Value::AsyncGeneratorFunction(_, ref c) => &c.params,
-                    _ => unreachable!(),
-                };
-                let mut len = 0.0;
-                for p in params {
-                    match p {
-                        DestructuringElement::Rest(_) | DestructuringElement::RestPattern(_) => break,
-                        DestructuringElement::Variable(_, Some(_)) => break,
-                        DestructuringElement::NestedArray(_, Some(_)) => break,
-                        DestructuringElement::NestedObject(_, Some(_)) => break,
-                        _ => len += 1.0,
-                    }
-                }
-                Ok(Value::Number(len))
-            } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                log::debug!("Expr::Property: attempting property access on nullish base: obj_expr={obj_expr:?}");
-                Err(raise_type_error!("Cannot read properties of null or undefined").into())
-            } else {
-                get_primitive_prototype_property(mc, env, &obj_val, key)
-            }
-        }
-        Expr::PrivateMember(obj_expr, key) => {
-            let obj_val = if is_optional_chain_expr(obj_expr) {
-                match evaluate_optional_chain_base(mc, env, obj_expr)? {
-                    Some(val) => val,
-                    None => return Ok(Value::Undefined),
-                }
-            } else {
-                evaluate_expr(mc, env, obj_expr)?
-            };
-            let pv = evaluate_var(mc, env, key)?;
-            if let Value::Object(obj) = &obj_val {
-                if let Value::PrivateName(n, id) = pv {
-                    get_property_with_accessors(mc, env, obj, PropertyKey::Private(n, id))
-                } else {
-                    Err(raise_syntax_error!(format!("Private field '{}' must be declared in an enclosing class", key)).into())
-                }
-            } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                Err(raise_type_error!("Cannot read properties of null or undefined").into())
-            } else {
-                Err(raise_type_error!("Cannot access private field on non-object").into())
-            }
-        }
-        Expr::OptionalPrivateMember(obj_expr, key) => {
-            let obj_val = evaluate_expr(mc, env, obj_expr)?;
-            if obj_val.is_null_or_undefined() {
-                Ok(Value::Undefined)
-            } else if let Value::Object(obj) = &obj_val {
-                let pv = evaluate_var(mc, env, key)?;
-                if let Value::PrivateName(n, id) = pv {
-                    get_property_with_accessors(mc, env, obj, PropertyKey::Private(n, id))
-                } else {
-                    Err(raise_syntax_error!(format!("Private field '{}' must be declared in an enclosing class", key)).into())
-                }
-            } else {
-                Err(raise_type_error!("Cannot access private field on non-object").into())
-            }
-        }
+        Expr::DynamicImport(specifier) => evaluate_expr_dynamic_import(mc, env, specifier),
+        Expr::Property(obj_expr, key) => evaluate_expr_property(mc, env, obj_expr, key),
+        Expr::PrivateMember(obj_expr, key) => evaluate_expr_private_member(mc, env, obj_expr, key),
+        Expr::OptionalPrivateMember(obj_expr, key) => evaluate_expr_optional_private_member(mc, env, obj_expr, key),
         Expr::Index(obj_expr, key_expr) => evaluate_expr_index(mc, env, obj_expr, key_expr),
         Expr::PostIncrement(target) => evaluate_update_expression(mc, env, target, 1.0, true),
         Expr::PostDecrement(target) => evaluate_update_expression(mc, env, target, -1.0, true),
         Expr::Increment(target) => evaluate_update_expression(mc, env, target, 1.0, false),
         Expr::Decrement(target) => evaluate_update_expression(mc, env, target, -1.0, false),
-        Expr::TemplateString(parts) => {
-            let mut result = Vec::new();
-            for part in parts {
-                match part {
-                    crate::core::TemplatePart::String(s) => result.extend(s),
-                    crate::core::TemplatePart::Expr(tokens) => {
-                        let (expr, _) = crate::core::parse_simple_expression(tokens, 0)?;
-                        let val = evaluate_expr(mc, env, &expr)?;
-                        // Template strings perform ToString coercion.
-                        // Objects are converted via ToPrimitive with hint 'string'.
-                        match val {
-                            Value::String(s) => result.extend(s),
-                            Value::Number(n) => result.extend(crate::unicode::utf8_to_utf16(&value_to_string(&Value::Number(n)))),
-                            Value::BigInt(b) => result.extend(crate::unicode::utf8_to_utf16(&b.to_string())),
-                            Value::Boolean(b) => result.extend(crate::unicode::utf8_to_utf16(&b.to_string())),
-                            Value::Undefined => result.extend(crate::unicode::utf8_to_utf16("undefined")),
-                            Value::Null => result.extend(crate::unicode::utf8_to_utf16("null")),
-                            Value::Object(_) => {
-                                // Template strings perform ToString coercion.
-                                // We call toString() explicitly if it exists, otherwise use value_to_string.
-                                let mut s = "[object Object]".to_string();
-                                if let Value::Object(obj) = &val {
-                                    if let Some(method_rc) = object_get_key_value(obj, "toString") {
-                                        let method_val = method_rc.borrow().clone();
-                                        if matches!(
-                                            method_val,
-                                            Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
-                                        ) {
-                                            if let Ok(res) = evaluate_call_dispatch(mc, env, &method_val, Some(&val), &Vec::new()) {
-                                                s = crate::core::value_to_string(&res);
-                                            }
-                                        } else {
-                                            // Regular ToPrimitive for other objects?
-                                            // The fallback below handles it.
-                                            let prim = crate::core::to_primitive(mc, &val, "string", env)?;
-                                            s = match &prim {
-                                                Value::String(vs) => crate::unicode::utf16_to_utf8(vs),
-                                                _ => value_to_string(&prim),
-                                            };
-                                        }
-                                    } else {
-                                        let prim = crate::core::to_primitive(mc, &val, "string", env)?;
-                                        s = match &prim {
-                                            Value::String(vs) => crate::unicode::utf16_to_utf8(vs),
-                                            _ => value_to_string(&prim),
-                                        };
-                                    }
-                                }
-                                result.extend(crate::unicode::utf8_to_utf16(&s));
-                            }
-                            _ => {
-                                // Fallback to the generic representation
-                                let s = value_to_string(&val);
-                                result.extend(crate::unicode::utf8_to_utf16(&s));
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(Value::String(result))
-        }
-        Expr::Class(class_def) => {
-            if class_def.name.is_empty() {
-                let class_obj = create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, env, false)?;
-                Ok(class_obj)
-            } else {
-                // Create a class scope for the class name binding (lexical, immutable)
-                let class_scope = new_js_object_data(mc);
-                class_scope.borrow_mut(mc).prototype = Some(*env);
-                env_set(mc, &class_scope, &class_def.name, &Value::Uninitialized)?;
-
-                let class_obj = create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, &class_scope, false)?;
-
-                // Initialize the class name binding to the class object and mark it immutable
-                env_set(mc, &class_scope, &class_def.name, &class_obj)?;
-                class_scope.borrow_mut(mc).set_const(class_def.name.clone());
-
-                Ok(class_obj)
-            }
-        }
+        Expr::TemplateString(parts) => evaluate_expr_template_string(mc, env, parts),
+        Expr::Class(class_def) => evaluate_expr_class(mc, env, class_def),
         Expr::UnaryNeg(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
             match val {
@@ -13842,66 +13208,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let _ = evaluate_expr(mc, env, expr)?;
             Ok(Value::Undefined)
         }
-        Expr::TypeOf(expr) => {
-            // typeof has special semantics: if the evaluation of the operand throws a
-            // ReferenceError due to an *unresolvable* reference (identifier not found),
-            // the result is "undefined" instead of throwing. However, if the ReferenceError
-            // is due to accessing an uninitialized lexical binding (TDZ), the ReferenceError
-            // must be propagated. Distinguish these cases here.
-            let val_result = evaluate_expr(mc, env, expr);
-            let val = match val_result {
-                Ok(v) => v,
-                Err(e) => {
-                    match e {
-                        EvalError::Js(js_err) => {
-                            // If this is a ReferenceError for an unresolvable reference ("is not defined"),
-                            // treat it as undefined. Otherwise rethrow the error (propagate it).
-                            let msg = js_err.message();
-                            if msg.ends_with(" is not defined") {
-                                Value::Undefined
-                            } else {
-                                return Err(EvalError::Js(js_err));
-                            }
-                        }
-                        // For thrown values (EvalError::Throw) or other EvalError variants,
-                        // propagate the error so semantics are preserved.
-                        other => return Err(other),
-                    }
-                }
-            };
-
-            let type_str = match val {
-                Value::Number(_) => "number",
-                Value::String(_) => "string",
-                Value::Boolean(_) => "boolean",
-                Value::Undefined | Value::Uninitialized => "undefined",
-                Value::Null => "object",
-                Value::Symbol(_) => "symbol",
-                Value::BigInt(_) => "bigint",
-                Value::Function(_)
-                | Value::Closure(_)
-                | Value::AsyncClosure(_)
-                | Value::GeneratorFunction(..)
-                | Value::ClassDefinition(_)
-                | Value::Getter(..)
-                | Value::Setter(..) => "function",
-                Value::Object(obj) => {
-                    if obj.borrow().get_closure().is_some() {
-                        "function"
-                    } else if let Some(is_ctor) = object_get_key_value(&obj, "__is_constructor") {
-                        if matches!(*is_ctor.borrow(), Value::Boolean(true)) {
-                            "function"
-                        } else {
-                            "object"
-                        }
-                    } else {
-                        "object"
-                    }
-                }
-                _ => "undefined",
-            };
-            Ok(Value::String(utf8_to_utf16(type_str)))
-        }
+        Expr::TypeOf(expr) => evaluate_expr_typeof(mc, env, expr),
         Expr::LogicalAnd(left, right) => {
             let lhs = evaluate_expr(mc, env, left)?;
             let is_truthy = lhs.to_truthy();
@@ -13921,39 +13228,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             }
         }
         Expr::This => Ok(crate::js_class::evaluate_this(mc, env)?),
-        Expr::NewTarget => {
-            // Runtime runtime for `new.target`: walk environment chain to find the nearest
-            // function scope. If the function was invoked as a constructor (has `__instance`),
-            // return the function object stored in `__function` (if present). Otherwise return `undefined`.
-            // Important: Arrow functions do not have their own `new.target` — skip their function
-            // scopes and continue walking up the environment chain.
-            let mut cur = Some(*env);
-            while let Some(e) = cur {
-                if e.borrow().is_function_scope {
-                    // Arrow functions do not have `new.target` of their own — skip them
-                    if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function")
-                        && matches!(*flag_rc.borrow(), Value::Boolean(true))
-                    {
-                        cur = e.borrow().prototype;
-                        continue;
-                    }
-                    if let Some(inst_rc) = object_get_key_value(&e, "__instance")
-                        && !matches!(*inst_rc.borrow(), Value::Undefined)
-                    {
-                        if let Some(nt_rc) = object_get_key_value(&e, "__new_target") {
-                            return Ok(nt_rc.borrow().clone());
-                        }
-                        if let Some(func_rc) = object_get_key_value(&e, "__function") {
-                            return Ok(func_rc.borrow().clone());
-                        }
-                    }
-                    return Ok(Value::Undefined);
-                }
-                cur = e.borrow().prototype;
-            }
-            Ok(Value::Undefined)
-        }
-
+        Expr::NewTarget => evaluate_expr_new_target(mc, env),
         Expr::SuperCall(args) => {
             let eval_args = collect_call_args(mc, env, args)?;
             Ok(crate::js_class::evaluate_super_call(mc, env, &eval_args)?)
@@ -13968,589 +13243,1428 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             Ok(crate::js_class::evaluate_super_method(mc, env, prop, &eval_args)?)
         }
         Expr::Super => Ok(crate::js_class::evaluate_super(mc, env)?),
-        Expr::OptionalProperty(lhs, prop) => {
-            let left_val = evaluate_expr(mc, env, lhs)?;
-            if left_val.is_null_or_undefined() {
-                Ok(Value::Undefined)
-            } else if let Value::Object(obj) = &left_val {
-                // Use accessor-aware property read so getters are executed.
-                let prop_val = get_property_with_accessors(mc, env, obj, prop)?;
-                if !matches!(prop_val, Value::Undefined) {
-                    Ok(prop_val)
-                } else {
-                    Ok(Value::Undefined)
-                }
-            } else if let Value::String(s) = &left_val
-                && prop == "length"
-            {
-                Ok(Value::Number(s.len() as f64))
-            } else {
-                get_primitive_prototype_property(mc, env, &left_val, prop)
-            }
-        }
-        Expr::OptionalIndex(lhs, index_expr) => {
-            let left_val = evaluate_expr(mc, env, lhs)?;
-            if left_val.is_null_or_undefined() {
-                Ok(Value::Undefined)
-            } else {
-                let index_val = evaluate_expr(mc, env, index_expr)?;
-                let prop_key = match index_val {
-                    Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
-                    Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
-                    val => {
-                        let s = match val {
-                            Value::Number(n) => n.to_string(),
-                            Value::Boolean(b) => b.to_string(),
-                            Value::Undefined => "undefined".to_string(),
-                            Value::Null => "null".to_string(),
-                            _ => crate::core::value_to_string(&val),
-                        };
-                        crate::core::PropertyKey::String(s)
-                    }
-                };
-                if let Value::Object(obj) = &left_val {
-                    // Use accessor-aware lookup so getters are invoked
-                    let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
-                    if !matches!(prop_val, Value::Undefined) {
-                        Ok(prop_val)
-                    } else {
-                        Ok(Value::Undefined)
-                    }
-                } else {
-                    get_primitive_prototype_property(mc, env, &left_val, &prop_key)
-                }
-            }
-        }
-        Expr::OptionalCall(lhs, args) => {
-            // Handle optional call specially for property/index targets so we can short-circuit
-            // when the base is null/undefined without raising a "Cannot read properties of null or undefined" error.
-            match &**lhs {
-                Expr::Property(obj_expr, key) => {
-                    // Special-case `super.method?.()` semantics: evaluate the property on the
-                    // parent prototype without evaluating call arguments, short-circuit to
-                    // undefined when absent, and ensure the call receives the correct `this`.
-                    if matches!(&**obj_expr, Expr::Super) {
-                        // Get the super property (handles getters and accessors)
-                        let prop_val = crate::js_class::evaluate_super_computed_property(mc, env, key)?;
-                        if matches!(prop_val, Value::Undefined) {
-                            return Ok(Value::Undefined);
-                        }
-                        // Only evaluate arguments once we know the method exists
-                        let eval_args = collect_call_args(mc, env, args)?;
-                        // Resolve the current `this` binding for the call.
-                        // Prefer any direct `this` binding on the current env (so we
-                        // preserve the exact receiver observed by `evaluate_super_computed_property`),
-                        // otherwise fall back to the general `evaluate_this` walker.
-                        let this_val = if let Some(tv_rc) = crate::core::object_get_key_value(env, "this") {
-                            tv_rc.borrow().clone()
-                        } else {
-                            crate::js_class::evaluate_this(mc, env)?
-                        };
-                        log::trace!("DBG OPT_SUPER_CALL: this_val={:?} prop_val={:?}", this_val, prop_val);
-
-                        match prop_val {
-                            Value::Function(name) => {
-                                let env_for_call = if name == "eval" {
-                                    let mut t = *env;
-                                    while let Some(proto) = t.borrow().prototype {
-                                        t = proto;
-                                    }
-                                    t
-                                } else {
-                                    *env
-                                };
-                                let call_env = prepare_call_env_with_this(
-                                    mc,
-                                    Some(&env_for_call),
-                                    Some(&this_val),
-                                    None,
-                                    &[],
-                                    None,
-                                    Some(&env_for_call),
-                                    None,
-                                )?;
-                                // Dispatch, handling indirect global `eval` marking when necessary.
-                                call_named_eval_or_dispatch(mc, &env_for_call, &call_env, &name, Some(&this_val), &eval_args)
-                            }
-                            Value::Closure(c) => call_closure(mc, &c, Some(&this_val), &eval_args, env, None),
-                            Value::Object(o) => {
-                                let c_e = prepare_call_env_with_this(mc, Some(env), Some(&this_val), None, &[], None, Some(env), Some(o))?;
-                                evaluate_call_dispatch(mc, &c_e, &Value::Object(o), Some(&this_val), &eval_args)
-                            }
-                            _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
-                        }
-                    } else {
-                        let obj_val = evaluate_expr(mc, env, obj_expr)?;
-                        if obj_val.is_null_or_undefined() {
-                            return Ok(Value::Undefined);
-                        }
-                        let eval_args = collect_call_args(mc, env, args)?;
-
-                        let f_val = if let Value::Object(obj) = &obj_val {
-                            // Use accessor-aware lookup so getters are executed
-                            let prop_val = get_property_with_accessors(mc, env, obj, key)?;
-                            if !matches!(prop_val, Value::Undefined) {
-                                prop_val
-                            } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
-                                Value::Function(key.to_string())
-                            } else {
-                                Value::Undefined
-                            }
-                        } else if let Value::String(s) = &obj_val
-                            && key == "length"
-                        {
-                            Value::Number(s.len() as f64)
-                        } else if matches!(
-                            obj_val,
-                            Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
-                        ) && key == "call"
-                        {
-                            Value::Function("call".to_string())
-                        } else {
-                            get_primitive_prototype_property(mc, env, &obj_val, key)?
-                        };
-
-                        match f_val {
-                            Value::Function(name) => {
-                                // Optional call invoking `eval` is always an indirect eval — use global env.
-                                let env_for_call = if name == "eval" {
-                                    let mut t = *env;
-                                    while let Some(proto) = t.borrow().prototype {
-                                        t = proto;
-                                    }
-                                    t
-                                } else {
-                                    *env
-                                };
-                                let call_env = prepare_call_env_with_this(
-                                    mc,
-                                    Some(&env_for_call),
-                                    Some(&obj_val),
-                                    None,
-                                    &[],
-                                    None,
-                                    Some(&env_for_call),
-                                    None,
-                                )?;
-                                // Dispatch, handling indirect global `eval` marking when necessary.
-                                Ok(call_named_eval_or_dispatch(
-                                    mc,
-                                    &env_for_call,
-                                    &call_env,
-                                    &name,
-                                    Some(&obj_val),
-                                    &eval_args,
-                                )?)
-                            }
-                            Value::Closure(c) => call_closure(mc, &c, Some(&obj_val), &eval_args, env, None),
-                            Value::Object(o) => {
-                                let call_env = prepare_call_env_with_this(mc, Some(env), Some(&obj_val), None, &[], None, Some(env), None)?;
-                                evaluate_call_dispatch(mc, &call_env, &Value::Object(o), Some(&obj_val), &eval_args)
-                            }
-                            _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
-                        }
-                    }
-                }
-                Expr::SuperProperty(prop) => {
-                    // Special-case `super.prop?.()` where the parser produces a SuperProperty
-                    // node directly (not Property(Super, ...)).
-                    let prop_key = (*prop).clone();
-                    let prop_val = crate::js_class::evaluate_super_computed_property(mc, env, prop_key)?;
-                    if matches!(prop_val, Value::Undefined) {
-                        return Ok(Value::Undefined);
-                    }
-                    // Only evaluate arguments once we know the method exists.
-                    let eval_args = collect_call_args(mc, env, args)?;
-                    // Resolve the current `this` binding for the call.
-                    let this_val = if let Some(tv_rc) = object_get_key_value(env, "this") {
-                        tv_rc.borrow().clone()
-                    } else {
-                        crate::js_class::evaluate_this(mc, env)?
-                    };
-
-                    match prop_val {
-                        Value::Function(name) => {
-                            let env_4_call = if name == "eval" {
-                                let mut t = *env;
-                                while let Some(proto) = t.borrow().prototype {
-                                    t = proto;
-                                }
-                                t
-                            } else {
-                                *env
-                            };
-                            let c_e = prepare_call_env_with_this(
-                                mc,
-                                Some(&env_4_call),
-                                Some(&this_val),
-                                None,
-                                &[],
-                                None,
-                                Some(&env_4_call),
-                                None,
-                            )?;
-                            if name == "eval" {
-                                let key = PropertyKey::String("__is_indirect_eval".to_string());
-                                object_set_key_value(mc, &env_4_call, &key, &Value::Boolean(true))?;
-                                let res = evaluate_call_dispatch(mc, &c_e, &Value::Function(name.clone()), Some(&this_val), &eval_args);
-                                let _ = env_4_call.borrow_mut(mc).properties.shift_remove(&key);
-                                res
-                            } else {
-                                evaluate_call_dispatch(mc, &c_e, &Value::Function(name.clone()), Some(&this_val), &eval_args)
-                            }
-                        }
-                        Value::Closure(c) => call_closure(mc, &c, Some(&this_val), &eval_args, env, None),
-                        Value::Object(o) => {
-                            let call_env = prepare_call_env_with_this(mc, Some(env), Some(&this_val), None, &[], None, Some(env), Some(o))?;
-                            evaluate_call_dispatch(mc, &call_env, &Value::Object(o), Some(&this_val), &eval_args)
-                        }
-                        _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
-                    }
-                }
-                Expr::Index(obj_expr, index_expr) => {
-                    let obj_val = evaluate_expr(mc, env, obj_expr)?;
-                    if obj_val.is_null_or_undefined() {
-                        return Ok(Value::Undefined);
-                    }
-
-                    let index_val = evaluate_expr(mc, env, index_expr)?;
-                    let prop_key = match index_val {
-                        Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
-                        Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
-                        val => {
-                            let s = match val {
-                                Value::Number(n) => n.to_string(),
-                                Value::Boolean(b) => b.to_string(),
-                                Value::Undefined => "undefined".to_string(),
-                                Value::Null => "null".to_string(),
-                                _ => crate::core::value_to_string(&val),
-                            };
-                            crate::core::PropertyKey::String(s)
-                        }
-                    };
-
-                    let eval_args = collect_call_args(mc, env, args)?;
-
-                    let f_val = if let Value::Object(obj) = &obj_val {
-                        // Use accessor-aware lookup so getters are invoked
-                        let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
-                        if !matches!(prop_val, Value::Undefined) {
-                            prop_val
-                        } else {
-                            Value::Undefined
-                        }
-                    } else {
-                        get_primitive_prototype_property(mc, env, &obj_val, &prop_key)?
-                    };
-
-                    match f_val {
-                        Value::Function(name) => {
-                            // Optional call invoking `eval` is always an indirect eval — use global env.
-                            let env_4_call = if name == "eval" {
-                                let mut t = *env;
-                                while let Some(proto) = t.borrow().prototype {
-                                    t = proto;
-                                }
-                                t
-                            } else {
-                                *env
-                            };
-                            let c_e = prepare_call_env_with_this(
-                                mc,
-                                Some(&env_4_call),
-                                Some(&obj_val),
-                                None,
-                                &[],
-                                None,
-                                Some(&env_4_call),
-                                None,
-                            )?;
-                            Ok(call_named_eval_or_dispatch(
-                                mc,
-                                &env_4_call,
-                                &c_e,
-                                &name,
-                                Some(&obj_val),
-                                &eval_args,
-                            )?)
-                        }
-                        Value::Closure(c) => call_closure(mc, &c, Some(&obj_val), &eval_args, env, None),
-                        Value::Object(o) => {
-                            let call_env = prepare_call_env_with_this(mc, Some(env), Some(&obj_val), None, &[], None, Some(env), None)?;
-                            evaluate_call_dispatch(mc, &call_env, &Value::Object(o), Some(&obj_val), &eval_args)
-                        }
-                        _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
-                    }
-                }
-                _ => {
-                    // Fallback: evaluate the lhs; if it throws because of reading properties of null/undefined,
-                    // treat it as short-circuit for optional chaining and return undefined.
-                    match evaluate_expr(mc, env, lhs) {
-                        Ok(left_val) => {
-                            if left_val.is_null_or_undefined() {
-                                Ok(Value::Undefined)
-                            } else {
-                                let eval_args = collect_call_args(mc, env, args)?;
-                                match left_val {
-                                    Value::Function(name) => {
-                                        // Optional call invoking `eval` is always an indirect eval — use global env.
-                                        let e_4_c = if name == "eval" {
-                                            let mut t = *env;
-                                            while let Some(proto) = t.borrow().prototype {
-                                                t = proto;
-                                            }
-                                            t
-                                        } else {
-                                            *env
-                                        };
-                                        let c_e = prepare_call_env_with_this(mc, Some(&e_4_c), None, None, &[], None, Some(&e_4_c), None)?;
-                                        Ok(call_named_eval_or_dispatch(mc, &e_4_c, &c_e, &name, None, &eval_args)?)
-                                    }
-                                    Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None),
-                                    Value::Object(o) => {
-                                        let call_env = prepare_call_env_with_this(mc, Some(env), None, None, &[], None, Some(env), None)?;
-                                        evaluate_call_dispatch(mc, &call_env, &Value::Object(o), None, &eval_args)
-                                    }
-                                    _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if e.message() == "Cannot read properties of null or undefined" {
-                                Ok(Value::Undefined)
-                            } else {
-                                Err(e)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Expr::Delete(target) => match &**target {
-            Expr::SuperProperty(_) => {
-                let _ = crate::js_class::evaluate_this(mc, env)?;
-                Err(raise_reference_error!("Cannot delete a super property").into())
-            }
-            Expr::Property(obj_expr, _key) if matches!(&**obj_expr, Expr::Super) => {
-                let _ = crate::js_class::evaluate_this(mc, env)?;
-                Err(raise_reference_error!("Cannot delete a super property").into())
-            }
-            Expr::Index(obj_expr, key_expr) if matches!(&**obj_expr, Expr::Super) => {
-                let _ = crate::js_class::evaluate_this(mc, env)?;
-                let _ = evaluate_expr(mc, env, key_expr)?;
-                Err(raise_reference_error!("Cannot delete a super property").into())
-            }
-            Expr::Property(obj_expr, key) => {
-                let obj_val = evaluate_expr(mc, env, obj_expr)?;
-                if obj_val.is_null_or_undefined() {
-                    return Err(raise_type_error!("Cannot delete property of null or undefined").into());
-                }
-                if let Value::Object(obj) = obj_val {
-                    let key_val = PropertyKey::from(key.to_string());
-                    // Proxy wrapper: delegate to deleteProperty trap
-                    if let Some(proxy_ptr) = get_own_property(&obj, "__proxy__")
-                        && let Value::Proxy(p) = &*proxy_ptr.borrow()
-                    {
-                        let deleted = crate::js_proxy::proxy_delete_property(mc, p, &key_val)?;
-                        return Ok(Value::Boolean(deleted));
-                    }
-
-                    if obj.borrow().non_configurable.contains(&key_val) {
-                        Err(crate::raise_type_error!(format!("Cannot delete non-configurable property '{key}'",)).into())
-                    } else {
-                        let _ = obj.borrow_mut(mc).properties.shift_remove(&key_val);
-                        // Deleting a non-existent property returns true per JS semantics
-                        Ok(Value::Boolean(true))
-                    }
-                } else {
-                    Ok(Value::Boolean(true))
-                }
-            }
-            Expr::Index(obj_expr, key_expr) => {
-                let obj_val = evaluate_expr(mc, env, obj_expr)?;
-                if obj_val.is_null_or_undefined() {
-                    return Err(raise_type_error!("Cannot delete property of null or undefined").into());
-                }
-                let key_val_res = evaluate_expr(mc, env, key_expr)?;
-                let key = match &key_val_res {
-                    Value::String(s) => PropertyKey::String(utf16_to_utf8(s)),
-                    Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(*n))),
-                    Value::Symbol(s) => PropertyKey::Symbol(*s),
-                    _ => PropertyKey::from(value_to_string(&key_val_res)),
-                };
-                if let Value::Object(obj) = obj_val {
-                    if obj.borrow().non_configurable.contains(&key) {
-                        Err(crate::raise_type_error!(format!(
-                            "Cannot delete non-configurable property '{}'",
-                            value_to_string(&key_val_res)
-                        ))
-                        .into())
-                    } else {
-                        let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
-                        // Deleting a non-existent property returns true per JS semantics
-                        Ok(Value::Boolean(true))
-                    }
-                } else {
-                    Ok(Value::Boolean(true))
-                }
-            }
-            Expr::Var(name, _, _) => {
-                Err(raise_syntax_error!(format!("Delete of an unqualified identifier '{name}' in strict mode",)).into())
-            }
-            _ => {
-                let _ = evaluate_expr(mc, env, target)?;
-                Ok(Value::Boolean(true))
-            }
-        },
-        Expr::Getter(func_expr) => {
-            let val = evaluate_expr(mc, env, func_expr)?;
-            let closure = match &val {
-                Value::Object(obj) => {
-                    let c_val = obj.borrow().get_closure();
-                    if let Some(c_ptr) = c_val {
-                        let c_ref = c_ptr.borrow();
-                        if let Value::Closure(c) = &*c_ref {
-                            *c
-                        } else {
-                            panic!("Getter function missing internal closure (not a closure)");
-                        }
-                    } else {
-                        panic!("Getter function missing internal closure");
-                    }
-                }
-                Value::Closure(c) => *c,
-                _ => panic!("Expr::Getter evaluated to invalid value: {:?}", val),
-            };
-            Ok(Value::Getter(
-                closure.body.clone(),
-                closure.env.expect("Getter closure requires env"),
-                None,
-            ))
-        }
-        Expr::Setter(func_expr) => {
-            let val = evaluate_expr(mc, env, func_expr)?;
-            let closure = match &val {
-                Value::Object(obj) => {
-                    let c_val = obj.borrow().get_closure();
-                    if let Some(c_ptr) = c_val {
-                        let c_ref = c_ptr.borrow();
-                        if let Value::Closure(c) = &*c_ref {
-                            *c
-                        } else {
-                            panic!("Setter function missing internal closure (not a closure)");
-                        }
-                    } else {
-                        panic!("Setter function missing internal closure");
-                    }
-                }
-                Value::Closure(c) => *c,
-                _ => panic!("Expr::Setter evaluated to invalid value: {:?}", val),
-            };
-            Ok(Value::Setter(
-                closure.params.clone(),
-                closure.body.clone(),
-                closure.env.expect("Setter closure requires env"),
-                None,
-            ))
-        }
-        Expr::TaggedTemplate(tag_expr, strings, exprs) => {
-            // Evaluate the tag function
-            let func_val = evaluate_expr(mc, env, tag_expr.as_ref())?;
-
-            // Create the "segments" (cooked) array and populate it
-            let segments_arr = crate::js_array::create_array(mc, env)?;
-            for (i, s) in strings.iter().enumerate() {
-                object_set_key_value(mc, &segments_arr, i, &Value::String(s.clone()))?;
-            }
-            crate::js_array::set_array_length(mc, &segments_arr, strings.len())?;
-
-            // Create the raw array (use same strings here; raw/cooked handling can be refined later)
-            let raw_arr = crate::js_array::create_array(mc, env)?;
-            for (i, s) in strings.iter().enumerate() {
-                object_set_key_value(mc, &raw_arr, i, &Value::String(s.clone()))?;
-            }
-            crate::js_array::set_array_length(mc, &raw_arr, strings.len())?;
-
-            // Attach raw as a property on segments
-            object_set_key_value(mc, &segments_arr, "raw", &Value::Object(raw_arr))?;
-
-            // Evaluate substitution expressions
-            let mut call_args: Vec<Value<'gc>> = Vec::new();
-            call_args.push(Value::Object(segments_arr));
-            for e in exprs.iter() {
-                let v = evaluate_expr(mc, env, e)?;
-                call_args.push(v);
-            }
-
-            // Call the tag function with 'undefined' as this
-            let res = evaluate_call_dispatch(mc, env, &func_val, Some(&Value::Undefined), &call_args)?;
-            Ok(res)
-        }
+        Expr::OptionalProperty(lhs, prop) => evaluate_optional_property(mc, env, lhs, prop),
+        Expr::OptionalIndex(lhs, index_expr) => evaluate_expr_optional_index(mc, env, lhs, index_expr),
+        Expr::OptionalCall(lhs, args) => evaluate_expr_optional_call(mc, env, lhs, args),
+        Expr::Delete(target) => evaluate_expr_delete(mc, env, target),
+        Expr::Getter(func_expr) => evaluate_expr_getter(mc, env, func_expr),
+        Expr::Setter(func_expr) => evaluate_expr_setter(mc, env, func_expr),
+        Expr::TaggedTemplate(tag_expr, strings, exprs) => evaluate_expr_tagged_template(mc, env, tag_expr, strings, exprs),
         Expr::Await(expr) => {
             log::trace!("DEBUG: Evaluating Await");
             let value = evaluate_expr(mc, env, expr)?;
             await_promise_value(mc, env, &value)
         }
         Expr::Yield(_) | Expr::YieldStar(_) => Err(raise_eval_error!("`yield` is only valid inside generator functions").into()),
-        Expr::AsyncArrowFunction(params, body) => {
-            // Create an async arrow function object which captures the current `this` lexically
-            let func_obj = crate::core::new_js_object_data(mc);
-            // Set __proto__ to Function.prototype
-            if let Some(func_ctor_val) = env_get(env, "Function")
-                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-                && let Value::Object(proto) = &*proto_val.borrow()
-            {
-                func_obj.borrow_mut(mc).prototype = Some(*proto);
-            }
-
-            let is_strict = body.first()
-                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
-                .unwrap_or(false);
-            let closure_data = ClosureData {
-                params: params.to_vec(),
-                body: body.clone(),
-                env: Some(*env),
-                bound_this: None,
-                is_arrow: true,
-                is_strict,
-                enforce_strictness_inheritance: true,
-                ..ClosureData::default()
-            };
-            let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
-            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-
-            // Anonymous async arrow functions should expose an own 'name' property
-            // with the empty string as its value and the standard attributes: writable:false,
-            // enumerable:false, configurable:true (per Test262 expectations).
-            let desc = create_descriptor_object(mc, &Value::String(vec![]), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
-
-            // Set 'length' for async arrow functions (number of positional params before first default/rest)
-            let mut fn_length = 0_usize;
-            for p in params.iter() {
-                match p {
-                    crate::core::DestructuringElement::Variable(_, default_opt) => {
-                        if default_opt.is_some() {
-                            break;
-                        }
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Rest(_) => break,
-                    crate::core::DestructuringElement::NestedArray(..) | crate::core::DestructuringElement::NestedObject(..) => {
-                        fn_length += 1;
-                    }
-                    crate::core::DestructuringElement::Empty => {}
-                    _ => {}
-                }
-            }
-            let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
-
-            Ok(Value::Object(func_obj))
-        }
+        Expr::AsyncArrowFunction(params, body) => evaluate_expr_async_arrow_function(mc, env, params, body),
         Expr::ValuePlaceholder => Ok(Value::Undefined),
         _ => todo!("{expr:?}"),
+    }
+}
+
+fn evaluate_expr_assign_in_main<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    value_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Diagnostic: log the assignment target variant to help identify unsupported targets
+    let target_variant = match target {
+        Expr::Var(_, _, _) => "Var",
+        Expr::Property(_, _) => "Property",
+        Expr::Index(_, _) => "Index",
+        Expr::Spread(inner) => {
+            // log inner variant for better diagnostics
+            let inner_variant = match &**inner {
+                Expr::Array(_) => "Array",
+                Expr::Index(_, _) => "Index",
+                Expr::Property(_, _) => "Property",
+                Expr::Var(_, _, _) => "Var",
+                Expr::Call(_, _) => "Call",
+                _ => "Other",
+            };
+            log::debug!("evaluate_expr: Assign target is Spread with inner variant = {}", inner_variant);
+            "Spread"
+        }
+        Expr::Array(_) => "Array",
+        Expr::Object(_) => "Object",
+        _ => "Other",
+    };
+    log::debug!("evaluate_expr: Assign target variant = {}", target_variant);
+    evaluate_expr_assign(mc, env, target, value_expr)
+}
+
+fn evaluate_expr_generator_function<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    name: &Option<String>,
+    params: &[DestructuringElement],
+    body: &[Statement],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Similar to Function but produces a GeneratorFunction value
+    let func_obj = crate::core::new_js_object_data(mc);
+    // Set internal [[Prototype]] to `GeneratorFunction.prototype` when available
+    // so generator functions inherit from a distinct function prototype.
+    if let Some(gen_func_ctor_val) = env_get(env, "GeneratorFunction")
+        && let Value::Object(gen_func_ctor) = &*gen_func_ctor_val.borrow()
+        && let Some(gen_func_proto_val) = object_get_key_value(gen_func_ctor, "prototype")
+    {
+        let proto_opt = match &*gen_func_proto_val.borrow() {
+            Value::Object(o) => Some(*o),
+            Value::Property { value: Some(v), .. } => {
+                let inner = v.borrow().clone();
+                if let Value::Object(o2) = inner { Some(o2) } else { None }
+            }
+            _ => None,
+        };
+        if let Some(gen_func_proto) = proto_opt {
+            func_obj.borrow_mut(mc).prototype = Some(gen_func_proto);
+            // DEBUG: report that the new generator function object's [[Prototype]] was set
+            log::trace!(
+                "eval: created generator function func_obj.ptr={:p} [[Prototype]] -> {:p}",
+                Gc::as_ptr(func_obj),
+                Gc::as_ptr(gen_func_proto)
+            );
+        }
+    } else if let Some(func_ctor_val) = env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        // Fallback: use Function.prototype
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
+    }
+
+    let is_strict = body.first()
+                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                .unwrap_or(false);
+    let closure_data = ClosureData {
+        params: params.to_vec(),
+        body: body.to_vec(),
+        env: Some(*env),
+        is_strict,
+        enforce_strictness_inheritance: true,
+        ..ClosureData::default()
+    };
+    let closure_val = Value::GeneratorFunction(name.clone(), Gc::new(mc, closure_data));
+    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+    match name {
+        Some(n) if !n.is_empty() => {
+            let desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(n)), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
+        }
+        _ => {
+            // Anonymous generator functions should expose an own 'name' property with the empty string
+            // and the standard attributes: writable:false, enumerable:false, configurable:true
+            let desc = crate::core::create_descriptor_object(mc, &Value::String(vec![]), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
+        }
+    }
+
+    // Set 'length' property for generator function
+    let mut fn_length = 0_usize;
+    for p in params.iter() {
+        match p {
+            crate::core::DestructuringElement::Variable(_, default_opt) => {
+                if default_opt.is_some() {
+                    break;
+                }
+                fn_length += 1;
+            }
+            crate::core::DestructuringElement::Rest(_) => break,
+            crate::core::DestructuringElement::NestedArray(..) | crate::core::DestructuringElement::NestedObject(..) => {
+                fn_length += 1;
+            }
+            crate::core::DestructuringElement::Empty => {}
+            _ => {}
+        }
+    }
+    let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
+
+    // Create prototype object
+    let proto_obj = crate::core::new_js_object_data(mc);
+    // Set prototype of prototype object to Generator.prototype if available
+    // (fallback to Object.prototype otherwise).
+    if let Some(gen_val) = env_get(env, "Generator")
+        && let Value::Object(gen_ctor) = &*gen_val.borrow()
+        && let Some(gen_proto_val) = object_get_key_value(gen_ctor, "prototype")
+    {
+        log::debug!("GeneratorFunction: found Generator constructor ptr = {:p}", Gc::as_ptr(*gen_ctor));
+        log::debug!("GeneratorFunction: raw prototype value ptr = {:p}", Gc::as_ptr(gen_proto_val));
+        let proto_value = match &*gen_proto_val.borrow() {
+            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+            other => other.clone(),
+        };
+        if let Value::Object(gen_proto) = proto_value {
+            log::debug!(
+                "GeneratorFunction: setting proto_obj.prototype to Generator.prototype {:p}",
+                Gc::as_ptr(gen_proto)
+            );
+            proto_obj.borrow_mut(mc).prototype = Some(gen_proto);
+        } else {
+            log::debug!("GeneratorFunction: Generator.prototype is not an object");
+        }
+    } else {
+        log::debug!("GeneratorFunction: could not find Generator.prototype");
+        if let Some(obj_val) = env_get(env, "Object")
+            && let Value::Object(obj_ctor) = &*obj_val.borrow()
+            && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+        {
+            let proto_value = match &*obj_proto_val.borrow() {
+                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                other => other.clone(),
+            };
+            if let Value::Object(obj_proto) = proto_value {
+                log::debug!("GeneratorFunction: falling back to Object.prototype {:p}", Gc::as_ptr(obj_proto));
+                proto_obj.borrow_mut(mc).prototype = Some(obj_proto);
+            }
+        }
+    }
+
+    // For generator functions, do NOT create an own 'constructor'
+    // property on the prototype object (per test262 expectations).
+    // Only define the `prototype` property on the function itself
+    // with writable:true, enumerable:false, configurable:false.
+    let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(proto_obj), true, false, false)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
+    // DEBUG: report the enumerable flag for the newly-defined `prototype` property
+    log::trace!(
+        "eval: func_obj.ptr={:p} prototype enumerable={} non_enumerable={}",
+        Gc::as_ptr(func_obj),
+        func_obj.borrow().is_enumerable("prototype"),
+        func_obj
+            .borrow()
+            .non_enumerable
+            .contains(&crate::core::PropertyKey::String("prototype".to_string()))
+    );
+    // Ensure non-enumerable as spec requires for function `prototype` property
+    func_obj.borrow_mut(mc).set_non_enumerable("prototype");
+
+    Ok(Value::Object(func_obj))
+}
+
+fn evaluate_expr_async_generator_function<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    name: &Option<String>,
+    params: &[crate::core::DestructuringElement],
+    body: &[Statement],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Async generator functions are represented as objects with an AsyncGeneratorFunction stored
+    // in an internal closure slot. They inherit from Function.prototype.
+    let func_obj = crate::core::new_js_object_data(mc);
+
+    // Set __proto__ to Function.prototype
+    if let Some(func_ctor_val) = env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
+    }
+
+    let is_strict = body
+        .first()
+        .map(|s| matches!(&*s.kind, StatementKind::Expr(Expr::StringLit(ss)) if utf16_to_utf8(ss).as_str() == "use strict"))
+        .unwrap_or(false);
+    let closure_data = ClosureData {
+        params: params.to_vec(),
+        body: body.to_vec(),
+        env: Some(*env),
+        is_strict,
+        enforce_strictness_inheritance: true,
+        ..ClosureData::default()
+    };
+    let closure_val = Value::AsyncGeneratorFunction(name.clone(), Gc::new(mc, closure_data));
+    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+    let name_val = match name {
+        Some(n) if !n.is_empty() => Value::String(utf8_to_utf16(n)),
+        _ => Value::String(vec![]),
+    };
+    let desc = create_descriptor_object(mc, &name_val, false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
+
+    // Set 'length' property for async generator function
+    let mut fn_length = 0_usize;
+    for p in params.iter() {
+        match p {
+            DestructuringElement::Variable(_, default_opt) => {
+                if default_opt.is_some() {
+                    break;
+                }
+                fn_length += 1;
+            }
+            DestructuringElement::Rest(_) => break,
+            DestructuringElement::NestedArray(..) | DestructuringElement::NestedObject(..) => {
+                fn_length += 1;
+            }
+            DestructuringElement::Empty => {}
+            _ => {}
+        }
+    }
+    let desc_len = create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
+
+    // Create prototype object
+    let proto_obj = new_js_object_data(mc);
+    // Set prototype of prototype object to AsyncGenerator.prototype if available
+    // (fallback to Object.prototype otherwise).
+    if let Some(async_gen_val) = env_get(env, "AsyncGenerator")
+        && let Value::Object(async_gen_ctor) = &*async_gen_val.borrow()
+        && let Some(async_proto_val) = object_get_key_value(async_gen_ctor, "prototype")
+    {
+        let proto_value = match &*async_proto_val.borrow() {
+            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+            other => other.clone(),
+        };
+        if let Value::Object(async_proto) = proto_value {
+            proto_obj.borrow_mut(mc).prototype = Some(async_proto);
+        }
+    } else if let Some(obj_val) = env_get(env, "Object")
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+    {
+        let proto_value = match &*obj_proto_val.borrow() {
+            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+            other => other.clone(),
+        };
+        if let Value::Object(obj_proto) = proto_value {
+            proto_obj.borrow_mut(mc).prototype = Some(obj_proto);
+        }
+    }
+    // Record the intrinsic async generator prototype (if any) for fallback
+    if let Some(proto) = proto_obj.borrow().prototype {
+        object_set_key_value(mc, &func_obj, "__async_generator_proto", &Value::Object(proto))?;
+    }
+
+    // For async generator functions, do NOT create an own 'constructor'
+    // property on the prototype object (per Test262 expectations).
+    // Only define the `prototype` property on the function itself
+    // with writable:true, enumerable:false, configurable:false.
+    let desc_proto = create_descriptor_object(mc, &Value::Object(proto_obj), true, false, false)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
+
+    Ok(Value::Object(func_obj))
+}
+
+fn evaluate_expr_async_function<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    name: &Option<String>,
+    params: &[DestructuringElement],
+    body: &[Statement],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Async functions are represented as objects with an AsyncClosure stored
+    // in an internal closure slot. They inherit from Function.prototype.
+    let func_obj = new_js_object_data(mc);
+
+    // Set __proto__ to Function.prototype
+    if let Some(func_ctor_val) = env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
+    }
+
+    let is_strict = body.first()
+                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                .unwrap_or(false);
+    let closure_data = ClosureData {
+        params: params.to_vec(),
+        body: body.to_vec(),
+        env: Some(*env),
+        is_strict,
+        enforce_strictness_inheritance: true,
+        ..ClosureData::default()
+    };
+    let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
+    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+    let val = match name {
+        Some(n) if !n.is_empty() => Value::String(utf8_to_utf16(n)),
+        _ => Value::String(vec![]),
+    };
+    let desc = create_descriptor_object(mc, &val, false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
+
+    // Set 'length' property for async functions
+    let mut fn_length = 0_usize;
+    for p in params.iter() {
+        match p {
+            DestructuringElement::Variable(_, default_opt) => {
+                if default_opt.is_some() {
+                    break;
+                }
+                fn_length += 1;
+            }
+            DestructuringElement::Rest(_) => break,
+            DestructuringElement::NestedArray(..) | DestructuringElement::NestedObject(..) => {
+                fn_length += 1;
+            }
+            DestructuringElement::Empty => {}
+            _ => {}
+        }
+    }
+    let desc_len = create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
+
+    Ok(Value::Object(func_obj))
+}
+
+fn evaluate_expr_arrow_function<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    params: &[DestructuringElement],
+    body: &[Statement],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Create an arrow function object which captures the current `this` lexically
+    let func_obj = new_js_object_data(mc);
+    // Set __proto__ to Function.prototype
+    if let Some(func_ctor_val) = env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
+    }
+
+    let is_strict = body
+        .first()
+        .map(|s| matches!(&*s.kind, StatementKind::Expr(Expr::StringLit(ss)) if utf16_to_utf8(ss).as_str() == "use strict"))
+        .unwrap_or(false);
+
+    let closure_data = ClosureData {
+        params: params.to_vec(),
+        body: body.to_vec(),
+        env: Some(*env),
+        bound_this: None,
+        is_arrow: true,
+        is_strict,
+        enforce_strictness_inheritance: true,
+        home_object: env.borrow().get_home_object(),
+        ..ClosureData::default()
+    };
+    let closure_val = Value::Closure(Gc::new(mc, closure_data));
+    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+
+    // Set 'length' for arrow functions
+    let mut fn_length = 0_usize;
+    for p in params.iter() {
+        match p {
+            DestructuringElement::Variable(_, default_opt) => {
+                if default_opt.is_some() {
+                    break;
+                }
+                fn_length += 1;
+            }
+            DestructuringElement::Rest(_) => break,
+            DestructuringElement::NestedArray(..) | DestructuringElement::NestedObject(..) => {
+                fn_length += 1;
+            }
+            DestructuringElement::Empty => {}
+            _ => {}
+        }
+    }
+    let desc_len = create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
+
+    // Anonymous arrow functions should expose an own 'name' property with the
+    // empty string and standard attributes: writable:false, enumerable:false, configurable:true
+    let desc = create_descriptor_object(mc, &Value::String(vec![]), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
+
+    // Arrow functions do not have a 'prototype' property (not constructible)
+
+    Ok(Value::Object(func_obj))
+}
+
+fn evaluate_expr_dynamic_import<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    specifier: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Evaluate the specifier before creating the promise capability so
+    // abrupt completion at this stage throws synchronously.
+    let spec_val = evaluate_expr(mc, env, specifier)?;
+
+    let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
+    let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+
+    let module_result: Result<Value<'gc>, EvalError<'gc>> = (|| {
+        let prim = crate::core::to_primitive(mc, &spec_val, "string", env)?;
+        let module_name = match prim {
+            Value::Symbol(_) => {
+                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+            }
+            _ => crate::core::value_to_string(&prim),
+        };
+
+        let base_path = if let Some(cell) = env_get(env, "__filepath")
+            && let Value::String(s) = cell.borrow().clone()
+        {
+            Some(utf16_to_utf8(&s))
+        } else {
+            None
+        };
+
+        crate::js_module::load_module(mc, &module_name, base_path.as_deref(), Some(*env))
+    })();
+
+    match module_result {
+        Ok(module_value) => {
+            crate::js_promise::resolve_promise(mc, &promise, module_value, env);
+        }
+        Err(err) => {
+            let reason = match err {
+                EvalError::Throw(val, _line, _column) => val,
+                EvalError::Js(js_err) => js_error_to_value(mc, env, &js_err),
+            };
+            crate::js_promise::reject_promise(mc, &promise, reason, env);
+        }
+    }
+    Ok(Value::Object(promise_obj))
+}
+
+fn evaluate_expr_property<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_expr: &Expr,
+    key: &str,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Special-case `import.meta` when executing in a module environment. We treat
+    // `import.meta` as a per-module ordinary object stored under env.__import_meta.
+    if let crate::core::Expr::Var(name, _, _) = obj_expr
+        && name == "import"
+        && key == "meta"
+    {
+        // Prefer the immediate environment but fall back to the root global environment
+        let meta_rc = crate::core::object_get_key_value(env, "__import_meta").or_else(|| {
+            let mut root = *env;
+            while let Some(proto) = root.borrow().prototype {
+                root = proto;
+            }
+            crate::core::object_get_key_value(&root, "__import_meta")
+        });
+        if let Some(meta_rc) = meta_rc
+            && let Value::Object(meta_obj) = &*meta_rc.borrow()
+        {
+            log::trace!("eval Expr::Property: special-case import.meta matched, returning module import.meta object");
+            return Ok(Value::Object(*meta_obj));
+        } else {
+            log::trace!(
+                "eval Expr::Property: special-case import.meta not matched in current env chain, creating fallback import.meta on root env"
+            );
+            // Fallback: create an import.meta object on the root environment so
+            // `import.meta` accessors always produce an ordinary object in
+            // module contexts. Use __filepath on the root env to populate the
+            // 'url' property when available.
+            let mut root = *env;
+            while let Some(proto) = root.borrow().prototype {
+                root = proto;
+            }
+            // Create a new ordinary object for import.meta
+            let import_meta = new_js_object_data(mc);
+            if let Some(cell) = env_get(&root, "__filepath")
+                && let Value::String(s) = cell.borrow().clone()
+            {
+                object_set_key_value(mc, &import_meta, "url", &Value::String(s))?;
+            }
+            object_set_key_value(mc, &root, "__import_meta", &Value::Object(import_meta))?;
+            return Ok(Value::Object(import_meta));
+        }
+    }
+
+    let obj_val = if expr_contains_optional_chain(obj_expr) {
+        match evaluate_optional_chain_base(mc, env, obj_expr)? {
+            Some(val) => val,
+            None => return Ok(Value::Undefined),
+        }
+    } else {
+        evaluate_expr(mc, env, obj_expr)?
+    };
+
+    if let Value::Object(obj) = &obj_val {
+        let val = get_property_with_accessors(mc, env, obj, key)?;
+        // Special-case `__proto__` getter: if not present as an own property, return
+        // the internal prototype pointer (or null).
+        if key == "__proto__" {
+            let proto_key = PropertyKey::String("__proto__".to_string());
+            if get_own_property(obj, &proto_key).is_none() {
+                if let Some(proto_ptr) = obj.borrow().prototype {
+                    return Ok(Value::Object(proto_ptr));
+                } else {
+                    return Ok(Value::Null);
+                }
+            }
+        }
+        Ok(val)
+    } else if let Value::String(s) = &obj_val
+        && key == "length"
+    {
+        Ok(Value::Number(s.len() as f64))
+    } else if key == "length"
+        && matches!(
+            obj_val,
+            Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..)
+        )
+    {
+        let params = match obj_val {
+            Value::Closure(ref c) => &c.params,
+            Value::AsyncClosure(ref c) => &c.params,
+            Value::GeneratorFunction(_, ref c) => &c.params,
+            Value::AsyncGeneratorFunction(_, ref c) => &c.params,
+            _ => unreachable!(),
+        };
+        let mut len = 0.0;
+        for p in params {
+            match p {
+                DestructuringElement::Rest(_) | DestructuringElement::RestPattern(_) => break,
+                DestructuringElement::Variable(_, Some(_)) => break,
+                DestructuringElement::NestedArray(_, Some(_)) => break,
+                DestructuringElement::NestedObject(_, Some(_)) => break,
+                _ => len += 1.0,
+            }
+        }
+        Ok(Value::Number(len))
+    } else if matches!(obj_val, Value::Undefined | Value::Null) {
+        log::debug!("Expr::Property: attempting property access on nullish base: obj_expr={obj_expr:?}");
+        Err(raise_type_error!("Cannot read properties of null or undefined").into())
+    } else {
+        get_primitive_prototype_property(mc, env, &obj_val, key)
+    }
+}
+
+fn evaluate_expr_class<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    class_def: &ClassDefinition,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if class_def.name.is_empty() {
+        let class_obj = create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, env, false)?;
+        Ok(class_obj)
+    } else {
+        // Create a class scope for the class name binding (lexical, immutable)
+        let class_scope = new_js_object_data(mc);
+        class_scope.borrow_mut(mc).prototype = Some(*env);
+        env_set(mc, &class_scope, &class_def.name, &Value::Uninitialized)?;
+
+        let class_obj = create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, &class_scope, false)?;
+
+        // Initialize the class name binding to the class object and mark it immutable
+        env_set(mc, &class_scope, &class_def.name, &class_obj)?;
+        class_scope.borrow_mut(mc).set_const(class_def.name.clone());
+
+        Ok(class_obj)
+    }
+}
+
+fn evaluate_expr_typeof<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
+    // typeof has special semantics: if the evaluation of the operand throws a
+    // ReferenceError due to an *unresolvable* reference (identifier not found),
+    // the result is "undefined" instead of throwing. However, if the ReferenceError
+    // is due to accessing an uninitialized lexical binding (TDZ), the ReferenceError
+    // must be propagated. Distinguish these cases here.
+    let val_result = evaluate_expr(mc, env, expr);
+    let val = match val_result {
+        Ok(v) => v,
+        Err(e) => {
+            match e {
+                EvalError::Js(js_err) => {
+                    // If this is a ReferenceError for an unresolvable reference ("is not defined"),
+                    // treat it as undefined. Otherwise rethrow the error (propagate it).
+                    let msg = js_err.message();
+                    if msg.ends_with(" is not defined") {
+                        Value::Undefined
+                    } else {
+                        return Err(EvalError::Js(js_err));
+                    }
+                }
+                // For thrown values (EvalError::Throw) or other EvalError variants,
+                // propagate the error so semantics are preserved.
+                other => return Err(other),
+            }
+        }
+    };
+
+    let type_str = match val {
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Boolean(_) => "boolean",
+        Value::Undefined | Value::Uninitialized => "undefined",
+        Value::Null => "object",
+        Value::Symbol(_) => "symbol",
+        Value::BigInt(_) => "bigint",
+        Value::Function(_)
+        | Value::Closure(_)
+        | Value::AsyncClosure(_)
+        | Value::GeneratorFunction(..)
+        | Value::ClassDefinition(_)
+        | Value::Getter(..)
+        | Value::Setter(..) => "function",
+        Value::Object(obj) => {
+            if obj.borrow().get_closure().is_some() {
+                "function"
+            } else if let Some(is_ctor) = object_get_key_value(&obj, "__is_constructor") {
+                if matches!(*is_ctor.borrow(), Value::Boolean(true)) {
+                    "function"
+                } else {
+                    "object"
+                }
+            } else {
+                "object"
+            }
+        }
+        _ => "undefined",
+    };
+    Ok(Value::String(utf8_to_utf16(type_str)))
+}
+
+fn evaluate_expr_new_target<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Runtime runtime for `new.target`: walk environment chain to find the nearest
+    // function scope. If the function was invoked as a constructor (has `__instance`),
+    // return the function object stored in `__function` (if present). Otherwise return `undefined`.
+    // Important: Arrow functions do not have their own `new.target` — skip their function
+    // scopes and continue walking up the environment chain.
+    let mut cur = Some(*env);
+    while let Some(e) = cur {
+        if e.borrow().is_function_scope {
+            // Arrow functions do not have `new.target` of their own — skip them
+            if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function")
+                && matches!(*flag_rc.borrow(), Value::Boolean(true))
+            {
+                cur = e.borrow().prototype;
+                continue;
+            }
+            if let Some(inst_rc) = object_get_key_value(&e, "__instance")
+                && !matches!(*inst_rc.borrow(), Value::Undefined)
+            {
+                if let Some(nt_rc) = object_get_key_value(&e, "__new_target") {
+                    return Ok(nt_rc.borrow().clone());
+                }
+                if let Some(func_rc) = object_get_key_value(&e, "__function") {
+                    return Ok(func_rc.borrow().clone());
+                }
+            }
+            return Ok(Value::Undefined);
+        }
+        cur = e.borrow().prototype;
+    }
+    Ok(Value::Undefined)
+}
+
+fn evaluate_optional_property<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    lhs: &Expr,
+    prop: &str,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let left_val = evaluate_expr(mc, env, lhs)?;
+    if left_val.is_null_or_undefined() {
+        Ok(Value::Undefined)
+    } else if let Value::Object(obj) = &left_val {
+        // Use accessor-aware property read so getters are executed.
+        let prop_val = get_property_with_accessors(mc, env, obj, prop)?;
+        if !matches!(prop_val, Value::Undefined) {
+            Ok(prop_val)
+        } else {
+            Ok(Value::Undefined)
+        }
+    } else if let Value::String(s) = &left_val
+        && prop == "length"
+    {
+        Ok(Value::Number(s.len() as f64))
+    } else {
+        get_primitive_prototype_property(mc, env, &left_val, prop)
+    }
+}
+
+fn evaluate_expr_optional_index<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    lhs: &Expr,
+    index_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let left_val = evaluate_expr(mc, env, lhs)?;
+    if left_val.is_null_or_undefined() {
+        Ok(Value::Undefined)
+    } else {
+        let index_val = evaluate_expr(mc, env, index_expr)?;
+        let prop_key = match index_val {
+            Value::Symbol(s) => PropertyKey::Symbol(s),
+            Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+            val => {
+                let s = match val {
+                    Value::Number(n) => n.to_string(),
+                    Value::Boolean(b) => b.to_string(),
+                    Value::Undefined => "undefined".to_string(),
+                    Value::Null => "null".to_string(),
+                    _ => crate::core::value_to_string(&val),
+                };
+                PropertyKey::String(s)
+            }
+        };
+        if let Value::Object(obj) = &left_val {
+            // Use accessor-aware lookup so getters are invoked
+            let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
+            if !matches!(prop_val, Value::Undefined) {
+                Ok(prop_val)
+            } else {
+                Ok(Value::Undefined)
+            }
+        } else {
+            get_primitive_prototype_property(mc, env, &left_val, &prop_key)
+        }
+    }
+}
+
+fn evaluate_expr_optional_call<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    lhs: &Expr,
+    args: &[Expr],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Handle optional call specially for property/index targets so we can short-circuit
+    // when the base is null/undefined without raising a "Cannot read properties of null or undefined" error.
+    match lhs {
+        Expr::Property(obj_expr, key) => {
+            // Special-case `super.method?.()` semantics: evaluate the property on the
+            // parent prototype without evaluating call arguments, short-circuit to
+            // undefined when absent, and ensure the call receives the correct `this`.
+            if matches!(&**obj_expr, Expr::Super) {
+                // Get the super property (handles getters and accessors)
+                let prop_val = crate::js_class::evaluate_super_computed_property(mc, env, key)?;
+                if matches!(prop_val, Value::Undefined) {
+                    return Ok(Value::Undefined);
+                }
+                // Only evaluate arguments once we know the method exists
+                let eval_args = collect_call_args(mc, env, args)?;
+                // Resolve the current `this` binding for the call.
+                // Prefer any direct `this` binding on the current env (so we
+                // preserve the exact receiver observed by `evaluate_super_computed_property`),
+                // otherwise fall back to the general `evaluate_this` walker.
+                let this_val = if let Some(tv_rc) = crate::core::object_get_key_value(env, "this") {
+                    tv_rc.borrow().clone()
+                } else {
+                    crate::js_class::evaluate_this(mc, env)?
+                };
+                log::trace!("DBG OPT_SUPER_CALL: this_val={:?} prop_val={:?}", this_val, prop_val);
+
+                match prop_val {
+                    Value::Function(name) => {
+                        let env_for_call = if name == "eval" {
+                            let mut t = *env;
+                            while let Some(proto) = t.borrow().prototype {
+                                t = proto;
+                            }
+                            t
+                        } else {
+                            *env
+                        };
+                        let call_env = prepare_call_env_with_this(
+                            mc,
+                            Some(&env_for_call),
+                            Some(&this_val),
+                            None,
+                            &[],
+                            None,
+                            Some(&env_for_call),
+                            None,
+                        )?;
+                        // Dispatch, handling indirect global `eval` marking when necessary.
+                        call_named_eval_or_dispatch(mc, &env_for_call, &call_env, &name, Some(&this_val), &eval_args)
+                    }
+                    Value::Closure(c) => call_closure(mc, &c, Some(&this_val), &eval_args, env, None),
+                    Value::Object(o) => {
+                        let c_e = prepare_call_env_with_this(mc, Some(env), Some(&this_val), None, &[], None, Some(env), Some(o))?;
+                        evaluate_call_dispatch(mc, &c_e, &Value::Object(o), Some(&this_val), &eval_args)
+                    }
+                    _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
+                }
+            } else {
+                let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                if obj_val.is_null_or_undefined() {
+                    return Ok(Value::Undefined);
+                }
+                let eval_args = collect_call_args(mc, env, args)?;
+
+                let f_val = if let Value::Object(obj) = &obj_val {
+                    // Use accessor-aware lookup so getters are executed
+                    let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                    if !matches!(prop_val, Value::Undefined) {
+                        prop_val
+                    } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
+                        Value::Function(key.to_string())
+                    } else {
+                        Value::Undefined
+                    }
+                } else if let Value::String(s) = &obj_val
+                    && key == "length"
+                {
+                    Value::Number(s.len() as f64)
+                } else if matches!(
+                    obj_val,
+                    Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
+                ) && key == "call"
+                {
+                    Value::Function("call".to_string())
+                } else {
+                    get_primitive_prototype_property(mc, env, &obj_val, key)?
+                };
+
+                match f_val {
+                    Value::Function(name) => {
+                        // Optional call invoking `eval` is always an indirect eval — use global env.
+                        let env_for_call = if name == "eval" {
+                            let mut t = *env;
+                            while let Some(proto) = t.borrow().prototype {
+                                t = proto;
+                            }
+                            t
+                        } else {
+                            *env
+                        };
+                        let call_env = prepare_call_env_with_this(
+                            mc,
+                            Some(&env_for_call),
+                            Some(&obj_val),
+                            None,
+                            &[],
+                            None,
+                            Some(&env_for_call),
+                            None,
+                        )?;
+                        // Dispatch, handling indirect global `eval` marking when necessary.
+                        Ok(call_named_eval_or_dispatch(
+                            mc,
+                            &env_for_call,
+                            &call_env,
+                            &name,
+                            Some(&obj_val),
+                            &eval_args,
+                        )?)
+                    }
+                    Value::Closure(c) => call_closure(mc, &c, Some(&obj_val), &eval_args, env, None),
+                    Value::Object(o) => {
+                        let call_env = prepare_call_env_with_this(mc, Some(env), Some(&obj_val), None, &[], None, Some(env), None)?;
+                        evaluate_call_dispatch(mc, &call_env, &Value::Object(o), Some(&obj_val), &eval_args)
+                    }
+                    _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
+                }
+            }
+        }
+        Expr::SuperProperty(prop) => {
+            // Special-case `super.prop?.()` where the parser produces a SuperProperty
+            // node directly (not Property(Super, ...)).
+            let prop_key = (*prop).clone();
+            let prop_val = crate::js_class::evaluate_super_computed_property(mc, env, prop_key)?;
+            if matches!(prop_val, Value::Undefined) {
+                return Ok(Value::Undefined);
+            }
+            // Only evaluate arguments once we know the method exists.
+            let eval_args = collect_call_args(mc, env, args)?;
+            // Resolve the current `this` binding for the call.
+            let this_val = if let Some(tv_rc) = object_get_key_value(env, "this") {
+                tv_rc.borrow().clone()
+            } else {
+                crate::js_class::evaluate_this(mc, env)?
+            };
+
+            match prop_val {
+                Value::Function(name) => {
+                    let env_4_call = if name == "eval" {
+                        let mut t = *env;
+                        while let Some(proto) = t.borrow().prototype {
+                            t = proto;
+                        }
+                        t
+                    } else {
+                        *env
+                    };
+                    let c_e = prepare_call_env_with_this(mc, Some(&env_4_call), Some(&this_val), None, &[], None, Some(&env_4_call), None)?;
+                    if name == "eval" {
+                        let key = PropertyKey::String("__is_indirect_eval".to_string());
+                        object_set_key_value(mc, &env_4_call, &key, &Value::Boolean(true))?;
+                        let res = evaluate_call_dispatch(mc, &c_e, &Value::Function(name.clone()), Some(&this_val), &eval_args);
+                        let _ = env_4_call.borrow_mut(mc).properties.shift_remove(&key);
+                        res
+                    } else {
+                        evaluate_call_dispatch(mc, &c_e, &Value::Function(name.clone()), Some(&this_val), &eval_args)
+                    }
+                }
+                Value::Closure(c) => call_closure(mc, &c, Some(&this_val), &eval_args, env, None),
+                Value::Object(o) => {
+                    let call_env = prepare_call_env_with_this(mc, Some(env), Some(&this_val), None, &[], None, Some(env), Some(o))?;
+                    evaluate_call_dispatch(mc, &call_env, &Value::Object(o), Some(&this_val), &eval_args)
+                }
+                _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
+            }
+        }
+        Expr::Index(obj_expr, index_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if obj_val.is_null_or_undefined() {
+                return Ok(Value::Undefined);
+            }
+
+            let index_val = evaluate_expr(mc, env, index_expr)?;
+            let prop_key = match index_val {
+                Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
+                Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                val => {
+                    let s = match val {
+                        Value::Number(n) => n.to_string(),
+                        Value::Boolean(b) => b.to_string(),
+                        Value::Undefined => "undefined".to_string(),
+                        Value::Null => "null".to_string(),
+                        _ => crate::core::value_to_string(&val),
+                    };
+                    crate::core::PropertyKey::String(s)
+                }
+            };
+
+            let eval_args = collect_call_args(mc, env, args)?;
+
+            let f_val = if let Value::Object(obj) = &obj_val {
+                // Use accessor-aware lookup so getters are invoked
+                let prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
+                if !matches!(prop_val, Value::Undefined) {
+                    prop_val
+                } else {
+                    Value::Undefined
+                }
+            } else {
+                get_primitive_prototype_property(mc, env, &obj_val, &prop_key)?
+            };
+
+            match f_val {
+                Value::Function(name) => {
+                    // Optional call invoking `eval` is always an indirect eval — use global env.
+                    let env_4_call = if name == "eval" {
+                        let mut t = *env;
+                        while let Some(proto) = t.borrow().prototype {
+                            t = proto;
+                        }
+                        t
+                    } else {
+                        *env
+                    };
+                    let c_e = prepare_call_env_with_this(mc, Some(&env_4_call), Some(&obj_val), None, &[], None, Some(&env_4_call), None)?;
+                    Ok(call_named_eval_or_dispatch(
+                        mc,
+                        &env_4_call,
+                        &c_e,
+                        &name,
+                        Some(&obj_val),
+                        &eval_args,
+                    )?)
+                }
+                Value::Closure(c) => call_closure(mc, &c, Some(&obj_val), &eval_args, env, None),
+                Value::Object(o) => {
+                    let call_env = prepare_call_env_with_this(mc, Some(env), Some(&obj_val), None, &[], None, Some(env), None)?;
+                    evaluate_call_dispatch(mc, &call_env, &Value::Object(o), Some(&obj_val), &eval_args)
+                }
+                _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
+            }
+        }
+        _ => {
+            // Fallback: evaluate the lhs; if it throws because of reading properties of null/undefined,
+            // treat it as short-circuit for optional chaining and return undefined.
+            match evaluate_expr(mc, env, lhs) {
+                Ok(left_val) => {
+                    if left_val.is_null_or_undefined() {
+                        Ok(Value::Undefined)
+                    } else {
+                        let eval_args = collect_call_args(mc, env, args)?;
+                        match left_val {
+                            Value::Function(name) => {
+                                // Optional call invoking `eval` is always an indirect eval — use global env.
+                                let e_4_c = if name == "eval" {
+                                    let mut t = *env;
+                                    while let Some(proto) = t.borrow().prototype {
+                                        t = proto;
+                                    }
+                                    t
+                                } else {
+                                    *env
+                                };
+                                let c_e = prepare_call_env_with_this(mc, Some(&e_4_c), None, None, &[], None, Some(&e_4_c), None)?;
+                                Ok(call_named_eval_or_dispatch(mc, &e_4_c, &c_e, &name, None, &eval_args)?)
+                            }
+                            Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None),
+                            Value::Object(o) => {
+                                let call_env = prepare_call_env_with_this(mc, Some(env), None, None, &[], None, Some(env), None)?;
+                                evaluate_call_dispatch(mc, &call_env, &Value::Object(o), None, &eval_args)
+                            }
+                            _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.message() == "Cannot read properties of null or undefined" {
+                        Ok(Value::Undefined)
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, target: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
+    match target {
+        Expr::SuperProperty(_) => {
+            let _ = crate::js_class::evaluate_this(mc, env)?;
+            Err(raise_reference_error!("Cannot delete a super property").into())
+        }
+        Expr::Property(obj_expr, _key) if matches!(&**obj_expr, Expr::Super) => {
+            let _ = crate::js_class::evaluate_this(mc, env)?;
+            Err(raise_reference_error!("Cannot delete a super property").into())
+        }
+        Expr::Index(obj_expr, key_expr) if matches!(&**obj_expr, Expr::Super) => {
+            let _ = crate::js_class::evaluate_this(mc, env)?;
+            let _ = evaluate_expr(mc, env, key_expr)?;
+            Err(raise_reference_error!("Cannot delete a super property").into())
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if obj_val.is_null_or_undefined() {
+                return Err(raise_type_error!("Cannot delete property of null or undefined").into());
+            }
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                // Proxy wrapper: delegate to deleteProperty trap
+                if let Some(proxy_ptr) = get_own_property(&obj, "__proxy__")
+                    && let Value::Proxy(p) = &*proxy_ptr.borrow()
+                {
+                    let deleted = crate::js_proxy::proxy_delete_property(mc, p, &key_val)?;
+                    return Ok(Value::Boolean(deleted));
+                }
+
+                if obj.borrow().non_configurable.contains(&key_val) {
+                    Err(crate::raise_type_error!(format!("Cannot delete non-configurable property '{key}'",)).into())
+                } else {
+                    let _ = obj.borrow_mut(mc).properties.shift_remove(&key_val);
+                    // Deleting a non-existent property returns true per JS semantics
+                    Ok(Value::Boolean(true))
+                }
+            } else {
+                Ok(Value::Boolean(true))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if obj_val.is_null_or_undefined() {
+                return Err(raise_type_error!("Cannot delete property of null or undefined").into());
+            }
+            let key_val_res = evaluate_expr(mc, env, key_expr)?;
+            let key = match &key_val_res {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(s)),
+                Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(*n))),
+                Value::Symbol(s) => PropertyKey::Symbol(*s),
+                _ => PropertyKey::from(value_to_string(&key_val_res)),
+            };
+            if let Value::Object(obj) = obj_val {
+                if obj.borrow().non_configurable.contains(&key) {
+                    Err(crate::raise_type_error!(format!(
+                        "Cannot delete non-configurable property '{}'",
+                        value_to_string(&key_val_res)
+                    ))
+                    .into())
+                } else {
+                    let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
+                    // Deleting a non-existent property returns true per JS semantics
+                    Ok(Value::Boolean(true))
+                }
+            } else {
+                Ok(Value::Boolean(true))
+            }
+        }
+        Expr::Var(name, _, _) => Err(raise_syntax_error!(format!("Delete of an unqualified identifier '{name}' in strict mode",)).into()),
+        _ => {
+            let _ = evaluate_expr(mc, env, target)?;
+            Ok(Value::Boolean(true))
+        }
+    }
+}
+
+fn evaluate_expr_getter<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    func_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = evaluate_expr(mc, env, func_expr)?;
+    let closure = match &val {
+        Value::Object(obj) => {
+            let c_val = obj.borrow().get_closure();
+            if let Some(c_ptr) = c_val {
+                let c_ref = c_ptr.borrow();
+                if let Value::Closure(c) = &*c_ref {
+                    *c
+                } else {
+                    panic!("Getter function missing internal closure (not a closure)");
+                }
+            } else {
+                panic!("Getter function missing internal closure");
+            }
+        }
+        Value::Closure(c) => *c,
+        _ => panic!("Expr::Getter evaluated to invalid value: {:?}", val),
+    };
+    Ok(Value::Getter(
+        closure.body.clone(),
+        closure.env.expect("Getter closure requires env"),
+        None,
+    ))
+}
+
+fn evaluate_expr_setter<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    func_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = evaluate_expr(mc, env, func_expr)?;
+    let closure = match &val {
+        Value::Object(obj) => {
+            let c_val = obj.borrow().get_closure();
+            if let Some(c_ptr) = c_val {
+                let c_ref = c_ptr.borrow();
+                if let Value::Closure(c) = &*c_ref {
+                    *c
+                } else {
+                    panic!("Setter function missing internal closure (not a closure)");
+                }
+            } else {
+                panic!("Setter function missing internal closure");
+            }
+        }
+        Value::Closure(c) => *c,
+        _ => panic!("Expr::Setter evaluated to invalid value: {:?}", val),
+    };
+    Ok(Value::Setter(
+        closure.params.clone(),
+        closure.body.clone(),
+        closure.env.expect("Setter closure requires env"),
+        None,
+    ))
+}
+
+fn evaluate_expr_tagged_template<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    tag_expr: &Expr,
+    strings: &[Vec<u16>],
+    exprs: &[Expr],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Evaluate the tag function
+    let func_val = evaluate_expr(mc, env, tag_expr)?;
+
+    // Create the "segments" (cooked) array and populate it
+    let segments_arr = crate::js_array::create_array(mc, env)?;
+    for (i, s) in strings.iter().enumerate() {
+        object_set_key_value(mc, &segments_arr, i, &Value::String(s.clone()))?;
+    }
+    crate::js_array::set_array_length(mc, &segments_arr, strings.len())?;
+
+    // Create the raw array (use same strings here; raw/cooked handling can be refined later)
+    let raw_arr = crate::js_array::create_array(mc, env)?;
+    for (i, s) in strings.iter().enumerate() {
+        object_set_key_value(mc, &raw_arr, i, &Value::String(s.clone()))?;
+    }
+    crate::js_array::set_array_length(mc, &raw_arr, strings.len())?;
+
+    // Attach raw as a property on segments
+    object_set_key_value(mc, &segments_arr, "raw", &Value::Object(raw_arr))?;
+
+    // Evaluate substitution expressions
+    let mut call_args: Vec<Value<'gc>> = Vec::new();
+    call_args.push(Value::Object(segments_arr));
+    for e in exprs.iter() {
+        let v = evaluate_expr(mc, env, e)?;
+        call_args.push(v);
+    }
+
+    // Call the tag function with 'undefined' as this
+    let res = evaluate_call_dispatch(mc, env, &func_val, Some(&Value::Undefined), &call_args)?;
+    Ok(res)
+}
+
+fn evaluate_expr_async_arrow_function<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    params: &[crate::core::DestructuringElement],
+    body: &[Statement],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Create an async arrow function object which captures the current `this` lexically
+    let func_obj = crate::core::new_js_object_data(mc);
+    // Set __proto__ to Function.prototype
+    if let Some(func_ctor_val) = env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
+    }
+
+    let is_strict = body
+        .first()
+        .map(|s| matches!(&*s.kind, StatementKind::Expr(Expr::StringLit(ss)) if utf16_to_utf8(ss).as_str() == "use strict"))
+        .unwrap_or(false);
+    let closure_data = ClosureData {
+        params: params.to_vec(),
+        body: body.to_vec(),
+        env: Some(*env),
+        bound_this: None,
+        is_arrow: true,
+        is_strict,
+        enforce_strictness_inheritance: true,
+        ..ClosureData::default()
+    };
+    let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
+    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+
+    // Anonymous async arrow functions should expose an own 'name' property
+    // with the empty string as its value and the standard attributes: writable:false,
+    // enumerable:false, configurable:true (per Test262 expectations).
+    let desc = create_descriptor_object(mc, &Value::String(vec![]), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
+
+    // Set 'length' for async arrow functions (number of positional params before first default/rest)
+    let mut fn_length = 0_usize;
+    for p in params.iter() {
+        match p {
+            DestructuringElement::Variable(_, default_opt) => {
+                if default_opt.is_some() {
+                    break;
+                }
+                fn_length += 1;
+            }
+            DestructuringElement::Rest(_) => break,
+            DestructuringElement::NestedArray(..) | DestructuringElement::NestedObject(..) => {
+                fn_length += 1;
+            }
+            DestructuringElement::Empty => {}
+            _ => {}
+        }
+    }
+    let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(fn_length as f64), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
+
+    Ok(Value::Object(func_obj))
+}
+
+fn evaluate_expr_template_string<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    parts: &[crate::core::TemplatePart],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let mut result = Vec::new();
+    for part in parts {
+        match part {
+            crate::core::TemplatePart::String(s) => result.extend(s),
+            crate::core::TemplatePart::Expr(tokens) => {
+                let (expr, _) = crate::core::parse_simple_expression(tokens, 0)?;
+                let val = evaluate_expr(mc, env, &expr)?;
+                // Template strings perform ToString coercion.
+                // Objects are converted via ToPrimitive with hint 'string'.
+                match val {
+                    Value::String(s) => result.extend(s),
+                    Value::Number(n) => result.extend(crate::unicode::utf8_to_utf16(&value_to_string(&Value::Number(n)))),
+                    Value::BigInt(b) => result.extend(crate::unicode::utf8_to_utf16(&b.to_string())),
+                    Value::Boolean(b) => result.extend(crate::unicode::utf8_to_utf16(&b.to_string())),
+                    Value::Undefined => result.extend(crate::unicode::utf8_to_utf16("undefined")),
+                    Value::Null => result.extend(crate::unicode::utf8_to_utf16("null")),
+                    Value::Object(_) => {
+                        // Template strings perform ToString coercion.
+                        // We call toString() explicitly if it exists, otherwise use value_to_string.
+                        let mut s = "[object Object]".to_string();
+                        if let Value::Object(obj) = &val {
+                            if let Some(method_rc) = object_get_key_value(obj, "toString") {
+                                let method_val = method_rc.borrow().clone();
+                                if matches!(
+                                    method_val,
+                                    Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
+                                ) {
+                                    if let Ok(res) = evaluate_call_dispatch(mc, env, &method_val, Some(&val), &Vec::new()) {
+                                        s = crate::core::value_to_string(&res);
+                                    }
+                                } else {
+                                    // Regular ToPrimitive for other objects?
+                                    // The fallback below handles it.
+                                    let prim = crate::core::to_primitive(mc, &val, "string", env)?;
+                                    s = match &prim {
+                                        Value::String(vs) => crate::unicode::utf16_to_utf8(vs),
+                                        _ => value_to_string(&prim),
+                                    };
+                                }
+                            } else {
+                                let prim = crate::core::to_primitive(mc, &val, "string", env)?;
+                                s = match &prim {
+                                    Value::String(vs) => crate::unicode::utf16_to_utf8(vs),
+                                    _ => value_to_string(&prim),
+                                };
+                            }
+                        }
+                        result.extend(crate::unicode::utf8_to_utf16(&s));
+                    }
+                    _ => {
+                        // Fallback to the generic representation
+                        let s = value_to_string(&val);
+                        result.extend(crate::unicode::utf8_to_utf16(&s));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Value::String(result))
+}
+
+fn evaluate_expr_private_member<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_expr: &Expr,
+    key: &str,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let obj_val = if is_optional_chain_expr(obj_expr) {
+        match evaluate_optional_chain_base(mc, env, obj_expr)? {
+            Some(val) => val,
+            None => return Ok(Value::Undefined),
+        }
+    } else {
+        evaluate_expr(mc, env, obj_expr)?
+    };
+    let pv = evaluate_var(mc, env, key)?;
+    if let Value::Object(obj) = &obj_val {
+        if let Value::PrivateName(n, id) = pv {
+            get_property_with_accessors(mc, env, obj, PropertyKey::Private(n, id))
+        } else {
+            Err(raise_syntax_error!(format!("Private field '{}' must be declared in an enclosing class", key)).into())
+        }
+    } else if matches!(obj_val, Value::Undefined | Value::Null) {
+        Err(raise_type_error!("Cannot read properties of null or undefined").into())
+    } else {
+        Err(raise_type_error!("Cannot access private field on non-object").into())
+    }
+}
+
+fn evaluate_expr_optional_private_member<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_expr: &Expr,
+    key: &str,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let obj_val = evaluate_expr(mc, env, obj_expr)?;
+    if obj_val.is_null_or_undefined() {
+        Ok(Value::Undefined)
+    } else if let Value::Object(obj) = &obj_val {
+        let pv = evaluate_var(mc, env, key)?;
+        if let Value::PrivateName(n, id) = pv {
+            get_property_with_accessors(mc, env, obj, PropertyKey::Private(n, id))
+        } else {
+            Err(raise_syntax_error!(format!("Private field '{}' must be declared in an enclosing class", key)).into())
+        }
+    } else {
+        Err(raise_type_error!("Cannot access private field on non-object").into())
     }
 }
 

@@ -125,6 +125,10 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     // Make constructor non-enumerable on the prototype
     string_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
+    // Ensure String.prototype.length exists and is a number (0)
+    let proto_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, false)?;
+    crate::js_object::define_property_internal(mc, &string_proto, "length", &proto_len_desc)?;
+
     env_set(mc, env, "String", &Value::Object(string_ctor))?;
     Ok(())
 }

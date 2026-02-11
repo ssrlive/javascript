@@ -36,17 +36,39 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
         "getTime",
         "valueOf",
         "getFullYear",
+        "getUTCFullYear",
+        "getUTCMonth",
         "getMonth",
+        "getUTCDate",
         "getDate",
+        "getUTCDay",
+        "getDay",
+        "getUTCHours",
         "getHours",
+        "getUTCMinutes",
         "getMinutes",
+        "getUTCSeconds",
         "getSeconds",
+        "getUTCMilliseconds",
         "getMilliseconds",
         "getTimezoneOffset",
-        "getDay",
+        // Setters
         "setFullYear",
-        "setTime",
+        "setUTCFullYear",
+        "setMonth",
+        "setUTCMonth",
         "setDate",
+        "setUTCDate",
+        "setHours",
+        "setUTCHours",
+        "setMinutes",
+        "setUTCMinutes",
+        "setSeconds",
+        "setUTCSeconds",
+        "setMilliseconds",
+        "setUTCMilliseconds",
+        "setTime",
+        // String output helpers
         "toDateString",
         "toTimeString",
         "toISOString",
@@ -70,6 +92,11 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
     object_set_key_value(mc, &date_ctor, "now", &Value::Function("Date.now".to_string()))?;
     object_set_key_value(mc, &date_ctor, "parse", &Value::Function("Date.parse".to_string()))?;
     object_set_key_value(mc, &date_ctor, "UTC", &Value::Function("Date.UTC".to_string()))?;
+    // Ensure Date constructor uses Function.prototype as its internal prototype (if present)
+    if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &date_ctor, env, "Function") {
+        log::warn!("Failed to set Date constructor's internal prototype from Function: {e:?}");
+    }
+
     env_set(mc, env, "Date", &Value::Object(date_ctor))?;
     Ok(())
 }

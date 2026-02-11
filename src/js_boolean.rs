@@ -33,6 +33,12 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     let val = Value::Function("Boolean.prototype.valueOf".to_string());
     object_set_key_value(mc, &boolean_proto, "valueOf", &val)?;
 
+    // Ensure the Boolean constructor object uses Function.prototype as its internal prototype
+    // (Function may have already been initialized).
+    if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &boolean_ctor, env, "Function") {
+        log::warn!("Failed to set Boolean constructor's internal prototype from Function: {e:?}");
+    }
+
     env_set(mc, env, "Boolean", &Value::Object(boolean_ctor))?;
     Ok(())
 }

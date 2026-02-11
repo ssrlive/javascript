@@ -2128,8 +2128,33 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
     // Ensure any native constructors created earlier (e.g., Error, TypeError)
     // get Function.prototype as their internal prototype so `instanceof Function`
-    // behaves correctly.
-    let native_constructors = ["Error", "ReferenceError", "TypeError", "RangeError", "SyntaxError"];
+    // behaves correctly. Also set the constructor objects created before this
+    // point (Object, Array, String, Number, Boolean, etc.) to use
+    // Function.prototype as their internal [[Prototype]] so they inherit
+    // Function.prototype members (e.g., `toString`, `constructor`).
+    let native_constructors = [
+        "Error",
+        "ReferenceError",
+        "TypeError",
+        "RangeError",
+        "SyntaxError",
+        // Common constructors that may have been created prior to initialize_function
+        "Object",
+        "Array",
+        "String",
+        "Number",
+        "Boolean",
+        "RegExp",
+        "Date",
+        "ArrayBuffer",
+        "Map",
+        "Set",
+        "WeakMap",
+        "WeakSet",
+        "Promise",
+        "Function",
+    ];
+
     for name in native_constructors {
         if let Some(ctor_rc) = crate::core::object_get_key_value(env, name)
             && let Value::Object(ctor_obj) = &*ctor_rc.borrow()
@@ -2137,6 +2162,16 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
             ctor_obj.borrow_mut(mc).prototype = Some(func_proto);
         }
     }
+
+    // Ensure Function constructor itself uses Function.prototype for its
+    // internal prototype so that `Function.constructor === Function` and
+    // Function instances see Function.prototype members.
+    func_ctor.borrow_mut(mc).prototype = Some(func_proto);
+
+    // Define Function.prototype.length = 0 so typeof Function.prototype.length
+    // is "number" (some tests expect this).
+    let proto_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, false)?;
+    crate::js_object::define_property_internal(mc, &func_proto, "length", &proto_len_desc)?;
 
     Ok(())
 }

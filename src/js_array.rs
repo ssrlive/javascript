@@ -112,6 +112,10 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         }
     }
 
+    // Set Array.length = 1 (callable arity) so typeof Array.length === "number" per tests
+    let arr_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, false)?;
+    crate::js_object::define_property_internal(mc, &array_ctor, "length", &arr_len_desc)?;
+
     env_set(mc, env, "Array", &Value::Object(array_ctor))?;
     Ok(())
 }

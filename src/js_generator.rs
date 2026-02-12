@@ -31,6 +31,13 @@ fn close_pending_iterator<'gc>(
     Ok(())
 }
 
+fn eval_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
+    match err {
+        EvalError::Throw(v, ..) => v,
+        EvalError::Js(j) => crate::core::js_error_to_value(mc, env, &j),
+    }
+}
+
 fn get_iterator<'gc>(
     mc: &MutationContext<'gc>,
     val: &Value<'gc>,
@@ -40,14 +47,39 @@ fn get_iterator<'gc>(
         && let Value::Object(sym_obj) = &*sym_ctor_val.borrow()
         && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
-        && let Value::Object(o) = val
     {
-        log::debug!(
-            "get_iterator: looking up Symbol.iterator on obj ptr={:p} sym={:?}",
-            Gc::as_ptr(*o),
-            iter_sym
-        );
-        let method = crate::core::get_property_with_accessors(mc, env, o, PropertyKey::Symbol(*iter_sym))?;
+        let method = match val {
+            Value::Object(o) => {
+                log::debug!(
+                    "get_iterator: looking up Symbol.iterator on obj ptr={:p} sym={:?}",
+                    Gc::as_ptr(*o),
+                    iter_sym
+                );
+                crate::core::get_property_with_accessors(mc, env, o, PropertyKey::Symbol(*iter_sym))?
+            }
+            _ => {
+                let proto_name = match val {
+                    Value::BigInt(_) => "BigInt",
+                    Value::Number(_) => "Number",
+                    Value::String(_) => "String",
+                    Value::Boolean(_) => "Boolean",
+                    Value::Symbol(_) => "Symbol",
+                    _ => "",
+                };
+                if proto_name.is_empty() {
+                    Value::Undefined
+                } else if let Some(ctor) = crate::core::env_get(env, proto_name)
+                    && let Value::Object(ctor_obj) = &*ctor.borrow()
+                    && let Some(proto_ref) = object_get_key_value(ctor_obj, "prototype")
+                    && let Value::Object(proto) = &*proto_ref.borrow()
+                    && let Some(method_ref) = object_get_key_value(proto, PropertyKey::Symbol(*iter_sym))
+                {
+                    method_ref.borrow().clone()
+                } else {
+                    Value::Undefined
+                }
+            }
+        };
         log::debug!("get_iterator: method lookup result = {:?}", method);
         if !matches!(method, Value::Undefined | Value::Null) {
             let iter = crate::core::evaluate_call_dispatch(mc, env, &method, Some(val), &[])?;
@@ -487,19 +519,7 @@ pub fn handle_generator_instance_method<'gc>(
         "throw" => {
             // Throw an exception into the generator
             let throw_value = if args.is_empty() { Value::Undefined } else { args[0].clone() };
-
-            // If generator_throw indicates a thrown JS value we should propagate
-            match generator_throw(mc, generator, &throw_value) {
-                Ok(v) => Ok(v),
-                Err(_e) => {
-                    // If the generator threw a JS value, it is represented via "throw_value" already
-                    // generator_throw returns a JSError for thrown values via raise_throw_error, but to preserve
-                    // the original thrown JS value we convert to EvalError::Throw with the original value here.
-                    // Inspect e.kind to detect Throw; but since generator_throw was passed the actual thrown value
-                    // we can simply propagate it.
-                    Err(crate::core::js_error::EvalError::Throw(throw_value, None, None))
-                }
-            }
+            generator_throw(mc, generator, &throw_value)
         }
         _ => Err(raise_eval_error!(format!("Generator.prototype.{} is not implemented", method)).into()),
     }
@@ -523,7 +543,7 @@ fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool)
         Expr::YieldStar(inner) => {
             let new_inner = Box::new(replace_first_yield_in_expr(inner, var_name, replaced));
             if *replaced {
-                *new_inner
+                Expr::YieldStar(new_inner)
             } else {
                 log::trace!(
                     "replace_first_yield_in_expr: Replacing YieldStar {:?} with var='{}'",
@@ -1711,28 +1731,53 @@ pub fn generator_next<'gc>(
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => {
                             if matches!(yield_kind, YieldKind::YieldStar) {
-                                let iterator = get_iterator(mc, &val, &func_env)?;
-                                let next_method = crate::core::get_property_with_accessors(mc, &func_env, &iterator, "next")?;
-                                let iter_res = evaluate_call_dispatch(mc, &func_env, &next_method, Some(&Value::Object(iterator)), &[])?;
+                                let delegated = (|| -> Result<Value<'gc>, EvalError<'gc>> {
+                                    let iterator = get_iterator(mc, &val, &func_env)?;
+                                    let next_method = crate::core::get_property_with_accessors(mc, &func_env, &iterator, "next")?;
+                                    let iter_res = evaluate_call_dispatch(
+                                        mc,
+                                        &func_env,
+                                        &next_method,
+                                        Some(&Value::Object(iterator)),
+                                        std::slice::from_ref(&Value::Undefined),
+                                    )?;
 
-                                if let Value::Object(res_obj) = iter_res {
-                                    // Use accessor-aware reads for 'done' and 'value' per spec so getters
-                                    // on the iterator result may throw and side-effects are observed.
-                                    let done_val = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "done")?;
-                                    let done = matches!(done_val, Value::Boolean(true));
-                                    let value = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "value")?;
+                                    if let Value::Object(res_obj) = iter_res {
+                                        // Use accessor-aware reads for 'done' and 'value' per spec so getters
+                                        // on the iterator result may throw and side-effects are observed.
+                                        let done_val = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "done")?;
+                                        let done = done_val.to_truthy();
 
-                                    if !done {
-                                        gen_obj.yield_star_iterator = Some(iterator);
-                                        gen_obj.cached_initial_yield = Some(value.clone());
-                                        return Ok(create_iterator_result(mc, &value, false)?);
+                                        if !done {
+                                            gen_obj.yield_star_iterator = Some(iterator);
+                                            let yielded = if let Some(v) = object_get_key_value(&res_obj, "value") {
+                                                v.borrow().clone()
+                                            } else {
+                                                Value::Undefined
+                                            };
+                                            gen_obj.cached_initial_yield = Some(yielded.clone());
+                                            return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                                        }
+                                        let value = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "value")?;
+                                        Ok(value)
                                     } else {
-                                        // Done immediately. Recurse with done value.
-                                        drop(gen_obj);
-                                        return generator_next(mc, generator, &value);
+                                        Err(raise_type_error!("Iterator result is not an object").into())
                                     }
-                                } else {
-                                    return Err(raise_type_error!("Iterator result is not an object").into());
+                                })();
+
+                                match delegated {
+                                    Ok(v) => {
+                                        if let Some(_iter) = gen_obj.yield_star_iterator {
+                                            return Ok(v);
+                                        }
+                                        drop(gen_obj);
+                                        return generator_next(mc, generator, &v);
+                                    }
+                                    Err(e) => {
+                                        let throw_val = eval_error_to_value(mc, &func_env, e);
+                                        drop(gen_obj);
+                                        return generator_throw(mc, generator, &throw_val);
+                                    }
                                 }
                             }
 
@@ -1740,7 +1785,11 @@ pub fn generator_next<'gc>(
                             gen_obj.cached_initial_yield = Some(val.clone());
                             return Ok(create_iterator_result(mc, &val, false)?);
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            let throw_val = eval_error_to_value(mc, &func_env, e);
+                            drop(gen_obj);
+                            return generator_throw(mc, generator, &throw_val);
+                        }
                     }
                 }
 
@@ -1884,8 +1933,7 @@ pub fn generator_next<'gc>(
                     // Use accessor-aware reads for 'done' and 'value' per spec so getters
                     // on the iterator result may throw and side-effects are observed.
                     let done_val = crate::core::get_property_with_accessors(mc, &gen_obj.env, &res_obj, "done")?;
-                    let done = matches!(done_val, Value::Boolean(true));
-                    let value = crate::core::get_property_with_accessors(mc, &gen_obj.env, &res_obj, "value")?;
+                    let done = done_val.to_truthy();
 
                     if !done {
                         gen_obj.state = GeneratorState::Suspended {
@@ -1893,8 +1941,14 @@ pub fn generator_next<'gc>(
                             stack: vec![],
                             pre_env,
                         };
-                        return Ok(create_iterator_result(mc, &value, false)?);
+                        let yielded = if let Some(v) = object_get_key_value(&res_obj, "value") {
+                            v.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
                     } else {
+                        let value = crate::core::get_property_with_accessors(mc, &gen_obj.env, &res_obj, "value")?;
                         gen_obj.yield_star_iterator = None;
                         gen_obj.state = GeneratorState::Suspended {
                             pc,
@@ -1921,6 +1975,15 @@ pub fn generator_next<'gc>(
                 gen_obj.state = GeneratorState::Completed;
                 return Ok(create_iterator_result(mc, &Value::Undefined, true)?);
             }
+            let mut for_stmt_snapshot = if let Some(stmt) = gen_obj.body.get(pc_val) {
+                if matches!(&*stmt.kind, StatementKind::For(_)) {
+                    Some(stmt.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             // Create a base name for yield variables for this PC; replace ALL yield
             // occurrences in the containing top-level statement with distinct
             // temporary variables so nested yields are placeholders for later
@@ -1934,6 +1997,45 @@ pub fn generator_next<'gc>(
             } else {
                 prepare_function_call_env(mc, Some(&gen_obj.env), gen_obj.this_val.clone().as_ref(), None, &[], None, None)?
             };
+
+            if let Some(stmt) = gen_obj.body.get_mut(pc_val)
+                && let StatementKind::For(for_stmt) = stmt.kind.as_mut()
+                && for_stmt.body.len() == 1
+                && let StatementKind::Expr(Expr::Yield(yield_inner_opt)) = &*for_stmt.body[0].kind
+            {
+                if let Some(init_stmt) = for_stmt.init.clone() {
+                    if for_init_needs_execution(&func_env, &init_stmt) {
+                        crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(&init_stmt))?;
+                    }
+                    for_stmt.init = None;
+                }
+
+                if let Some(update_stmt) = &for_stmt.update {
+                    crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(update_stmt))?;
+                }
+
+                if let Some(test_expr) = &for_stmt.test {
+                    let test_val = crate::core::evaluate_expr(mc, &func_env, test_expr)?;
+                    if !test_val.to_truthy() {
+                        gen_obj.state = GeneratorState::Completed;
+                        return Ok(create_iterator_result(mc, &Value::Undefined, true)?);
+                    }
+                }
+
+                let yielded = if let Some(inner_expr) = yield_inner_opt {
+                    crate::core::evaluate_expr(mc, &func_env, inner_expr)?
+                } else {
+                    Value::Undefined
+                };
+
+                gen_obj.state = GeneratorState::Suspended {
+                    pc: pc_val,
+                    stack: vec![],
+                    pre_env: Some(func_env),
+                };
+                gen_obj.cached_initial_yield = Some(yielded.clone());
+                return Ok(create_iterator_result(mc, &yielded, false)?);
+            }
 
             // Special-case: precompute conditional branch inner yield's operand
             // value so we can return it now while still installing placeholders
@@ -2351,6 +2453,11 @@ pub fn generator_next<'gc>(
                             {
                                 body_for_stmt.init = None;
                             }
+                            if let Some(snapshot_stmt) = for_stmt_snapshot.as_mut()
+                                && let StatementKind::For(snapshot_for_stmt) = snapshot_stmt.kind.as_mut()
+                            {
+                                snapshot_for_stmt.init = None;
+                            }
                         }
 
                         if let Some(inner_idx) = inner_idx_opt
@@ -2423,7 +2530,11 @@ pub fn generator_next<'gc>(
                                         gen_obj.cached_initial_yield = Some(val.clone());
                                         return Ok(create_iterator_result(mc, &val, false)?);
                                     }
-                                    Err(e) => return Err(e),
+                                    Err(e) => {
+                                        let throw_val = eval_error_to_value(mc, &func_env, e);
+                                        drop(gen_obj);
+                                        return generator_throw(mc, generator, &throw_val);
+                                    }
                                 }
                             } else {
                                 // Chosen branch contains a bare `yield` (no inner expr). Install
@@ -2470,10 +2581,71 @@ pub fn generator_next<'gc>(
                     );
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => {
+                            if matches!(yield_kind, YieldKind::YieldStar) {
+                                let delegated = (|| -> Result<Value<'gc>, EvalError<'gc>> {
+                                    let iterator = get_iterator(mc, &val, &func_env)?;
+                                    let next_method = crate::core::get_property_with_accessors(mc, &func_env, &iterator, "next")?;
+                                    let iter_res = evaluate_call_dispatch(
+                                        mc,
+                                        &func_env,
+                                        &next_method,
+                                        Some(&Value::Object(iterator)),
+                                        std::slice::from_ref(&Value::Undefined),
+                                    )?;
+
+                                    if let Value::Object(res_obj) = iter_res {
+                                        let done_val = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "done")?;
+                                        let done = done_val.to_truthy();
+
+                                        if !done {
+                                            gen_obj.yield_star_iterator = Some(iterator);
+                                            let yielded = if let Some(v) = object_get_key_value(&res_obj, "value") {
+                                                v.borrow().clone()
+                                            } else {
+                                                Value::Undefined
+                                            };
+                                            gen_obj.cached_initial_yield = Some(yielded.clone());
+                                            return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                                        }
+
+                                        let value = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "value")?;
+                                        Ok(value)
+                                    } else {
+                                        Err(raise_type_error!("Iterator result is not an object").into())
+                                    }
+                                })();
+
+                                match delegated {
+                                    Ok(v) => {
+                                        if let Some(_iter) = gen_obj.yield_star_iterator {
+                                            return Ok(v);
+                                        }
+                                        drop(gen_obj);
+                                        return generator_next(mc, generator, &v);
+                                    }
+                                    Err(e) => {
+                                        let throw_val = eval_error_to_value(mc, &func_env, e);
+                                        drop(gen_obj);
+                                        return generator_throw(mc, generator, &throw_val);
+                                    }
+                                }
+                            }
+
+                            if idx == 0
+                                && let Some(snapshot_stmt) = for_stmt_snapshot.clone()
+                                && let Some(body_stmt) = gen_obj.body.get_mut(pc_val)
+                                && matches!(&*body_stmt.kind, StatementKind::For(_))
+                            {
+                                *body_stmt = snapshot_stmt;
+                            }
                             gen_obj.cached_initial_yield = Some(val.clone());
                             return Ok(create_iterator_result(mc, &val, false)?);
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            let throw_val = eval_error_to_value(mc, &func_env, e);
+                            drop(gen_obj);
+                            return generator_throw(mc, generator, &throw_val);
+                        }
                     }
                 }
 
@@ -2497,12 +2669,159 @@ pub fn generator_next<'gc>(
 }
 
 /// Execute generator.return()
+fn resume_with_return_completion<'gc>(
+    mc: &MutationContext<'gc>,
+    generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
+    return_value: &Value<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let mut gen_obj = generator.borrow_mut(mc);
+    match &mut gen_obj.state {
+        GeneratorState::NotStarted | GeneratorState::Completed => {
+            gen_obj.state = GeneratorState::Completed;
+            Ok(create_iterator_result(mc, return_value, true)?)
+        }
+        GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running").into()),
+        GeneratorState::Suspended { pc, .. } => {
+            let pc_val = *pc;
+            if pc_val >= gen_obj.body.len() {
+                gen_obj.state = GeneratorState::Completed;
+                return Ok(create_iterator_result(mc, return_value, true)?);
+            }
+
+            let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
+            let tail_before = tail.clone();
+
+            let mut replaced = false;
+            for s in tail.iter_mut() {
+                if replace_first_yield_statement_with_return(s) {
+                    replaced = true;
+                    break;
+                }
+            }
+            if !replaced {
+                tail[0] = StatementKind::Return(Some(Expr::Var("__gen_throw_val".to_string(), None, None))).into();
+            }
+
+            let func_env = if let GeneratorState::Suspended { pre_env: Some(env), .. } = &gen_obj.state {
+                *env
+            } else {
+                prepare_function_call_env(mc, Some(&gen_obj.env), gen_obj.this_val.clone().as_ref(), None, &[], None, None)?
+            };
+
+            if let Some((idx, inner_idx_opt, _yield_kind, _yield_inner)) = find_first_yield_in_statements(&tail_before) {
+                if idx > 0 {
+                    let pre_stmts = tail_before[0..idx].to_vec();
+                    crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                } else if let Some(inner_idx) = inner_idx_opt
+                    && inner_idx > 0
+                    && let StatementKind::Block(inner_stmts) = &*tail_before[idx].kind
+                {
+                    let pre_stmts = inner_stmts[0..inner_idx].to_vec();
+                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                }
+            }
+
+            object_set_key_value(mc, &func_env, "__gen_throw_val", return_value)?;
+            let result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tail, &[]);
+            gen_obj.state = GeneratorState::Completed;
+
+            match result {
+                Ok((cf, _last)) => match cf {
+                    crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &v, true)?),
+                    crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &Value::Undefined, true)?),
+                    crate::core::ControlFlow::Throw(v, l, c) => Err(crate::core::EvalError::Throw(v, l, c)),
+                    _ => Err(raise_eval_error!("Unexpected control flow after generator return handling").into()),
+                },
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
 fn generator_return<'gc>(
     mc: &MutationContext<'gc>,
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     return_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut gen_obj = generator.borrow_mut(mc);
+    if let Some(iter_obj) = gen_obj.yield_star_iterator {
+        let ret_method = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &iter_obj, "return") {
+            Ok(v) => v,
+            Err(e) => {
+                gen_obj.yield_star_iterator = None;
+                let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                drop(gen_obj);
+                return generator_throw(mc, generator, &throw_val);
+            }
+        };
+
+        if matches!(ret_method, Value::Undefined | Value::Null) {
+            gen_obj.yield_star_iterator = None;
+            drop(gen_obj);
+            return resume_with_return_completion(mc, generator, return_value);
+        }
+
+        let ret_res = match crate::core::evaluate_call_dispatch(
+            mc,
+            &gen_obj.env,
+            &ret_method,
+            Some(&Value::Object(iter_obj)),
+            std::slice::from_ref(return_value),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                gen_obj.yield_star_iterator = None;
+                let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                drop(gen_obj);
+                return generator_throw(mc, generator, &throw_val);
+            }
+        };
+
+        let ret_obj = match ret_res {
+            Value::Object(o) => o,
+            _ => {
+                gen_obj.yield_star_iterator = None;
+                let throw_val = eval_error_to_value(
+                    mc,
+                    &gen_obj.env,
+                    raise_type_error!("Iterator return did not return an object").into(),
+                );
+                drop(gen_obj);
+                return generator_throw(mc, generator, &throw_val);
+            }
+        };
+        let done_val = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &ret_obj, "done") {
+            Ok(v) => v,
+            Err(e) => {
+                gen_obj.yield_star_iterator = None;
+                let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                drop(gen_obj);
+                return generator_throw(mc, generator, &throw_val);
+            }
+        };
+        let done = done_val.to_truthy();
+        if done {
+            let value = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &ret_obj, "value") {
+                Ok(v) => v,
+                Err(e) => {
+                    gen_obj.yield_star_iterator = None;
+                    let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                    drop(gen_obj);
+                    return generator_throw(mc, generator, &throw_val);
+                }
+            };
+            gen_obj.yield_star_iterator = None;
+            drop(gen_obj);
+            return resume_with_return_completion(mc, generator, &value);
+        }
+        let value = if let Some(v) = object_get_key_value(&ret_obj, "value") {
+            v.borrow().clone()
+        } else {
+            Value::Undefined
+        };
+        return Ok(create_iterator_result_with_done(mc, &value, &done_val)?);
+    }
+
     if let Some(iter_obj) = gen_obj.pending_iterator {
         if !gen_obj.pending_iterator_done {
             close_pending_iterator(mc, &gen_obj.env, &iter_obj)?;
@@ -2521,6 +2840,120 @@ pub fn generator_throw<'gc>(
     throw_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut gen_obj = generator.borrow_mut(mc);
+
+    if let Some(iter_obj) = gen_obj.yield_star_iterator {
+        let throw_method = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &iter_obj, "throw") {
+            Ok(v) => v,
+            Err(e) => {
+                gen_obj.yield_star_iterator = None;
+                let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                drop(gen_obj);
+                return generator_throw(mc, generator, &throw_val);
+            }
+        };
+        if matches!(throw_method, Value::Undefined | Value::Null) {
+            let return_method = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &iter_obj, "return") {
+                Ok(v) => v,
+                Err(e) => {
+                    gen_obj.yield_star_iterator = None;
+                    let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                    drop(gen_obj);
+                    return generator_throw(mc, generator, &throw_val);
+                }
+            };
+            if !matches!(return_method, Value::Undefined | Value::Null) {
+                let return_res = crate::core::evaluate_call_dispatch(mc, &gen_obj.env, &return_method, Some(&Value::Object(iter_obj)), &[]);
+                match return_res {
+                    Ok(Value::Object(_)) => {}
+                    Ok(_) => {
+                        gen_obj.yield_star_iterator = None;
+                        let throw_val = eval_error_to_value(
+                            mc,
+                            &gen_obj.env,
+                            raise_type_error!("Iterator return did not return an object").into(),
+                        );
+                        drop(gen_obj);
+                        return generator_throw(mc, generator, &throw_val);
+                    }
+                    Err(e) => {
+                        gen_obj.yield_star_iterator = None;
+                        let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                        drop(gen_obj);
+                        return generator_throw(mc, generator, &throw_val);
+                    }
+                }
+            }
+            gen_obj.yield_star_iterator = None;
+            let throw_val = eval_error_to_value(
+                mc,
+                &gen_obj.env,
+                raise_type_error!("Iterator does not provide a throw method").into(),
+            );
+            drop(gen_obj);
+            return generator_throw(mc, generator, &throw_val);
+        }
+
+        let throw_res = crate::core::evaluate_call_dispatch(
+            mc,
+            &gen_obj.env,
+            &throw_method,
+            Some(&Value::Object(iter_obj)),
+            std::slice::from_ref(throw_value),
+        );
+        let throw_res = match throw_res {
+            Ok(v) => v,
+            Err(e) => {
+                gen_obj.yield_star_iterator = None;
+                let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                drop(gen_obj);
+                return generator_throw(mc, generator, &throw_val);
+            }
+        };
+        let throw_obj = match throw_res {
+            Value::Object(o) => o,
+            _ => {
+                gen_obj.yield_star_iterator = None;
+                let throw_val = eval_error_to_value(
+                    mc,
+                    &gen_obj.env,
+                    raise_type_error!("Iterator throw did not return an object").into(),
+                );
+                drop(gen_obj);
+                return generator_throw(mc, generator, &throw_val);
+            }
+        };
+        let done_val = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &throw_obj, "done") {
+            Ok(v) => v,
+            Err(e) => {
+                gen_obj.yield_star_iterator = None;
+                let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                drop(gen_obj);
+                return generator_throw(mc, generator, &throw_val);
+            }
+        };
+        let done = done_val.to_truthy();
+        if done {
+            let value = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &throw_obj, "value") {
+                Ok(v) => v,
+                Err(e) => {
+                    gen_obj.yield_star_iterator = None;
+                    let throw_val = eval_error_to_value(mc, &gen_obj.env, e);
+                    drop(gen_obj);
+                    return generator_throw(mc, generator, &throw_val);
+                }
+            };
+            gen_obj.yield_star_iterator = None;
+            drop(gen_obj);
+            return generator_next(mc, generator, &value);
+        }
+        let value = if let Some(v) = object_get_key_value(&throw_obj, "value") {
+            v.borrow().clone()
+        } else {
+            Value::Undefined
+        };
+        return Ok(create_iterator_result_with_done(mc, &value, &done_val)?);
+    }
+
     match &mut gen_obj.state {
         GeneratorState::NotStarted => {
             // Throwing into a not-started generator throws synchronously
@@ -2597,7 +3030,7 @@ pub fn generator_throw<'gc>(
                 func_home,
                 Gc::as_ptr(*generator)
             );
-            let result = crate::core::evaluate_statements(mc, &func_env, &tail);
+            let result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tail, &[]);
             // Don't blindly set Completed; check if it returned from a yield or completion
             // NOTE: Current implementation of evaluate_statements does not support Yield.
             // If the generator contains subsequent yields, evaluate_statements may fail.
@@ -2606,7 +3039,12 @@ pub fn generator_throw<'gc>(
             gen_obj.state = GeneratorState::Completed;
 
             match result {
-                Ok(val) => Ok(create_iterator_result(mc, &val, true)?),
+                Ok((cf, _last)) => match cf {
+                    crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &v, true)?),
+                    crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &Value::Undefined, true)?),
+                    crate::core::ControlFlow::Throw(v, l, c) => Err(crate::core::EvalError::Throw(v, l, c)),
+                    _ => Err(raise_eval_error!("Unexpected control flow after generator throw handling").into()),
+                },
                 Err(e) => Err(e),
             }
         }
@@ -2629,6 +3067,17 @@ fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: &Value<'gc>, do
     // Set done property
     object_set_key_value(mc, &obj, "done", &Value::Boolean(done))?;
 
+    Ok(Value::Object(obj))
+}
+
+fn create_iterator_result_with_done<'gc>(
+    mc: &MutationContext<'gc>,
+    value: &Value<'gc>,
+    done_value: &Value<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    let obj = crate::core::new_js_object_data(mc);
+    object_set_key_value(mc, &obj, "value", value)?;
+    object_set_key_value(mc, &obj, "done", done_value)?;
     Ok(Value::Object(obj))
 }
 

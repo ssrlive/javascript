@@ -10596,6 +10596,11 @@ pub fn evaluate_call_dispatch<'gc>(
                     Value::String(name) => {
                         if name == &crate::unicode::utf8_to_utf16("Object") {
                             Ok(crate::js_class::handle_object_constructor(mc, eval_args, env)?)
+                        } else if name == &crate::unicode::utf8_to_utf16("Date") {
+                            let date_obj = crate::js_date::handle_date_constructor(mc, eval_args, env)?;
+                            crate::js_date::handle_date_method(mc, &date_obj, "toString", &[], env)
+                        } else if name == &crate::unicode::utf8_to_utf16("RegExp") {
+                            Ok(crate::js_regexp::handle_regexp_constructor(mc, eval_args)?)
                         } else if name == &crate::unicode::utf8_to_utf16("String") {
                             Ok(crate::js_string::string_constructor(mc, eval_args, env)?)
                         } else if name == &crate::unicode::utf8_to_utf16("Boolean") {
@@ -13806,6 +13811,37 @@ fn evaluate_expr_class<'gc>(
     }
 }
 
+fn is_callable_for_typeof<'gc>(value: &Value<'gc>) -> bool {
+    match value {
+        Value::Function(_)
+        | Value::Closure(_)
+        | Value::AsyncClosure(_)
+        | Value::GeneratorFunction(..)
+        | Value::AsyncGeneratorFunction(..)
+        | Value::ClassDefinition(_)
+        | Value::Getter(..)
+        | Value::Setter(..) => true,
+        Value::Proxy(proxy) => is_callable_for_typeof(&proxy.target),
+        Value::Object(obj) => {
+            if obj.borrow().get_closure().is_some() {
+                return true;
+            }
+            if let Some(proxy_cell) = object_get_key_value(obj, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+            {
+                return is_callable_for_typeof(&proxy.target);
+            }
+            if let Some(is_ctor) = object_get_key_value(obj, "__is_constructor")
+                && matches!(*is_ctor.borrow(), Value::Boolean(true))
+            {
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn evaluate_expr_typeof<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     // typeof has special semantics: if the evaluation of the operand throws a
     // ReferenceError due to an *unresolvable* reference (identifier not found),
@@ -13821,7 +13857,7 @@ fn evaluate_expr_typeof<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                     // If this is a ReferenceError for an unresolvable reference ("is not defined"),
                     // treat it as undefined. Otherwise rethrow the error (propagate it).
                     let msg = js_err.message();
-                    if msg.ends_with(" is not defined") {
+                    if matches!(expr, Expr::Var(..)) && msg.ends_with(" is not defined") {
                         Value::Undefined
                     } else {
                         return Err(EvalError::Js(js_err));
@@ -13849,15 +13885,9 @@ fn evaluate_expr_typeof<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         | Value::ClassDefinition(_)
         | Value::Getter(..)
         | Value::Setter(..) => "function",
-        Value::Object(obj) => {
-            if obj.borrow().get_closure().is_some() {
+        Value::Object(_) | Value::Proxy(_) => {
+            if is_callable_for_typeof(&val) {
                 "function"
-            } else if let Some(is_ctor) = object_get_key_value(&obj, "__is_constructor") {
-                if matches!(*is_ctor.borrow(), Value::Boolean(true)) {
-                    "function"
-                } else {
-                    "object"
-                }
             } else {
                 "object"
             }

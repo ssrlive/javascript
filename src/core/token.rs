@@ -262,17 +262,75 @@ pub enum TemplatePart {
 }
 
 fn parse_template_literal_chunk(chars: &[char], start: usize, end: usize) -> (Option<Vec<u16>>, Vec<u16>) {
-    let raw_str: String = chars[start..end].iter().collect();
-    let raw_utf16: Vec<u16> = raw_str.encode_utf16().collect();
+    // Compute raw via TRV rules for LineTerminatorSequence: CR and CRLF map to LF.
+    let mut raw_utf16: Vec<u16> = Vec::new();
+    let mut r = start;
+    while r < end {
+        match chars[r] {
+            '\r' => {
+                raw_utf16.push('\n' as u16);
+                if r + 1 < end && chars[r + 1] == '\n' {
+                    r += 2;
+                } else {
+                    r += 1;
+                }
+            }
+            '\n' => {
+                raw_utf16.push('\n' as u16);
+                r += 1;
+            }
+            '\u{2028}' => {
+                raw_utf16.push(0x2028);
+                r += 1;
+            }
+            '\u{2029}' => {
+                raw_utf16.push(0x2029);
+                r += 1;
+            }
+            ch => {
+                raw_utf16.extend(ch.to_string().encode_utf16());
+                r += 1;
+            }
+        }
+    }
 
+    // Compute cooked; invalid escapes yield cooked=None for tagged templates.
     let mut cooked_utf16: Vec<u16> = Vec::new();
     let mut i = start;
     while i < end {
         let ch = chars[i];
-        if ch != '\\' {
-            for cu in ch.to_string().encode_utf16() {
-                cooked_utf16.push(cu);
+
+        // TemplateCharacter :: LineTerminatorSequence uses TRV normalization.
+        match ch {
+            '\r' => {
+                cooked_utf16.push('\n' as u16);
+                if i + 1 < end && chars[i + 1] == '\n' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
             }
+            '\n' => {
+                cooked_utf16.push('\n' as u16);
+                i += 1;
+                continue;
+            }
+            '\u{2028}' => {
+                cooked_utf16.push(0x2028);
+                i += 1;
+                continue;
+            }
+            '\u{2029}' => {
+                cooked_utf16.push(0x2029);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if ch != '\\' {
+            cooked_utf16.extend(ch.to_string().encode_utf16());
             i += 1;
             continue;
         }
@@ -284,7 +342,7 @@ fn parse_template_literal_chunk(chars: &[char], start: usize, end: usize) -> (Op
         }
         let esc = chars[i];
         match esc {
-            // Line continuation
+            // Line continuation: cooked contributes empty.
             '\n' | '\u{2028}' | '\u{2029}' => {
                 i += 1;
                 continue;
@@ -349,11 +407,7 @@ fn parse_template_literal_chunk(chars: &[char], start: usize, end: usize) -> (Op
                         return (None, raw_utf16);
                     }
                     match u32::from_str_radix(&hex, 16).ok().and_then(std::char::from_u32) {
-                        Some(cp) => {
-                            for cu in cp.to_string().encode_utf16() {
-                                cooked_utf16.push(cu);
-                            }
-                        }
+                        Some(cp) => cooked_utf16.extend(cp.to_string().encode_utf16()),
                         None => return (None, raw_utf16),
                     }
                     i = j; // move to '}'
@@ -374,12 +428,7 @@ fn parse_template_literal_chunk(chars: &[char], start: usize, end: usize) -> (Op
                     i += 4;
                 }
             }
-            other => {
-                // Unknown escape sequence: keep the character (like string literals)
-                for cu in other.to_string().encode_utf16() {
-                    cooked_utf16.push(cu);
-                }
-            }
+            other => cooked_utf16.extend(other.to_string().encode_utf16()),
         }
         i += 1;
     }

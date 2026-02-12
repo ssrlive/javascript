@@ -71,7 +71,14 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
                     .map(|n| n as f64)
                     .map_err(|_| raise_range_error!("Invalid number").into());
             }
-            Ok(trimmed.parse::<f64>().unwrap_or(f64::NAN))
+            let parsed = trimmed.parse::<f64>().unwrap_or(f64::NAN);
+            if parsed.is_infinite() {
+                return Ok(match trimmed {
+                    "Infinity" | "+Infinity" | "-Infinity" => parsed,
+                    _ => f64::NAN,
+                });
+            }
+            Ok(parsed)
         }
         Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a number").into()),
         Value::Object(_) => Err(raise_type_error!("Cannot convert object to number without context").into()),

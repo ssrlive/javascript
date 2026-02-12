@@ -19,12 +19,16 @@ fn test_reflect_construct_with_new_target_parameter() {
     let script = r#"
         class A { constructor(v) { this.v = v } full() { return this.v; } }
         class B {}
-        // newTarget is provided (B) but engine currently ignores it; construction should still succeed
+        // When `newTarget` is provided, the constructed object's prototype is `newTarget.prototype`.
+        // The target constructor body still runs and initializes `this`.
         let o = Reflect.construct(A, [42], B);
-        o.full();
+        (o.v === 42)
+          && (Object.getPrototypeOf(o) === B.prototype)
+          && (o instanceof B)
+          && !(o instanceof A);
     "#;
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
-    assert_eq!(v, "42");
+    assert_eq!(v, "true");
 }
 
 #[test]

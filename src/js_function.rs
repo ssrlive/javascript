@@ -947,11 +947,27 @@ fn function_constructor<'gc>(
     let mut index = 0;
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
-    // Find global environment (Function constructor always creates functions in global scope)
-    let mut global_env = *env;
+    // Find global environment (Function constructor always creates functions in global scope).
+    // If the call site provided an object `this` binding, prefer it as the
+    // realm-global root for constructor-created functions.
+    let mut global_env = if let Some(this_rc) = crate::core::env_get(env, "this") {
+        match &*this_rc.borrow() {
+            Value::Object(o) => *o,
+            _ => *env,
+        }
+    } else {
+        *env
+    };
     while let Some(proto) = global_env.borrow().prototype {
         global_env = proto;
     }
+
+    // DIAG: log resolved global environment for functions created by the Function constructor
+    log::warn!(
+        "function_constructor: chosen global_env ptr={:p} (call env ptr={:p})",
+        Gc::as_ptr(global_env),
+        Gc::as_ptr(*env)
+    );
 
     if let Some(Statement { kind, .. }) = stmts.first() {
         if let StatementKind::FunctionDeclaration(_n, params, body, _i, _a) = &**kind {
@@ -963,8 +979,8 @@ fn function_constructor<'gc>(
 
             // Create a function object wrapper so it has a proper `prototype` and property attributes
             let func_obj = crate::core::new_js_object_data(mc);
-            // Set __proto__ to Function.prototype if available
-            if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+            // Set __proto__ to Function.prototype from the selected realm
+            if let Some(func_ctor_val) = crate::core::env_get(&global_env, "Function")
                 && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
                 && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
                 && let Value::Object(proto) = &*proto_val.borrow()
@@ -973,6 +989,10 @@ fn function_constructor<'gc>(
             }
 
             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+
+            // Record origin global so callers can trace which realm this function was created in
+            object_set_key_value(mc, &func_obj, "__origin_global", &Value::Object(global_env))?;
+            func_obj.borrow_mut(mc).set_non_enumerable("__origin_global");
 
             // Set name as anonymous for Function constructor-produced functions
             object_set_key_value(mc, &func_obj, "name", &Value::String(crate::unicode::utf8_to_utf16("")))?;
@@ -986,12 +1006,16 @@ fn function_constructor<'gc>(
 
             // Create prototype object and attach
             let proto_obj = crate::core::new_js_object_data(mc);
-            if let Some(obj_val) = crate::core::env_get(env, "Object")
+            if let Some(obj_val) = crate::core::env_get(&global_env, "Object")
                 && let Value::Object(obj_ctor) = &*obj_val.borrow()
                 && let Some(obj_proto_val) = crate::core::object_get_key_value(obj_ctor, "prototype")
                 && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
             {
                 proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+                log::warn!(
+                    "function_constructor: Object.prototype ptr used for new function proto = {:p}",
+                    Gc::as_ptr(*obj_proto)
+                );
             }
             let desc_ctor = crate::core::create_descriptor_object(mc, &Value::Object(func_obj), true, false, true)?;
             crate::js_object::define_property_internal(mc, &proto_obj, "constructor", &desc_ctor)?;

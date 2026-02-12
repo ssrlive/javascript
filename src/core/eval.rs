@@ -446,12 +446,6 @@ fn bind_object_inner_for_letconst<'gc>(
                     if let Some(proxy_cell) = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        println!(
-                            "TRACE: bind_object_inner_for_letconst Rest: obj_ptr={:p} proxy_ptr={:p} key={:?}",
-                            obj.as_ptr(),
-                            Gc::as_ptr(*proxy),
-                            k
-                        );
                         // Ask proxy for own property descriptor and check [[Enumerable]]
                         let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
                         if desc_enum_opt.is_none() {
@@ -642,13 +636,6 @@ fn bind_object_inner_for_var<'gc>(
             }
             DestructuringElement::Rest(name) => {
                 let rest_obj = new_js_object_data(mc);
-                // Diagnostic: log at start of Rest binding to verify proxy detection
-                let obj_ptr = obj.as_ptr();
-                let has_proxy = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string())).is_some();
-                println!(
-                    "TRACE: bind_object_inner_for_var Rest: obj_ptr={:p} has_proxy={}",
-                    obj_ptr, has_proxy
-                );
                 let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
                 for k in ordered {
                     if excluded_keys.iter().any(|ex| ex == &k) {
@@ -658,12 +645,6 @@ fn bind_object_inner_for_var<'gc>(
                     if let Some(proxy_cell) = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        println!(
-                            "TRACE: bind_object_inner_for_var Rest: proxy detected obj_ptr={:p} proxy_ptr={:p} key={:?}",
-                            obj.as_ptr(),
-                            Gc::as_ptr(*proxy),
-                            k
-                        );
                         // Ask proxy for own property descriptor and check [[Enumerable]]
                         let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
                         if desc_enum_opt.is_none() {
@@ -3004,7 +2985,6 @@ fn eval_res<'gc>(
                 Ok(v) => v,
                 Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
             };
-            log::trace!("TRACE: LetDestructuringObject: val={:?}", val);
 
             // If RHS is undefined/null, throw a helpful error referencing first property name
             if matches!(val, Value::Undefined) || matches!(val, Value::Null) {
@@ -3026,16 +3006,12 @@ fn eval_res<'gc>(
             let mut excluded_names: Vec<crate::core::PropertyKey<'gc>> = Vec::new();
             let mut computed_keys: Vec<Option<crate::core::PropertyKey<'gc>>> = vec![None; pattern.len()];
 
-            // DEBUG: print pattern element types and evaluate computed keys
-            log::trace!("TRACE: LetDestructuringObject: pattern.len={}", pattern.len());
             for (i, p) in pattern.iter().enumerate() {
                 match p {
                     ObjectDestructuringElement::Property { key, .. } => {
-                        log::trace!("TRACE: pattern[{}] Property key={}", i, key);
                         excluded_names.push(crate::core::PropertyKey::String(key.clone()));
                     }
                     ObjectDestructuringElement::ComputedProperty { key: key_expr, .. } => {
-                        log::trace!("TRACE: pattern[{}] ComputedProperty", i);
                         let key_val = evaluate_expr(mc, env, key_expr)?;
                         let prop_key = match key_val {
                             Value::Symbol(sd) => crate::core::PropertyKey::Symbol(sd),
@@ -3052,11 +3028,10 @@ fn eval_res<'gc>(
                             }
                             other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
                         };
-                        log::trace!("TRACE: LetDestructuringObject: computed_key[{}] = {:?}", i, prop_key);
                         excluded_names.push(prop_key.clone());
                         computed_keys[i] = Some(prop_key);
                     }
-                    ObjectDestructuringElement::Rest(name) => log::trace!("TRACE: pattern[{}] Rest name={}", i, name),
+                    ObjectDestructuringElement::Rest(_name) => {}
                 }
             }
             for (i, prop) in pattern.iter().enumerate() {
@@ -3174,14 +3149,6 @@ fn eval_res<'gc>(
                         // Create a new object with remaining properties
                         let obj = new_js_object_data(mc);
                         if let Value::Object(orig) = &val {
-                            println!(
-                                "TRACE: LetRest: orig_ptr={:p} has_proxy? {}",
-                                orig.as_ptr(),
-                                orig.borrow()
-                                    .properties
-                                    .get(&PropertyKey::String("__proxy__".to_string()))
-                                    .is_some()
-                            );
                             // copy all own properties except those in pattern keys
                             let ordered = crate::core::ordinary_own_property_keys_mc(mc, orig)?;
                             for k in ordered {
@@ -3196,7 +3163,6 @@ fn eval_res<'gc>(
                                 {
                                     // Ask proxy for own property descriptor and check [[Enumerable]]
                                     let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
-                                    println!("TRACE: LetRest: key={:?} desc_enum_opt={:?}", k, desc_enum_opt);
                                     if desc_enum_opt.is_none() {
                                         continue;
                                     }
@@ -3204,7 +3170,6 @@ fn eval_res<'gc>(
                                         continue;
                                     }
                                     // Get property value via proxy get trap
-                                    println!("TRACE: LetRest: calling proxy_get_property for key={:?}", k);
                                     let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
                                     let v = val_opt.unwrap_or(Value::Undefined);
                                     object_set_key_value(mc, &obj, k.clone(), &v)?;
@@ -3251,16 +3216,12 @@ fn eval_res<'gc>(
             let mut excluded_names: Vec<crate::core::PropertyKey<'gc>> = Vec::new();
             let mut computed_keys: Vec<Option<crate::core::PropertyKey<'gc>>> = vec![None; pattern.len()];
 
-            // DEBUG: print pattern element types and evaluate computed keys
-            println!("TRACE: VarDestructuringObject: pattern.len={}", pattern.len());
             for (i, p) in pattern.iter().enumerate() {
                 match p {
                     ObjectDestructuringElement::Property { key, .. } => {
-                        println!("TRACE: pattern[{}] Property key={}", i, key);
                         excluded_names.push(crate::core::PropertyKey::String(key.clone()));
                     }
                     ObjectDestructuringElement::ComputedProperty { key: key_expr, .. } => {
-                        println!("TRACE: pattern[{}] ComputedProperty", i);
                         let key_val = evaluate_expr(mc, env, key_expr)?;
                         let prop_key = match key_val {
                             Value::Symbol(sd) => crate::core::PropertyKey::Symbol(sd),
@@ -3277,11 +3238,10 @@ fn eval_res<'gc>(
                             }
                             other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
                         };
-                        println!("TRACE: VarDestructuringObject: computed_key[{}] = {:?}", i, prop_key);
                         excluded_names.push(prop_key.clone());
                         computed_keys[i] = Some(prop_key);
                     }
-                    ObjectDestructuringElement::Rest(name) => println!("TRACE: pattern[{}] Rest name={}", i, name),
+                    ObjectDestructuringElement::Rest(_name) => {}
                 }
             }
 
@@ -3421,7 +3381,6 @@ fn eval_res<'gc>(
                                 {
                                     // Ask proxy for own property descriptor and check [[Enumerable]]
                                     let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
-                                    println!("TRACE: VarRest: key={:?} desc_enum_opt={:?}", k, desc_enum_opt);
                                     if desc_enum_opt.is_none() {
                                         continue;
                                     }
@@ -3429,7 +3388,6 @@ fn eval_res<'gc>(
                                         continue;
                                     }
                                     // Get property value via proxy get trap
-                                    println!("TRACE: VarRest: calling proxy_get_property for key={:?}", k);
                                     let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
                                     let v = val_opt.unwrap_or(Value::Undefined);
                                     object_set_key_value(mc, &obj, k.clone(), &v)?;
@@ -6260,7 +6218,8 @@ enum TargetTemp<'gc> {
     Var(String),
     PropBase(JSObjectDataPtr<'gc>, String),
     PrivatePropBase(JSObjectDataPtr<'gc>, String, u32),
-    IndexBase(JSObjectDataPtr<'gc>, Box<Value<'gc>>),
+    // IndexBase(base_obj, raw_key_value, optional_receiver)
+    IndexBase(JSObjectDataPtr<'gc>, Box<Value<'gc>>, Option<Value<'gc>>),
 }
 
 fn put_temp<'gc>(
@@ -6271,24 +6230,16 @@ fn put_temp<'gc>(
 ) -> Result<(), EvalError<'gc>> {
     match temp {
         TargetTemp::Var(name) => {
-            if name == "await" {
-                println!(
-                    "DEBUG: put_temp assign to 'await' in env ptr={:p} is_function_scope={} has_prop={}",
-                    env,
-                    env.borrow().is_function_scope,
-                    env.borrow().properties.contains_key(&PropertyKey::String("await".to_string()))
-                );
-            }
             env_set_recursive(mc, env, &name, value)?;
         }
         TargetTemp::PropBase(obj, static_key) => {
-            set_property_with_accessors(mc, env, &obj, &static_key, value)?;
+            set_property_with_accessors(mc, env, &obj, &static_key, value, None)?;
         }
         TargetTemp::PrivatePropBase(obj, name, id) => {
             let key = PropertyKey::Private(name, id);
-            set_property_with_accessors(mc, env, &obj, &key, value)?;
+            set_property_with_accessors(mc, env, &obj, &key, value, None)?;
         }
-        TargetTemp::IndexBase(obj, raw_key_val) => {
+        TargetTemp::IndexBase(obj, raw_key_val, receiver_opt) => {
             let key = match *raw_key_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
@@ -6304,7 +6255,7 @@ fn put_temp<'gc>(
                 }
                 _ => PropertyKey::String(value_to_string(&raw_key_val)),
             };
-            set_property_with_accessors(mc, env, &obj, &key, value)?;
+            set_property_with_accessors(mc, env, &obj, &key, value, receiver_opt.as_ref())?;
         }
     }
     Ok(())
@@ -6326,12 +6277,33 @@ fn precompute_target<'gc>(
             }
         }
         Expr::Index(obj_expr, key_expr) => {
-            let obj_val = evaluate_expr(mc, env, obj_expr)?;
-            let raw_key = evaluate_expr(mc, env, key_expr)?;
-            if let Value::Object(obj) = obj_val {
-                Ok(TargetTemp::IndexBase(obj, Box::new(raw_key)))
+            // Special-case computed super assignment so GetSuperBase is captured *after*
+            // evaluating the key expression but *before* converting to a PropertyKey.
+            // This preserves the spec ordering for "super[key] = value" where the key's
+            // ToPropertyKey may have side-effects that mutate the prototype chain.
+            if let crate::core::Expr::Super = obj_expr.as_ref() {
+                let raw_key = evaluate_expr(mc, env, key_expr)?;
+                // Capture super base after key evaluation (per spec)
+                let super_base = crate::js_class::evaluate_super(mc, env)?;
+                // Determine the proper receiver (actualThis) to use for any eventual set
+                let actual_this = if let Some(tv_rc) = object_get_key_value(env, "this") {
+                    tv_rc.borrow().clone()
+                } else {
+                    crate::js_class::evaluate_this(mc, env)?
+                };
+                if let Value::Object(obj) = super_base {
+                    Ok(TargetTemp::IndexBase(obj, Box::new(raw_key), Some(actual_this)))
+                } else {
+                    Err(raise_type_error!("Cannot access 'super' of a class with null prototype").into())
+                }
             } else {
-                Err(raise_eval_error!("Cannot assign to property of non-object").into())
+                let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                let raw_key = evaluate_expr(mc, env, key_expr)?;
+                if let Value::Object(obj) = obj_val {
+                    Ok(TargetTemp::IndexBase(obj, Box::new(raw_key), None))
+                } else {
+                    Err(raise_eval_error!("Cannot assign to property of non-object").into())
+                }
             }
         }
         Expr::PrivateMember(obj_expr, name) => {
@@ -7161,7 +7133,7 @@ fn evaluate_expr_assign<'gc>(
                 }
                 _ => return Err(raise_eval_error!("Cannot assign to property of non-object").into()),
             };
-            set_property_with_accessors(mc, env, &obj, &*key, &val)?;
+            set_property_with_accessors(mc, env, &obj, &*key, &val, None)?;
             Ok(val)
         }
         Precomputed::Index(base_val, raw_key) => {
@@ -7224,12 +7196,12 @@ fn evaluate_expr_assign<'gc>(
                 _ => return Err(raise_eval_error!("Cannot assign to property of non-object").into()),
             };
 
-            set_property_with_accessors(mc, env, &obj, &key, &val)?;
+            set_property_with_accessors(mc, env, &obj, &key, &val, None)?;
             Ok(val)
         }
         Precomputed::PrivateMember(base_val, name, id) => {
             if let Value::Object(obj) = *base_val {
-                set_property_with_accessors(mc, env, &obj, PropertyKey::Private(name, id), &val)?;
+                set_property_with_accessors(mc, env, &obj, PropertyKey::Private(name, id), &val, None)?;
                 Ok(val)
             } else {
                 Err(raise_type_error!("Cannot write private member to non-object").into())
@@ -7444,25 +7416,9 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
             // Disallow assignment to the special 'arguments' binding in strict-function scope
             if name == "arguments" {
                 let caller_is_strict = env_get_strictness(env);
-                log::trace!(
-                    "DEBUG: assignment-to-arguments (assign_target_with_value): env ptr={:p} is_function_scope={} caller_is_strict={}",
-                    env,
-                    env.borrow().is_function_scope,
-                    caller_is_strict
-                );
                 if env.borrow().is_function_scope && caller_is_strict {
                     return Err(crate::raise_syntax_error!("Assignment to 'arguments' is not allowed in strict mode").into());
                 }
-            }
-
-            // DEBUG: log assignments to 'await' to diagnose nested async scoping issues
-            if name == "await" {
-                println!(
-                    "DEBUG: assign to 'await' in env ptr={:p} is_function_scope={} has_prop={}",
-                    env,
-                    env.borrow().is_function_scope,
-                    env.borrow().properties.contains_key(&PropertyKey::String("await".to_string()))
-                );
             }
 
             env_set_recursive(mc, env, name, val)?;
@@ -7478,7 +7434,7 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
                 evaluate_expr(mc, env, obj_expr)?
             };
             if let Value::Object(obj) = obj_val {
-                set_property_with_accessors(mc, env, &obj, key, val)?;
+                set_property_with_accessors(mc, env, &obj, key, val, None)?;
                 Ok(val.clone())
             } else {
                 Err(raise_eval_error!("Cannot assign to property of non-object").into())
@@ -7489,7 +7445,7 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
             if let Value::Object(obj) = obj_val {
                 let pv = evaluate_var(mc, env, name)?;
                 if let Value::PrivateName(n, id) = pv {
-                    set_property_with_accessors(mc, env, &obj, PropertyKey::Private(n, id), val)?;
+                    set_property_with_accessors(mc, env, &obj, PropertyKey::Private(n, id), val, None)?;
                     Ok(val.clone())
                 } else {
                     Err(raise_syntax_error!(format!("Private field '{}' must be declared in an enclosing class", name)).into())
@@ -7510,7 +7466,7 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
             };
 
             if let Value::Object(obj) = obj_val {
-                set_property_with_accessors(mc, env, &obj, &key, val)?;
+                set_property_with_accessors(mc, env, &obj, &key, val, None)?;
                 Ok(val.clone())
             } else {
                 Err(raise_eval_error!("Cannot assign to property of non-object").into())
@@ -7525,7 +7481,6 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
             }
             // Obtain iterator if available
             let mut iterator: Option<crate::core::JSObjectDataPtr<'gc>> = None;
-            println!("DEBUG: before iterator lookup in assign_target");
             if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                 && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
@@ -7536,7 +7491,6 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
                 } else {
                     get_primitive_prototype_property(mc, env, &rhs, iter_sym_data)?
                 };
-                println!("DEBUG: method for iterator: {:?}", method);
                 if matches!(method, Value::Undefined | Value::Null) {
                     return Err(raise_type_error!("Object is not iterable").into());
                 }
@@ -7735,18 +7689,8 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
                                 if excluded_keys.iter().any(|ex| ex == &k) {
                                     continue;
                                 }
-                                println!(
-                                    "TRACE: object-literal spread proxy: obj_ptr={:p} proxy_ptr={:p} key={:?}",
-                                    obj.as_ptr(),
-                                    Gc::as_ptr(*proxy),
-                                    k
-                                );
                                 // Ask proxy for own property descriptor and check [[Enumerable]]
                                 let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
-                                println!(
-                                    "TRACE: object-literal spread proxy: desc_enum_opt={:?} for key={:?}",
-                                    desc_enum_opt, k
-                                );
                                 if desc_enum_opt.is_none() {
                                     continue;
                                 }
@@ -7755,7 +7699,6 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
                                 }
                                 // Get property value via proxy get trap
                                 let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
-                                println!("TRACE: object-literal spread proxy: got val_opt={:?} for key={:?}", val_opt, k);
                                 let v = val_opt.unwrap_or(Value::Undefined);
                                 object_set_key_value(mc, &rest_obj, k.clone(), &v)?;
                             }
@@ -8169,7 +8112,7 @@ fn evaluate_expr_add_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, key)?;
                 let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = compute_add(mc, env, &current, &val)?;
-                set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -8193,7 +8136,7 @@ fn evaluate_expr_add_assign<'gc>(
                 let current = get_property_with_accessors(mc, env, &obj, &key)?;
                 let val = evaluate_expr(mc, env, value_expr)?;
                 let new_val = compute_add(mc, env, &current, &val)?;
-                set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -8204,7 +8147,7 @@ fn evaluate_expr_add_assign<'gc>(
             let current = get_property_with_accessors(mc, env, &obj, &key)?;
             let val = evaluate_expr(mc, env, value_expr)?;
             let new_val = compute_add(mc, env, &current, &val)?;
-            set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+            set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
             Ok(new_val)
         }
         _ => Err(raise_eval_error!("AddAssign only for variables, properties or indexes").into()),
@@ -8257,7 +8200,7 @@ fn evaluate_expr_bitand_assign<'gc>(
                 match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln & *rn));
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8265,7 +8208,7 @@ fn evaluate_expr_bitand_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                         let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l & r) as f64);
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                     _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise AND assignment").into()),
@@ -8289,7 +8232,7 @@ fn evaluate_expr_bitand_assign<'gc>(
                 match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln & *rn));
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8297,7 +8240,7 @@ fn evaluate_expr_bitand_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                         let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l & r) as f64);
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                     _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise AND assignment").into()),
@@ -8315,7 +8258,7 @@ fn evaluate_expr_bitand_assign<'gc>(
             match (current_num, val_num) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let new_val = Value::BigInt(Box::new(*ln & *rn));
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8323,7 +8266,7 @@ fn evaluate_expr_bitand_assign<'gc>(
                     let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                     let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                     let new_val = Value::Number((l & r) as f64);
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
                 _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise AND assignment").into()),
@@ -8379,7 +8322,7 @@ fn evaluate_expr_bitor_assign<'gc>(
                 match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln | *rn));
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8387,7 +8330,7 @@ fn evaluate_expr_bitor_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                         let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l | r) as f64);
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                     _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise OR assignment").into()),
@@ -8411,7 +8354,7 @@ fn evaluate_expr_bitor_assign<'gc>(
                 match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln | *rn));
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8419,7 +8362,7 @@ fn evaluate_expr_bitor_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                         let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l | r) as f64);
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                     _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise OR assignment").into()),
@@ -8437,7 +8380,7 @@ fn evaluate_expr_bitor_assign<'gc>(
             match (current_num, val_num) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let new_val = Value::BigInt(Box::new(*ln | *rn));
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8445,7 +8388,7 @@ fn evaluate_expr_bitor_assign<'gc>(
                     let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                     let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                     let new_val = Value::Number((l | r) as f64);
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
                 _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise OR assignment").into()),
@@ -8494,7 +8437,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
                 match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln ^ *rn));
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8502,7 +8445,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                         let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l ^ r) as f64);
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                     _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise XOR assignment").into()),
@@ -8526,7 +8469,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
                 match (current_num, val_num) {
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let new_val = Value::BigInt(Box::new(*ln ^ *rn));
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8534,7 +8477,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                         let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                         let new_val = Value::Number((l ^ r) as f64);
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                     _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise XOR assignment").into()),
@@ -8552,7 +8495,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
             match (current_num, val_num) {
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let new_val = Value::BigInt(Box::new(*ln ^ *rn));
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8560,7 +8503,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
                     let l = to_int32_value_with_env(mc, env, &Value::Number(l))?;
                     let r = to_int32_value_with_env(mc, env, &Value::Number(r))?;
                     let new_val = Value::Number((l ^ r) as f64);
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
                 _ => Err(raise_eval_error!("Invalid numeric conversion for bitwise XOR assignment").into()),
@@ -8606,7 +8549,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
                         let new_val = Value::BigInt(Box::new(*ln << shift));
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8614,7 +8557,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &l)?;
                         let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                         let new_val = Value::Number(((l << r) as i32) as f64);
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                 }
@@ -8636,7 +8579,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
                         let new_val = Value::BigInt(Box::new(*ln << shift));
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8644,7 +8587,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &l)?;
                         let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                         let new_val = Value::Number(((l << r) as i32) as f64);
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                 }
@@ -8660,7 +8603,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let shift = bigint_shift_count(&rn)?;
                     let new_val = Value::BigInt(Box::new(*ln << shift));
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8668,7 +8611,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
                     let l = to_int32_value_with_env(mc, env, &l)?;
                     let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number(((l << r) as i32) as f64);
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
             }
@@ -8713,7 +8656,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
                         let new_val = Value::BigInt(Box::new(*ln >> shift));
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8721,7 +8664,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &l)?;
                         let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                         let new_val = Value::Number((l >> r) as f64);
-                        set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
                 }
@@ -8743,7 +8686,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                     (Value::BigInt(ln), Value::BigInt(rn)) => {
                         let shift = bigint_shift_count(&rn)?;
                         let new_val = Value::BigInt(Box::new(*ln >> shift));
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8751,7 +8694,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                         let l = to_int32_value_with_env(mc, env, &l)?;
                         let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                         let new_val = Value::Number((l >> r) as f64);
-                        set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
                 }
@@ -8767,7 +8710,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                 (Value::BigInt(ln), Value::BigInt(rn)) => {
                     let shift = bigint_shift_count(&rn)?;
                     let new_val = Value::BigInt(Box::new(*ln >> shift));
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
@@ -8775,7 +8718,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                     let l = to_int32_value_with_env(mc, env, &l)?;
                     let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number((l >> r) as f64);
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
             }
@@ -8818,7 +8761,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
                     let l = to_uint32_value_with_env(mc, env, &l)?;
                     let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number((l >> r) as f64);
-                    set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                     Ok(new_val)
                 }
             } else {
@@ -8843,7 +8786,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
                     let l = to_uint32_value_with_env(mc, env, &l)?;
                     let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
                     let new_val = Value::Number((l >> r) as f64);
-                    set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
             } else {
@@ -8861,7 +8804,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
             let l = to_uint32_value_with_env(mc, env, &l)?;
             let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
             let new_val = Value::Number((l >> r) as f64);
-            set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+            set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
             Ok(new_val)
         }
         _ => Err(raise_eval_error!("UnsignedRightShiftAssign only for variables, properties or indexes").into()),
@@ -8911,7 +8854,7 @@ fn evaluate_expr_sub_assign<'gc>(
                         Value::Number(ln - rn)
                     }
                 };
-                set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -8938,7 +8881,7 @@ fn evaluate_expr_sub_assign<'gc>(
                         Value::Number(ln - rn)
                     }
                 };
-                set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -8959,7 +8902,7 @@ fn evaluate_expr_sub_assign<'gc>(
                     Value::Number(ln - rn)
                 }
             };
-            set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+            set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
             Ok(new_val)
         }
         _ => Err(raise_eval_error!("SubAssign only for variables, properties or indexes").into()),
@@ -9008,7 +8951,7 @@ fn evaluate_expr_mul_assign<'gc>(
                         Value::Number(ln * rn)
                     }
                 };
-                set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -9035,7 +8978,7 @@ fn evaluate_expr_mul_assign<'gc>(
                         Value::Number(ln * rn)
                     }
                 };
-                set_property_with_accessors(mc, env, &obj, &key_str, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, &key_str, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -9056,7 +8999,7 @@ fn evaluate_expr_mul_assign<'gc>(
                     Value::Number(ln * rn)
                 }
             };
-            set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+            set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
             Ok(new_val)
         }
         _ => Err(raise_eval_error!("MulAssign only for variables, properties or indexes").into()),
@@ -9113,7 +9056,7 @@ fn evaluate_expr_div_assign<'gc>(
                         Value::Number(ln / denom)
                     }
                 };
-                set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -9145,7 +9088,7 @@ fn evaluate_expr_div_assign<'gc>(
                         Value::Number(ln / denom)
                     }
                 };
-                set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -9171,7 +9114,7 @@ fn evaluate_expr_div_assign<'gc>(
                     Value::Number(ln / denom)
                 }
             };
-            set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+            set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
             Ok(new_val)
         }
         _ => Err(raise_eval_error!("DivAssign only for variables, properties or indexes").into()),
@@ -9228,7 +9171,7 @@ fn evaluate_expr_mod_assign<'gc>(
                         Value::Number(ln % denom)
                     }
                 };
-                set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -9260,7 +9203,7 @@ fn evaluate_expr_mod_assign<'gc>(
                         Value::Number(ln % denom)
                     }
                 };
-                set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -9286,7 +9229,7 @@ fn evaluate_expr_mod_assign<'gc>(
                     Value::Number(ln % denom)
                 }
             };
-            set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+            set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
             Ok(new_val)
         }
         _ => Err(raise_eval_error!("ModAssign only for variables, properties or indexes").into()),
@@ -9341,7 +9284,7 @@ fn evaluate_expr_pow_assign<'gc>(
                     }
                     (l, r) => Value::Number(to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?)),
                 };
-                set_property_with_accessors(mc, env, &obj, key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -9372,7 +9315,7 @@ fn evaluate_expr_pow_assign<'gc>(
                     }
                     (l, r) => Value::Number(to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?)),
                 };
-                set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+                set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                 Ok(new_val)
             } else {
                 Err(raise_type_error!("Cannot assign to property of non-object").into())
@@ -9397,7 +9340,7 @@ fn evaluate_expr_pow_assign<'gc>(
                 }
                 (l, r) => Value::Number(to_number_with_env(mc, env, &l)?.powf(to_number_with_env(mc, env, &r)?)),
             };
-            set_property_with_accessors(mc, env, &obj, &key, &new_val)?;
+            set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
             Ok(new_val)
         }
         _ => Err(raise_eval_error!("PowAssign only for variables, properties or indexes").into()),
@@ -10763,7 +10706,6 @@ fn evaluate_expr_call<'gc>(
                     Err(_) => return Err(raise_syntax_error!(msg).into()),
                 }
             }
-            // Diagnostic: report env chain findings for direct new.target eval
             if in_function {
                 // If __instance is present and not undefined, return the function stored in __function
                 if let Some(inst_val_rc) = object_get_key_value(&cur.unwrap(), "__instance")
@@ -10773,8 +10715,6 @@ fn evaluate_expr_call<'gc>(
                     log::trace!("FAST-SPECIAL-NEWTARGET: returning __function");
                     return Ok(func_val_rc.borrow().clone());
                 }
-            } else {
-                log::trace!("EVAL-FAST-NEWTARGET DIAG: in_function=false");
             }
             log::trace!("FAST-SPECIAL-NEWTARGET: returning undefined");
             return Ok(Value::Undefined);
@@ -10782,7 +10722,6 @@ fn evaluate_expr_call<'gc>(
     }
 
     log::trace!("DEBUG-EVALUATE-CALL: func_expr={:?} args={:?}", func_expr, args);
-    log::warn!("DIAG evaluate_expr_call: callee AST = {:?}", func_expr);
     OPT_CHAIN_RECURSION_DEPTH.with(|c| log::trace!("ENTER evaluate_expr_call opt_depth={} func_expr={:?}", c.get(), func_expr));
     let (func_val, this_val) = match func_expr {
         Expr::OptionalProperty(obj_expr, key) => {
@@ -11218,12 +11157,10 @@ fn evaluate_expr_index_call<'gc>(
 ) -> Result<(Value<'gc>, Option<Value<'gc>>), EvalError<'gc>> {
     // Special-case `super[expr]` so that `super[expr]()` uses GetThisBinding as receiver
     if let crate::core::Expr::Super = obj_expr {
-        log::warn!("DIAG evaluate_expr_call: special-case super[expr] triggered");
         // 1) Evaluate the property expression to a value (propertyNameValue) but do NOT convert to PropertyKey yet
         let key_val = evaluate_expr(mc, env, key_expr)?;
         // 2) Capture the super base *before* ToPropertyKey (per spec)
         let super_base = crate::js_class::evaluate_super(mc, env)?;
-        log::warn!("DIAG super_index: captured super_base={:?}", super_base);
         // 3) Convert propertyNameValue -> PropertyKey (this may call ToString and cause side-effects)
         let key = match key_val {
             Value::Symbol(s) => PropertyKey::Symbol(s),
@@ -11231,16 +11168,6 @@ fn evaluate_expr_index_call<'gc>(
             Value::Number(n) => PropertyKey::from(n.to_string()),
             _ => PropertyKey::from(value_to_string(&key_val)),
         };
-        log::warn!(
-            "DIAG super_index: after ToPropertyKey key={:?} obj.__proto__ ptr={:?}",
-            key,
-            object_get_key_value(env, "this").and_then(|v| if let Value::Object(o) = &*v.borrow() {
-                o.borrow().prototype.map(Gc::as_ptr)
-            } else {
-                None
-            })
-        );
-
         // Determine the proper receiver (actualThis) to use for any eventual call
         let actual_this = if let Some(tv_rc) = object_get_key_value(env, "this") {
             tv_rc.borrow().clone()
@@ -11251,7 +11178,6 @@ fn evaluate_expr_index_call<'gc>(
         // 4) Now perform property lookup on the captured super base and prepare the callee+receiver pair
         match super_base {
             Value::Object(super_obj) => {
-                log::warn!("DIAG super_index: super_obj ptr={:p}", Gc::as_ptr(super_obj));
                 // If property exists on super prototype, compute the value that GetValue(ref) would return.
                 if let Some(prop_rc) = object_get_key_value(&super_obj, &key) {
                     // If this is an accessor, invoke the getter now (GetValue semantics) but preserve
@@ -13027,7 +12953,7 @@ fn evaluate_expr_logical_assign<'gc>(
 
                 if should_assign {
                     let val = evaluate_expr(mc, env, value_expr)?;
-                    set_property_with_accessors(mc, env, &obj, key_str, &val)?;
+                    set_property_with_accessors(mc, env, &obj, key_str, &val, None)?;
                     Ok(val)
                 } else {
                     Ok(current)
@@ -13058,7 +12984,7 @@ fn evaluate_expr_logical_assign<'gc>(
 
                 if should_assign {
                     let val = evaluate_expr(mc, env, value_expr)?;
-                    set_property_with_accessors(mc, env, &obj, &key, &val)?;
+                    set_property_with_accessors(mc, env, &obj, &key, &val, None)?;
                     Ok(val)
                 } else {
                     Ok(current)
@@ -13081,7 +13007,7 @@ fn evaluate_expr_logical_assign<'gc>(
 
             if should_assign {
                 let val = evaluate_expr(mc, env, value_expr)?;
-                set_property_with_accessors(mc, env, &obj, prop_key, &val)?;
+                set_property_with_accessors(mc, env, &obj, prop_key, &val, None)?;
                 Ok(val)
             } else {
                 Ok(current)
@@ -14674,15 +14600,12 @@ fn evaluate_expr_index<'gc>(
     obj_expr: &Expr,
     key_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    log::warn!("DIAG Expr::Index: obj_expr AST = {:?}", obj_expr);
     if let Expr::Super = obj_expr {
-        log::warn!("DIAG Expr::Index: detected Super index access");
         // Evaluate the index expression to a value but delay ToPropertyKey
         // until after we've captured the super base (per spec ordering).
         let key_val = evaluate_expr(mc, env, key_expr)?;
         // Capture super base now (GetSuperBase semantics)
         let super_base = crate::js_class::evaluate_super(mc, env)?;
-        log::warn!("DIAG Expr::Index(super): captured super_base={:?}", super_base);
 
         // Now coerce key_val -> PropertyKey (this may call ToString and run side-effects)
         let key = match key_val {
@@ -14703,26 +14626,37 @@ fn evaluate_expr_index<'gc>(
         };
 
         // Now perform the lookup on the captured super base
-        log::warn!("DIAG Expr::Index(super): after capture super_base={:?} key={:?}", super_base, key);
-        if let Value::Object(super_obj) = super_base {
-            log::warn!("DIAG Expr::Index(super): super_obj ptr={:p}", Gc::as_ptr(super_obj));
-            if let Some(prop_rc) = object_get_key_value(&super_obj, &key) {
-                match &*prop_rc.borrow() {
-                    Value::Property { getter: Some(getter), .. } => {
-                        if let Some(this_rc) = object_get_key_value(env, "this")
-                            && let Value::Object(receiver) = &*this_rc.borrow()
-                        {
-                            // Call accessor/getter with receiver set to current this
-                            match &**getter {
-                                Value::Getter(body, captured_env, _) => {
-                                    let call_env = crate::core::new_js_object_data(mc);
-                                    call_env.borrow_mut(mc).prototype = Some(*captured_env);
-                                    call_env.borrow_mut(mc).is_function_scope = true;
-                                    crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                                    let body_clone = body.clone();
-                                    return crate::core::evaluate_statements(mc, &call_env, &body_clone);
-                                }
-                                Value::Closure(cl) => {
+        if let Value::Object(super_obj) = super_base
+            && let Some(prop_rc) = object_get_key_value(&super_obj, &key)
+        {
+            match &*prop_rc.borrow() {
+                Value::Property { getter: Some(getter), .. } => {
+                    if let Some(this_rc) = object_get_key_value(env, "this")
+                        && let Value::Object(receiver) = &*this_rc.borrow()
+                    {
+                        // Call accessor/getter with receiver set to current this
+                        match &**getter {
+                            Value::Getter(body, captured_env, _) => {
+                                let call_env = crate::core::new_js_object_data(mc);
+                                call_env.borrow_mut(mc).prototype = Some(*captured_env);
+                                call_env.borrow_mut(mc).is_function_scope = true;
+                                crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                let body_clone = body.clone();
+                                return crate::core::evaluate_statements(mc, &call_env, &body_clone);
+                            }
+                            Value::Closure(cl) => {
+                                let cl_data = cl;
+                                let call_env = crate::core::new_js_object_data(mc);
+                                call_env.borrow_mut(mc).prototype = cl_data.env;
+                                call_env.borrow_mut(mc).is_function_scope = true;
+                                crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                let body_clone = cl_data.body.clone();
+                                return crate::core::evaluate_statements(mc, &call_env, &body_clone);
+                            }
+                            Value::Object(obj) => {
+                                if let Some(cl_rc) = obj.borrow().get_closure()
+                                    && let Value::Closure(cl) = &*cl_rc.borrow()
+                                {
                                     let cl_data = cl;
                                     let call_env = crate::core::new_js_object_data(mc);
                                     call_env.borrow_mut(mc).prototype = cl_data.env;
@@ -14731,49 +14665,36 @@ fn evaluate_expr_index<'gc>(
                                     let body_clone = cl_data.body.clone();
                                     return crate::core::evaluate_statements(mc, &call_env, &body_clone);
                                 }
-                                Value::Object(obj) => {
-                                    if let Some(cl_rc) = obj.borrow().get_closure()
-                                        && let Value::Closure(cl) = &*cl_rc.borrow()
-                                    {
-                                        let cl_data = cl;
-                                        let call_env = crate::core::new_js_object_data(mc);
-                                        call_env.borrow_mut(mc).prototype = cl_data.env;
-                                        call_env.borrow_mut(mc).is_function_scope = true;
-                                        crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                                        let body_clone = cl_data.body.clone();
-                                        return crate::core::evaluate_statements(mc, &call_env, &body_clone);
-                                    }
-                                    return Err(raise_eval_error!("Accessor is not a function").into());
-                                }
-                                _ => return Err(raise_eval_error!("Accessor is not a function").into()),
+                                return Err(raise_eval_error!("Accessor is not a function").into());
                             }
+                            _ => return Err(raise_eval_error!("Accessor is not a function").into()),
                         }
-                        // No receiver -> undefined
-                        return Ok(Value::Undefined);
                     }
-                    Value::Getter(..) => {
-                        if let Some(this_rc) = object_get_key_value(env, "this")
-                            && let Value::Object(receiver) = &*this_rc.borrow()
-                        {
-                            let (body, captured_env, _home) = match &*prop_rc.borrow() {
-                                Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
-                                _ => return Err(raise_eval_error!("Accessor is not a function").into()),
-                            };
-                            let call_env = crate::core::new_js_object_data(mc);
-                            call_env.borrow_mut(mc).prototype = Some(captured_env);
-                            call_env.borrow_mut(mc).is_function_scope = true;
-                            crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                            let body_clone = body.clone();
-                            return crate::core::evaluate_statements(mc, &call_env, &body_clone);
-                        }
-                        return Ok(Value::Undefined);
-                    }
-                    _ => {
-                        return match &*prop_rc.borrow() {
-                            Value::Property { value: Some(v), .. } => Ok(v.borrow().clone()),
-                            other => Ok(other.clone()),
+                    // No receiver -> undefined
+                    return Ok(Value::Undefined);
+                }
+                Value::Getter(..) => {
+                    if let Some(this_rc) = object_get_key_value(env, "this")
+                        && let Value::Object(receiver) = &*this_rc.borrow()
+                    {
+                        let (body, captured_env, _home) = match &*prop_rc.borrow() {
+                            Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
+                            _ => return Err(raise_eval_error!("Accessor is not a function").into()),
                         };
+                        let call_env = crate::core::new_js_object_data(mc);
+                        call_env.borrow_mut(mc).prototype = Some(captured_env);
+                        call_env.borrow_mut(mc).is_function_scope = true;
+                        crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                        let body_clone = body.clone();
+                        return crate::core::evaluate_statements(mc, &call_env, &body_clone);
                     }
+                    return Ok(Value::Undefined);
+                }
+                _ => {
+                    return match &*prop_rc.borrow() {
+                        Value::Property { value: Some(v), .. } => Ok(v.borrow().clone()),
+                        other => Ok(other.clone()),
+                    };
                 }
             }
         }
@@ -14846,7 +14767,6 @@ fn evaluate_var<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name
     // via DefinePropertyOrThrow, unwrap the stored value. For accessor descriptors, call accessor.
     if let Some(val_ptr) = env_get(env, name) {
         let val = val_ptr.borrow().clone();
-        log::debug!("evaluate_var: name='{}' raw_value={:?}", name, val);
         if let Value::Uninitialized = val {
             return Err(raise_reference_error!(format!("Cannot access '{name}' before initialization")).into());
         }
@@ -15157,8 +15077,11 @@ fn set_property_with_accessors<'gc>(
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
     val: &Value<'gc>,
+    receiver_opt: Option<&Value<'gc>>,
 ) -> Result<(), EvalError<'gc>> {
     let key = &key.into();
+    // Resolve receiver object: if receiver_opt is provided and is an Object use it, else default to obj
+    let receiver_obj: crate::core::JSObjectDataPtr<'gc> = if let Some(Value::Object(o)) = receiver_opt { *o } else { *obj };
 
     if let PropertyKey::Private(..) = key {
         // Check prototype chain for private property (fields are own, methods/accessors on prototype)
@@ -15197,6 +15120,11 @@ fn set_property_with_accessors<'gc>(
     {
         match &val {
             Value::Object(proto_obj) => {
+                log::warn!(
+                    "DBG __proto__ assignment: obj ptr={:p} -> new proto ptr={:p}",
+                    Gc::as_ptr(*obj),
+                    Gc::as_ptr(*proto_obj)
+                );
                 // If object is non-extensible and the new prototype differs, throw TypeError
                 if !obj.borrow().is_extensible() {
                     let differs = match obj.borrow().prototype {
@@ -15212,6 +15140,7 @@ fn set_property_with_accessors<'gc>(
                 return Ok(());
             }
             Value::Null => {
+                log::warn!("DBG __proto__ assignment: obj ptr={:p} -> new proto NULL", Gc::as_ptr(*obj));
                 if !obj.borrow().is_extensible() && obj.borrow().prototype.is_some() {
                     return Err(raise_type_error!("Cannot change prototype of non-extensible object").into());
                 }
@@ -15267,7 +15196,8 @@ fn set_property_with_accessors<'gc>(
     // receiver's own property (data or accessor). Only when there is no own property should we
     // consult the prototype chain for inherited setters or non-writable inherited properties.
 
-    if get_own_property(obj, key).is_none() {
+    let receiver_ptr = receiver_obj;
+    if get_own_property(&receiver_ptr, key).is_none() {
         let mut proto_check = obj.borrow().prototype;
         while let Some(proto_obj) = proto_check {
             // Diagnostic: print prototype object pointer, whether it owns the key,
@@ -15282,7 +15212,7 @@ fn set_property_with_accessors<'gc>(
                             // Clone setter out to avoid holding a borrow on the inherited property
                             // cell while calling into the setter, which may mutate prototypes/receiver.
                             let s_clone = (*s).clone();
-                            return call_setter(mc, obj, &s_clone, val);
+                            return call_setter(mc, &receiver_ptr, &s_clone, val);
                         }
                         if getter.is_some() {
                             return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -15315,7 +15245,7 @@ fn set_property_with_accessors<'gc>(
                         break;
                     }
                     Value::Setter(params, body, captured_env, home_opt) => {
-                        return call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val);
+                        return call_setter_raw(mc, &receiver_ptr, &params, &body, &captured_env, home_opt.clone(), val);
                     }
                     Value::Getter(..) => {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -15371,9 +15301,9 @@ fn set_property_with_accessors<'gc>(
 
     if let Some(owner_obj) = owner_opt {
         // Found an owner in the chain
-        if Gc::ptr_eq(owner_obj, *obj) {
+        if Gc::ptr_eq(owner_obj, receiver_ptr) {
             // Owner is the receiver (own property)
-            let prop_ptr = object_get_key_value(obj, key).unwrap();
+            let prop_ptr = object_get_key_value(&receiver_ptr, key).unwrap();
             let prop = prop_ptr.borrow().clone();
             match prop {
                 Value::Property { setter, getter, .. } => {
@@ -15400,13 +15330,13 @@ fn set_property_with_accessors<'gc>(
                         // Clone setter value to avoid holding any borrows into the property cell
                         // while the setter executes and potentially mutates the receiver.
                         let s_clone = (*s).clone();
-                        return call_setter(mc, obj, &s_clone, val);
+                        return call_setter(mc, &receiver_ptr, &s_clone, val);
                     }
                     if getter.is_some() {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
                     }
                     // If the existing property is non-writable, TypeError should be thrown
-                    let writable = { obj.borrow().is_writable(key) };
+                    let writable = { receiver_ptr.borrow().is_writable(key) };
                     if !writable {
                         return Err(raise_type_error!("Cannot assign to read-only property").into());
                     }
@@ -15424,12 +15354,12 @@ fn set_property_with_accessors<'gc>(
                     } else {
                         log::debug!("DBG set_property: calling setter with no home_obj");
                     }
-                    call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val)
+                    call_setter_raw(mc, &receiver_ptr, &params, &body, &captured_env, home_opt.clone(), val)
                 }
                 Value::Getter(..) => Err(raise_type_error!("Cannot set property which has only a getter").into()),
                 _ => {
                     // For plain existing properties, respect writability
-                    let writable = { obj.borrow().is_writable(key) };
+                    let writable = { receiver_ptr.borrow().is_writable(key) };
                     if !writable {
                         return Err(raise_type_error!("Cannot assign to read-only property").into());
                     }
@@ -15449,7 +15379,7 @@ fn set_property_with_accessors<'gc>(
                         // Clone setter to drop any borrows into the property's storage
                         // before invoking the setter, which may mutate the receiver.
                         let s_clone = (*s).clone();
-                        return call_setter(mc, obj, &s_clone, val);
+                        return call_setter(mc, &receiver_ptr, &s_clone, val);
                     }
                     if getter.is_some() {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -15463,11 +15393,11 @@ fn set_property_with_accessors<'gc>(
                         }
                     }
                     // Writable on prototype -> create own property on receiver
-                    object_set_key_value(mc, obj, key, val)?;
+                    object_set_key_value(mc, &receiver_ptr, key, val)?;
                     Ok(())
                 }
                 Value::Setter(params, body, captured_env, home_opt) => {
-                    call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val)
+                    call_setter_raw(mc, &receiver_ptr, &params, &body, &captured_env, home_opt.clone(), val)
                 }
                 Value::Getter(..) => Err(raise_type_error!("Cannot set property which has only a getter").into()),
                 _ => {
@@ -15479,7 +15409,7 @@ fn set_property_with_accessors<'gc>(
                             return Ok(());
                         }
                     }
-                    object_set_key_value(mc, obj, key, val)?;
+                    object_set_key_value(mc, &receiver_ptr, key, val)?;
                     Ok(())
                 }
             }
@@ -16611,13 +16541,13 @@ fn evaluate_update_expression<'gc>(
                         let delta_i = delta as i64;
                         nb += BigInt::from(delta_i);
                         let new_v = Value::BigInt(Box::new(nb));
-                        set_property_with_accessors(mc, env, &obj, key, &new_v)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_v, None)?;
                         (current, new_v)
                     }
                     Value::Number(n) => {
                         let new_num = n + delta;
                         let new_v = Value::Number(new_num);
-                        set_property_with_accessors(mc, env, &obj, key, &new_v)?;
+                        set_property_with_accessors(mc, env, &obj, key, &new_v, None)?;
                         (current, new_v)
                     }
                     _ => unreachable!("to_numeric_with_env returned non-numeric"),
@@ -16645,13 +16575,13 @@ fn evaluate_update_expression<'gc>(
                         let delta_i = delta as i64;
                         nb += BigInt::from(delta_i);
                         let new_v = Value::BigInt(Box::new(nb));
-                        set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_v, None)?;
                         (current, new_v)
                     }
                     Value::Number(n) => {
                         let new_num = n + delta;
                         let new_v = Value::Number(new_num);
-                        set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
+                        set_property_with_accessors(mc, env, &obj, &key, &new_v, None)?;
                         (current, new_v)
                     }
                     _ => unreachable!("to_numeric_with_env returned non-numeric"),
@@ -16674,13 +16604,13 @@ fn evaluate_update_expression<'gc>(
                             let delta_i = delta as i64;
                             nb += BigInt::from(delta_i);
                             let new_v = Value::BigInt(Box::new(nb));
-                            set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
+                            set_property_with_accessors(mc, env, &obj, &key, &new_v, None)?;
                             (current, new_v)
                         }
                         Value::Number(n) => {
                             let new_num = n + delta;
                             let new_v = Value::Number(new_num);
-                            set_property_with_accessors(mc, env, &obj, &key, &new_v)?;
+                            set_property_with_accessors(mc, env, &obj, &key, &new_v, None)?;
                             (current, new_v)
                         }
                         _ => unreachable!("to_numeric_with_env returned non-numeric"),
@@ -17086,30 +17016,22 @@ fn evaluate_expr_new<'gc>(
                 let import_meta_val = lookup_or_create_import_meta(mc, env)?;
                 Some(CtorRef::Other(import_meta_val))
             } else {
-                // evaluate base and perform GetValue(ref) now (before args)
+                // Evaluate the base now but DO NOT perform GetValue(ref) yet; record
+                // a Property reference so resolution can be delayed until after
+                // argument evaluation (preserves correct semantics and allows
+                // discovering the base object's realm when needed).
                 let base = evaluate_expr(mc, env, obj_expr)?;
-                let val = match &base {
-                    Value::Object(obj) => get_property_with_accessors(mc, env, obj, key)?,
-                    other => get_primitive_prototype_property(mc, env, other, key)?,
-                };
-                Some(CtorRef::Other(val))
+                match base {
+                    Value::Object(o) => Some(CtorRef::Property(Value::Object(o), PropertyKey::from(key))),
+                    _ => return Err(raise_type_error!("Property base must be an object for delayed resolution").into()),
+                }
             }
         }
         Expr::Index(obj_expr, key_expr) => {
-            // evaluate base and key now, then GetValue(ref) now
+            // Evaluate base and key but DO NOT perform GetValue(ref) yet; record Index for delayed resolution.
             let base = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
-            let key = match &key_val {
-                Value::Symbol(s) => PropertyKey::Symbol(*s),
-                Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(s)),
-                Value::Number(n) => PropertyKey::from(n.to_string()),
-                _ => PropertyKey::from(crate::core::value_to_string(&key_val)),
-            };
-            let val = match &base {
-                Value::Object(obj) => get_property_with_accessors(mc, env, obj, &key)?,
-                other => get_primitive_prototype_property(mc, env, other, &key)?,
-            };
-            Some(CtorRef::Other(val))
+            Some(CtorRef::Index(base, key_val))
         }
         _ => {
             let val = evaluate_expr(mc, env, ctor)?;
@@ -17290,12 +17212,18 @@ fn evaluate_expr_new<'gc>(
             CtorRef::Other(v) => log::debug!("evaluate_expr_new: ctor_ref = Other({:?})", v),
         }
     }
-    let func_val = match ctor_ref.take().expect("ctor_ref must be set") {
+    let mut ctor_base_opt: Option<crate::core::JSObjectDataPtr<'gc>> = None;
+    let ct = ctor_ref.take().expect("ctor_ref must be set");
+    let func_val = match ct {
         CtorRef::Var(name) => evaluate_var(mc, env, name)?,
-        CtorRef::Property(base, key) => match base {
-            Value::Object(obj) => get_property_with_accessors(mc, env, &obj, &key)?,
-            other => get_primitive_prototype_property(mc, env, &other, &key)?,
-        },
+        CtorRef::Property(base, key) => {
+            if let Value::Object(base_obj) = &base {
+                ctor_base_opt = Some(*base_obj);
+                get_property_with_accessors(mc, env, base_obj, &key)?
+            } else {
+                get_primitive_prototype_property(mc, env, &base, &key)?
+            }
+        }
         CtorRef::Index(base, key_v) => {
             let key = match &key_v {
                 Value::Symbol(s) => PropertyKey::Symbol(*s),
@@ -17304,7 +17232,10 @@ fn evaluate_expr_new<'gc>(
                 _ => PropertyKey::from(crate::core::value_to_string(&key_v)),
             };
             match base {
-                Value::Object(obj) => get_property_with_accessors(mc, env, &obj, &key)?,
+                Value::Object(obj) => {
+                    ctor_base_opt = Some(obj);
+                    get_property_with_accessors(mc, env, &obj, &key)?
+                }
                 other => get_primitive_prototype_property(mc, env, &other, &key)?,
             }
         }
@@ -17591,7 +17522,44 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "TypedArray" {
                         return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
                     } else if name_str == "Function" {
-                        return crate::js_function::handle_global_function(mc, "Function", &eval_args, env);
+                        // Prefer to execute Function constructor logic in the realm of the
+                        // constructor object's base (if this was a property access) or via
+                        // any closure we can discover on the constructor itself.
+                        let ctor_re_env = (|| {
+                            // 1) if this was a property access, use the base object's env
+                            if let Some(base_env) = ctor_base_opt {
+                                return Some(base_env);
+                            }
+
+                            // 2) direct closure on the constructor object
+                            if let Some(cl_val_rc) = obj.borrow().get_closure() {
+                                match &*cl_val_rc.borrow() {
+                                    Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
+                                    _ => {}
+                                }
+                            }
+
+                            // 3) walk the constructor/prototype chain looking for a closure on a
+                            //    `constructor` property or prototype object
+                            let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(obj);
+                            while let Some(o) = cur {
+                                if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
+                                    && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
+                                    && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
+                                {
+                                    match &*c_cl_val_rc.borrow() {
+                                        Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
+                                        _ => {}
+                                    }
+                                }
+                                cur = o.borrow().prototype;
+                            }
+
+                            None
+                        })();
+
+                        let call_env_for_function = if let Some(re) = ctor_re_env { re } else { *env };
+                        return crate::js_function::handle_global_function(mc, "Function", &eval_args, &call_env_for_function);
                     } else if name_str == "Symbol" {
                         return Err(raise_type_error!("Symbol is not a constructor").into());
                     }
@@ -17634,18 +17602,8 @@ fn evaluate_expr_object<'gc>(
                         if k == "__proto__".into() {
                             continue;
                         }
-                        println!(
-                            "TRACE: object-literal spread proxy: obj_ptr={:p} proxy_ptr={:p} key={:?}",
-                            source_obj.as_ptr(),
-                            Gc::as_ptr(*proxy),
-                            k
-                        );
                         // Ask proxy for own property descriptor and check [[Enumerable]]
                         let desc_enum_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &k)?;
-                        println!(
-                            "TRACE: object-literal spread proxy: desc_enum_opt={:?} for key={:?}",
-                            desc_enum_opt, k
-                        );
                         if desc_enum_opt.is_none() {
                             continue;
                         }
@@ -17654,7 +17612,6 @@ fn evaluate_expr_object<'gc>(
                         }
                         // Get property value via proxy get trap
                         let val_opt = crate::js_proxy::proxy_get_property(mc, proxy, &k)?;
-                        println!("TRACE: object-literal spread proxy: got val_opt={:?} for key={:?}", val_opt, k);
                         let v = val_opt.unwrap_or(Value::Undefined);
                         object_set_key_value(mc, &obj, &k, &v)?;
                     }

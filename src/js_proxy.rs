@@ -129,36 +129,9 @@ pub(crate) fn apply_proxy_trap<'gc>(
     {
         let trap = trap_val.borrow().clone();
 
-        // Diagnostic: log trap presence and type for 'get' trap (helps track missing get calls for symbol keys)
-        if trap_name == "get" {
-            println!(
-                "TRACE: apply_proxy_trap: found trap '{}' on handler, trap_val={:?}",
-                trap_name, trap
-            );
-            if let Some((_, _, captured_env)) = extract_closure_from_value(&trap) {
-                println!(
-                    "TRACE: apply_proxy_trap: 'get' trap closure captured_env_ptr={:p}",
-                    &*captured_env as *const _
-                );
-            }
-        }
-
         // Accept either a direct `Value::Closure` or a function-object that
         // stores the executable closure in the internal closure slot.
         if let Some((params, body, captured_env)) = extract_closure_from_value(&trap) {
-            // Diagnostic for closure-captured environment when invoking traps (helpful for testing harness issue)
-            if trap_name == "getOwnPropertyDescriptor" {
-                println!(
-                    "TRACE: apply_proxy_trap invoking trap '{}' captured_env_ptr={:p}",
-                    trap_name, &*captured_env as *const _
-                );
-                let has_getown = crate::core::env_get(&captured_env, "getOwnKeys").is_some();
-                println!("TRACE: captured_env has getOwnKeys? {}", has_getown);
-                if let Some(vptr) = crate::core::env_get(&captured_env, "getOwnKeys") {
-                    println!("TRACE: getOwnKeys val at call time: {:?}", *vptr.borrow());
-                }
-            }
-
             // Create execution environment for the trap and bind parameters
             let trap_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params), &args, None)?;
 
@@ -182,8 +155,6 @@ pub(crate) fn proxy_own_keys<'gc>(
     mc: &MutationContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
 ) -> Result<Vec<crate::core::PropertyKey<'gc>>, EvalError<'gc>> {
-    // Direct stdout diagnostic to ensure invocation is visible
-    println!("TRACE: proxy_own_keys: proxy_ptr={:p}", Gc::as_ptr(*proxy));
     log::trace!("proxy_own_keys: proxy_ptr={:p}", Gc::as_ptr(*proxy));
     // If trap exists it will be invoked; default behavior returns the target's own keys
     let res = apply_proxy_trap(mc, proxy, "ownKeys", vec![(*proxy.target).clone()], || {
@@ -245,7 +216,6 @@ pub(crate) fn proxy_get_property<'gc>(
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
-    println!("TRACE: proxy_get_property: proxy_ptr={:p} key={:?}", Gc::as_ptr(*proxy), key);
     let result = apply_proxy_trap(mc, proxy, "get", vec![(*proxy.target).clone(), property_key_to_value(key)], || {
         // Default behavior: get property from target
         match &*proxy.target {
@@ -273,11 +243,6 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &crate::core::PropertyKey<'gc>,
 ) -> Result<Option<bool>, EvalError<'gc>> {
-    println!(
-        "TRACE: proxy_get_own_property_descriptor: proxy_ptr={:p} key={:?}",
-        Gc::as_ptr(*proxy),
-        key
-    );
     let res = apply_proxy_trap(
         mc,
         proxy,

@@ -701,7 +701,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if !args.is_empty() {
                 // let callback_val = evaluate_expr(mc, env, &args[0])?;
                 let callback_val = args[0].clone();
-                println!("DEBUG Array.map callback arg: {:?}", callback_val);
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 let new_array = create_array(mc, env)?;

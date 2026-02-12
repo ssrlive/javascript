@@ -59,20 +59,105 @@ function ensureArrayDistinct(arr) {
 
 const realmMarker = '// Inject: minimal $262 shim for cross-realm tests - idempotent';
 function get262StubLines() {
-  // Minimal, idempotent shim for $262.createRealm to support simple cross-realm tests
+  // Minimal, idempotent shim for $262.createRealm to support cross-realm tests
   return [
     '// Inject: minimal $262 shim for cross-realm tests - idempotent',
     'if (typeof $262 === "undefined") {',
     '  var $262 = {',
     '    createRealm: function() {',
-    '      var g = {};',
-    '      g.Function = Function;',
+    '      // Delegate to runner-provided native hook when available.',
+    '      if (typeof globalThis.__createRealm__ === "function") {',
+    '        try {',
+    '          var nativeRealm = globalThis.__createRealm__();',
+    '          if (nativeRealm && nativeRealm.global) return nativeRealm;',
+    '        } catch (e) { }',
+    '      }',
+    '',
+    '      // Fallback: emulate a realm with distinct object intrinsics.',
+    '      var g = Object.create(null);',
+    '      var realmObjectProto = Object.create(null);',
+    '      var realmObjectCtor = function Object(value) {',
+    '        if (value === null || value === undefined) {',
+    '          var o = {};',
+    '          try { Object.setPrototypeOf(o, realmObjectProto); } catch (_) {}',
+    '          return o;',
+    '        }',
+    '        return Object(value);',
+    '      };',
+    '      realmObjectCtor.prototype = realmObjectProto;',
+    '      try { realmObjectProto.constructor = realmObjectCtor; } catch (_) {}',
+    '',
+    '      var GlobalFunction = Function;',
+    '      var realmFunctionCtor = function RealmFunction() {',
+    '        var args = Array.prototype.slice.call(arguments);',
+    '        var f = Reflect.construct(GlobalFunction, args);',
+    '        try { f.__origin_global = g; } catch (_) {}',
+    '        try {',
+    '          if (f && typeof f === "function" && f.prototype && typeof f.prototype === "object") {',
+    '            Object.setPrototypeOf(f.prototype, realmObjectProto);',
+    '          }',
+    '        } catch (_) {}',
+    '        return f;',
+    '      };',
+    '      try { Object.setPrototypeOf(realmFunctionCtor, GlobalFunction); } catch (_) {}',
+    '      realmFunctionCtor.prototype = GlobalFunction.prototype;',
+    '',
+    '      g.globalThis = g;',
+    '      g.this = g;',
+    '      g.Object = realmObjectCtor;',
+    '      g.Function = realmFunctionCtor;',
     '      g.TypeError = TypeError;',
-    '      g.Object = Object;',
+    '      g.RangeError = RangeError;',
+    '      g.ReferenceError = ReferenceError;',
+    '      g.SyntaxError = SyntaxError;',
+    '      g.Error = Error;',
+    '      g.Array = Array;',
+    '      g.Date = Date;',
+    '      g.RegExp = RegExp;',
+    '      g.Math = Math;',
+    '      g.JSON = JSON;',
+    '      g.Promise = Promise;',
+    '      g.Symbol = Symbol;',
+    '      g.Number = Number;',
+    '      g.String = String;',
+    '      g.Boolean = Boolean;',
     '      g.parseInt = parseInt;',
     '      g.parseFloat = parseFloat;',
     '      g.isNaN = isNaN;',
     '      g.isFinite = isFinite;',
+    '      function __wrapRealmCallable(fn) {',
+    '        if (typeof fn !== "function") return fn;',
+    '        var defaultProto = null;',
+    '        try {',
+    '          if (fn.prototype && typeof fn.prototype === "object") {',
+    '            defaultProto = Object.getPrototypeOf(fn.prototype);',
+    '          }',
+    '        } catch (_) {}',
+    '        var wrapped = function() {',
+    '          var out = fn.apply(this, arguments);',
+    '          try {',
+    '            var ctorProto = wrapped.prototype;',
+    '            var nonObjectProto = (ctorProto === null) || (typeof ctorProto !== "object" && typeof ctorProto !== "function");',
+    '            if (nonObjectProto && out && typeof out === "object" && defaultProto && Object.getPrototypeOf(out) !== defaultProto) {',
+    '              Object.setPrototypeOf(out, defaultProto);',
+    '            }',
+    '          } catch (_) {}',
+    '          return out;',
+    '        };',
+    '        try { Object.setPrototypeOf(wrapped, fn); } catch (_) {}',
+    '        try { wrapped.__origin_global = g; } catch (_) {}',
+    '        try {',
+    '          Object.defineProperty(wrapped, "prototype", {',
+    '            get: function() { return fn.prototype; },',
+    '            set: function(v) { fn.prototype = v; },',
+    '            enumerable: false,',
+    '            configurable: true',
+    '          });',
+    '        } catch (_) {',
+    '          try { wrapped.prototype = fn.prototype; } catch (_) {}',
+    '        }',
+    '        return wrapped;',
+    '      }',
     '      g.eval = function(src) {',
     '        src = String(src);',
     '        var transformed = "";',
@@ -95,11 +180,13 @@ function get262StubLines() {
     '          lastIndex = re.lastIndex;',
     '        }',
     '        transformed += src.slice(lastIndex);',
-    '        // Execute with `this` bound to realm global; var->this.x replaced already',
+    '        // Execute with `this` bound to the emulated realm global.',
     '        try {',
-    '          return (new Function("with (this) { return (" + transformed + "); }")).call(g);',
+    '          var ret = (new Function("with (this) { return (" + transformed + "); }")).call(g);',
+    '          return __wrapRealmCallable(ret);',
     '        } catch (e) {',
-    '          return (new Function("with (this) { " + transformed + " }")).call(g);',
+    '          var ret2 = (new Function("with (this) { " + transformed + " }")).call(g);',
+    '          return __wrapRealmCallable(ret2);',
     '        }',
     '      };',
     '      return { global: g };',
@@ -119,9 +206,7 @@ function verifyComposeStubMarkerCount(testPath, harnessIndex = {}, prependFiles 
 }
 
 function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needStrict = true}) {
-  // Returns { testToRun, tmpPath, cleanupTmp, debug }
-  const debug = [];
-  debug.push(`DEBUG PREPEND_BEFORE ${prependFiles.map(p => path.relative('.', p)).join(',')} , for ${testPath}`);
+  // Returns { testToRun, tmpPath, cleanupTmp }
 
   // prepends are file paths
   let PREPEND_FILES = prependFiles.slice();
@@ -194,7 +279,6 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
       }
     }
   })();
-  debug.push(`DEBUG PREPEND_AFTER ${PREPEND_FILES.map(p => path.relative('.', p)).join(',')} , for ${testPath}`);
 
   // If no module tests: add strict wrapper
   // Create tmp file
@@ -258,7 +342,6 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
 
   // verify assert was injected if test references assert
   if (referencesAssert(testPath) && !definesAssertInFile(tmpName)) {
-    debug.push(`WARN (assert missing after compose) ${testPath}`);
     // rebuild ensuring sta/assert at top while preserving other PREPEND_FILES
     const fixedTmp = fs.mkdtempSync(prefix) + '.js';
     const lines2 = [];
@@ -277,8 +360,6 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
       if (!fixedPrepend.some(q => path.basename(q) === b)) fixedPrepend.push(p);
     }
     const fixedUnique = ensureArrayDistinct(fixedPrepend);
-    debug.push(`DEBUG PREPEND_FIXED ${fixedUnique.map(p => path.relative('.', p)).join(',')} , for ${testPath}`);
-
     for (const p of fixedUnique) {
       if (!p) continue;
       const absP = path.resolve(p);
@@ -301,10 +382,10 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
     lines2.push(`// Inject: ${absTest}`);
     lines2.push(fs.readFileSync(testPath, 'utf8'));
     fs.writeFileSync(fixedTmp, lines2.join('\n'));
-    return {testToRun: fixedTmp, tmpPath: fixedTmp, cleanupTmp: true, debug};
+    return {testToRun: fixedTmp, tmpPath: fixedTmp, cleanupTmp: true};
   }
 
-  return {testToRun: tmpName, tmpPath: tmpName, cleanupTmp: true, debug};
+  return {testToRun: tmpName, tmpPath: tmpName, cleanupTmp: true};
 }
 
 module.exports = {extractMeta, parseList, hasFlag, hasFeature, get262StubLines, composeTest, referencesAssert, verifyComposeStubMarkerCount};

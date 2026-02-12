@@ -157,26 +157,15 @@ pub fn handle_generator_function_call<'gc>(
             None,
             home_opt,
         )?;
-        log::debug!("handle_generator_function_call: prepared param_env");
         // Early: propagate [[HomeObject]] into the parameter environment so
         // any frames created during parameter initialization or early evaluation
         // can see it when resolving `super`.
         if let Some(home_obj) = &closure.home_object {
             param_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
-            log::trace!(
-                "handle_generator_function_call: early-set param_env.home from closure -> {:p}",
-                Gc::as_ptr(*home_obj.borrow())
-            );
-            let bt = std::backtrace::Backtrace::capture();
-            log::trace!("handle_generator_function_call: backtrace at early-set home: {:?}", bt);
         } else if let Some(fn_obj_ptr) = fn_obj
             && let Some(home) = fn_obj_ptr.borrow().get_home_object()
         {
             param_env.borrow_mut(mc).set_home_object(Some(home.clone()));
-            log::trace!(
-                "handle_generator_function_call: early-set param_env.home from fn_obj -> {:p}",
-                Gc::as_ptr(*home.borrow())
-            );
         }
         let var_env = new_js_object_data(mc);
         var_env.borrow_mut(mc).prototype = Some(param_env);
@@ -213,40 +202,15 @@ pub fn handle_generator_function_call<'gc>(
             // Also set on the parameter environment so frames whose prototype is
             // the param env can still locate [[HomeObject]]
             param_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
-            log::trace!(
-                "handle_generator_function_call: set var_env.home_object from closure -> {:p} and param_env.home -> {:p}",
-                Gc::as_ptr(*home_obj.borrow()),
-                Gc::as_ptr(*home_obj.borrow())
-            );
         } else if let Some(fn_obj_ptr) = fn_obj {
             // If the closure itself has no [[HomeObject]], prefer the function
             // object's [[HomeObject]] (if present). This covers cases like
             // concise methods where the function object wrapper holds the
             // home object but the underlying closure data may not.
-            let fn_home_ptr = fn_obj_ptr.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
-            log::trace!(
-                "handle_generator_function_call: fn_obj ptr={:p} fn_home={:?}",
-                Gc::as_ptr(fn_obj_ptr),
-                fn_home_ptr
-            );
             if let Some(home) = fn_obj_ptr.borrow().get_home_object() {
                 var_env.borrow_mut(mc).set_home_object(Some(home.clone()));
                 param_env.borrow_mut(mc).set_home_object(Some(home.clone()));
-                log::trace!(
-                    "handle_generator_function_call: set var_env.home_object from fn_obj -> {:p} and param_env.home -> {:p}",
-                    Gc::as_ptr(*home.borrow()),
-                    Gc::as_ptr(*home.borrow())
-                );
-                let bt = std::backtrace::Backtrace::capture();
-                log::trace!("handle_generator_function_call: backtrace at fn_obj-home-set: {:?}", bt);
             }
-        }
-        // Diagnostic: final var_env home pointer
-        let var_home_ptr = var_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
-        log::trace!("handle_generator_function_call: final var_env.home={:?}", var_home_ptr);
-        if var_home_ptr.is_some() {
-            let bt = std::backtrace::Backtrace::capture();
-            log::trace!("handle_generator_function_call: backtrace at final var_env.home: {:?}", bt);
         }
 
         // Ensure the body environment has its own arguments object.

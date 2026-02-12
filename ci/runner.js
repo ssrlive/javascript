@@ -344,11 +344,7 @@ async function runAll(){
     // not inject a global "use strict" which can change eval semantics.
     const isModule = hasFlag(meta, 'module');
     const needStrict = !isModule && hasFlag(meta, 'onlyStrict');
-    const {testToRun, tmpPath, cleanupTmp, debug} = composeTest({testPath: f, repoDir: REPO_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict});
-    // Only emit detailed debug lines when explicitly requested via TEST262_LOG_LEVEL=debug
-    if (process.env.TEST262_LOG_LEVEL === 'debug') {
-      for (const d of debug) log(d);
-    }
+    const {testToRun, tmpPath, cleanupTmp} = composeTest({testPath: f, repoDir: REPO_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict});
 
     let currentSucceeds = false;
     // Run test

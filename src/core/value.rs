@@ -1065,14 +1065,6 @@ pub fn object_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<Prop
     let mut current = Some(*obj);
     while let Some(cur) = current {
         if let Some(val) = cur.borrow().properties.get(&key) {
-            // Diagnostic: log the exact GC cell pointer and value being returned
-            log::debug!(
-                "object_get_key_value: found on obj={:p} key={:?} val_ptr={:p} val_debug={:?}",
-                cur.as_ptr(),
-                &key,
-                val,
-                val.borrow()
-            );
             return Some(*val);
         }
         current = cur.borrow().prototype;
@@ -1161,11 +1153,6 @@ pub fn ordinary_own_property_keys_mc<'gc>(mc: &MutationContext<'gc>, obj: &JSObj
     // Debug: show whether object is a proxy wrapper so we can diagnose missing trap calls
     let obj_ptr = obj.as_ptr();
     let has_proxy = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string())).is_some();
-    // Also print directly to stdout to ensure diagnostic is visible even if log filters hide it
-    println!(
-        "TRACE: ordinary_own_property_keys_mc: obj_ptr={:p} has_proxy={}",
-        obj_ptr, has_proxy
-    );
     log::trace!("ordinary_own_property_keys_mc: obj_ptr={:p} has_proxy={}", obj_ptr, has_proxy);
 
     // If this is a proxy wrapper object, delegate to the proxy helper so
@@ -1394,6 +1381,13 @@ pub fn object_set_key_value<'gc>(
     }
 
     let val_ptr = new_gc_cell_ptr(mc, val.clone());
+    if key_desc == "prototype" {
+        log::debug!(
+            "object_set_key_value: setting 'prototype' on obj={:p} value={:?}",
+            obj.as_ptr(),
+            val
+        );
+    }
     obj.borrow_mut(mc).insert(key.clone(), val_ptr);
     Ok(())
 }

@@ -1978,30 +1978,6 @@ pub fn resolve_promise<'gc>(
     value: Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) {
-    log::trace!("resolve_promise called");
-    // Diagnostic: print promise ptr, value, and calling env frame (if available)
-    let mut frame_name: Option<String> = None;
-    if let Some(frame_rc) = object_get_key_value(env, "__frame")
-        && let Value::String(s) = &*frame_rc.borrow()
-    {
-        frame_name = Some(crate::unicode::utf16_to_utf8(s));
-    }
-    log::debug!(
-        "resolve_promise called for promise ptr={:p} id={} value={:?} env_ptr={:p} frame={:?}",
-        Gc::as_ptr(*promise),
-        promise.borrow().id,
-        value,
-        env,
-        frame_name
-    );
-
-    // If value is Undefined, capture a backtrace to find the caller
-    if matches!(value, Value::Undefined) {
-        log::debug!("resolve_promise received Undefined — capturing backtrace to find caller");
-        let bt = std::backtrace::Backtrace::capture();
-        log::debug!("resolve_promise backtrace:\n{:?}", bt);
-    }
-
     let mut promise_borrow = promise.borrow_mut(mc);
     // println!("DEBUG: resolve_promise called for promise id={} value={:?}", promise_borrow.id, value);
     if let PromiseState::Pending = promise_borrow.state {

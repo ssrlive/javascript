@@ -161,7 +161,7 @@ pub fn handle_reflect_method<'gc>(
             }
             let target = args[0].clone();
             let arguments_list = if args.len() > 1 { args[1].clone() } else { Value::Undefined };
-            let _new_target = if args.len() > 2 { args[2].clone() } else { target.clone() };
+            let new_target = if args.len() > 2 { args[2].clone() } else { target.clone() };
 
             // Build argument list from array-like arguments_list
             let mut arg_values: Vec<Value> = Vec::new();
@@ -187,7 +187,7 @@ pub fn handle_reflect_method<'gc>(
                 }
             }
 
-            crate::js_class::evaluate_new(mc, env, &target, &arg_values, Some(&_new_target))
+            crate::js_class::evaluate_new(mc, env, &target, &arg_values, Some(&new_target))
         }
         "defineProperty" => {
             if args.len() < 3 {

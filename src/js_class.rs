@@ -335,30 +335,10 @@ pub(crate) fn evaluate_this_allow_uninitialized<'gc>(
 // direct eval creates a fresh declarative environment whose prototype points
 // at the function's environment). Return `Some(home_obj)` if found.
 fn find_home_object_in_env<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<GcCell<JSObjectDataPtr<'gc>>> {
-    // Capture a short backtrace at lookup time so we can correlate the
-    // environment lookup site with where [[HomeObject]] was set.
-    let bt = std::backtrace::Backtrace::capture();
-    log::warn!("find_home_object_in_env: backtrace (short): {:?}", bt);
-    // TEMP DIAG: print immediate env pointer to stderr to help triage
-    log::warn!("DIAG: find_home_object_in_env called env_ptr={:p}", env.as_ptr());
-
     let mut cur = Some(*env);
     while let Some(e) = cur {
-        // Diagnostic: log the environment being checked
-        let has_home = e.borrow().get_home_object().is_some();
-        let has_fn = object_get_key_value(&e, "__function").is_some();
-        log::warn!(
-            "find_home_object_in_env: checking env ptr={:p} has_home={} has___function={}",
-            Gc::as_ptr(e),
-            has_home,
-            has_fn
-        );
         // Prefer explicit [[HomeObject]] on the environment itself
         if let Some(home) = e.borrow().get_home_object() {
-            log::trace!(
-                "find_home_object_in_env: returning home_object ptr={:p}",
-                Gc::as_ptr(*home.borrow())
-            );
             return Some(home);
         }
         // If there is a __function binding in this environment, try to extract the
@@ -370,13 +350,11 @@ fn find_home_object_in_env<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<GcCell<JSO
             match f_val {
                 Value::Object(obj) => {
                     if let Some(h) = obj.borrow().get_home_object() {
-                        log::trace!("find_home_object_in_env: found home on bound function ptr={:p}", Gc::as_ptr(obj));
                         return Some(h);
                     }
                 }
                 Value::Closure(cl) => {
                     if let Some(h) = cl.home_object.clone() {
-                        log::trace!("find_home_object_in_env: found home on bound closure");
                         return Some(h);
                     }
                 }
@@ -861,36 +839,20 @@ pub(crate) fn evaluate_new<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate arguments first
 
-    // Log pointer/type of the evaluated constructor value for diagnostics
-    match &constructor_val {
-        Value::Object(o) => {
-            log::debug!("evaluate_new - constructor evaluated -> Object ptr={:p}", Gc::as_ptr(*o));
-        }
-        Value::Function(name) => {
-            log::debug!("evaluate_new - constructor evaluated -> Builtin Function {name}");
-        }
-        Value::Closure(..) | Value::AsyncClosure(..) => {
-            log::debug!("evaluate_new - constructor evaluated -> Closure")
-        }
-        other => {
-            log::debug!("evaluate_new - constructor evaluated -> {other:?}");
-        }
-    }
-    log::trace!("evaluate_new - invoking constructor (evaluated)");
-
     match constructor_val {
         Value::Object(class_obj) => {
-            if class_obj.borrow().class_def.is_some() {
-                log::debug!("evaluate_new - constructor has internal class_def slot");
-            } else {
-                log::debug!("evaluate_new - constructor class_def slot not present");
-            }
             // If this function object has a [[HomeObject]] set, it is a
             // method created on an object literal or class and per ECMAScript
             // is not a constructor. Reject with TypeError.
             if class_obj.borrow().get_home_object().is_some() {
                 return Err(raise_type_error!("Not a constructor").into());
             }
+            // Keep a slot for any computed prototype we derive from the
+            // constructor/newTarget search so we can finalize it on the
+            // actual returned object regardless of re-assignment via
+            // `super()` in derived constructors.
+            let mut computed_proto: Option<crate::core::JSObjectDataPtr<'_>> = None;
+
             // If this object wraps a closure (created from a function
             // expression/declaration), treat it as a constructor by
             // extracting the internal closure and invoking it as a
@@ -910,13 +872,190 @@ pub(crate) fn evaluate_new<'gc>(
                     // Create the instance object
                     let instance = new_js_object_data(mc);
 
-                    // Set prototype from the constructor object's `.prototype` if available
-                    if let Some(prototype_val) = object_get_key_value(class_obj, "prototype") {
-                        if let Value::Object(proto_obj) = &*prototype_val.borrow() {
-                            instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(*proto_obj))?;
+                    // Determine prototype per GetPrototypeFromConstructor semantics.
+                    // If an explicit `new_target` was provided (e.g. via `Reflect.construct`),
+                    // use that as the constructor for prototype selection; otherwise use
+                    // the constructor object itself (`class_obj`). If the chosen
+                    // constructor's `prototype` property is an Object, use that; if it
+                    // exists but is not an object (e.g., `null`) or is absent, fall
+                    // back to the constructor's realm's `Object.prototype` intrinsic.
+                    let prototype_source_obj: Option<crate::core::JSObjectDataPtr<'_>> = if let Some(nt) = new_target {
+                        if let Value::Object(o) = nt { Some(*o) } else { None }
+                    } else {
+                        Some(*class_obj)
+                    };
+
+                    let mut assigned_proto: Option<crate::core::JSObjectDataPtr<'_>> = None;
+                    if let Some(src_obj) = prototype_source_obj
+                        && let Some(prototype_val) = object_get_key_value(&src_obj, "prototype")
+                    {
+                        match &*prototype_val.borrow() {
+                            Value::Object(proto_obj) => assigned_proto = Some(*proto_obj),
+                            other => {
+                                let _ = other;
+                            }
+                        }
+                    }
+
+                    if let Some(proto_obj) = assigned_proto {
+                        // Defer actual assignment; remember it for finalization below.
+                        computed_proto = Some(proto_obj);
+                        log::debug!("evaluate_new: computed prototype (deferred) -> proto={:p}", Gc::as_ptr(proto_obj));
+                    } else {
+                        // Fall back to the realm's Object.prototype for the
+                        // prototype_source_obj's realm (if available). First try to
+                        // directly inspect the prototype_source_obj for an 'Object'
+                        // binding when available.
+                        let obj_proto_from_src = prototype_source_obj.and_then(|src_obj| {
+                            if let Some(obj_val) = get_own_property(&src_obj, "Object")
+                                && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+                                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+                            {
+                                log::warn!(
+                                    "evaluate_new: found Object.prototype on source obj ptr={:p} proto={:p}",
+                                    Gc::as_ptr(src_obj),
+                                    Gc::as_ptr(*obj_proto)
+                                );
+                                return Some(*obj_proto);
+                            }
+                            None
+                        });
+
+                        if let Some(obj_proto) = obj_proto_from_src {
+                            // Defer assignment to final instance
+                            computed_proto = Some(obj_proto);
+                            log::warn!(
+                                "evaluate_new: computed fallback (from source obj) realm prototype (deferred) -> proto={:p}",
+                                Gc::as_ptr(obj_proto)
+                            );
                         } else {
-                            object_set_key_value(mc, &instance, "__proto__", &prototype_val.borrow().clone())?;
+                            // If the source object came from a Function constructor, it may
+                            // carry an internal marker pointing to its origin global. Use
+                            // that to find the realm's Object.prototype.
+                            if let Some(src_obj) = prototype_source_obj
+                                && let Some(origin_val) = object_get_key_value(&src_obj, "__origin_global")
+                                && let Value::Object(origin_global) = &*origin_val.borrow()
+                                && let Some(obj_val) = object_get_key_value(origin_global, "Object")
+                                && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+                                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+                            {
+                                // Defer assignment to final instance
+                                computed_proto = Some(*obj_proto);
+                                log::warn!(
+                                    "evaluate_new: computed fallback (from origin_global) realm prototype (deferred) -> proto={:p}",
+                                    Gc::as_ptr(*obj_proto)
+                                );
+                            }
+                            // Try multiple strategies to discover the constructor's realm:
+                            // 1. If the constructor object itself wraps a closure, use its
+                            //    closure.env.
+                            // 2. Walk the constructor/prototype chain and inspect any
+                            //    `constructor` property or prototype objects for a closure
+                            //    whose `env` points at the originating realm.
+                            let realm_env_opt = prototype_source_obj.and_then(|src_obj| {
+                                // 1) direct closure on the constructor object
+                                if let Some(cl_val_rc) = src_obj.borrow().get_closure() {
+                                    match &*cl_val_rc.borrow() {
+                                        Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
+                                        _ => {}
+                                    }
+                                }
+
+                                // 2) walk the constructor/prototype chain looking for a
+                                // closure on either a `constructor` property or on the
+                                // prototype objects themselves.
+                                let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(src_obj);
+                                while let Some(o) = cur {
+                                    // Check for a `constructor` property that may point to
+                                    // a function object with closure data.
+                                    if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
+                                        && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
+                                        && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
+                                    {
+                                        match &*c_cl_val_rc.borrow() {
+                                            Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
+                                            _ => {}
+                                        }
+                                    }
+
+                                    // Advance up the prototype chain and continue searching.
+                                    cur = o.borrow().prototype;
+                                }
+
+                                None
+                            });
+
+                            // DIAG: report the computed realm_env_opt and extract its Object.prototype if present
+                            let obj_proto_opt = if let Some(re_env) = realm_env_opt {
+                                log::warn!("evaluate_new: computed realm_env_opt ptr={:p}", Gc::as_ptr(re_env));
+                                if let Some(obj_val) = crate::core::env_get(&re_env, "Object") {
+                                    log::warn!("evaluate_new: realm env Object binding = {:?}", obj_val.borrow());
+                                    if let Value::Object(obj_ctor) = &*obj_val.borrow() {
+                                        if let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype") {
+                                            match &*obj_proto_val.borrow() {
+                                                Value::Object(p) => {
+                                                    log::warn!("evaluate_new: realm Object.prototype ptr = {:p}", Gc::as_ptr(*p));
+                                                    Some(*p)
+                                                }
+                                                other => {
+                                                    log::warn!("evaluate_new: realm Object.prototype not object: {:?}", other);
+                                                    None
+                                                }
+                                            }
+                                        } else {
+                                            log::warn!("evaluate_new: realm Object binding has no prototype property");
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    log::warn!("evaluate_new: computed realm_env_opt but no Object binding found in that env");
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Some(obj_proto) = obj_proto_opt {
+                                // Defer assignment to final instance
+                                computed_proto = Some(obj_proto);
+                                log::debug!(
+                                    "evaluate_new: computed fallback realm prototype (deferred) -> proto={:p}",
+                                    Gc::as_ptr(obj_proto)
+                                );
+                            } else if let Some(src_obj) = prototype_source_obj {
+                                // As a final fallback, walk the prototype chain of the
+                                // prototype_source_obj to find the top-most prototype
+                                // (the object whose [[Prototype]] is null). That object
+                                // is the realm-specific Object.prototype intrinsic for
+                                // the realm which originally created `src_obj`.
+                                let mut cur = Some(src_obj);
+                                while let Some(o) = cur {
+                                    let next_ptr = o.borrow().prototype.map(Gc::as_ptr);
+                                    log::debug!(
+                                        "evaluate_new: walking prototype chain: at obj ptr={:p} proto={:?}",
+                                        Gc::as_ptr(o),
+                                        next_ptr
+                                    );
+                                    if let Some(p) = o.borrow().prototype {
+                                        cur = Some(p);
+                                        continue;
+                                    } else {
+                                        // `o` is the top-most prototype (Object.prototype)
+                                        instance.borrow_mut(mc).prototype = Some(o);
+                                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(o))?;
+                                        log::warn!(
+                                            "evaluate_new: assigned fallback by walking prototype chain -> instance={:p} proto={:p}",
+                                            Gc::as_ptr(instance),
+                                            Gc::as_ptr(o)
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -968,6 +1107,31 @@ pub(crate) fn evaluate_new<'gc>(
                     if let Some(nt) = &new_target {
                         crate::core::object_set_key_value(mc, &func_env, "__new_target", nt)?;
                     }
+
+                    // If we computed a deferred prototype, attach it to the function environment
+                    // so that if `super()` returns a different object we can apply the
+                    // computed prototype to the actual returned object inside evaluate_super_call.
+                    if let Some(proto) = computed_proto {
+                        // Attach pending computed proto to the function environment so
+                        // evaluate_super_call can apply it if the parent constructor
+                        // returns a different instance. Also attach to the original
+                        // `instance` object as a fallback lookup in case the
+                        // lexical env chain at the super() call site does not
+                        // include the function environment (nested envs, arrows, etc.).
+                        crate::core::object_set_key_value(mc, &func_env, "__computed_proto", &Value::Object(proto))?;
+                        crate::core::object_set_key_value(mc, &instance, "__computed_proto", &Value::Object(proto))?;
+                        log::warn!(
+                            "evaluate_new: attached computed_proto to func_env ptr={:p} proto={:p}",
+                            Gc::as_ptr(func_env),
+                            Gc::as_ptr(proto)
+                        );
+                        log::warn!(
+                            "evaluate_new: attached computed_proto to original instance ptr={:p} proto={:p}",
+                            Gc::as_ptr(instance),
+                            Gc::as_ptr(proto)
+                        );
+                    }
+
                     log::trace!("evaluate_new: called prepare_call_env_with_this");
 
                     // Create the arguments object
@@ -976,11 +1140,69 @@ pub(crate) fn evaluate_new<'gc>(
                     // Execute constructor body
                     evaluate_statements(mc, &func_env, body)?;
 
-                    log::trace!(
-                        "evaluate_new: constructor body executed; returning instance ptr={:p}",
-                        Gc::as_ptr(instance)
+                    // If this is a derived class, `super()` may have replaced the
+                    // initially-created `instance` with a different object. Per
+                    // spec, the actual instance to return is the `__instance`
+                    // binding in the constructor environment (if it is an
+                    // object). Prefer that over the original `instance`.
+                    let mut final_instance = instance;
+                    if is_derived
+                        && let Some(inst_val_rc) = object_get_key_value(&func_env, "__instance")
+                        && let Value::Object(real_inst) = &*inst_val_rc.borrow()
+                    {
+                        final_instance = *real_inst;
+                    }
+
+                    log::debug!(
+                        "evaluate_new: constructor body executed; returning instance ptr={:p} (orig={:p}) final_instance.prototype={:?} orig.prototype={:?}",
+                        Gc::as_ptr(final_instance),
+                        Gc::as_ptr(instance),
+                        final_instance.borrow().prototype.map(Gc::as_ptr),
+                        instance.borrow().prototype.map(Gc::as_ptr)
                     );
-                    return Ok(Value::Object(instance));
+
+                    // If super() replaced the instance, ensure the final instance
+                    // receives the computed prototype (overriding any current value).
+                    // Also copy any assigned prototype from the original instance first
+                    if !Gc::ptr_eq(final_instance, instance)
+                        && let Some(proto) = instance.borrow().prototype
+                    {
+                        final_instance.borrow_mut(mc).prototype = Some(proto);
+                        object_set_key_value(mc, &final_instance, "__proto__", &Value::Object(proto))?;
+                        log::warn!(
+                            "evaluate_new: copied assigned prototype from orig instance {:p} to final_instance {:p} proto={:p}",
+                            Gc::as_ptr(instance),
+                            Gc::as_ptr(final_instance),
+                            Gc::as_ptr(proto)
+                        );
+                    }
+
+                    if let Some(proto) = computed_proto {
+                        // Always apply computed_proto to the final instance, overriding
+                        // any existing prototype so GetPrototypeFromConstructor semantics
+                        // are honored even when super() returns a different object.
+                        final_instance.borrow_mut(mc).prototype = Some(proto);
+                        object_set_key_value(mc, &final_instance, "__proto__", &Value::Object(proto))?;
+                        log::warn!(
+                            "evaluate_new: finalized deferred prototype -> instance={:p} proto={:p}",
+                            Gc::as_ptr(final_instance),
+                            Gc::as_ptr(proto)
+                        );
+                        // Clear any pending computed proto marker on the function env
+                        // so subsequent super() handling won't re-apply it from that env.
+                        crate::core::object_set_key_value(mc, &func_env, "__computed_proto", &Value::Undefined)?;
+                        // Read-back diagnostics to ensure prototype persists
+                        let read_proto_ptr = final_instance.borrow().prototype.map(Gc::as_ptr);
+                        let has_own_proto = object_get_key_value(&final_instance, "__proto__").is_some();
+                        log::warn!(
+                            "evaluate_new: after finalize readback -> instance={:p} read_proto={:?} has_own_proto={}",
+                            Gc::as_ptr(final_instance),
+                            read_proto_ptr,
+                            has_own_proto
+                        );
+                    }
+
+                    return Ok(Value::Object(final_instance));
                 }
             }
 
@@ -1006,17 +1228,61 @@ pub(crate) fn evaluate_new<'gc>(
                         return handle_object_constructor(mc, &[str_val], env);
                     }
                     "Function" => {
-                        let f_val = crate::js_function::handle_global_function(mc, "Function", evaluated_args, env)?;
-                        let func_obj = new_js_object_data(mc);
-                        if let Some(func_ctor_val) = env_get(env, "Function")
-                            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-                            && let Value::Object(proto) = &*proto_val.borrow()
-                        {
-                            func_obj.borrow_mut(mc).prototype = Some(*proto);
-                        }
-                        func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, f_val)));
-                        return Ok(Value::Object(func_obj));
+                        // Prefer to execute Function constructor logic in the realm of the constructor
+                        // object (class_obj) if we can discover one, otherwise fall back to the
+                        // current call env. This ensures `new other.Function()` creates functions
+                        // in the `other` realm rather than in the caller's realm.
+                        let ctor_re_env = (|| {
+                            // 1) direct closure on the constructor object
+                            if let Some(cl_val_rc) = class_obj.borrow().get_closure() {
+                                match &*cl_val_rc.borrow() {
+                                    Value::Closure(data) | Value::AsyncClosure(data) => {
+                                        let env_ptr = if let Some(e) = data.env {
+                                            Gc::as_ptr(e) as *const _
+                                        } else {
+                                            std::ptr::null()
+                                        };
+                                        log::warn!("evaluate_new: ctor direct closure found - closure.env ptr={:p}", env_ptr);
+                                        return data.env;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // 2) walk the constructor/prototype chain looking for a closure on a
+                            //    `constructor` property or prototype object
+                            let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(*class_obj);
+                            while let Some(o) = cur {
+                                if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
+                                    && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
+                                {
+                                    log::warn!(
+                                        "evaluate_new: walking chain - found 'constructor' property pointing to ctor_obj ptr={:p}",
+                                        Gc::as_ptr(*ctor_obj)
+                                    );
+                                    if let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure() {
+                                        match &*c_cl_val_rc.borrow() {
+                                            Value::Closure(data) | Value::AsyncClosure(data) => {
+                                                let env_ptr = if let Some(e) = data.env {
+                                                    Gc::as_ptr(e) as *const _
+                                                } else {
+                                                    std::ptr::null()
+                                                };
+                                                log::warn!("evaluate_new: ctor chain closure found - closure.env ptr={:p}", env_ptr);
+                                                return data.env;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                cur = o.borrow().prototype;
+                            }
+
+                            None
+                        })();
+
+                        let call_env_for_function = if let Some(re) = ctor_re_env { re } else { *env };
+                        return crate::js_function::handle_global_function(mc, "Function", evaluated_args, &call_env_for_function);
                     }
                     "Map" => return Ok(crate::js_map::handle_map_constructor(mc, evaluated_args, env)?),
                     "Set" => return Ok(crate::js_set::handle_set_constructor(mc, evaluated_args, env)?),
@@ -1068,14 +1334,100 @@ pub(crate) fn evaluate_new<'gc>(
                 // Create instance
                 let instance = new_js_object_data(mc);
 
-                // Set prototype (both internal pointer and __proto__ property)
-                if let Some(prototype_val) = object_get_key_value(class_obj, "prototype") {
-                    if let Value::Object(proto_obj) = &*prototype_val.borrow() {
-                        instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(*proto_obj))?;
-                    } else {
-                        // Fallback: store whatever prototype value was provided
-                        object_set_key_value(mc, &instance, "__proto__", &prototype_val.borrow().clone())?;
+                // Set prototype (respect `new_target` if provided per spec - GetPrototypeFromConstructor)
+                let prototype_source_obj: Option<JSObjectDataPtr<'_>> = if let Some(nt) = new_target
+                    && let Value::Object(o) = nt
+                {
+                    Some(*o)
+                } else {
+                    Some(*class_obj)
+                };
+
+                // DIAG: print where we source prototype from
+                if let Some(src) = prototype_source_obj {
+                    log::warn!(
+                        "evaluate_new (class): prototype_source obj ptr = {:p}, class_obj ptr = {:p}",
+                        Gc::as_ptr(src),
+                        Gc::as_ptr(*class_obj)
+                    );
+                }
+
+                // Try to fetch the 'prototype' property on the source object first
+                let mut assigned_proto: Option<JSObjectDataPtr<'_>> = None;
+                if let Some(src_obj) = prototype_source_obj
+                    && let Some(prototype_val) = object_get_key_value(&src_obj, "prototype")
+                {
+                    match &*prototype_val.borrow() {
+                        Value::Object(proto_obj) => assigned_proto = Some(*proto_obj),
+                        other => log::debug!("evaluate_new (class): prototype property present but not object (val={:?})", other),
+                    }
+                }
+
+                if let Some(proto_obj) = assigned_proto {
+                    instance.borrow_mut(mc).prototype = Some(proto_obj);
+                    object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto_obj))?;
+                    let assigned_ptr = instance.borrow().prototype.map(Gc::as_ptr);
+                    log::debug!(
+                        "evaluate_new (class): assigned explicit prototype -> instance={:p} proto={:p} after assign ptr={:?}",
+                        Gc::as_ptr(instance),
+                        Gc::as_ptr(proto_obj),
+                        assigned_ptr
+                    );
+                } else {
+                    // Fallback to the realm intrinsic Object.prototype for the prototype_source_obj's realm
+                    let realm_env_opt = prototype_source_obj.and_then(|src_obj| {
+                        // 1) direct closure on the constructor object
+                        if let Some(cl_val_rc) = src_obj.borrow().get_closure() {
+                            match &*cl_val_rc.borrow() {
+                                Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
+                                _ => {}
+                            }
+                        }
+
+                        // 2) walk the constructor/prototype chain looking for a
+                        // closure on either a `constructor` property or on the
+                        // prototype objects themselves.
+                        let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(src_obj);
+                        while let Some(o) = cur {
+                            // Check for a `constructor` property that may point to
+                            // a function object with closure data.
+                            if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
+                                && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
+                                && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
+                            {
+                                match &*c_cl_val_rc.borrow() {
+                                    Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
+                                    _ => {}
+                                }
+                            }
+
+                            // Advance up the prototype chain and continue searching.
+                            cur = o.borrow().prototype;
+                        }
+
+                        None
+                    });
+
+                    // DIAG: log what realm we found (if any)
+                    if let Some(re_env) = realm_env_opt {
+                        log::warn!("evaluate_new (class): found realm env ptr={:p}", Gc::as_ptr(re_env));
+                    }
+
+                    if let Some(re_env) = realm_env_opt
+                        && let Some(obj_val) = crate::core::env_get(&re_env, "Object")
+                        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+                        && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+                    {
+                        instance.borrow_mut(mc).prototype = Some(*obj_proto);
+                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(*obj_proto))?;
+                        let assigned_ptr = instance.borrow().prototype.map(Gc::as_ptr);
+                        log::warn!(
+                            "evaluate_new: assigned fallback realm prototype -> instance={:p} proto={:p}",
+                            Gc::as_ptr(instance),
+                            Gc::as_ptr(*obj_proto)
+                        );
+                        log::warn!("evaluate_new: after assignment instance.prototype ptr = {:?}", assigned_ptr);
                     }
                 }
 
@@ -1110,6 +1462,12 @@ pub(crate) fn evaluate_new<'gc>(
                             Some(*class_obj),
                         )?;
 
+                        if let Some(nt) = new_target {
+                            crate::core::object_set_key_value(mc, &func_env, "__new_target", nt)?;
+                        } else {
+                            crate::core::object_set_key_value(mc, &func_env, "__new_target", &Value::Object(*class_obj))?;
+                        }
+
                         // For class constructors, ensure the home object points at the class prototype
                         // so `super.prop` within the constructor (including via arrow functions)
                         // resolves against the parent prototype.
@@ -1126,6 +1484,31 @@ pub(crate) fn evaluate_new<'gc>(
                         if let crate::core::ControlFlow::Return(ret_val) = result
                             && let Value::Object(_) = ret_val
                         {
+                            // Finalize any deferred prototype on the explicitly-returned object
+                            if let Some(proto) = computed_proto
+                                && let Value::Object(obj) = &ret_val
+                                && obj.borrow().prototype.is_none()
+                            {
+                                obj.borrow_mut(mc).prototype = Some(proto);
+                                object_set_key_value(mc, obj, "__proto__", &Value::Object(proto))?;
+                                log::warn!(
+                                    "evaluate_new: finalized deferred prototype on explicit return -> instance={:p} proto={:p}",
+                                    Gc::as_ptr(*obj),
+                                    Gc::as_ptr(proto)
+                                );
+                                // Clear pending computed_proto markers
+                                crate::core::object_set_key_value(mc, &func_env, "__computed_proto", &Value::Undefined)?;
+                                crate::core::object_set_key_value(mc, &instance, "__computed_proto", &Value::Undefined)?;
+                                // Read-back diagnostics
+                                let read_proto = obj.borrow().prototype.map(Gc::as_ptr);
+                                let has_own = object_get_key_value(obj, "__proto__").is_some();
+                                log::warn!(
+                                    "evaluate_new: explicit-return instance readback -> instance={:p} read_proto={:?} has_own_proto={}",
+                                    Gc::as_ptr(*obj),
+                                    read_proto,
+                                    has_own
+                                );
+                            }
                             return Ok(ret_val);
                         }
 
@@ -1133,10 +1516,70 @@ pub(crate) fn evaluate_new<'gc>(
                         if let Some(final_this) = object_get_key_value(&func_env, "this")
                             && let Value::Object(final_instance) = &*final_this.borrow()
                         {
+                            // Diagnostic: log final_instance pointer and prototype before returning
+                            log::warn!(
+                                "evaluate_new: returning final_this instance ptr={:p} proto={:?}",
+                                Gc::as_ptr(*final_instance),
+                                final_instance.borrow().prototype.map(Gc::as_ptr)
+                            );
+                            // Ensure computed_proto is applied at the actual return site so the object the
+                            // caller receives has the expected [[Prototype]] even if the env's `this`
+                            // was changed later by `super()`/parent constructor.
+                            if let Some(proto) = computed_proto {
+                                final_instance.borrow_mut(mc).prototype = Some(proto);
+                                object_set_key_value(mc, final_instance, "__proto__", &Value::Object(proto))?;
+                                log::warn!(
+                                    "evaluate_new: applied computed_proto at return site -> returning instance={:p} proto={:p}",
+                                    Gc::as_ptr(*final_instance),
+                                    Gc::as_ptr(proto)
+                                );
+                                let read_proto_ptr = final_instance.borrow().prototype.map(Gc::as_ptr);
+                                let has_own = object_get_key_value(final_instance, "__proto__").is_some();
+                                log::warn!(
+                                    "evaluate_new: return-site readback -> instance={:p} read_proto={:?} has_own_proto={}",
+                                    Gc::as_ptr(*final_instance),
+                                    read_proto_ptr,
+                                    has_own
+                                );
+                            }
+                            let has_own = object_get_key_value(final_instance, "__proto__").is_some();
+                            log::warn!(
+                                "evaluate_new: returning final_this readback -> instance={:p} has_own_proto={}",
+                                Gc::as_ptr(*final_instance),
+                                has_own
+                            );
                             return Ok(Value::Object(*final_instance));
                         }
                         // Default: if constructor did not explicitly return an object and did not
                         // set `this` (shouldn't usually happen), return the created instance per spec.
+                        log::warn!(
+                            "evaluate_new: returning original instance ptr={:p} proto={:?}",
+                            Gc::as_ptr(instance),
+                            instance.borrow().prototype.map(Gc::as_ptr)
+                        );
+                        if let Some(proto) = computed_proto {
+                            instance.borrow_mut(mc).prototype = Some(proto);
+                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto))?;
+                            log::warn!(
+                                "evaluate_new: applied computed_proto at original return site -> instance={:p} proto={:p}",
+                                Gc::as_ptr(instance),
+                                Gc::as_ptr(proto)
+                            );
+                            let read_proto = instance.borrow().prototype.map(Gc::as_ptr);
+                            let has_own = object_get_key_value(&instance, "__proto__").is_some();
+                            log::warn!(
+                                "evaluate_new: original return-site readback -> instance={:p} read_proto={:?} has_own_proto={}",
+                                Gc::as_ptr(instance),
+                                read_proto,
+                                has_own
+                            );
+                        }
+                        let has_own = object_get_key_value(&instance, "__proto__").is_some();
+                        log::warn!(
+                            "evaluate_new: returning original instance readback -> instance={:p} has_own_proto={}",
+                            Gc::as_ptr(instance),
+                            has_own
+                        );
                         return Ok(Value::Object(instance));
                     }
                 }
@@ -1154,11 +1597,12 @@ pub(crate) fn evaluate_new<'gc>(
                         if let Some(parent_ctor_obj) = class_obj.borrow().prototype {
                             let parent_ctor = Value::Object(parent_ctor_obj);
                             // Call parent constructor
-                            let parent_inst = evaluate_new(mc, env, &parent_ctor, evaluated_args, None)?;
+                            let parent_inst = evaluate_new(mc, env, &parent_ctor, evaluated_args, new_target)?;
                             if let Value::Object(inst_obj) = &parent_inst {
-                                // Fix prototype to point to this class's prototype
+                                // Fix prototype to point to this class's prototype only if we don't have a computed_proto to use
                                 if let Some(prototype_val) = object_get_key_value(class_obj, "prototype")
                                     && let Value::Object(proto_obj) = &*prototype_val.borrow()
+                                    && computed_proto.is_none()
                                 {
                                     inst_obj.borrow_mut(mc).prototype = Some(*proto_obj);
                                     object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(*proto_obj))?;
@@ -1170,8 +1614,29 @@ pub(crate) fn evaluate_new<'gc>(
                                 // Fix: Initialize derived class members (fields) since default constructor doesn't have a body to do it
                                 initialize_instance_elements(mc, inst_obj, class_obj)?;
 
-                                return Ok(parent_inst);
-                            } else {
+                                // Finalize any deferred prototype on the instance returned from parent
+                                if let Some(proto) = computed_proto {
+                                    // Always apply computed_proto to the parent-returned instance, overriding any previous prototype
+                                    inst_obj.borrow_mut(mc).prototype = Some(proto);
+                                    object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(proto))?;
+                                    log::warn!(
+                                        "evaluate_new: finalized deferred prototype on parent-returned instance -> instance={:p} proto={:p}",
+                                        Gc::as_ptr(*inst_obj),
+                                        Gc::as_ptr(proto)
+                                    );
+                                    // Leave the original instance marker in place so evaluate_super_call can
+                                    // still apply the computed prototype to any parent-returned replacement instance if needed.
+                                    // Read-back diagnostics
+                                    let read_proto = inst_obj.borrow().prototype.map(Gc::as_ptr);
+                                    let has_own = object_get_key_value(inst_obj, "__proto__").is_some();
+                                    log::warn!(
+                                        "evaluate_new: parent-returned instance readback -> instance={:p} read_proto={:?} has_own_proto={}",
+                                        Gc::as_ptr(*inst_obj),
+                                        read_proto,
+                                        has_own
+                                    );
+                                }
+
                                 return Ok(parent_inst);
                             }
                         } else {
@@ -1180,6 +1645,29 @@ pub(crate) fn evaluate_new<'gc>(
                     } else {
                         // Base class default constructor (empty)
                         // Don't add an own `constructor` property on the instance; the prototype carries the constructor
+                        // Finalize deferred prototype if present
+                        if let Some(proto) = computed_proto
+                            && instance.borrow().prototype.is_none()
+                        {
+                            instance.borrow_mut(mc).prototype = Some(proto);
+                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto))?;
+                            log::warn!(
+                                "evaluate_new: finalized deferred prototype on default-constructed instance -> instance={:p} proto={:p}",
+                                Gc::as_ptr(instance),
+                                Gc::as_ptr(proto)
+                            );
+                            // Leave the original instance marker in place so evaluate_super_call can
+                            // still apply the computed prototype to any parent-returned replacement instance if needed.
+                            // Read-back diagnostics
+                            let read_proto = instance.borrow().prototype.map(Gc::as_ptr);
+                            let has_own = object_get_key_value(&instance, "__proto__").is_some();
+                            log::warn!(
+                                "evaluate_new: default-constructed instance readback -> instance={:p} read_proto={:?} has_own_proto={}",
+                                Gc::as_ptr(instance),
+                                read_proto,
+                                has_own
+                            );
+                        }
                         return Ok(Value::Object(instance));
                     }
                 }
@@ -2510,14 +2998,6 @@ pub(crate) fn call_class_method<'gc>(
 }
 
 pub(crate) fn evaluate_super<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
-    // Debug trace to help find why 'super' isn't resolving in some call contexts
-    log::trace!(
-        "TRACE: evaluate_super: env_ptr={:p} env_has_this_own={} env_has_this_any={}",
-        env.as_ptr(),
-        env.borrow().get_property("this").is_some(),
-        crate::core::env_get(env, "this").is_some()
-    );
-
     // Per spec: GetThisEnvironment — walk the environment chain until we find
     // a record that *owns* a 'this' binding. That environment is used for
     // HasSuperBinding/GetThisBinding/GetSuperBase semantics.
@@ -2531,48 +3011,27 @@ pub(crate) fn evaluate_super<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectData
         cur_env = e.borrow().prototype;
     }
 
-    if let Some(this_env) = this_env_opt {
-        log::warn!("TRACE: evaluate_super: this_env_ptr={:p}", this_env.as_ptr());
-        if let Some(this_val_rc) = object_get_key_value(&this_env, "this") {
-            log::warn!("TRACE: evaluate_super: this_val = {:?}", *this_val_rc.borrow());
-
-            // Prefer using an explicit [[HomeObject]] found on the environment chain
-            // since it captures the static home where the method was defined (class
-            // prototype or object literal). If present, the `super` base is the
-            // home object's internal prototype (home.prototype).
-            if let Some(home_seen) = find_home_object_in_env(env) {
-                if let Some(home_proto) = home_seen.borrow().borrow().prototype {
-                    log::warn!("TRACE: evaluate_super: using home_object proto ptr={:p}", Gc::as_ptr(home_proto));
-                    return Ok(Value::Object(home_proto));
-                } else {
-                    log::warn!("TRACE: evaluate_super: home_object prototype is null");
-                    return Err(raise_type_error!("Cannot access 'super' of a class with null prototype"));
-                }
-            }
-
-            // Fallback: use the instance's internal prototype as the super base
-            if let Value::Object(instance) = &*this_val_rc.borrow() {
-                if let Some(proto_ptr) = instance.borrow().prototype {
-                    log::warn!(
-                        "TRACE: evaluate_super: using instance.__proto__ as super base: instance ptr={:p} proto_ptr={:p}",
-                        Gc::as_ptr(*instance),
-                        Gc::as_ptr(proto_ptr)
-                    );
-                    return Ok(Value::Object(proto_ptr));
-                } else {
-                    log::warn!("TRACE: evaluate_super: instance present but no internal prototype");
-                }
+    if let Some(this_env) = this_env_opt
+        && let Some(this_val_rc) = object_get_key_value(&this_env, "this")
+    {
+        // Prefer using an explicit [[HomeObject]] found on the environment chain
+        // since it captures the static home where the method was defined (class
+        // prototype or object literal). If present, the `super` base is the
+        // home object's internal prototype (home.prototype).
+        if let Some(home_seen) = find_home_object_in_env(env) {
+            if let Some(home_proto) = home_seen.borrow().borrow().prototype {
+                return Ok(Value::Object(home_proto));
             } else {
-                log::warn!("TRACE: evaluate_super: 'this' binding exists but is not an object");
+                return Err(raise_type_error!("Cannot access 'super' of a class with null prototype"));
             }
-        } else {
-            log::warn!("TRACE: evaluate_super: this binding not found on this_env (unexpected)");
         }
-    } else {
-        log::warn!(
-            "TRACE: evaluate_super: no this environment found starting from env_ptr={:p}",
-            env.as_ptr()
-        );
+
+        // Fallback: use the instance's internal prototype as the super base
+        if let Value::Object(instance) = &*this_val_rc.borrow()
+            && let Some(proto_ptr) = instance.borrow().prototype
+        {
+            return Ok(Value::Object(proto_ptr));
+        }
     }
 
     Err(raise_eval_error!("super can only be used in class methods or constructors"))
@@ -2583,7 +3042,6 @@ pub(crate) fn evaluate_super_call<'gc>(
     env: &JSObjectDataPtr<'gc>,
     evaluated_args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
-    log::debug!("evaluate_super_call start");
     // Find the lexical environment that has __instance
     let lexical_env = find_binding_env(env, "__instance").ok_or_else(|| raise_type_error!("super() called in invalid context"))?;
 
@@ -2599,7 +3057,6 @@ pub(crate) fn evaluate_super_call<'gc>(
     let this_initialized = object_get_key_value(&lexical_env, "__this_initialized")
         .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
         .unwrap_or(false);
-    log::debug!("evaluate_super_call: this_initialized = {}", this_initialized);
 
     // Check if this is super() call and this is already initialized
     // NOTE: don't return early here — per spec the SuperCall will still call
@@ -2654,23 +3111,25 @@ pub(crate) fn evaluate_super_call<'gc>(
         Value::Undefined
     };
 
-    let bind_this_after_super = |mc: &MutationContext<'gc>| -> Result<(), JSError> {
-        crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(instance))?;
-        crate::core::object_set_key_value(mc, &lexical_env, "__this_initialized", &Value::Boolean(true))?;
+    let bind_this_after_super =
+        |mc: &MutationContext<'gc>, this_to_bind: Option<crate::core::JSObjectDataPtr<'gc>>| -> Result<(), JSError> {
+            let to_set = this_to_bind.unwrap_or(instance);
+            crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(to_set))?;
+            crate::core::object_set_key_value(mc, &lexical_env, "__this_initialized", &Value::Boolean(true))?;
 
-        let mut cur = Some(*env);
-        while let Some(env_ptr) = cur {
-            log::debug!("evaluate_super_call: updating env={:p}", env_ptr.as_ptr());
-            crate::core::object_set_key_value(mc, &env_ptr, "__this_initialized", &Value::Boolean(true))?;
-            crate::core::object_set_key_value(mc, &env_ptr, "this", &Value::Object(instance))?;
-            if Gc::ptr_eq(env_ptr, lexical_env) {
-                break;
+            let mut cur = Some(*env);
+            while let Some(env_ptr) = cur {
+                crate::core::object_set_key_value(mc, &env_ptr, "__this_initialized", &Value::Boolean(true))?;
+                crate::core::object_set_key_value(mc, &env_ptr, "this", &Value::Object(to_set))?;
+
+                if Gc::ptr_eq(env_ptr, lexical_env) {
+                    break;
+                }
+                cur = env_ptr.borrow().prototype;
             }
-            cur = env_ptr.borrow().prototype;
-        }
 
-        Ok(())
-    };
+            Ok(())
+        };
 
     if let Value::Object(parent_class_obj) = parent_class {
         // If parent class has an internal class_def slot, use it
@@ -2709,14 +3168,13 @@ pub(crate) fn evaluate_super_call<'gc>(
                     // Create the arguments object
                     create_arguments_object(mc, &func_env, evaluated_args, None)?;
                     let _ = evaluate_statements(mc, &func_env, body)?;
-                    bind_this_after_super(mc)?;
+                    bind_this_after_super(mc, None)?;
                     if already_initialized {
                         return Err(raise_reference_error!("super() called after this is initialized"));
                     }
                     if let Value::Object(ctor_obj) = &current_function {
                         initialize_instance_elements(mc, &instance, ctor_obj)?;
                     }
-                    log::debug!("evaluate_super_call: returning instance object from parent constructor");
                     return Ok(Value::Object(instance));
                 }
             }
@@ -2725,7 +3183,7 @@ pub(crate) fn evaluate_super_call<'gc>(
             // Per spec there is an implicit default constructor — treat this as a
             // successful super() call that simply initializes instance fields and
             // binds `this` into the constructor environment.
-            bind_this_after_super(mc)?;
+            bind_this_after_super(mc, None)?;
             if already_initialized {
                 return Err(raise_reference_error!("super() called after this is initialized"));
             }
@@ -2733,6 +3191,123 @@ pub(crate) fn evaluate_super_call<'gc>(
                 initialize_instance_elements(mc, &instance, ctor_obj)?;
             }
             return Ok(Value::Object(instance));
+        }
+
+        // If the parent is a callable constructor (ordinary function objects/closures), attempt to construct it.
+        // This covers cases where `extends` used an ordinary function rather than a `class` or native constructor.
+        {
+            let new_target_for_parent = if let Some(nt_val) = find_binding(env, "__new_target") {
+                Some(nt_val)
+            } else {
+                match &current_function {
+                    Value::Object(_) => Some(current_function.clone()),
+                    _ => None,
+                }
+            };
+            // Try to call EvaluateNew on the parent class object. If it is not callable
+            // evaluate_new will return a type error which we propagate as the existing
+            // fallback will ultimately return a more helpful message.
+            match evaluate_new(
+                mc,
+                env,
+                &Value::Object(parent_class_obj),
+                evaluated_args,
+                new_target_for_parent.as_ref(),
+            ) {
+                Ok(res) => {
+                    if let Value::Object(new_instance) = res {
+                        // Update this and __instance bindings to the actual returned instance
+                        crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(new_instance))?;
+                        crate::core::object_set_key_value(mc, &lexical_env, "__instance", &Value::Object(new_instance))?;
+                        let mut cur_update = Some(*env);
+                        while let Some(env_ptr) = cur_update {
+                            crate::core::object_set_key_value(mc, &env_ptr, "this", &Value::Object(new_instance))?;
+                            if object_get_key_value(&env_ptr, "__instance").is_some() {
+                                crate::core::object_set_key_value(mc, &env_ptr, "__instance", &Value::Object(new_instance))?;
+                            }
+                            if Gc::ptr_eq(env_ptr, lexical_env) {
+                                break;
+                            }
+                            cur_update = env_ptr.borrow().prototype;
+                        }
+
+                        // If the function environment chain had a deferred computed prototype attached,
+                        // locate the environment that actually owns the "__computed_proto" binding (searching the env chain)
+                        // so we can apply it to the actual instance returned by the parent constructor.
+                        if let Some(proto_env) = find_binding_env(&lexical_env, "__computed_proto") {
+                            if let Some(proto_rc) = object_get_key_value(&proto_env, "__computed_proto") {
+                                match &*proto_rc.borrow() {
+                                    Value::Object(proto_obj) => {
+                                        new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
+                                        object_set_key_value(mc, &new_instance, "__proto__", &Value::Object(*proto_obj))?;
+                                        // clear the pending slot on the environment that owned it
+                                        crate::core::object_set_key_value(mc, &proto_env, "__computed_proto", &Value::Undefined)?;
+                                    }
+                                    _other => {}
+                                }
+                            }
+                        } else {
+                            // If no env binding was found, fall back to checking the original instance
+                            // for a pending computed proto marker and apply it to the new_instance.
+                            if let Some(orig_inst_rc) = object_get_key_value(&lexical_env, "__instance") {
+                                match &*orig_inst_rc.borrow() {
+                                    Value::Object(orig_inst) => {
+                                        if let Some(proto_rc) = object_get_key_value(orig_inst, "__computed_proto") {
+                                            match &*proto_rc.borrow() {
+                                                Value::Object(proto_obj) => {
+                                                    new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
+                                                    object_set_key_value(mc, &new_instance, "__proto__", &Value::Object(*proto_obj))?;
+                                                    // clear the pending slot on the original instance
+                                                    crate::core::object_set_key_value(
+                                                        mc,
+                                                        orig_inst,
+                                                        "__computed_proto",
+                                                        &Value::Undefined,
+                                                    )?;
+                                                }
+                                                _other => {}
+                                            }
+                                        }
+                                    }
+                                    _other => {}
+                                }
+                            }
+                        }
+
+                        bind_this_after_super(mc, Some(new_instance))?;
+                        if already_initialized {
+                            return Err(raise_reference_error!("super() called after this is initialized"));
+                        }
+                        if let Value::Object(ctor_obj) = &current_function {
+                            initialize_instance_elements(mc, &new_instance, ctor_obj)?;
+                        }
+                        return Ok(Value::Object(new_instance));
+                    }
+                    bind_this_after_super(mc, None)?;
+                    if already_initialized {
+                        return Err(raise_reference_error!("super() called after this is initialized"));
+                    }
+                    if let Value::Object(ctor_obj) = &current_function {
+                        initialize_instance_elements(mc, &instance, ctor_obj)?;
+                    }
+                    return Ok(Value::Object(instance));
+                }
+                Err(e) => {
+                    // If evaluate_new returned an error other than 'Constructor is not callable', propagate it.
+                    // Otherwise, fall through to the existing native-handling branch which may still handle natives.
+                    match e {
+                        crate::core::EvalError::Js(js_err) => {
+                            match js_err.kind() {
+                                crate::JSErrorKind::TypeError { message } if message == "Constructor is not callable" => {
+                                    // swallow and fallthrough
+                                }
+                                _ => return Err(js_err),
+                            }
+                        }
+                        _ => return Err(raise_eval_error!("Error invoking parent constructor")),
+                    }
+                }
+            }
         }
 
         // Handle native constructors (like Array, Object, etc.)
@@ -2756,17 +3331,6 @@ pub(crate) fn evaluate_super_call<'gc>(
                 new_target_for_parent.as_ref(),
             )?;
             if let Value::Object(new_instance) = res {
-                // If we have a derived constructor, ensure the returned instance
-                // has the subclass prototype as its [[Prototype]].
-                if let Value::Object(func_obj) = &current_function
-                    && let Some(proto_val) = object_get_key_value(func_obj, "prototype")
-                    && let Value::Object(sub_proto) = &*proto_val.borrow()
-                {
-                    new_instance.borrow_mut(mc).prototype = Some(*sub_proto);
-                    object_set_key_value(mc, &new_instance, "__proto__", &Value::Object(*sub_proto))?;
-                    new_instance.borrow_mut(mc).set_non_enumerable("__proto__");
-                }
-
                 // Update this and __instance bindings to the actual returned instance
                 crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(new_instance))?;
                 crate::core::object_set_key_value(mc, &lexical_env, "__instance", &Value::Object(new_instance))?;
@@ -2782,7 +3346,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                     cur_update = env_ptr.borrow().prototype;
                 }
 
-                bind_this_after_super(mc)?;
+                bind_this_after_super(mc, Some(new_instance))?;
                 if already_initialized {
                     return Err(raise_reference_error!("super() called after this is initialized"));
                 }
@@ -2791,7 +3355,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                 }
                 return Ok(Value::Object(new_instance));
             }
-            bind_this_after_super(mc)?;
+            bind_this_after_super(mc, None)?;
             if already_initialized {
                 return Err(raise_reference_error!("super() called after this is initialized"));
             }
@@ -2815,59 +3379,6 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
     key: impl Into<PropertyKey<'gc>>,
 ) -> Result<Value<'gc>, JSError> {
     let key = key.into();
-    log::trace!(
-        "DBG evaluate_super_computed_property: called key='{key:?}' env_ptr={env:p} env_gc_ptr={:p}",
-        Gc::as_ptr(*env)
-    );
-    // TEMP DIAG: echo to stderr so we always see this when running the single test
-    log::trace!(
-        "DIAG: evaluate_super_computed_property called key={:?} env_ptr={:p}",
-        key,
-        env.as_ptr()
-    );
-    // Diagnostic: report whether [[HomeObject]] is present on the env chain and show its prototype pointer
-    if let Some(home_seen) = find_home_object_in_env(env) {
-        let home_proto_ptr = home_seen.borrow().borrow().prototype.map(Gc::as_ptr);
-        log::trace!(
-            "DBG evaluate_super_computed_property: witness home_object ptr={:p} home.prototype={:?}",
-            Gc::as_ptr(*home_seen.borrow()),
-            home_proto_ptr
-        );
-    } else {
-        log::trace!("DBG evaluate_super_computed_property: witness no [[HomeObject]] found");
-        // Diagnostic: dump the entire environment chain starting at `env` so we
-        // can correlate which lexical environments are visible at the lookup site.
-        log::trace!(
-            "DBG evaluate_super_computed_property: dumping env chain starting at env_ptr={:p}",
-            Gc::as_ptr(*env)
-        );
-        let mut cur_chain = Some(*env);
-        while let Some(e) = cur_chain {
-            let has_home = e.borrow().get_home_object().is_some();
-            let home_ptr = e.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
-            let has_fn = object_get_key_value(&e, "__function").is_some();
-            let fn_ptr = if let Some(f_rc) = object_get_key_value(&e, "__function") {
-                match &*f_rc.borrow() {
-                    Value::Object(o) => Some(Gc::as_ptr(*o)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            log::trace!(
-                "DBG evaluate_super_computed_property: env_chain item env_ptr={:p} has_home={} home_ptr={:?} has___function={} __function_ptr={:?}",
-                Gc::as_ptr(e),
-                has_home,
-                home_ptr,
-                has_fn,
-                fn_ptr
-            );
-            cur_chain = e.borrow().prototype;
-        }
-        // Also capture a short backtrace to help correlate caller frames when available.
-        let bt = std::backtrace::Backtrace::capture();
-        log::trace!("DBG evaluate_super_computed_property: backtrace (short): {:?}", bt);
-    }
     // super.property (or super[expr]) accesses parent class properties
     // Use [[HomeObject]] if available; search up environment prototype chain
     if let Some(home_obj) = find_home_object_in_env(env) {
@@ -2882,15 +3393,6 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
         if let Some(super_obj) = super_base {
             // Look up property on super object
             if let Some(prop_val) = object_get_key_value(&super_obj, key.clone()) {
-                log::trace!(
-                    "DBG evaluate_super_computed_property: found prop_val on super_obj for '{:?}' => {:?}",
-                    key,
-                    prop_val.borrow()
-                );
-                log::trace!(
-                    "DBG evaluate_super_computed_property: env.this={:?}",
-                    object_get_key_value(env, "this")
-                );
                 // If this is a property descriptor with a getter, call the getter with the current `this` as receiver
                 match &*prop_val.borrow() {
                     Value::Property { getter: Some(getter), .. } => {
@@ -2976,11 +3478,6 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
                     }
                 }
             }
-            log::trace!(
-                "DBG evaluate_super_computed_property: property '{:?}' not found on super_obj {:p} - returning undefined",
-                key,
-                Gc::as_ptr(super_obj)
-            );
             return Ok(Value::Undefined);
         }
     }
@@ -2997,11 +3494,6 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
         {
             // Look for property in parent prototype
             if let Some(prop_val) = object_get_key_value(parent_proto_obj, key.clone()) {
-                log::trace!(
-                    "DBG evaluate_super_computed_property: found prop_val on parent_proto for '{:?}' => {:?}",
-                    key,
-                    prop_val.borrow()
-                );
                 // If this is an accessor or getter, call it
                 match &*prop_val.borrow() {
                     Value::Property { getter: Some(getter), .. } => {
@@ -3066,15 +3558,9 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
                     }
                 }
             }
-            log::trace!(
-                "DBG evaluate_super_computed_property: property '{:?}' not found on parent prototype {:p} - returning undefined",
-                key,
-                Gc::as_ptr(*parent_proto_obj)
-            );
         }
     }
     // If no parent class/property found, return undefined (per spec, missing super property yields undefined)
-    log::trace!("DBG evaluate_super_computed_property: no parent class/property found for '{key:?}' - returning undefined",);
     Ok(Value::Undefined)
 }
 
@@ -3084,36 +3570,7 @@ pub(crate) fn evaluate_super_method<'gc>(
     method: &str,
     evaluated_args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
-    log::trace!("DBG evaluate_super_method: called method='{}' env_ptr={:p}", method, env);
     // super.method() calls parent class methods
-
-    // Debug: print basic context to track recursion
-    log::trace!(
-        "DBG evaluate_super_method: method={}, this_present={}, home_object_present={}",
-        method,
-        object_get_key_value(env, "this").is_some() && object_get_key_value(env, "this").is_some(),
-        env.borrow().get_home_object().is_some()
-    );
-    // Additional diagnostics to help triage failing cases
-    let home_exists = env.borrow().get_home_object().is_some();
-    let home_ptr = env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
-    log::warn!(
-        "DIAG evaluate_super_method start: env_ptr={:p} this_binding={:?} __instance={:?} home_exists={} home_ptr={:?}",
-        env.as_ptr(),
-        object_get_key_value(env, "this"),
-        object_get_key_value(env, "__instance"),
-        home_exists,
-        home_ptr
-    );
-    if let Some(home_seen) = find_home_object_in_env(env) {
-        log::warn!(
-            "DIAG evaluate_super_method: find_home_object_in_env -> home_ptr={:p} home.prototype={:?}",
-            Gc::as_ptr(*home_seen.borrow()),
-            home_seen.borrow().borrow().prototype.map(Gc::as_ptr)
-        );
-    } else {
-        log::warn!("DIAG evaluate_super_method: find_home_object_in_env -> NONE");
-    }
 
     // Use [[HomeObject]] if available; search up env prototype chain
     if let Some(home_obj) = find_home_object_in_env(env) {
@@ -3127,11 +3584,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                 Gc::as_ptr(super_obj),
                 method
             );
-            // Print property keys for debugging
-            log::warn!(
-                "TRACE: evaluate_super_method: super_obj properties: {:?}",
-                super_obj.borrow().properties.keys().collect::<Vec<_>>()
-            );
             // Look up method on super object
             log::trace!(
                 "evaluate_super_method - home_obj={:p} super_obj={:p} method={}",
@@ -3140,13 +3592,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                 method
             );
             if let Some(method_val) = object_get_key_value(&super_obj, method) {
-                // Reduce verbosity: only log a short method type rather than full Value debug
-                log::trace!(
-                    "DBG evaluate_super_method: found method_val={:?} env.this={:?}",
-                    method_val.borrow(),
-                    object_get_key_value(env, "this")
-                );
-                log::warn!("TRACE: evaluate_super_method: found method_val = {:?}", method_val.borrow());
                 let method_type = match &*method_val.borrow() {
                     Value::Closure(..) => "Closure",
                     Value::AsyncClosure(..) => "AsyncClosure",
@@ -3165,10 +3610,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                             let home_obj_opt = data.home_object.clone();
 
                             // Create function environment and bind params/this
-                            log::trace!(
-                                "DBG evaluate_super_method: preparing call_env with this={:?}",
-                                this_val.borrow().clone()
-                            );
                             let func_env = prepare_call_env_with_this(
                                 mc,
                                 captured_env.as_ref(),
@@ -3185,10 +3626,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                             }
 
                             // Execute method body
-                            log::trace!(
-                                "DBG evaluate_super_method: calling method body with func_env={:p}",
-                                func_env.as_ptr()
-                            );
                             return Ok(evaluate_statements(mc, &func_env, body)?);
                         }
                         Value::Function(func_name) => {
@@ -3215,10 +3652,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                                         let home_obj_opt = data.home_object.clone();
 
                                         // Create function environment and bind params/this
-                                        log::trace!(
-                                            "DBG evaluate_super_method (object closure): preparing call_env with this={:?}",
-                                            this_val.borrow().clone()
-                                        );
                                         let func_env = prepare_call_env_with_this(
                                             mc,
                                             captured_env.as_ref(),
@@ -3233,11 +3666,6 @@ pub(crate) fn evaluate_super_method<'gc>(
                                         if let Some(home_object) = home_obj_opt {
                                             func_env.borrow_mut(mc).set_home_object(Some(home_object));
                                         }
-
-                                        log::trace!(
-                                            "DBG evaluate_super_method (object closure): calling method body with func_env={:p}",
-                                            func_env.as_ptr()
-                                        );
                                         // Execute method body
                                         return Ok(evaluate_statements(mc, &func_env, body)?);
                                     }
@@ -3509,19 +3937,6 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let new_env = crate::core::new_js_object_data(mc);
     new_env.borrow_mut(mc).is_function_scope = true;
-
-    // Diagnostic: log newly created call environment and its immediate links
-    log::trace!(
-        "prepare_call_env_with_this: new_env ptr={:p} captured_env_gc_ptr={:?} scope_gc_ptr={:?} fn_obj_gc_ptr={:?}",
-        new_env.as_ptr(),
-        captured_env.map(|c| Gc::as_ptr(*c)),
-        scope.map(|s| Gc::as_ptr(*s)),
-        fn_obj.map(Gc::as_ptr)
-    );
-    // Capture a short backtrace here to correlate the call-site that created
-    // this environment with super/home-object lookups later.
-    let bt = std::backtrace::Backtrace::capture();
-    log::trace!("prepare_call_env_with_this: backtrace at new_env creation: {:?}", bt);
 
     if let Some(c) = captured_env {
         new_env.borrow_mut(mc).prototype = Some(*c);

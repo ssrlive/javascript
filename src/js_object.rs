@@ -508,9 +508,28 @@ pub fn handle_object_method<'gc>(
                             Gc::as_ptr(obj),
                             Gc::as_ptr(proto_rc)
                         );
+                        // DIAG: print whether object has an own '__proto__' property and its value
+                        if let Some(pv) = object_get_key_value(&obj, "__proto__") {
+                            log::debug!(
+                                "DBG Object.getPrototypeOf: obj ptr={:p} has own __proto__ prop = {:?}",
+                                Gc::as_ptr(obj),
+                                pv.borrow()
+                            );
+                        } else {
+                            log::debug!("DBG Object.getPrototypeOf: obj ptr={:p} has no own __proto__ prop", Gc::as_ptr(obj));
+                        }
                         Ok(Value::Object(proto_rc))
                     } else {
                         log::debug!("DBG Object.getPrototypeOf: obj ptr={:p} -> proto NULL", Gc::as_ptr(obj));
+                        if let Some(pv) = object_get_key_value(&obj, "__proto__") {
+                            log::debug!(
+                                "DBG Object.getPrototypeOf: obj ptr={:p} has own __proto__ prop = {:?}",
+                                Gc::as_ptr(obj),
+                                pv.borrow()
+                            );
+                        } else {
+                            log::debug!("DBG Object.getPrototypeOf: obj ptr={:p} has no own __proto__ prop", Gc::as_ptr(obj));
+                        }
                         Ok(Value::Null)
                     }
                 }

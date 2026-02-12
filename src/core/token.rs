@@ -254,8 +254,137 @@ unsafe impl<'gc> Collect<'gc> for TokenData {
 #[derive(Debug, Clone, Collect, PartialEq)]
 #[collect(no_drop)]
 pub enum TemplatePart {
-    String(Vec<u16>),
+    // For template literals, we must keep both cooked and raw values.
+    // If the template contains an invalid escape sequence, cooked is None
+    // (TaggedTemplate will pass `undefined` for that element).
+    String(Option<Vec<u16>>, Vec<u16>),
     Expr(Vec<TokenData>),
+}
+
+fn parse_template_literal_chunk(chars: &[char], start: usize, end: usize) -> (Option<Vec<u16>>, Vec<u16>) {
+    let raw_str: String = chars[start..end].iter().collect();
+    let raw_utf16: Vec<u16> = raw_str.encode_utf16().collect();
+
+    let mut cooked_utf16: Vec<u16> = Vec::new();
+    let mut i = start;
+    while i < end {
+        let ch = chars[i];
+        if ch != '\\' {
+            for cu in ch.to_string().encode_utf16() {
+                cooked_utf16.push(cu);
+            }
+            i += 1;
+            continue;
+        }
+
+        // Escape sequence
+        i += 1;
+        if i >= end {
+            return (None, raw_utf16);
+        }
+        let esc = chars[i];
+        match esc {
+            // Line continuation
+            '\n' | '\u{2028}' | '\u{2029}' => {
+                i += 1;
+                continue;
+            }
+            '\r' => {
+                i += 1;
+                if i < end && chars[i] == '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            'n' => cooked_utf16.push('\n' as u16),
+            't' => cooked_utf16.push('\t' as u16),
+            'r' => cooked_utf16.push('\r' as u16),
+            'b' => cooked_utf16.push(0x08),
+            'f' => cooked_utf16.push(0x0C),
+            'v' => cooked_utf16.push(0x0B),
+            '0' => {
+                // \0 is allowed only when not followed by a decimal digit.
+                if i + 1 < end {
+                    let next = chars[i + 1];
+                    if next.is_ascii_digit() {
+                        return (None, raw_utf16);
+                    }
+                }
+                cooked_utf16.push(0x00);
+            }
+            '1'..='9' => {
+                // Octal escapes are invalid in template literals.
+                return (None, raw_utf16);
+            }
+            'x' => {
+                if i + 2 >= end {
+                    return (None, raw_utf16);
+                }
+                let h1 = chars[i + 1];
+                let h2 = chars[i + 2];
+                if !h1.is_ascii_hexdigit() || !h2.is_ascii_hexdigit() {
+                    return (None, raw_utf16);
+                }
+                let hex: String = [h1, h2].iter().collect();
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    cooked_utf16.push(byte as u16);
+                    i += 2;
+                } else {
+                    return (None, raw_utf16);
+                }
+            }
+            'u' => {
+                if i + 1 >= end {
+                    return (None, raw_utf16);
+                }
+                if chars[i + 1] == '{' {
+                    // \u{...}
+                    let mut j = i + 2;
+                    let mut hex = String::new();
+                    while j < end && chars[j] != '}' {
+                        hex.push(chars[j]);
+                        j += 1;
+                    }
+                    if j >= end || chars[j] != '}' || hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return (None, raw_utf16);
+                    }
+                    match u32::from_str_radix(&hex, 16).ok().and_then(std::char::from_u32) {
+                        Some(cp) => {
+                            for cu in cp.to_string().encode_utf16() {
+                                cooked_utf16.push(cu);
+                            }
+                        }
+                        None => return (None, raw_utf16),
+                    }
+                    i = j; // move to '}'
+                } else {
+                    // \uXXXX
+                    if i + 4 >= end {
+                        return (None, raw_utf16);
+                    }
+                    let h = &chars[i + 1..i + 5];
+                    if !h.iter().all(|c| c.is_ascii_hexdigit()) {
+                        return (None, raw_utf16);
+                    }
+                    let hex: String = h.iter().collect();
+                    match u16::from_str_radix(&hex, 16) {
+                        Ok(code) => cooked_utf16.push(code),
+                        Err(_) => return (None, raw_utf16),
+                    }
+                    i += 4;
+                }
+            }
+            other => {
+                // Unknown escape sequence: keep the character (like string literals)
+                for cu in other.to_string().encode_utf16() {
+                    cooked_utf16.push(cu);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    (Some(cooked_utf16), raw_utf16)
 }
 
 pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
@@ -1160,13 +1289,10 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 while i < chars.len() && chars[i] != '`' {
                     if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
                         // Found ${, add string part before it
-                        if current_start < i {
-                            let mut start_idx = current_start;
-                            let str_part = parse_string_literal(&chars, &mut start_idx, '$', part_start_line, part_start_col)?;
-                            parts.push(TemplatePart::String(str_part));
-
-                            i = start_idx; // Update i to after the parsed string
-                        }
+                        // Always push a string chunk (may be empty). Tagged templates
+                        // require N+1 string elements for N substitutions.
+                        let (cooked, raw) = parse_template_literal_chunk(&chars, current_start, i);
+                        parts.push(TemplatePart::String(cooked, raw));
                         i += 2; // skip ${
                         column += 2;
                         let expr_start = i;
@@ -1244,11 +1370,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     return Err(raise_tokenize_error!("Unterminated template literal", line, column));
                 }
                 // Add remaining string part
-                if current_start < i {
-                    let mut start_idx = current_start;
-                    let str_part = parse_string_literal(&chars, &mut start_idx, '`', part_start_line, part_start_col)?;
-                    parts.push(TemplatePart::String(str_part));
-                }
+                // Always push trailing chunk (may be empty).
+                let (cooked, raw) = parse_template_literal_chunk(&chars, current_start, i);
+                parts.push(TemplatePart::String(cooked, raw));
                 tokens.push(TokenData {
                     token: Token::TemplateString(parts),
                     line,

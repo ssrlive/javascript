@@ -6999,7 +6999,7 @@ fn evaluate_expr_assign<'gc>(
                 Expr::OptionalPrivateMember(_, _) => "OptionalPrivateMember",
                 Expr::OptionalIndex(_, _) => "OptionalIndex",
                 Expr::OptionalCall(_, _) => "OptionalCall",
-                Expr::TaggedTemplate(_, _, _) => "TaggedTemplate",
+                Expr::TaggedTemplate(..) => "TaggedTemplate",
                 Expr::TemplateString(_) => "TemplateString",
                 Expr::GeneratorFunction(_, _, _) => "GeneratorFunction",
                 Expr::AsyncFunction(_, _, _) => "AsyncFunction",
@@ -9526,7 +9526,7 @@ fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has
         | Expr::PostDecrement(obj)
         | Expr::Spread(obj)
         | Expr::OptionalCall(obj, _)
-        | Expr::TaggedTemplate(obj, _, _)
+        | Expr::TaggedTemplate(obj, ..)
         | Expr::DynamicImport(obj)
         | Expr::BitAndAssign(obj, _) => {
             walk_expr(obj, has_super_call, has_super_prop, has_new_target, has_arguments);
@@ -13194,7 +13194,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::Delete(target) => evaluate_expr_delete(mc, env, target),
         Expr::Getter(func_expr) => evaluate_expr_getter(mc, env, func_expr),
         Expr::Setter(func_expr) => evaluate_expr_setter(mc, env, func_expr),
-        Expr::TaggedTemplate(tag_expr, strings, exprs) => evaluate_expr_tagged_template(mc, env, tag_expr, strings, exprs),
+        Expr::TaggedTemplate(tag_expr, site_id, cooked, raw, exprs) => {
+            evaluate_expr_tagged_template(mc, env, tag_expr, *site_id, cooked, raw, exprs)
+        }
         Expr::Await(expr) => {
             log::trace!("DEBUG: Evaluating Await");
             let value = evaluate_expr(mc, env, expr)?;
@@ -14398,40 +14400,95 @@ fn evaluate_expr_tagged_template<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     tag_expr: &Expr,
-    strings: &[Vec<u16>],
+    site_id: u64,
+    cooked_strings: &[Option<Vec<u16>>],
+    raw_strings: &[Vec<u16>],
     exprs: &[Expr],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Evaluate the tag function
-    let func_val = evaluate_expr(mc, env, tag_expr)?;
+    // Evaluate tag expression as a call target so member-expression context is preserved.
+    let (func_val, this_val_opt): (Value<'gc>, Option<Value<'gc>>) = match tag_expr {
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            match &obj_val {
+                Value::Object(obj) => {
+                    let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                    (prop_val, Some(obj_val))
+                }
+                _ => {
+                    let prop_val = evaluate_expr_property(mc, env, obj_expr, key)?;
+                    (prop_val, Some(obj_val))
+                }
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let (callee, recv) = evaluate_expr_index_call(mc, env, obj_expr, key_expr)?;
+            (callee, recv)
+        }
+        _ => (evaluate_expr(mc, env, tag_expr)?, None),
+    };
 
-    // Create the "segments" (cooked) array and populate it
-    let segments_arr = crate::js_array::create_array(mc, env)?;
-    for (i, s) in strings.iter().enumerate() {
-        object_set_key_value(mc, &segments_arr, i, &Value::String(s.clone()))?;
+    // Locate realm/global root env to store per-realm template cache.
+    let mut root = *env;
+    while let Some(proto) = root.borrow().prototype {
+        root = proto;
     }
-    crate::js_array::set_array_length(mc, &segments_arr, strings.len())?;
 
-    // Create the raw array (use same strings here; raw/cooked handling can be refined later)
-    let raw_arr = crate::js_array::create_array(mc, env)?;
-    for (i, s) in strings.iter().enumerate() {
-        object_set_key_value(mc, &raw_arr, i, &Value::String(s.clone()))?;
-    }
-    crate::js_array::set_array_length(mc, &raw_arr, strings.len())?;
+    let registry_obj = if let Some(reg_rc) = object_get_key_value(&root, "__template_registry")
+        && let Value::Object(obj) = &*reg_rc.borrow()
+    {
+        *obj
+    } else {
+        let o = new_js_object_data(mc);
+        object_set_key_value(mc, &root, "__template_registry", &Value::Object(o))?;
+        o
+    };
 
-    // Attach raw as a property on segments
-    object_set_key_value(mc, &segments_arr, "raw", &Value::Object(raw_arr))?;
+    let cache_key = format!("site:{site_id}");
+    let template_obj = if let Some(cached_rc) = object_get_key_value(&registry_obj, &cache_key)
+        && let Value::Object(obj) = &*cached_rc.borrow()
+    {
+        *obj
+    } else {
+        // Create the template object (array of cooked strings/undefined).
+        let segments_arr = crate::js_array::create_array(mc, env)?;
+        for (i, cooked_opt) in cooked_strings.iter().enumerate() {
+            let v = match cooked_opt {
+                Some(s) => Value::String(s.clone()),
+                None => Value::Undefined,
+            };
+            object_set_key_value(mc, &segments_arr, i, &v)?;
+        }
+        crate::js_array::set_array_length(mc, &segments_arr, cooked_strings.len())?;
+
+        // Create raw array and populate it.
+        let raw_arr = crate::js_array::create_array(mc, env)?;
+        for (i, s) in raw_strings.iter().enumerate() {
+            object_set_key_value(mc, &raw_arr, i, &Value::String(s.clone()))?;
+        }
+        crate::js_array::set_array_length(mc, &raw_arr, raw_strings.len())?;
+
+        // Define segments.raw with attributes writable:false, enumerable:false, configurable:false.
+        let desc_raw = crate::core::create_descriptor_object(mc, &Value::Object(raw_arr), false, false, false)?;
+        crate::js_object::define_property_internal(mc, &segments_arr, "raw", &desc_raw)?;
+
+        // Freeze both arrays.
+        let _ = crate::js_object::handle_object_method(mc, "freeze", &[Value::Object(raw_arr)], env)?;
+        let _ = crate::js_object::handle_object_method(mc, "freeze", &[Value::Object(segments_arr)], env)?;
+
+        object_set_key_value(mc, &registry_obj, &cache_key, &Value::Object(segments_arr))?;
+        segments_arr
+    };
 
     // Evaluate substitution expressions
     let mut call_args: Vec<Value<'gc>> = Vec::new();
-    call_args.push(Value::Object(segments_arr));
+    call_args.push(Value::Object(template_obj));
     for e in exprs.iter() {
         let v = evaluate_expr(mc, env, e)?;
         call_args.push(v);
     }
 
-    // Call the tag function with 'undefined' as this
-    let res = evaluate_call_dispatch(mc, env, &func_val, Some(&Value::Undefined), &call_args)?;
-    Ok(res)
+    let this_val = this_val_opt.unwrap_or(Value::Undefined);
+    evaluate_call_dispatch(mc, env, &func_val, Some(&this_val), &call_args)
 }
 
 fn evaluate_expr_async_arrow_function<'gc>(
@@ -14506,7 +14563,10 @@ fn evaluate_expr_template_string<'gc>(
     let mut result = Vec::new();
     for part in parts {
         match part {
-            crate::core::TemplatePart::String(s) => result.extend(s),
+            crate::core::TemplatePart::String(Some(s), _raw) => result.extend(s),
+            crate::core::TemplatePart::String(None, _raw) => {
+                return Err(raise_syntax_error!("Invalid escape sequence in template literal").into());
+            }
             crate::core::TemplatePart::Expr(tokens) => {
                 let (expr, _) = crate::core::parse_simple_expression(tokens, 0)?;
                 let val = evaluate_expr(mc, env, &expr)?;
@@ -15172,6 +15232,15 @@ fn set_property_with_accessors<'gc>(
         && s == "length"
         && crate::js_array::is_array(mc, obj)
     {
+        // Respect non-writable length. In non-strict code this should fail silently;
+        // in strict mode it should throw TypeError.
+        if !obj.borrow().is_writable(key) {
+            let is_strict = crate::core::env_get_strictness(_env);
+            if is_strict {
+                return Err(raise_type_error!("Cannot assign to read-only property").into());
+            }
+            return Ok(());
+        }
         match &val {
             Value::Number(n) => {
                 if !n.is_finite() {

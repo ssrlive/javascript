@@ -3,6 +3,13 @@ use crate::core::statement::{
     ExportSpecifier, ForOfPattern, ForStatement, IfStatement, ImportSpecifier, Statement, StatementKind, SwitchStatement, TryCatchStatement,
 };
 use crate::core::{BinaryOp, ClassMember, DestructuringElement, Expr, ObjectDestructuringElement, TemplatePart, Token, TokenData};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMPLATE_SITE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_template_site_id() -> u64 {
+    TEMPLATE_SITE_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 use crate::{raise_parse_error, raise_parse_error_at, raise_parse_error_with_token, unicode::utf16_to_utf8};
 use std::{
     cell::{Cell, RefCell},
@@ -1949,7 +1956,7 @@ fn contains_import_meta_expr(e: &Expr) -> bool {
             }
             false
         }
-        Expr::TaggedTemplate(f, _, _) => contains_import_meta_expr(f),
+        Expr::TaggedTemplate(f, ..) => contains_import_meta_expr(f),
         Expr::Index(obj, key) => contains_import_meta_expr(obj) || contains_import_meta_expr(key),
         Expr::UnaryNeg(inner) | Expr::UnaryPlus(inner) | Expr::TypeOf(inner) | Expr::Void(inner) => contains_import_meta_expr(inner),
         _ => false,
@@ -3546,7 +3553,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 Expr::StringLit(Vec::new())
             } else if parts.len() == 1 {
                 match &parts[0] {
-                    TemplatePart::String(s) => Expr::StringLit(s.clone()),
+                    TemplatePart::String(cooked_opt, _raw) => {
+                        let cooked = cooked_opt.clone().ok_or_else(|| raise_parse_error_at!(tokens.get(*index - 1)))?;
+                        Expr::StringLit(cooked)
+                    }
                     TemplatePart::Expr(expr_tokens) => {
                         let expr_tokens = expr_tokens.clone();
                         let e = parse_expression(&expr_tokens, &mut 0)?;
@@ -3559,7 +3569,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             } else {
                 // Build binary addition chain
                 let mut expr = match &parts[0] {
-                    TemplatePart::String(s) => Expr::StringLit(s.clone()),
+                    TemplatePart::String(cooked_opt, _raw) => {
+                        let cooked = cooked_opt.clone().ok_or_else(|| raise_parse_error_at!(tokens.get(*index - 1)))?;
+                        Expr::StringLit(cooked)
+                    }
                     TemplatePart::Expr(expr_tokens) => {
                         let expr_tokens = expr_tokens.clone();
                         let e = parse_expression(&expr_tokens, &mut 0)?;
@@ -3569,7 +3582,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 };
                 for part in &parts[1..] {
                     let right = match part {
-                        TemplatePart::String(s) => Expr::StringLit(s.clone()),
+                        TemplatePart::String(cooked_opt, _raw) => {
+                            let cooked = cooked_opt.clone().ok_or_else(|| raise_parse_error_at!(tokens.get(*index - 1)))?;
+                            Expr::StringLit(cooked)
+                        }
                         TemplatePart::Expr(expr_tokens) => {
                             let expr_tokens = expr_tokens.clone();
                             let e = parse_expression(&expr_tokens, &mut 0)?;
@@ -5028,11 +5044,16 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             Token::TemplateString(parts) => {
                 let parts = parts.clone();
                 *index += 1;
-                let mut strings = Vec::new();
+                let site_id = next_template_site_id();
+                let mut cooked_strings: Vec<Option<Vec<u16>>> = Vec::new();
+                let mut raw_strings: Vec<Vec<u16>> = Vec::new();
                 let mut exprs = Vec::new();
                 for part in parts {
                     match part {
-                        TemplatePart::String(s) => strings.push(s.clone()),
+                        TemplatePart::String(cooked_opt, raw) => {
+                            cooked_strings.push(cooked_opt.clone());
+                            raw_strings.push(raw.clone());
+                        }
                         TemplatePart::Expr(expr_tokens) => {
                             let expr_tokens = expr_tokens.clone();
                             let e = parse_expression(&expr_tokens, &mut 0)?;
@@ -5040,7 +5061,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         }
                     }
                 }
-                expr = Expr::TaggedTemplate(Box::new(expr), strings, exprs);
+                expr = Expr::TaggedTemplate(Box::new(expr), site_id, cooked_strings, raw_strings, exprs);
             }
             _ => break,
         }

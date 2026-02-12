@@ -1515,10 +1515,28 @@ pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'
     if let Some(cur_len) = object_get_length(obj)
         && length < cur_len
     {
-        for i in length..cur_len {
-            let key = PropertyKey::from(i.to_string());
-            // Use shift_remove to preserve insertion order (avoid deprecated remove)
-            let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
+        // IMPORTANT: Do not iterate over the full numeric range (which can be huge).
+        // Only delete indexed properties that actually exist.
+        let keys_to_delete: Vec<PropertyKey<'gc>> = obj
+            .borrow()
+            .properties
+            .keys()
+            .filter_map(|k| match k {
+                PropertyKey::String(s) => {
+                    if let Ok(idx) = s.parse::<usize>()
+                        && idx >= length
+                    {
+                        return Some(PropertyKey::String(s.clone()));
+                    }
+                    None
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut obj_mut = obj.borrow_mut(mc);
+        for key in keys_to_delete {
+            let _ = obj_mut.properties.shift_remove(&key);
         }
     }
     object_set_key_value(mc, obj, "length", &Value::Number(length as f64))?;

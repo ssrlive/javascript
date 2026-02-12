@@ -187,7 +187,10 @@ pub enum Expr {
     AsyncArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
     PostIncrement(Box<Expr>),
     PostDecrement(Box<Expr>),
-    TaggedTemplate(Box<Expr>, Vec<Vec<u16>>, Vec<Expr>),
+    // Tagged template literal call.
+    // `site_id` is a stable per-parse unique id used for GetTemplateObject caching.
+    // `cooked` entries are None when the template contains an invalid escape sequence.
+    TaggedTemplate(Box<Expr>, u64, Vec<Option<Vec<u16>>>, Vec<Vec<u16>>, Vec<Expr>),
     TemplateString(Vec<TemplatePart>),
     Regex(String, String),
     Comma(Box<Expr>, Box<Expr>),

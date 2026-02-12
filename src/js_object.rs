@@ -618,11 +618,17 @@ pub fn handle_object_method<'gc>(
                     for k in ordered.clone() {
                         if let Some(desc_rc) = crate::core::object_get_key_value(obj, &k) {
                             match &*desc_rc.borrow() {
+                                // Accessor descriptor: do not set writable
+                                Value::Property { getter: Some(_), .. } | Value::Property { setter: Some(_), .. } => {}
+                                // Data descriptor
                                 Value::Property { value: Some(_), .. } => {
                                     obj.borrow_mut(mc).set_non_writable(k.clone());
                                 }
+                                // Getter/setter stored directly
+                                Value::Getter(..) | Value::Setter(..) => {}
+                                // Any other stored value is a data property
                                 _ => {
-                                    // Accessor or other -> don't change writability
+                                    obj.borrow_mut(mc).set_non_writable(k.clone());
                                 }
                             }
                             obj.borrow_mut(mc).set_non_configurable(k.clone());
@@ -650,11 +656,18 @@ pub fn handle_object_method<'gc>(
                             return Ok(Value::Boolean(false));
                         }
                         // If data property, it must be non-writable
-                        if let Some(desc_rc) = crate::core::object_get_key_value(&obj, &k)
-                            && let Value::Property { value: Some(_), .. } = &*desc_rc.borrow()
-                            && obj.borrow().is_writable(&k)
-                        {
-                            return Ok(Value::Boolean(false));
+                        if let Some(desc_rc) = crate::core::object_get_key_value(&obj, &k) {
+                            match &*desc_rc.borrow() {
+                                // Accessor properties have no writable attribute
+                                Value::Property { getter: Some(_), .. } | Value::Property { setter: Some(_), .. } => {}
+                                Value::Getter(..) | Value::Setter(..) => {}
+                                // Data descriptor or direct value
+                                _ => {
+                                    if obj.borrow().is_writable(&k) {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(Value::Boolean(true))

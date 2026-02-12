@@ -1210,7 +1210,7 @@ fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has
         | Expr::PostDecrement(obj)
         | Expr::Spread(obj)
         | Expr::OptionalCall(obj, _)
-        | Expr::TaggedTemplate(obj, _, _)
+        | Expr::TaggedTemplate(obj, ..)
         | Expr::DynamicImport(obj)
         | Expr::BitAndAssign(obj, _) => {
             // common single-child variants

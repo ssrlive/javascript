@@ -419,13 +419,30 @@ pub fn handle_reflect_method<'gc>(
                 return Err(raise_type_error!("Reflect.setPrototypeOf requires 2 arguments").into());
             }
             match &args[0] {
-                Value::Object(obj) => match args[1] {
+                Value::Object(obj) => match &args[1] {
                     Value::Object(proto_obj) => {
-                        obj.borrow_mut(mc).prototype = Some(proto_obj);
+                        obj.borrow_mut(mc).prototype = Some(*proto_obj);
                         Ok(Value::Boolean(true))
                     }
-                    Value::Undefined => {
+                    Value::Undefined | Value::Null => {
                         obj.borrow_mut(mc).prototype = None;
+                        Ok(Value::Boolean(true))
+                    }
+                    Value::Function(func_name) => {
+                        // Functions are objects in JS. Our engine represents some built-ins as Value::Function,
+                        // so wrap it in an object shell that behaves like a function object for prototype chains.
+                        let fn_obj = new_js_object_data(mc);
+                        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+                            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+                            && let Value::Object(func_proto) = &*proto_val.borrow()
+                        {
+                            fn_obj.borrow_mut(mc).prototype = Some(*func_proto);
+                        }
+                        fn_obj
+                            .borrow_mut(mc)
+                            .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function(func_name.clone()))));
+                        obj.borrow_mut(mc).prototype = Some(fn_obj);
                         Ok(Value::Boolean(true))
                     }
                     _ => Err(raise_type_error!("Reflect.setPrototypeOf prototype must be an object or null").into()),

@@ -6282,15 +6282,11 @@ fn precompute_target<'gc>(
             // This preserves the spec ordering for "super[key] = value" where the key's
             // ToPropertyKey may have side-effects that mutate the prototype chain.
             if let crate::core::Expr::Super = obj_expr.as_ref() {
+                // Spec: GetThisBinding must happen before evaluating the computed key.
+                let actual_this = crate::js_class::evaluate_this(mc, env)?;
                 let raw_key = evaluate_expr(mc, env, key_expr)?;
                 // Capture super base after key evaluation (per spec)
                 let super_base = crate::js_class::evaluate_super(mc, env)?;
-                // Determine the proper receiver (actualThis) to use for any eventual set
-                let actual_this = if let Some(tv_rc) = object_get_key_value(env, "this") {
-                    tv_rc.borrow().clone()
-                } else {
-                    crate::js_class::evaluate_this(mc, env)?
-                };
                 if let Value::Object(obj) = super_base {
                     Ok(TargetTemp::IndexBase(obj, Box::new(raw_key), Some(actual_this)))
                 } else {
@@ -6947,6 +6943,10 @@ fn evaluate_expr_assign<'gc>(
             // If this is a `super.prop` form, do not resolve `super` yet; defer
             // until PutValue. Otherwise evaluate base now.
             if let Expr::Super = &**obj_expr {
+                // Spec: SuperProperty performs GetThisBinding during LHS evaluation.
+                // This must throw ReferenceError when `this` is uninitialized and
+                // must happen before RHS evaluation.
+                let _ = crate::js_class::evaluate_this(mc, env)?;
                 Precomputed::SuperProperty(Box::new(key.into()))
             } else {
                 let obj_val = evaluate_expr(mc, env, obj_expr)?;
@@ -6968,6 +6968,9 @@ fn evaluate_expr_assign<'gc>(
             // If this is `super[... ]`, evaluate the raw key expression but defer
             // resolving `super` until PutValue.
             if let Expr::Super = &**obj_expr {
+                // Spec: GetThisBinding happens before evaluating the computed key.
+                // This prevents evaluating `key_expr` when `this` is uninitialized.
+                let _ = crate::js_class::evaluate_this(mc, env)?;
                 let raw_key = evaluate_expr(mc, env, key_expr)?; // raw value; ToPropertyKey deferred
                 Precomputed::SuperIndex(Box::new(raw_key))
             } else {
@@ -7213,15 +7216,29 @@ fn evaluate_expr_assign<'gc>(
             Ok(val)
         }
         Precomputed::SuperIndex(raw_key) => {
-            // Similar to SuperProperty: resolve property on prototype chain but call
-            // setter with the original receiver (`this`). Convert raw key to PropertyKey
-            let key = match *raw_key {
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::Number(n) => PropertyKey::String(n.to_string()),
-                Value::Symbol(s) => PropertyKey::Symbol(s),
-                _ => PropertyKey::from(value_to_string(&raw_key)),
-            };
+            // Similar to SuperProperty: resolve super base and receiver, then perform
+            // ToPropertyKey and dispatch [[Set]] with the original receiver (`this`).
+            // Ordering is important: capture super base before ToPropertyKey so that
+            // coercion side-effects cannot affect the chosen super base.
             let (receiver, super_base) = resolve_super_assignment_base(env)?;
+
+            // Apply ToPropertyKey semantics now (may run user code via toString/valueOf)
+            let key: PropertyKey<'gc> = match *raw_key {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                Value::Object(_) => {
+                    let prim = crate::core::to_primitive(mc, &raw_key, "string", env)?;
+                    match prim {
+                        Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                        Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                        Value::Symbol(s) => PropertyKey::Symbol(s),
+                        other => PropertyKey::String(value_to_string(&other)),
+                    }
+                }
+                other => PropertyKey::String(value_to_string(&other)),
+            };
+
             set_super_property_with_accessors(mc, env, &receiver, super_base, &key, &val)?;
             Ok(val)
         }
@@ -7272,6 +7289,9 @@ fn resolve_super_assignment_base<'gc>(
     // Get the actual this binding from the this environment
     let receiver = match crate::core::env_get(&this_env, "this") {
         Some(this_val_ptr) => match &*this_val_ptr.borrow() {
+            Value::Uninitialized => {
+                return Err(raise_reference_error!("Must call super constructor in derived class before accessing 'this'").into());
+            }
             Value::Object(o) => *o,
             _ => return Err(raise_type_error!("Invalid receiver for super assignment").into()),
         },
@@ -8127,6 +8147,11 @@ fn evaluate_expr_add_assign<'gc>(
             } else {
                 evaluate_expr(mc, env, obj_expr)?
             };
+            // Spec: SuperProperty performs GetThisBinding before evaluating the computed key.
+            // This prevents evaluating `key_expr` (which may call `super()`) when `this` is uninitialized.
+            if let Expr::Super = &**obj_expr {
+                let _ = crate::js_class::evaluate_this(mc, env)?;
+            }
             let key_val = evaluate_expr(mc, env, key_expr)?;
             if matches!(obj_val, Value::Undefined | Value::Null) {
                 return Err(raise_type_error!("Cannot assign to property of non-object").into());
@@ -10814,14 +10839,8 @@ fn evaluate_expr_call<'gc>(
             if let crate::core::Expr::Super = &**obj_expr {
                 // Evaluate the `super[...]` property (handles accessors/getters)
                 let prop_val = crate::js_class::evaluate_super_computed_property(mc, env, key.clone())?;
-                // Determine the appropriate receiver (`this`). Prefer any direct `this` on
-                // the current env (preserves exact receiver used by property evaluation),
-                // otherwise fall back to the general `evaluate_this` walker.
-                let this_val = if let Some(tv_rc) = crate::core::object_get_key_value(env, "this") {
-                    tv_rc.borrow().clone()
-                } else {
-                    crate::js_class::evaluate_this(mc, env)?
-                };
+                // Receiver is actualThis (GetThisBinding), and must throw if uninitialized.
+                let this_val = crate::js_class::evaluate_this(mc, env)?;
                 // Return the property value as callee and the *actualThis* as receiver
                 (prop_val, Some(this_val))
             }
@@ -13157,7 +13176,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::NewTarget => evaluate_expr_new_target(mc, env),
         Expr::SuperCall(args) => {
             let eval_args = collect_call_args(mc, env, args)?;
-            Ok(crate::js_class::evaluate_super_call(mc, env, &eval_args)?)
+            crate::js_class::evaluate_super_call(mc, env, &eval_args)
         }
         Expr::SuperProperty(prop) => {
             // Delegate to `evaluate_super_computed_property` which implements the full semantics
@@ -14601,6 +14620,10 @@ fn evaluate_expr_index<'gc>(
     key_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Expr::Super = obj_expr {
+        // Spec: GetThisBinding is evaluated before the computed key expression.
+        // This ensures we throw ReferenceError when `this` is uninitialized and
+        // do not evaluate `key_expr` in that case.
+        let actual_this = crate::js_class::evaluate_this(mc, env)?;
         // Evaluate the index expression to a value but delay ToPropertyKey
         // until after we've captured the super base (per spec ordering).
         let key_val = evaluate_expr(mc, env, key_expr)?;
@@ -14631,64 +14654,53 @@ fn evaluate_expr_index<'gc>(
         {
             match &*prop_rc.borrow() {
                 Value::Property { getter: Some(getter), .. } => {
-                    if let Some(this_rc) = object_get_key_value(env, "this")
-                        && let Value::Object(receiver) = &*this_rc.borrow()
-                    {
-                        // Call accessor/getter with receiver set to current this
-                        match &**getter {
-                            Value::Getter(body, captured_env, _) => {
-                                let call_env = crate::core::new_js_object_data(mc);
-                                call_env.borrow_mut(mc).prototype = Some(*captured_env);
-                                call_env.borrow_mut(mc).is_function_scope = true;
-                                crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                                let body_clone = body.clone();
-                                return crate::core::evaluate_statements(mc, &call_env, &body_clone);
-                            }
-                            Value::Closure(cl) => {
+                    // Call accessor/getter with receiver set to actualThis
+                    match &**getter {
+                        Value::Getter(body, captured_env, _) => {
+                            let call_env = crate::core::new_js_object_data(mc);
+                            call_env.borrow_mut(mc).prototype = Some(*captured_env);
+                            call_env.borrow_mut(mc).is_function_scope = true;
+                            crate::core::object_set_key_value(mc, &call_env, "this", &actual_this)?;
+                            let body_clone = body.clone();
+                            return crate::core::evaluate_statements(mc, &call_env, &body_clone);
+                        }
+                        Value::Closure(cl) => {
+                            let cl_data = cl;
+                            let call_env = crate::core::new_js_object_data(mc);
+                            call_env.borrow_mut(mc).prototype = cl_data.env;
+                            call_env.borrow_mut(mc).is_function_scope = true;
+                            crate::core::object_set_key_value(mc, &call_env, "this", &actual_this)?;
+                            let body_clone = cl_data.body.clone();
+                            return crate::core::evaluate_statements(mc, &call_env, &body_clone);
+                        }
+                        Value::Object(obj) => {
+                            if let Some(cl_rc) = obj.borrow().get_closure()
+                                && let Value::Closure(cl) = &*cl_rc.borrow()
+                            {
                                 let cl_data = cl;
                                 let call_env = crate::core::new_js_object_data(mc);
                                 call_env.borrow_mut(mc).prototype = cl_data.env;
                                 call_env.borrow_mut(mc).is_function_scope = true;
-                                crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                crate::core::object_set_key_value(mc, &call_env, "this", &actual_this)?;
                                 let body_clone = cl_data.body.clone();
                                 return crate::core::evaluate_statements(mc, &call_env, &body_clone);
                             }
-                            Value::Object(obj) => {
-                                if let Some(cl_rc) = obj.borrow().get_closure()
-                                    && let Value::Closure(cl) = &*cl_rc.borrow()
-                                {
-                                    let cl_data = cl;
-                                    let call_env = crate::core::new_js_object_data(mc);
-                                    call_env.borrow_mut(mc).prototype = cl_data.env;
-                                    call_env.borrow_mut(mc).is_function_scope = true;
-                                    crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                                    let body_clone = cl_data.body.clone();
-                                    return crate::core::evaluate_statements(mc, &call_env, &body_clone);
-                                }
-                                return Err(raise_eval_error!("Accessor is not a function").into());
-                            }
-                            _ => return Err(raise_eval_error!("Accessor is not a function").into()),
+                            return Err(raise_eval_error!("Accessor is not a function").into());
                         }
+                        _ => return Err(raise_eval_error!("Accessor is not a function").into()),
                     }
-                    // No receiver -> undefined
-                    return Ok(Value::Undefined);
                 }
                 Value::Getter(..) => {
-                    if let Some(this_rc) = object_get_key_value(env, "this")
-                        && let Value::Object(receiver) = &*this_rc.borrow()
-                    {
-                        let (body, captured_env, _home) = match &*prop_rc.borrow() {
-                            Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
-                            _ => return Err(raise_eval_error!("Accessor is not a function").into()),
-                        };
-                        let call_env = crate::core::new_js_object_data(mc);
-                        call_env.borrow_mut(mc).prototype = Some(captured_env);
-                        call_env.borrow_mut(mc).is_function_scope = true;
-                        crate::core::object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                        let body_clone = body.clone();
-                        return crate::core::evaluate_statements(mc, &call_env, &body_clone);
-                    }
-                    return Ok(Value::Undefined);
+                    let (body, captured_env, _home) = match &*prop_rc.borrow() {
+                        Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
+                        _ => return Err(raise_eval_error!("Accessor is not a function").into()),
+                    };
+                    let call_env = crate::core::new_js_object_data(mc);
+                    call_env.borrow_mut(mc).prototype = Some(captured_env);
+                    call_env.borrow_mut(mc).is_function_scope = true;
+                    crate::core::object_set_key_value(mc, &call_env, "this", &actual_this)?;
+                    let body_clone = body.clone();
+                    return crate::core::evaluate_statements(mc, &call_env, &body_clone);
                 }
                 _ => {
                     return match &*prop_rc.borrow() {
@@ -15198,13 +15210,20 @@ fn set_property_with_accessors<'gc>(
 
     let receiver_ptr = receiver_obj;
     if get_own_property(&receiver_ptr, key).is_none() {
-        let mut proto_check = obj.borrow().prototype;
+        // When receiver != obj (e.g. `super[prop] = v`), the [[Set]] algorithm
+        // starts at `obj` itself (the super base). When receiver == obj, we can
+        // start at obj.[[Prototype]] because we already checked receiver's own props.
+        let mut proto_check = if Gc::ptr_eq(receiver_ptr, *obj) {
+            obj.borrow().prototype
+        } else {
+            Some(*obj)
+        };
         while let Some(proto_obj) = proto_check {
             // Diagnostic: print prototype object pointer, whether it owns the key,
             // and its writability for the key. This helps verify that the pre-check
             // sees the same non-writable marker that `define_property_internal` set.
 
-            if let Some(inherited_ptr) = object_get_key_value(&proto_obj, key) {
+            if let Some(inherited_ptr) = get_own_property(&proto_obj, key) {
                 let inherited = inherited_ptr.borrow().clone();
                 match inherited {
                     Value::Property { setter, getter, .. } => {
@@ -16558,6 +16577,10 @@ fn evaluate_update_expression<'gc>(
         }
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            // Spec: SuperProperty performs GetThisBinding before evaluating the computed key.
+            if let Expr::Super = &**obj_expr {
+                let _ = crate::js_class::evaluate_this(mc, env)?;
+            }
             let k_val = evaluate_expr(mc, env, key_expr)?;
             if matches!(obj_val, Value::Undefined | Value::Null) {
                 return Err(raise_type_error!("Cannot update property of non-object").into());

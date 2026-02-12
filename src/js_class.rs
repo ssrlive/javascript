@@ -1,5 +1,4 @@
-use crate::core::get_own_property;
-use crate::core::{ClassDefinition, ClassMember};
+use crate::core::{ClassDefinition, ClassMember, ControlFlow, get_own_property};
 use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Value, create_descriptor_object, env_get, evaluate_expr,
     evaluate_statements, new_js_object_data,
@@ -939,14 +938,19 @@ pub(crate) fn evaluate_new<'gc>(
                                 && let Some(obj_val) = object_get_key_value(origin_global, "Object")
                                 && let Value::Object(obj_ctor) = &*obj_val.borrow()
                                 && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
                             {
-                                // Defer assignment to final instance
-                                computed_proto = Some(*obj_proto);
-                                log::warn!(
-                                    "evaluate_new: computed fallback (from origin_global) realm prototype (deferred) -> proto={:p}",
-                                    Gc::as_ptr(*obj_proto)
-                                );
+                                let proto_opt: Option<crate::core::JSObjectDataPtr<'_>> = match &*obj_proto_val.borrow() {
+                                    Value::Object(p) => Some(*p),
+                                    Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                                        Value::Object(p) => Some(*p),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                if let Some(obj_proto) = proto_opt {
+                                    // Defer assignment to final instance
+                                    computed_proto = Some(obj_proto);
+                                }
                             }
                             // Try multiple strategies to discover the constructor's realm:
                             // 1. If the constructor object itself wraps a closure, use its
@@ -1137,8 +1141,19 @@ pub(crate) fn evaluate_new<'gc>(
                     // Create the arguments object
                     create_arguments_object(mc, &func_env, evaluated_args, None)?;
 
-                    // Execute constructor body
-                    evaluate_statements(mc, &func_env, body)?;
+                    // Execute constructor body and honor explicit returns.
+                    // For ordinary function constructors invoked with `new`, an explicit
+                    // `return <object>` replaces the constructed instance; primitives are ignored.
+                    let cf = crate::core::evaluate_statements_with_context(mc, &func_env, body, &[])?;
+                    match cf {
+                        ControlFlow::Return(Value::Object(obj)) => {
+                            return Ok(Value::Object(obj));
+                        }
+                        ControlFlow::Throw(v, l, c) => {
+                            return Err(crate::core::EvalError::Throw(v, l, c));
+                        }
+                        _ => {}
+                    }
 
                     // If this is a derived class, `super()` may have replaced the
                     // initially-created `instance` with a different object. Per
@@ -3041,7 +3056,7 @@ pub(crate) fn evaluate_super_call<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     evaluated_args: &[Value<'gc>],
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Find the lexical environment that has __instance
     let lexical_env = find_binding_env(env, "__instance").ok_or_else(|| raise_type_error!("super() called in invalid context"))?;
 
@@ -3050,7 +3065,7 @@ pub(crate) fn evaluate_super_call<'gc>(
     let instance = if let Some(Value::Object(inst)) = instance_val {
         inst
     } else {
-        return Err(raise_type_error!("super() called in invalid context"));
+        return Err(raise_type_error!("super() called in invalid context").into());
     };
 
     // Get this initialization status from lexical environment
@@ -3170,7 +3185,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                     let _ = evaluate_statements(mc, &func_env, body)?;
                     bind_this_after_super(mc, None)?;
                     if already_initialized {
-                        return Err(raise_reference_error!("super() called after this is initialized"));
+                        return Err(raise_reference_error!("super() called after this is initialized").into());
                     }
                     if let Value::Object(ctor_obj) = &current_function {
                         initialize_instance_elements(mc, &instance, ctor_obj)?;
@@ -3185,7 +3200,7 @@ pub(crate) fn evaluate_super_call<'gc>(
             // binds `this` into the constructor environment.
             bind_this_after_super(mc, None)?;
             if already_initialized {
-                return Err(raise_reference_error!("super() called after this is initialized"));
+                return Err(raise_reference_error!("super() called after this is initialized").into());
             }
             if let Value::Object(ctor_obj) = &current_function {
                 initialize_instance_elements(mc, &instance, ctor_obj)?;
@@ -3276,7 +3291,7 @@ pub(crate) fn evaluate_super_call<'gc>(
 
                         bind_this_after_super(mc, Some(new_instance))?;
                         if already_initialized {
-                            return Err(raise_reference_error!("super() called after this is initialized"));
+                            return Err(raise_reference_error!("super() called after this is initialized").into());
                         }
                         if let Value::Object(ctor_obj) = &current_function {
                             initialize_instance_elements(mc, &new_instance, ctor_obj)?;
@@ -3285,7 +3300,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                     }
                     bind_this_after_super(mc, None)?;
                     if already_initialized {
-                        return Err(raise_reference_error!("super() called after this is initialized"));
+                        return Err(raise_reference_error!("super() called after this is initialized").into());
                     }
                     if let Value::Object(ctor_obj) = &current_function {
                         initialize_instance_elements(mc, &instance, ctor_obj)?;
@@ -3301,10 +3316,13 @@ pub(crate) fn evaluate_super_call<'gc>(
                                 crate::JSErrorKind::TypeError { message } if message == "Constructor is not callable" => {
                                     // swallow and fallthrough
                                 }
-                                _ => return Err(js_err),
+                                _ => return Err(js_err.into()),
                             }
                         }
-                        _ => return Err(raise_eval_error!("Error invoking parent constructor")),
+                        crate::core::EvalError::Throw(..) => {
+                            // Preserve the original thrown JS value.
+                            return Err(e);
+                        }
                     }
                 }
             }
@@ -3348,7 +3366,7 @@ pub(crate) fn evaluate_super_call<'gc>(
 
                 bind_this_after_super(mc, Some(new_instance))?;
                 if already_initialized {
-                    return Err(raise_reference_error!("super() called after this is initialized"));
+                    return Err(raise_reference_error!("super() called after this is initialized").into());
                 }
                 if let Value::Object(ctor_obj) = &current_function {
                     initialize_instance_elements(mc, &new_instance, ctor_obj)?;
@@ -3357,7 +3375,7 @@ pub(crate) fn evaluate_super_call<'gc>(
             }
             bind_this_after_super(mc, None)?;
             if already_initialized {
-                return Err(raise_reference_error!("super() called after this is initialized"));
+                return Err(raise_reference_error!("super() called after this is initialized").into());
             }
             if let Value::Object(ctor_obj) = &current_function {
                 initialize_instance_elements(mc, &instance, ctor_obj)?;
@@ -3367,10 +3385,10 @@ pub(crate) fn evaluate_super_call<'gc>(
     }
 
     if already_initialized {
-        return Err(raise_reference_error!("super() called after this is initialized"));
+        return Err(raise_reference_error!("super() called after this is initialized").into());
     }
 
-    Err(raise_type_error!("super() failed: parent constructor not found"))
+    Err(raise_type_error!("super() failed: parent constructor not found").into())
 }
 
 pub(crate) fn evaluate_super_computed_property<'gc>(
@@ -3379,6 +3397,9 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
     key: impl Into<PropertyKey<'gc>>,
 ) -> Result<Value<'gc>, JSError> {
     let key = key.into();
+    // Spec: GetThisBinding happens before any further evaluation for SuperProperty.
+    // This throws ReferenceError when `this` is uninitialized.
+    let actual_this = evaluate_this(mc, env)?;
     // super.property (or super[expr]) accesses parent class properties
     // Use [[HomeObject]] if available; search up environment prototype chain
     if let Some(home_obj) = find_home_object_in_env(env) {
@@ -3396,76 +3417,65 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
                 // If this is a property descriptor with a getter, call the getter with the current `this` as receiver
                 match &*prop_val.borrow() {
                     Value::Property { getter: Some(getter), .. } => {
-                        if let Some(this_val) = object_get_key_value(env, "this")
-                            && let Value::Object(receiver) = &*this_val.borrow()
-                        {
-                            // Inline the call_accessor logic here
-                            match &**getter {
-                                Value::Getter(body, captured_env, _) => {
-                                    let call_env = crate::core::new_js_object_data(mc);
-                                    call_env.borrow_mut(mc).prototype = Some(*captured_env);
-                                    call_env.borrow_mut(mc).is_function_scope = true;
-                                    object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                                    let body_clone = body.clone();
-                                    return crate::core::evaluate_statements(mc, &call_env, &body_clone).map_err(|e| match e {
-                                        crate::core::EvalError::Js(e) => e,
-                                        _ => raise_eval_error!("Error calling getter on super property"),
-                                    });
-                                }
-                                Value::Closure(cl) => {
+                        // Inline the call_accessor logic here
+                        match &**getter {
+                            Value::Getter(body, captured_env, _) => {
+                                let call_env = crate::core::new_js_object_data(mc);
+                                call_env.borrow_mut(mc).prototype = Some(*captured_env);
+                                call_env.borrow_mut(mc).is_function_scope = true;
+                                object_set_key_value(mc, &call_env, "this", &actual_this)?;
+                                let body_clone = body.clone();
+                                return crate::core::evaluate_statements(mc, &call_env, &body_clone).map_err(|e| match e {
+                                    crate::core::EvalError::Js(e) => e,
+                                    _ => raise_eval_error!("Error calling getter on super property"),
+                                });
+                            }
+                            Value::Closure(cl) => {
+                                let cl_data = cl;
+                                let call_env = crate::core::new_js_object_data(mc);
+                                call_env.borrow_mut(mc).prototype = cl_data.env;
+                                call_env.borrow_mut(mc).is_function_scope = true;
+                                object_set_key_value(mc, &call_env, "this", &actual_this)?;
+                                let body_clone = cl_data.body.clone();
+                                return crate::core::evaluate_statements(mc, &call_env, &body_clone).map_err(|e| match e {
+                                    crate::core::EvalError::Js(e) => e,
+                                    _ => raise_eval_error!("Error calling getter on super property"),
+                                });
+                            }
+                            Value::Object(obj) => {
+                                if let Some(cl_rc) = obj.borrow().get_closure()
+                                    && let Value::Closure(cl) = &*cl_rc.borrow()
+                                {
                                     let cl_data = cl;
                                     let call_env = crate::core::new_js_object_data(mc);
                                     call_env.borrow_mut(mc).prototype = cl_data.env;
                                     call_env.borrow_mut(mc).is_function_scope = true;
-                                    object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+                                    object_set_key_value(mc, &call_env, "this", &actual_this)?;
                                     let body_clone = cl_data.body.clone();
                                     return crate::core::evaluate_statements(mc, &call_env, &body_clone).map_err(|e| match e {
                                         crate::core::EvalError::Js(e) => e,
                                         _ => raise_eval_error!("Error calling getter on super property"),
                                     });
                                 }
-                                Value::Object(obj) => {
-                                    if let Some(cl_rc) = obj.borrow().get_closure()
-                                        && let Value::Closure(cl) = &*cl_rc.borrow()
-                                    {
-                                        let cl_data = cl;
-                                        let call_env = crate::core::new_js_object_data(mc);
-                                        call_env.borrow_mut(mc).prototype = cl_data.env;
-                                        call_env.borrow_mut(mc).is_function_scope = true;
-                                        object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                                        let body_clone = cl_data.body.clone();
-                                        return crate::core::evaluate_statements(mc, &call_env, &body_clone).map_err(|e| match e {
-                                            crate::core::EvalError::Js(e) => e,
-                                            _ => raise_eval_error!("Error calling getter on super property"),
-                                        });
-                                    }
-                                    return Err(raise_eval_error!("Accessor is not a function"));
-                                }
-                                _ => return Err(raise_eval_error!("Accessor is not a function")),
+                                return Err(raise_eval_error!("Accessor is not a function"));
                             }
+                            _ => return Err(raise_eval_error!("Accessor is not a function")),
                         }
-                        // If no receiver, return undefined
-                        return Ok(Value::Undefined);
                     }
                     Value::Getter(..) => {
-                        if let Some(this_val) = object_get_key_value(env, "this")
-                            && let Value::Object(receiver) = &*this_val.borrow()
-                        {
-                            let call_env = crate::core::new_js_object_data(mc);
-                            let (body, captured_env, _home) = match &*prop_val.borrow() {
-                                Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
-                                _ => return Err(raise_eval_error!("Accessor is not a function")),
-                            };
-                            call_env.borrow_mut(mc).prototype = Some(captured_env);
-                            call_env.borrow_mut(mc).is_function_scope = true;
-                            object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
-                            let body_clone = body.clone();
-                            return crate::core::evaluate_statements(mc, &call_env, &body_clone).map_err(|e| match e {
-                                crate::core::EvalError::Js(e) => e,
-                                _ => raise_eval_error!("Error calling getter on super property"),
-                            });
-                        }
-                        return Ok(Value::Undefined);
+                        let call_env = crate::core::new_js_object_data(mc);
+                        let (body, captured_env, _home) = match &*prop_val.borrow() {
+                            Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
+                            _ => return Err(raise_eval_error!("Accessor is not a function")),
+                        };
+                        call_env.borrow_mut(mc).prototype = Some(captured_env);
+                        call_env.borrow_mut(mc).is_function_scope = true;
+                        object_set_key_value(mc, &call_env, "this", &actual_this)?;
+                        let body_clone = body.clone();
+                        return crate::core::evaluate_statements(mc, &call_env, &body_clone).map_err(|e| match e {
+                            crate::core::EvalError::Js(e) => e,
+                            _ => raise_eval_error!("Error calling getter on super property"),
+                        });
                     }
                     _ => {
                         // If the stored slot is a property descriptor with a stored value, return that

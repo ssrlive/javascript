@@ -1080,16 +1080,28 @@ fn hoist_name<'gc>(
         }
     }
 
-    if target_env.borrow().prototype.is_some()
-        && let Some(proto_env) = target_env.borrow().prototype
-        && proto_env.borrow().is_function_scope
-        && env_get_own(&target_env, name).is_none()
-        && env_get_own(&proto_env, name).is_some()
-    {
-        return Ok(());
-    }
+    let has_own_property = get_own_property(&target_env, name).is_some();
 
-    if env_get_own(&target_env, name).is_none() {
+    // In function calls we may split environments into parameter env -> var env.
+    // A `var x;` where `x` is already a formal parameter must not create a new
+    // shadowing binding on the var env; it should preserve the parameter binding.
+    let has_formal_param_binding_in_parent = if let Some(parent_env) = target_env.borrow().prototype {
+        let is_parameter_env = env_get_own(&parent_env, "__is_parameter_env")
+            .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+            .unwrap_or(false);
+        let marker_key = format!("__param_binding__{}", name);
+        let is_formal_param_binding = env_get_own(&parent_env, &marker_key)
+            .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+            .unwrap_or(false);
+        is_parameter_env && is_formal_param_binding
+    } else {
+        false
+    };
+
+    if !has_own_property {
+        if has_formal_param_binding_in_parent {
+            return Ok(());
+        }
         // If target is global object, use CreateGlobalVarBinding semantics
         // For indirect eval, CreateGlobalVarBinding(..., true) should be used which creates
         // a configurable=true property. Detect indirect eval marker on the global env.
@@ -1139,7 +1151,7 @@ fn hoist_name<'gc>(
             let desc_obj = create_descriptor_object(mc, &Value::Undefined, true, true, deletable)?;
             crate::js_object::define_property_internal(mc, &target_env, name, &desc_obj)?;
         } else {
-            env_set(mc, &target_env, name, &Value::Undefined)?;
+            object_set_key_value(mc, &target_env, name, &Value::Undefined)?;
         }
     } else {
         // If the binding already exists in a non-global function scope, we do
@@ -1552,7 +1564,8 @@ fn hoist_declarations<'gc>(
                             env.borrow().is_configurable(&key)
                         );
                         if existing.is_none() || env.borrow().is_configurable(&key) {
-                            let desc_obj = crate::core::create_descriptor_object(mc, &Value::Object(*func_obj), true, true, true)?;
+                            let desc_obj =
+                                crate::core::create_descriptor_object(mc, &Value::Object(*func_obj), true, true, is_indirect_eval)?;
                             crate::js_object::define_property_internal(mc, env, &key, &desc_obj)?;
                         } else {
                             let desc_obj = crate::core::new_js_object_data(mc);
@@ -1582,20 +1595,20 @@ fn hoist_declarations<'gc>(
             match &*stmt.kind {
                 StatementKind::Let(decls) => {
                     for (name, _) in decls {
-                        env_set(mc, env, name, &Value::Uninitialized)?;
+                        object_set_key_value(mc, env, name, &Value::Uninitialized)?;
                         env.borrow_mut(mc).set_lexical(name.clone());
                         log::trace!("hoist_declarations: hoisted lexical '{}' into env {:p}", name, env);
                     }
                 }
                 StatementKind::Const(decls) => {
                     for (name, _) in decls {
-                        env_set(mc, env, name, &Value::Uninitialized)?;
+                        object_set_key_value(mc, env, name, &Value::Uninitialized)?;
                         env.borrow_mut(mc).set_lexical(name.clone());
                         log::trace!("hoist_declarations: hoisted const lexical '{}' into env {:p}", name, env);
                     }
                 }
                 StatementKind::Class(class_def) => {
-                    env_set(mc, env, &class_def.name, &Value::Uninitialized)?;
+                    object_set_key_value(mc, env, &class_def.name, &Value::Uninitialized)?;
                     env.borrow_mut(mc).set_lexical(class_def.name.clone());
                     log::trace!("hoist_declarations: hoisted class lexical '{}' into env {:p}", class_def.name, env);
                 }
@@ -1603,15 +1616,15 @@ fn hoist_declarations<'gc>(
                     for spec in specifiers {
                         match spec {
                             ImportSpecifier::Default(name) => {
-                                env_set(mc, env, name, &Value::Uninitialized)?;
+                                object_set_key_value(mc, env, name, &Value::Uninitialized)?;
                             }
                             ImportSpecifier::Named(name, alias) => {
                                 let binding_name = alias.as_ref().unwrap_or(name);
-                                env_set(mc, env, binding_name, &Value::Uninitialized)?;
+                                object_set_key_value(mc, env, binding_name, &Value::Uninitialized)?;
                                 env.borrow_mut(mc).set_lexical(binding_name.clone());
                             }
                             ImportSpecifier::Namespace(name) => {
-                                env_set(mc, env, name, &Value::Uninitialized)?;
+                                object_set_key_value(mc, env, name, &Value::Uninitialized)?;
                             }
                         }
                     }
@@ -1620,14 +1633,14 @@ fn hoist_declarations<'gc>(
                     let mut names = Vec::new();
                     collect_names_from_destructuring(pattern, &mut names);
                     for name in names {
-                        env_set(mc, env, &name, &Value::Uninitialized)?;
+                        object_set_key_value(mc, env, &name, &Value::Uninitialized)?;
                     }
                 }
                 StatementKind::LetDestructuringObject(pattern, _) | StatementKind::ConstDestructuringObject(pattern, _) => {
                     let mut names = Vec::new();
                     collect_names_from_object_destructuring(pattern, &mut names);
                     for name in names {
-                        env_set(mc, env, &name, &Value::Uninitialized)?;
+                        object_set_key_value(mc, env, &name, &Value::Uninitialized)?;
                     }
                 }
                 _ => {}
@@ -2070,7 +2083,75 @@ pub fn evaluate_statements_with_labels<'gc>(
         false
     };
 
-    if is_indirect_eval {
+    let global_code_mode = env_get(env, "__test262_global_code_mode")
+        .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+        .unwrap_or(false);
+
+    if is_indirect_eval && global_code_mode {
+        // $262.evalScript path: use the shared global lexical environment
+        // so that lexical bindings persist across evalScript calls.
+        let mut global_env = *env;
+        while let Some(proto) = global_env.borrow().prototype {
+            global_env = proto;
+        }
+        log::trace!(
+            "evaluate_statements: is_indirect_eval && global_code_mode: global_env={:p}",
+            global_env
+        );
+        let lex_env = if let Some(v) = object_get_key_value(&global_env, "__global_lex_env")
+            && let Value::Object(obj) = &*v.borrow()
+        {
+            log::trace!("evaluate_statements: found existing __global_lex_env={:p}", *obj);
+            *obj
+        } else {
+            log::trace!("evaluate_statements: creating new __global_lex_env");
+            let le = crate::core::new_js_object_data(mc);
+            le.borrow_mut(mc).prototype = Some(global_env);
+            object_set_key_value(mc, &le, "this", &Value::Object(global_env))?;
+            object_set_key_value(mc, &global_env, "__global_lex_env", &Value::Object(le))?;
+            le
+        };
+        log::trace!(
+            "evaluate_statements: lex_env={:p} keys={:?}",
+            lex_env,
+            lex_env.borrow().properties.keys().collect::<Vec<_>>()
+        );
+
+        // Check for declaration conflicts (GlobalDeclarationInstantiation)
+        check_global_code_declarations(&global_env, &lex_env, statements)?;
+
+        // Hoist var/function into global env (skip lexicals)
+        // Use is_indirect_eval=false because $262.evalScript emulates script
+        // semantics where var bindings should NOT be configurable/deletable.
+        hoist_declarations(mc, &global_env, statements, true, false)?;
+
+        // Hoist let/const/class into the shared lex env.
+        // Use object_set_key_value (not env_set) to create the binding directly on lex_env
+        // without walking the prototype chain, which would overwrite same-named globals.
+        for stmt in statements {
+            match &*stmt.kind {
+                StatementKind::Let(decls) => {
+                    for (name, _) in decls {
+                        object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(name.clone());
+                    }
+                }
+                StatementKind::Const(decls) => {
+                    for (name, _) in decls {
+                        object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(name.clone());
+                    }
+                }
+                StatementKind::Class(class_def) => {
+                    object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
+                    lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        exec_env = lex_env;
+    } else if is_indirect_eval && !global_code_mode {
         if starts_with_use_strict {
             log::trace!("evaluate_statements: indirect strict eval - creating declarative env");
             let new_env = crate::core::new_js_object_data(mc);
@@ -2126,7 +2207,7 @@ pub fn evaluate_statements_with_labels<'gc>(
                 match &*stmt.kind {
                     StatementKind::Let(decls) => {
                         for (name, _) in decls {
-                            env_set(mc, &lex_env, name, &Value::Uninitialized)?;
+                            object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                             lex_env.borrow_mut(mc).set_lexical(name.clone());
                             log::trace!(
                                 "evaluate_statements: non-strict indirect - hoisted lexical '{}' into lex_env {:p}",
@@ -2137,7 +2218,7 @@ pub fn evaluate_statements_with_labels<'gc>(
                     }
                     StatementKind::Const(decls) => {
                         for (name, _) in decls {
-                            env_set(mc, &lex_env, name, &Value::Uninitialized)?;
+                            object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                             lex_env.borrow_mut(mc).set_lexical(name.clone());
                             log::trace!(
                                 "evaluate_statements: non-strict indirect - hoisted const lexical '{}' into lex_env {:p}",
@@ -2147,7 +2228,7 @@ pub fn evaluate_statements_with_labels<'gc>(
                         }
                     }
                     StatementKind::Class(class_def) => {
-                        env_set(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
+                        object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
                         lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
                         log::trace!(
                             "evaluate_statements: non-strict indirect - hoisted class lexical '{}' into lex_env {:p}",
@@ -2159,14 +2240,14 @@ pub fn evaluate_statements_with_labels<'gc>(
                         for spec in specifiers {
                             match spec {
                                 ImportSpecifier::Default(name) => {
-                                    env_set(mc, &lex_env, name, &Value::Uninitialized)?;
+                                    object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                                 }
                                 ImportSpecifier::Named(name, alias) => {
                                     let binding_name = alias.as_ref().unwrap_or(name);
-                                    env_set(mc, &lex_env, binding_name, &Value::Uninitialized)?;
+                                    object_set_key_value(mc, &lex_env, binding_name, &Value::Uninitialized)?;
                                 }
                                 ImportSpecifier::Namespace(name) => {
-                                    env_set(mc, &lex_env, name, &Value::Uninitialized)?;
+                                    object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                                 }
                             }
                         }
@@ -2179,13 +2260,58 @@ pub fn evaluate_statements_with_labels<'gc>(
             exec_env = lex_env;
         }
     } else {
-        // Not an indirect eval: just honor 'use strict' directive if present
-        if starts_with_use_strict {
-            log::trace!("evaluate_statements: detected 'use strict' directive; marking env as strict");
-            env_set_strictness(mc, &exec_env, true)?;
-        }
+        // Not an indirect eval: apply global-code mode only at the root
+        // global environment (prototype.is_none()) to avoid re-creating
+        // the lex_env for nested function/block scope calls.
+        if global_code_mode && env.borrow().prototype.is_none() {
+            let lex_env = crate::core::new_js_object_data(mc);
+            lex_env.borrow_mut(mc).prototype = Some(*env);
+            object_set_key_value(mc, &lex_env, "this", &Value::Object(*env))?;
 
-        hoist_declarations(mc, &exec_env, statements, false, false)?;
+            // Store the global lex env for later use by $262.evalScript
+            object_set_key_value(mc, env, "__global_lex_env", &Value::Object(lex_env))?;
+
+            if starts_with_use_strict {
+                log::trace!("evaluate_statements: global-code mode + use strict; marking lexical env strict");
+                env_set_strictness(mc, &lex_env, true)?;
+            }
+
+            hoist_declarations(mc, env, statements, true, false)?;
+
+            // Initialize let/const/class bindings directly on lex_env using
+            // object_set_key_value (not env_set) to avoid walking the prototype
+            // chain and accidentally overwriting same-named globals.
+            for stmt in statements {
+                match &*stmt.kind {
+                    StatementKind::Let(decls) => {
+                        for (name, _) in decls {
+                            object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                            lex_env.borrow_mut(mc).set_lexical(name.clone());
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                            lex_env.borrow_mut(mc).set_lexical(name.clone());
+                        }
+                    }
+                    StatementKind::Class(class_def) => {
+                        object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                    }
+                    _ => {}
+                }
+            }
+
+            exec_env = lex_env;
+        } else {
+            if starts_with_use_strict {
+                log::trace!("evaluate_statements: detected 'use strict' directive; marking env as strict");
+                env_set_strictness(mc, &exec_env, true)?;
+            }
+
+            hoist_declarations(mc, &exec_env, statements, false, false)?;
+        }
     }
 
     // If the execution environment is marked strict, scan for certain forbidden
@@ -2263,7 +2389,55 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
         false
     };
 
-    if is_indirect_eval {
+    let global_code_mode = env_get(env, "__test262_global_code_mode")
+        .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+        .unwrap_or(false);
+
+    if is_indirect_eval && global_code_mode {
+        // $262.evalScript path: use the shared global lexical environment
+        let mut global_env = *env;
+        while let Some(proto) = global_env.borrow().prototype {
+            global_env = proto;
+        }
+        let lex_env = if let Some(v) = object_get_key_value(&global_env, "__global_lex_env")
+            && let Value::Object(obj) = &*v.borrow()
+        {
+            *obj
+        } else {
+            let le = crate::core::new_js_object_data(mc);
+            le.borrow_mut(mc).prototype = Some(global_env);
+            object_set_key_value(mc, &le, "this", &Value::Object(global_env))?;
+            object_set_key_value(mc, &global_env, "__global_lex_env", &Value::Object(le))?;
+            le
+        };
+
+        check_global_code_declarations(&global_env, &lex_env, statements)?;
+        hoist_declarations(mc, &global_env, statements, true, false)?;
+
+        for stmt in statements {
+            match &*stmt.kind {
+                StatementKind::Let(decls) => {
+                    for (name, _) in decls {
+                        object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(name.clone());
+                    }
+                }
+                StatementKind::Const(decls) => {
+                    for (name, _) in decls {
+                        object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(name.clone());
+                    }
+                }
+                StatementKind::Class(class_def) => {
+                    object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
+                    lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        exec_env = lex_env;
+    } else if is_indirect_eval && !global_code_mode {
         if starts_with_use_strict {
             let new_env = crate::core::new_js_object_data(mc);
             new_env.borrow_mut(mc).prototype = Some(*env);
@@ -2287,29 +2461,29 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
                 match &*stmt.kind {
                     StatementKind::Let(decls) => {
                         for (name, _) in decls {
-                            env_set(mc, &lex_env, name, &Value::Uninitialized)?;
+                            object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                         }
                     }
                     StatementKind::Const(decls) => {
                         for (name, _) in decls {
-                            env_set(mc, &lex_env, name, &Value::Uninitialized)?;
+                            object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                         }
                     }
                     StatementKind::Class(class_def) => {
-                        env_set(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
+                        object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
                     }
                     StatementKind::Import(specifiers, _) => {
                         for spec in specifiers {
                             match spec {
                                 ImportSpecifier::Default(name) => {
-                                    env_set(mc, &lex_env, name, &Value::Uninitialized)?;
+                                    object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                                 }
                                 ImportSpecifier::Named(name, alias) => {
                                     let binding_name = alias.as_ref().unwrap_or(name);
-                                    env_set(mc, &lex_env, binding_name, &Value::Uninitialized)?;
+                                    object_set_key_value(mc, &lex_env, binding_name, &Value::Uninitialized)?;
                                 }
                                 ImportSpecifier::Namespace(name) => {
-                                    env_set(mc, &lex_env, name, &Value::Uninitialized)?;
+                                    object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                                 }
                             }
                         }
@@ -2320,6 +2494,46 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
 
             exec_env = lex_env;
         }
+    } else if global_code_mode && env.borrow().prototype.is_none() {
+        let lex_env = crate::core::new_js_object_data(mc);
+        lex_env.borrow_mut(mc).prototype = Some(*env);
+        object_set_key_value(mc, &lex_env, "this", &Value::Object(*env))?;
+
+        // Store the global lex env for later use by $262.evalScript
+        object_set_key_value(mc, env, "__global_lex_env", &Value::Object(lex_env))?;
+
+        if starts_with_use_strict {
+            env_set_strictness(mc, &lex_env, true)?;
+        }
+
+        hoist_declarations(mc, env, statements, true, false)?;
+
+        // Initialize let/const/class bindings directly on lex_env using
+        // object_set_key_value (not env_set) to avoid walking the prototype
+        // chain and accidentally overwriting same-named globals.
+        for stmt in statements {
+            match &*stmt.kind {
+                StatementKind::Let(decls) => {
+                    for (name, _) in decls {
+                        object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(name.clone());
+                    }
+                }
+                StatementKind::Const(decls) => {
+                    for (name, _) in decls {
+                        object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(name.clone());
+                    }
+                }
+                StatementKind::Class(class_def) => {
+                    object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
+                    lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        exec_env = lex_env;
     } else {
         if starts_with_use_strict {
             env_set_strictness(mc, &exec_env, true)?;
@@ -2668,7 +2882,7 @@ fn eval_res<'gc>(
                     Value::Undefined
                 };
                 _last_init = val.clone();
-                env_set(mc, env, name, &val)?;
+                object_set_key_value(mc, env, name, &val)?;
             }
             // *last_value = _last_init;
             Ok(None)
@@ -2729,7 +2943,7 @@ fn eval_res<'gc>(
                 };
                 _last_init = val.clone();
                 // Bind value and mark the binding as const so subsequent assignments fail
-                env_set(mc, env, name, &val)?;
+                object_set_key_value(mc, env, name, &val)?;
                 env.borrow_mut(mc).set_const(name.clone());
             }
             // *last_value = _last_init;
@@ -2765,21 +2979,11 @@ fn eval_res<'gc>(
                         ImportSpecifier::Named(name, alias) => {
                             let binding_name = alias.as_ref().unwrap_or(name);
 
-                            let val_ptr_res = object_get_key_value(&exports_obj, name);
-                            let val = if let Some(cell) = val_ptr_res {
-                                cell.borrow().clone()
-                            } else {
-                                Value::Undefined
-                            };
+                            let val = get_property_with_accessors(mc, env, &exports_obj, name)?;
                             env_set(mc, env, binding_name, &val)?;
                         }
                         ImportSpecifier::Default(name) => {
-                            let val_ptr_res = object_get_key_value(&exports_obj, "default");
-                            let val = if let Some(cell) = val_ptr_res {
-                                cell.borrow().clone()
-                            } else {
-                                Value::Undefined
-                            };
+                            let val = get_property_with_accessors(mc, env, &exports_obj, "default")?;
                             env_set(mc, env, name, &val)?;
                         }
                         ImportSpecifier::Namespace(name) => {
@@ -3629,7 +3833,7 @@ fn eval_res<'gc>(
                 catch_env.borrow_mut(mc).prototype = Some(*env);
 
                 if let Some(param_name) = &tc_stmt.catch_param {
-                    env_set(mc, &catch_env, param_name, val)?;
+                    object_set_key_value(mc, &catch_env, param_name, val)?;
                 }
 
                 let catch_stmts_clone = catch_stmts.clone();
@@ -3961,7 +4165,7 @@ fn eval_res<'gc>(
             if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
-                env_set(mc, &he, var_name, &Value::Uninitialized)?;
+                object_set_key_value(mc, &he, var_name, &Value::Uninitialized)?;
                 head_env = Some(he);
             }
             let iter_eval_env = head_env.as_ref().unwrap_or(env);
@@ -4060,7 +4264,7 @@ fn eval_res<'gc>(
                                 // create a fresh lexical env for each iteration
                                 let iter_env = new_js_object_data(mc);
                                 iter_env.borrow_mut(mc).prototype = Some(*env);
-                                env_set(mc, &iter_env, var_name, &value)?;
+                                object_set_key_value(mc, &iter_env, var_name, &value)?;
                                 let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
                                 match res {
                                     ControlFlow::Normal(_) => v = vbody.clone(),
@@ -4144,7 +4348,7 @@ fn eval_res<'gc>(
                         Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
                             let iter_env = new_js_object_data(mc);
                             iter_env.borrow_mut(mc).prototype = Some(*env);
-                            env_set(mc, &iter_env, var_name, &val)?;
+                            object_set_key_value(mc, &iter_env, var_name, &val)?;
                             let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
                             match res {
                                 ControlFlow::Normal(_) => v = vbody.clone(),
@@ -4191,7 +4395,7 @@ fn eval_res<'gc>(
             if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
-                env_set(mc, &he, var_name, &Value::Uninitialized)?;
+                object_set_key_value(mc, &he, var_name, &Value::Uninitialized)?;
                 head_env = Some(he);
             }
             let iter_eval_env = head_env.as_ref().unwrap_or(env);
@@ -4318,7 +4522,7 @@ fn eval_res<'gc>(
                             Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
                                 let iter_env = new_js_object_data(mc);
                                 iter_env.borrow_mut(mc).prototype = Some(*env);
-                                env_set(mc, &iter_env, var_name, &value)?;
+                                object_set_key_value(mc, &iter_env, var_name, &value)?;
                                 let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
                                 match res {
                                     ControlFlow::Normal(_) => v = vbody.clone(),
@@ -4637,7 +4841,7 @@ fn eval_res<'gc>(
             if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind {
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
-                env_set(mc, &he, var_name, &Value::Uninitialized)?;
+                object_set_key_value(mc, &he, var_name, &Value::Uninitialized)?;
                 head_env = Some(he);
             }
             let iter_eval_env = head_env.as_ref().unwrap_or(env);
@@ -4812,7 +5016,7 @@ fn eval_res<'gc>(
 
                             let iter_env = new_js_object_data(mc);
                             iter_env.borrow_mut(mc).prototype = Some(*env);
-                            env_set(mc, &iter_env, var_name, &Value::String(utf8_to_utf16(k)))?;
+                            object_set_key_value(mc, &iter_env, var_name, &Value::String(utf8_to_utf16(k)))?;
                             let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
                             match res {
                                 ControlFlow::Normal(_) => *last_value = vbody,
@@ -4972,7 +5176,7 @@ fn eval_res<'gc>(
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
                 for name in names.iter() {
-                    env_set(mc, &he, name, &Value::Uninitialized)?;
+                    object_set_key_value(mc, &he, name, &Value::Uninitialized)?;
                 }
                 head_env = Some(he);
             }
@@ -5059,7 +5263,7 @@ fn eval_res<'gc>(
                                 if let DestructuringElement::Variable(name, _) = value {
                                     match decl_kind_opt {
                                         Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                            object_set_key_value(mc, &iter_env, name, &prop_val)?;
                                         }
                                         _ => {
                                             crate::core::env_set_recursive(mc, env, name, &prop_val)?;
@@ -5081,7 +5285,7 @@ fn eval_res<'gc>(
                                 if let DestructuringElement::Variable(name, _) = value {
                                     match decl_kind_opt {
                                         Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                            object_set_key_value(mc, &iter_env, name, &prop_val)?;
                                         }
                                         _ => {
                                             crate::core::env_set_recursive(mc, env, name, &prop_val)?;
@@ -5150,7 +5354,7 @@ fn eval_res<'gc>(
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
                 for name in names.iter() {
-                    env_set(mc, &he, name, &Value::Uninitialized)?;
+                    object_set_key_value(mc, &he, name, &Value::Uninitialized)?;
                 }
                 head_env = Some(he);
             }
@@ -5291,7 +5495,7 @@ fn eval_res<'gc>(
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
                 for name in names.iter() {
-                    env_set(mc, &he, name, &Value::Uninitialized)?;
+                    object_set_key_value(mc, &he, name, &Value::Uninitialized)?;
                 }
                 head_env = Some(he);
             }
@@ -5325,7 +5529,7 @@ fn eval_res<'gc>(
                                 if let DestructuringElement::Variable(name, _) = value {
                                     match decl_kind_opt {
                                         Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                            object_set_key_value(mc, &iter_env, name, &prop_val)?;
                                         }
                                         _ => {
                                             crate::core::env_set_recursive(mc, env, name, &prop_val)?;
@@ -5348,7 +5552,7 @@ fn eval_res<'gc>(
                                 if let DestructuringElement::Variable(name, _) = value {
                                     match decl_kind_opt {
                                         Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                            object_set_key_value(mc, &iter_env, name, &prop_val)?;
                                         }
                                         _ => {
                                             crate::core::env_set_recursive(mc, env, name, &prop_val)?;
@@ -5413,7 +5617,7 @@ fn eval_res<'gc>(
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
                 for name in names.iter() {
-                    env_set(mc, &he, name, &Value::Uninitialized)?;
+                    object_set_key_value(mc, &he, name, &Value::Uninitialized)?;
                 }
                 head_env = Some(he);
             }
@@ -5449,7 +5653,7 @@ fn eval_res<'gc>(
                                 if let DestructuringElement::Variable(name, _) = value {
                                     match decl_kind_opt {
                                         Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                            object_set_key_value(mc, &iter_env, name, &prop_val)?;
                                         }
                                         _ => {
                                             crate::core::env_set_recursive(mc, env, name, &prop_val)?;
@@ -5472,7 +5676,7 @@ fn eval_res<'gc>(
                                 if let DestructuringElement::Variable(name, _) = value {
                                     match decl_kind_opt {
                                         Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                            env_set(mc, &iter_env, name, &prop_val)?;
+                                            object_set_key_value(mc, &iter_env, name, &prop_val)?;
                                         }
                                         _ => {
                                             crate::core::env_set_recursive(mc, env, name, &prop_val)?;
@@ -5542,7 +5746,7 @@ fn eval_res<'gc>(
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
                 for name in names.iter() {
-                    env_set(mc, &he, name, &Value::Uninitialized)?;
+                    object_set_key_value(mc, &he, name, &Value::Uninitialized)?;
                 }
                 head_env = Some(he);
             }
@@ -5626,7 +5830,7 @@ fn eval_res<'gc>(
                                         } else {
                                             Value::Undefined
                                         };
-                                        env_set(mc, &iter_env, name, &elem_val)?;
+                                        object_set_key_value(mc, &iter_env, name, &elem_val)?;
                                     }
                                 }
 
@@ -9450,6 +9654,90 @@ pub fn check_top_level_return<'gc>(stmts: &[Statement]) -> Result<(), EvalError<
     Ok(())
 }
 
+/// Check global declaration conflicts for GlobalDeclarationInstantiation
+/// (15.1.11). Called in the global-code-mode eval path (emulating script
+/// semantics via $262.evalScript).
+///
+/// For each lexical declaration (let/const/class), checks:
+///   - HasVarDeclaration(name) on global env → SyntaxError
+///   - HasLexicalDeclaration(name) on lex env → SyntaxError
+///   - HasRestrictedGlobalProperty(name) → non-configurable own property → SyntaxError
+///
+/// For each var/function declaration, checks:
+///   - HasLexicalDeclaration(name) on lex env → SyntaxError
+fn check_global_code_declarations<'gc>(
+    global_env: &JSObjectDataPtr<'gc>,
+    lex_env: &JSObjectDataPtr<'gc>,
+    statements: &[Statement],
+) -> Result<(), EvalError<'gc>> {
+    // Collect lexical declaration names
+    let mut lex_names: Vec<String> = Vec::new();
+    for stmt in statements {
+        match &*stmt.kind {
+            StatementKind::Let(decls) => {
+                for (name, _) in decls {
+                    lex_names.push(name.clone());
+                }
+            }
+            StatementKind::Const(decls) => {
+                for (name, _) in decls {
+                    lex_names.push(name.clone());
+                }
+            }
+            StatementKind::Class(class_def) => {
+                lex_names.push(class_def.name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // For each lexical name, check for conflicts
+    for name in &lex_names {
+        let key = PropertyKey::String(name.clone());
+
+        // HasLexicalDeclaration: check the shared global lex env
+        if lex_env.borrow().has_lexical(name) {
+            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)).into());
+        }
+
+        // HasRestrictedGlobalProperty: non-configurable own property on global object
+        if let Some(_) = get_own_property(global_env, &key)
+            && !global_env.borrow().is_configurable(&key)
+        {
+            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)).into());
+        }
+    }
+
+    // Collect var/function declaration names
+    let mut var_names: Vec<String> = Vec::new();
+    for stmt in statements {
+        match &*stmt.kind {
+            StatementKind::Var(decls) => {
+                for (name, _) in decls {
+                    if !var_names.contains(name) {
+                        var_names.push(name.clone());
+                    }
+                }
+            }
+            StatementKind::FunctionDeclaration(name, ..) => {
+                if !var_names.contains(name) {
+                    var_names.push(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // For each var/function name, check for conflicts with existing lexical bindings
+    for name in &var_names {
+        if lex_env.borrow().has_lexical(name) {
+            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)).into());
+        }
+    }
+
+    Ok(())
+}
+
 fn check_global_declarations<'gc>(env: &JSObjectDataPtr<'gc>, statements: &[Statement]) -> Result<(), EvalError<'gc>> {
     let mut fn_names: Vec<String> = Vec::new();
     for stmt in statements {
@@ -9480,7 +9768,7 @@ fn check_global_declarations<'gc>(env: &JSObjectDataPtr<'gc>, statements: &[Stat
             }
 
             // If it's a non-writable data property and non-configurable, we cannot change its value
-            if !env.borrow().is_writable(&key) {
+            if !env.borrow().is_writable(&key) || !env.borrow().is_enumerable(&key) {
                 return Err(raise_type_error!(format!("Cannot declare global function '{name}'")).into());
             }
         }
@@ -13835,12 +14123,12 @@ fn evaluate_expr_class<'gc>(
         // Create a class scope for the class name binding (lexical, immutable)
         let class_scope = new_js_object_data(mc);
         class_scope.borrow_mut(mc).prototype = Some(*env);
-        env_set(mc, &class_scope, &class_def.name, &Value::Uninitialized)?;
+        object_set_key_value(mc, &class_scope, &class_def.name, &Value::Uninitialized)?;
 
         let class_obj = create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, &class_scope, false)?;
 
         // Initialize the class name binding to the class object and mark it immutable
-        env_set(mc, &class_scope, &class_def.name, &class_obj)?;
+        object_set_key_value(mc, &class_scope, &class_def.name, &class_obj)?;
         class_scope.borrow_mut(mc).set_const(class_def.name.clone());
 
         Ok(class_obj)
@@ -15570,7 +15858,13 @@ fn set_property_with_accessors<'gc>(
         }
     } else {
         // No owner found in chain: create own property
-        if !obj.borrow().is_extensible() {
+        let allow_nonextensible_internal_write = if let PropertyKey::String(s) = key {
+            obj.borrow().prototype.is_none() && matches!(s.as_str(), "__test262_global_code_mode" | "__global_lex_env")
+        } else {
+            false
+        };
+
+        if !obj.borrow().is_extensible() && !allow_nonextensible_internal_write {
             if crate::core::env_get_strictness(_env) {
                 return Err(raise_type_error!("Cannot add property to non-extensible object").into());
             }
@@ -15714,7 +16008,9 @@ pub fn call_native_function<'gc>(
             Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, rest_args, None)?)),
 
             Value::Function(func_name) => {
-                if let Some(res) = call_native_function(mc, func_name, Some(new_this), rest_args, env)? {
+                if func_name != "eval"
+                    && let Some(res) = call_native_function(mc, func_name, Some(new_this), rest_args, env)?
+                {
                     Ok(Some(res))
                 } else {
                     let call_env = crate::core::new_js_object_data(mc);
@@ -15727,11 +16023,18 @@ pub fn call_native_function<'gc>(
                         while let Some(proto) = root_env.borrow().prototype {
                             root_env = proto;
                         }
+                        let key = PropertyKey::String("__is_indirect_eval".to_string());
+                        object_set_key_value(mc, &root_env, &key, &Value::Boolean(true))?;
                         root_env
                     } else {
                         call_env
                     };
-                    Ok(Some(handle_global_function(mc, func_name, rest_args, &target_env_for_call)?))
+                    let result = handle_global_function(mc, func_name, rest_args, &target_env_for_call)?;
+                    if func_name == "eval" {
+                        let key = PropertyKey::String("__is_indirect_eval".to_string());
+                        let _ = target_env_for_call.borrow_mut(mc).properties.shift_remove(&key);
+                    }
+                    Ok(Some(result))
                 }
             }
             Value::Object(obj) => {
@@ -15765,9 +16068,7 @@ pub fn call_native_function<'gc>(
         let arg_array = args.get(1).cloned().unwrap_or(Value::Undefined);
 
         let mut rest_args = Vec::new();
-        if let Value::Object(obj) = arg_array
-            && is_array(mc, &obj)
-        {
+        if let Value::Object(obj) = arg_array {
             let len_val = object_get_key_value(&obj, "length").unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
             let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
             for k in 0..len {
@@ -15789,7 +16090,9 @@ pub fn call_native_function<'gc>(
             )?)),
             Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, &rest_args, None)?)),
             Value::Function(func_name) => {
-                if let Some(res) = call_native_function(mc, func_name, Some(&new_this), &rest_args, env)? {
+                if func_name != "eval"
+                    && let Some(res) = call_native_function(mc, func_name, Some(&new_this), &rest_args, env)?
+                {
                     Ok(Some(res))
                 } else {
                     let call_env = crate::core::new_js_object_data(mc);
@@ -15802,16 +16105,18 @@ pub fn call_native_function<'gc>(
                         while let Some(proto) = root_env.borrow().prototype {
                             root_env = proto;
                         }
+                        let key = PropertyKey::String("__is_indirect_eval".to_string());
+                        object_set_key_value(mc, &root_env, &key, &Value::Boolean(true))?;
                         root_env
                     } else {
                         call_env
                     };
-                    Ok(Some(crate::js_function::handle_global_function(
-                        mc,
-                        func_name,
-                        &rest_args,
-                        &target_env_for_call,
-                    )?))
+                    let result = crate::js_function::handle_global_function(mc, func_name, &rest_args, &target_env_for_call)?;
+                    if func_name == "eval" {
+                        let key = PropertyKey::String("__is_indirect_eval".to_string());
+                        let _ = target_env_for_call.borrow_mut(mc).properties.shift_remove(&key);
+                    }
+                    Ok(Some(result))
                 }
             }
             Value::Object(obj) => {
@@ -16324,6 +16629,7 @@ pub fn call_closure<'gc>(
         let p = crate::core::new_js_object_data(mc);
         p.borrow_mut(mc).prototype = cl.env;
         p.borrow_mut(mc).is_function_scope = true;
+        object_set_key_value(mc, &p, "__is_parameter_env", &Value::Boolean(true))?;
         let v = crate::core::new_js_object_data(mc);
         v.borrow_mut(mc).prototype = Some(p);
         v.borrow_mut(mc).is_function_scope = true;
@@ -16371,7 +16677,9 @@ pub fn call_closure<'gc>(
     // `name` property, bind that name in the function's parameter environment so
     // the function can reference itself by name (e.g., `fac` inside `function fac ...`).
     if let Some(fn_obj_ptr) = fn_obj {
-        if let Some(name) = fn_obj_ptr.borrow().get_property("name") {
+        if let Some(name) = fn_obj_ptr.borrow().get_property("name")
+            && !name.is_empty()
+        {
             // If the function object was created as a hoisted declaration on its
             // creation environment, do NOT create a separate per-call binding for
             // the name (that behavior is only for Named Function Expressions).
@@ -16399,7 +16707,7 @@ pub fn call_closure<'gc>(
                 }
             }
             if should_bind_name {
-                crate::core::env_set(mc, &param_env, &name, &Value::Object(fn_obj_ptr))?;
+                crate::core::object_set_key_value(mc, &param_env, &name, &Value::Object(fn_obj_ptr))?;
                 // If this function executes in strict mode, the name binding must be immutable
                 // (assignment to it should throw a TypeError). Mark it as a const binding so
                 // subsequent assignment attempts will produce the correct error.
@@ -16437,8 +16745,10 @@ pub fn call_closure<'gc>(
             collect_names_from_destructuring_element(param, &mut param_names);
         }
         for name in param_names {
+            let marker_key = format!("__param_binding__{}", name);
+            object_set_key_value(mc, &param_env, &marker_key, &Value::Boolean(true))?;
             if env_get_own(&param_env, &name).is_none() {
-                env_set(mc, &param_env, &name, &Value::Uninitialized)?;
+                object_set_key_value(mc, &param_env, &name, &Value::Uninitialized)?;
             }
         }
     }
@@ -16989,8 +17299,10 @@ fn init_function_call_env<'gc>(
             collect_names_from_destructuring_element(param, &mut param_names);
         }
         for name in param_names {
+            let marker_key = format!("__param_binding__{}", name);
+            object_set_key_value(mc, call_env, &marker_key, &Value::Boolean(true))?;
             if env_get_own(call_env, &name).is_none() {
-                env_set(mc, call_env, &name, &Value::Uninitialized)?;
+                object_set_key_value(mc, call_env, &name, &Value::Uninitialized)?;
             }
         }
 

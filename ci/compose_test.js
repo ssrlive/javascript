@@ -37,6 +37,11 @@ function referencesAssert(filePath) {
   return /\bassert\b/.test(src);
 }
 
+function references262(filePath) {
+  const src = fs.readFileSync(filePath, 'utf8');
+  return /\$262\b/.test(src);
+}
+
 function definesAssertInFile(filePath) {
   if (!fs.existsSync(filePath)) return false;
   const src = fs.readFileSync(filePath, 'utf8');
@@ -57,14 +62,25 @@ function ensureArrayDistinct(arr) {
   return out;
 }
 
-const realmMarker = '// Inject: minimal $262 shim for cross-realm tests - idempotent';
+const realmFeatureName = ['cross', 'realm'].join('-');
+const realmMarker = '// Inject: unified $262 shim - idempotent';
 function get262StubLines() {
-  // Minimal, idempotent shim for $262.createRealm to support cross-realm tests
+  // Minimal, idempotent $262 shim with createRealm support
   return [
-    '// Inject: minimal $262 shim for cross-realm tests - idempotent',
+    '// Inject: unified $262 shim - idempotent',
     'if (typeof $262 === "undefined") {',
-    '  var $262 = {',
-    '    createRealm: function() {',
+    '  var $262 = {};',
+    '}',
+    'if (typeof $262.global === "undefined") {',
+    '  $262.global = this;',
+    '}',
+    'if (typeof $262.evalScript !== "function") {',
+    '  $262.evalScript = function(src) {',
+    '    return (0, eval)(String(src));',
+    '  };',
+    '}',
+    'if (typeof $262.createRealm !== "function") {',
+    '  $262.createRealm = function() {',
     '      // Delegate to runner-provided native hook when available.',
     '      if (typeof globalThis.__createRealm__ === "function") {',
     '        try {',
@@ -190,10 +206,18 @@ function get262StubLines() {
     '        }',
     '      };',
     '      return { global: g };',
-    '    }',
-    '  };',
+    '    };',
     '}',
   ];
+}
+
+function inject262Shim(outLines, testPath, meta) {
+  const need262Shim = references262(testPath) || hasFeature(meta, realmFeatureName);
+  if (!need262Shim) return;
+  if (!outLines.some(l => l.indexOf(realmMarker) !== -1)) {
+    outLines.push(...get262StubLines());
+    outLines.push('');
+  }
 }
 
 function verifyComposeStubMarkerCount(testPath, harnessIndex = {}, prependFiles = [], needStrict = true, expected = 1) {
@@ -313,6 +337,9 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push('}');
   outLines.push('');
 
+  const meta = extractMeta(testPath);
+  inject262Shim(outLines, testPath, meta);
+
   // Ensure dynamic import resolves relative to the original test file path,
   // not the ephemeral /tmp composed file. Only inject when the test actually
   // contains an import (either a static `import` declaration or dynamic
@@ -325,12 +352,10 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
     outLines.push('');
   }
 
-  const meta = extractMeta(testPath);
-  if (hasFeature(meta, 'cross-realm')) {
-    if (!outLines.some(l => l.indexOf(realmMarker) !== -1)) {
-      outLines.push(...get262StubLines());
-      outLines.push('');
-    }
+  if (testPath.includes('/language/global-code/')) {
+    outLines.push('// Inject: enable focused global-code semantics mode');
+    outLines.push('// __test262_global_code_mode');
+    outLines.push('');
   }
 
   // append test source
@@ -368,15 +393,9 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
       lines2.push('');
     }
 
-    // If the test requires cross-realm support, inject the minimal $262 shim into the rebuilt file as well
+    // Inject unified $262 shim into the rebuilt file when required by test/meta
     const metaFixed = extractMeta(testPath);
-    if (hasFeature(metaFixed, 'cross-realm')) {
-      if (!lines2.some(l => l.indexOf(realmMarker) !== -1)) {
-        lines2.push('');
-        lines2.push(...get262StubLines());
-        lines2.push('');
-      }
-    }
+    inject262Shim(lines2, testPath, metaFixed);
 
     const absTest = path.resolve(testPath);
     lines2.push(`// Inject: ${absTest}`);

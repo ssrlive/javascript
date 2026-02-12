@@ -220,6 +220,14 @@ pub(crate) fn define_property_internal<'gc>(
     // DEBUG: Log raw descriptor fields for troubleshooting
     log::debug!("define_property_internal: descriptor writable raw = {:?}", pd.writable);
     log::debug!("define_property_internal: descriptor enumerable raw = {:?}", pd.enumerable);
+
+    // Compute existence and configurability BEFORE applying the new configurable flag.
+    // This ensures that when a configurable property is being redefined as non-configurable,
+    // we still allow writable/enumerable attributes to be updated in the same operation.
+    let is_property_desc = pd.value.is_some() || pd.get.is_some() || pd.set.is_some();
+    let existed = object_get_key_value(target_obj, prop_key).is_some();
+    let existing_is_configurable = !existed || target_obj.borrow().is_configurable(prop_key);
+
     if let Some(is_cfg) = pd.configurable {
         if is_cfg {
             log::trace!("define_property_internal: setting configurable=true for {:?}", prop_key);
@@ -231,13 +239,10 @@ pub(crate) fn define_property_internal<'gc>(
     }
 
     // If descriptor is a property descriptor (has value/get/set), unspecified attributes default to false
-    let is_property_desc = pd.value.is_some() || pd.get.is_some() || pd.set.is_some();
-    // Only apply defaults when the property does not exist yet or is configurable. If the
-    // existing property is non-configurable, missing attributes should not be defaulted
-    // to false (per DefinePropertyOrThrow semantics); only explicitly provided attributes
-    // should be applied/checked.
-    let existed = object_get_key_value(target_obj, prop_key).is_some();
-    let existing_is_configurable = !existed || target_obj.borrow().is_configurable(prop_key);
+    // Only apply defaults when the property does not exist yet or was configurable (before
+    // applying the new configurable flag). If the existing property was non-configurable,
+    // missing attributes should not be defaulted to false (per DefinePropertyOrThrow
+    // semantics); only explicitly provided attributes should be applied/checked.
 
     if is_property_desc && existing_is_configurable {
         // Only default missing 'writable' to false for data descriptors (value or writable present).

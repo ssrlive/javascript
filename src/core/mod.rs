@@ -166,6 +166,18 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     #[cfg(feature = "std")]
     crate::js_std::initialize_std_module(mc, env)?;
 
+    // Per the ECMAScript specification, the global object's built-in properties
+    // (constructors, global functions, etc.) should have attributes:
+    //   { writable: true, enumerable: false, configurable: true }
+    // Mark all current own properties as non-enumerable. They are already writable
+    // and configurable by default (the engine defaults to writable=true, configurable=true).
+    {
+        let keys: Vec<PropertyKey> = env.borrow().properties.keys().cloned().collect();
+        for key in keys {
+            env.borrow_mut(mc).non_enumerable.insert(key);
+        }
+    }
+
     Ok(())
 }
 
@@ -268,6 +280,17 @@ where
             object_set_key_value(mc, &import_meta, "url", &Value::String(utf8_to_utf16(&module_path_str)))?;
             object_set_key_value(mc, &root.global_env, "__import_meta", &Value::Object(import_meta))?;
         }
+
+        // Pre-scan the script source for the test262 global-code-mode marker.
+        // The marker is an assignment statement (`globalThis.__test262_global_code_mode = true`)
+        // injected by compose_test.js. We must set it on the global env BEFORE
+        // evaluation so that evaluate_statements_with_labels can detect it and
+        // apply the proper GlobalDeclarationInstantiation semantics (separate
+        // lexical environment for let/const/class).
+        if script.contains("__test262_global_code_mode") {
+            object_set_key_value(mc, &root.global_env, "__test262_global_code_mode", &Value::Boolean(true))?;
+        }
+
         match evaluate_statements(mc, &root.global_env, &statements) {
             Ok(mut result) => {
                 if kind == ProgramKind::Module

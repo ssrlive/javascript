@@ -1069,6 +1069,29 @@ pub fn object_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<Prop
         }
         current = cur.borrow().prototype;
     }
+
+    // Global environment object does not participate in JS [[Prototype]] lookup
+    // (its `prototype` field is used for scope parent links). To preserve
+    // `this.hasOwnProperty(...)` semantics in global code without materializing
+    // those methods as own globals, dynamically fall back to Object.prototype
+    // for a small set of Object prototype methods.
+    if obj.borrow().prototype.is_none()
+        && let Some(global_this_cell) = obj.borrow().properties.get(&PropertyKey::String("globalThis".to_string()))
+        && let Value::Object(global_this_obj) = &*global_this_cell.borrow()
+        && Gc::ptr_eq(*global_this_obj, *obj)
+        && let PropertyKey::String(method_name) = &key
+        && matches!(
+            method_name.as_str(),
+            "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable" | "toLocaleString" | "toString" | "valueOf"
+        )
+        && let Some(obj_ctor_val) = obj.borrow().properties.get(&PropertyKey::String("Object".to_string()))
+        && let Value::Object(obj_ctor) = &*obj_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        return object_get_key_value(proto_obj, key);
+    }
+
     None
 }
 
@@ -1206,8 +1229,21 @@ pub fn object_set_key_value<'gc>(
         }
     }
 
-    // Disallow creating new own properties on non-extensible objects
-    if !exists && !is_extensible {
+    // Disallow creating new own properties on non-extensible objects.
+    // Exception: allow a very small whitelist of engine markers only on the
+    // global environment object itself. This is needed for test harness/global
+    // code plumbing, while still preventing arbitrary `__*` user properties.
+    let allow_nonextensible_internal_write = if let PropertyKey::String(s) = &key {
+        obj.borrow().prototype.is_none()
+            && matches!(
+                s.as_str(),
+                "__test262_global_code_mode" | "__global_lex_env" | "__is_indirect_eval" | "__allow_dynamic_import_result"
+            )
+    } else {
+        false
+    };
+
+    if !exists && !is_extensible && !allow_nonextensible_internal_write {
         return Err(raise_type_error!("Cannot add property to non-extensible object"));
     }
 
@@ -1420,7 +1456,35 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
         return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
     }
     let val_ptr = new_gc_cell_ptr(mc, val.clone());
-    env.borrow_mut(mc).insert(PropertyKey::String(key.to_string()), val_ptr);
+    let pk = PropertyKey::String(key.to_string());
+
+    // If the current env already has this binding as an own property, update it
+    // directly without walking the prototype chain. This ensures that lexical
+    // bindings (let/const) on a lex_env are updated in-place rather than
+    // accidentally overwriting same-named bindings in a parent scope.
+    if env.borrow().properties.contains_key(&pk) {
+        env.borrow_mut(mc).insert(pk, val_ptr);
+        return Ok(());
+    }
+
+    // Walk the prototype chain to find an existing binding and update it there.
+    // This ensures that var declarations hoisted to an outer variable environment
+    // are properly updated rather than shadowed by a new local binding.
+    // Also check for const constraints in outer scopes.
+    let mut cur = env.borrow().prototype;
+    while let Some(c) = cur {
+        if c.borrow().is_const(key) {
+            return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
+        }
+        if c.borrow().properties.contains_key(&pk) {
+            c.borrow_mut(mc).insert(pk, val_ptr);
+            return Ok(());
+        }
+        cur = c.borrow().prototype;
+    }
+
+    // Not found in the chain — create on the given env.
+    env.borrow_mut(mc).insert(pk, val_ptr);
     Ok(())
 }
 

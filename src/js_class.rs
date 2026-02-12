@@ -1921,7 +1921,7 @@ pub(crate) fn create_class_object<'gc>(
             // The parser stores private member names without the '#' prefix.
             // We must add it back for the environment key so lookup (which expects #) works.
             let env_key = format!("#{}", name);
-            crate::core::env_set(mc, &class_env, &env_key, &Value::PrivateName(name.to_string(), id))?;
+            crate::core::object_set_key_value(mc, &class_env, &env_key, &Value::PrivateName(name.to_string(), id))?;
         }
     }
 

@@ -265,7 +265,7 @@ pub fn handle_generator_function_call<'gc>(
                 should_bind_name = false;
             }
             if should_bind_name {
-                crate::core::env_set(mc, &param_env, &name, &Value::Object(fn_obj_ptr))?;
+                crate::core::object_set_key_value(mc, &param_env, &name, &Value::Object(fn_obj_ptr))?;
                 if fn_is_strict {
                     param_env.borrow_mut(mc).set_const(name.clone());
                 }
@@ -305,7 +305,7 @@ pub fn handle_generator_function_call<'gc>(
         if let Some(fn_obj_ptr) = fn_obj
             && let Some(name) = fn_obj_ptr.borrow().get_property("name")
         {
-            crate::core::env_set(mc, &call_env, &name, &Value::Object(fn_obj_ptr))?;
+            crate::core::object_set_key_value(mc, &call_env, &name, &Value::Object(fn_obj_ptr))?;
             if fn_is_strict {
                 call_env.borrow_mut(mc).set_const(name.clone());
             }

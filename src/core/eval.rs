@@ -13132,9 +13132,11 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::Class(class_def) => evaluate_expr_class(mc, env, class_def),
         Expr::UnaryNeg(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
-            match val {
+            let numeric = to_numeric_with_env(mc, env, &val)?;
+            match numeric {
                 Value::BigInt(b) => Ok(Value::BigInt(Box::new(-*b))),
-                other => Ok(Value::Number(-to_number_with_env(mc, env, &other)?)),
+                Value::Number(n) => Ok(Value::Number(-n)),
+                _ => Err(raise_eval_error!("Invalid numeric conversion for unary minus").into()),
             }
         }
         Expr::UnaryPlus(expr) => {

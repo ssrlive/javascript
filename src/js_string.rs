@@ -1,7 +1,7 @@
 use crate::core::js_error::EvalError;
 use crate::core::{
-    JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, get_own_property, new_js_object_data, object_get_key_value,
-    object_set_key_value, to_primitive, value_to_string,
+    JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, evaluate_call_dispatch, get_own_property, new_js_object_data,
+    object_get_key_value, object_set_key_value, to_primitive, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -210,7 +210,7 @@ pub fn handle_string_method<'gc>(
         "toLowerCase" => string_to_lowercase(s, args),
         "indexOf" => string_indexof_method(s, args),
         "lastIndexOf" => string_lastindexof_method(s, args),
-        "replace" => string_replace_method(s, args),
+        "replace" => string_replace_method(mc, s, args, env),
         "split" => string_split_method(mc, s, args, env),
         "match" => string_match_method(mc, s, args, env),
         "charAt" => string_charat_method(s, args),
@@ -440,7 +440,12 @@ fn string_lastindexof_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
     }
 }
 
-fn string_replace_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_replace_method<'gc>(
+    mc: &MutationContext<'gc>,
+    s: &[u16],
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 2 {
         let search_val = args[0].clone();
         let replace_val = args[1].clone();
@@ -596,8 +601,42 @@ fn string_replace_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'g
             } else {
                 Err(raise_eval_error!("replace: search argument must be a string or RegExp").into())
             }
-        } else if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
-            Ok(Value::String(utf16_replace(s, &search, &replace)))
+        } else if let Value::String(search) = search_val {
+            match replace_val {
+                Value::String(replace) => Ok(Value::String(utf16_replace(s, &search, &replace))),
+                Value::Function(_) | Value::Closure(_) | Value::Object(_) => {
+                    if search.is_empty() {
+                        // Minimal compatibility path for tests in this repo.
+                        // For empty search, replace at position 0.
+                        let matched = Value::String(Vec::new());
+                        let position = Value::Number(0.0);
+                        let input = Value::String(s.to_vec());
+                        let repl = evaluate_call_dispatch(mc, env, &replace_val, Some(&Value::Undefined), &[matched, position, input])?;
+                        let repl_s = value_to_string(&repl);
+                        let mut out = utf8_to_utf16(&repl_s);
+                        out.extend_from_slice(s);
+                        return Ok(Value::String(out));
+                    }
+
+                    if let Some(pos) = utf16_find(s, &search) {
+                        let before = &s[..pos];
+                        let after = &s[pos + search.len()..];
+                        let matched = Value::String(search.clone());
+                        let position = Value::Number(pos as f64);
+                        let input = Value::String(s.to_vec());
+                        let repl = evaluate_call_dispatch(mc, env, &replace_val, Some(&Value::Undefined), &[matched, position, input])?;
+                        let repl_s = value_to_string(&repl);
+
+                        let mut out = before.to_vec();
+                        out.extend_from_slice(&utf8_to_utf16(&repl_s));
+                        out.extend_from_slice(after);
+                        Ok(Value::String(out))
+                    } else {
+                        Ok(Value::String(s.to_vec()))
+                    }
+                }
+                _ => Err(raise_eval_error!("replace: replacement must be a string or function").into()),
+            }
         } else {
             Err(raise_eval_error!("replace: both arguments must be strings").into())
         }

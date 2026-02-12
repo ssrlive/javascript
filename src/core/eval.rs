@@ -1079,6 +1079,16 @@ fn hoist_name<'gc>(
             break;
         }
     }
+
+    if target_env.borrow().prototype.is_some()
+        && let Some(proto_env) = target_env.borrow().prototype
+        && proto_env.borrow().is_function_scope
+        && env_get_own(&target_env, name).is_none()
+        && env_get_own(&proto_env, name).is_some()
+    {
+        return Ok(());
+    }
+
     if env_get_own(&target_env, name).is_none() {
         // If target is global object, use CreateGlobalVarBinding semantics
         // For indirect eval, CreateGlobalVarBinding(..., true) should be used which creates
@@ -6064,7 +6074,20 @@ fn get_primitive_prototype_property<'gc>(
         }
 
         if let Some(val) = object_get_key_value(proto, key) {
-            return Ok(val.borrow().clone());
+            let prop = val.borrow().clone();
+            return match prop {
+                Value::Property { getter, value, .. } => {
+                    if let Some(g) = getter {
+                        evaluate_call_dispatch(mc, env, &g, Some(obj_val), &[])
+                    } else if let Some(v) = value {
+                        Ok(v.borrow().clone())
+                    } else {
+                        Ok(Value::Undefined)
+                    }
+                }
+                Value::Getter(..) => evaluate_call_dispatch(mc, env, &prop, Some(obj_val), &[]),
+                _ => Ok(prop),
+            };
         }
     }
 

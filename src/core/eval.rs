@@ -12394,14 +12394,18 @@ fn evaluate_expr_binary<'gc>(
                 }
             }
         }
-        BinaryOp::UnsignedRightShift => match (l_val, r_val) {
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("BigInt does not support >>>").into()),
-            (l, r) => {
-                let l = to_uint32_value_with_env(mc, env, &l)?;
-                let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
-                Ok(Value::Number((l >> r) as f64))
+        BinaryOp::UnsignedRightShift => {
+            let lnum = to_numeric_with_env(mc, env, &l_val)?;
+            let rnum = to_numeric_with_env(mc, env, &r_val)?;
+            match (lnum, rnum) {
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("BigInt does not support >>>").into()),
+                (l, r) => {
+                    let l = to_uint32_value_with_env(mc, env, &l)?;
+                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    Ok(Value::Number((l >> r) as f64))
+                }
             }
-        },
+        }
         BinaryOp::StrictEqual => {
             let eq = match (l_val, r_val) {
                 (Value::Number(l), Value::Number(r)) => l == r,

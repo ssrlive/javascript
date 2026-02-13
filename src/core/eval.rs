@@ -10117,6 +10117,194 @@ fn walk_destructuring(
     }
 }
 
+fn is_eval_ws_or_lt(u: u16) -> bool {
+    matches!(u, 0x0009 | 0x000A | 0x000B | 0x000C | 0x000D | 0x0020 | 0x00A0 | 0x2028 | 0x2029)
+}
+
+fn try_parse_simple_eval_regex_literal(script_u16: &[u16]) -> Option<(Vec<u16>, String)> {
+    let mut i = 0usize;
+    while i < script_u16.len() && is_eval_ws_or_lt(script_u16[i]) {
+        i += 1;
+    }
+    if i >= script_u16.len() || script_u16[i] != 0x002F {
+        return None;
+    }
+    i += 1; // opening '/'
+
+    let mut pattern = Vec::new();
+    let mut in_class = false;
+    let mut found_close = false;
+    while i < script_u16.len() {
+        let cu = script_u16[i];
+        if matches!(cu, 0x000A | 0x000D | 0x2028 | 0x2029) {
+            return None;
+        }
+        if cu == 0x005C {
+            if i + 1 >= script_u16.len() {
+                return None;
+            }
+            let next = script_u16[i + 1];
+            if matches!(next, 0x000A | 0x000D | 0x2028 | 0x2029) {
+                return None;
+            }
+            pattern.push(cu);
+            pattern.push(next);
+            i += 2;
+            continue;
+        }
+        if !in_class && cu == 0x002F {
+            i += 1; // closing '/'
+            found_close = true;
+            break;
+        }
+        if cu == 0x005B {
+            in_class = true;
+        } else if cu == 0x005D {
+            in_class = false;
+        }
+        pattern.push(cu);
+        i += 1;
+    }
+
+    if !found_close {
+        return None;
+    }
+
+    let mut flags = String::new();
+    while i < script_u16.len() {
+        let cu = script_u16[i];
+        if (cu as u32) < 0x80 {
+            let ch = cu as u8 as char;
+            if ch.is_ascii_alphabetic() {
+                flags.push(ch);
+                i += 1;
+                continue;
+            }
+        }
+        break;
+    }
+
+    while i < script_u16.len() && is_eval_ws_or_lt(script_u16[i]) {
+        i += 1;
+    }
+    if i < script_u16.len() && script_u16[i] == 0x003B {
+        i += 1;
+    }
+    while i < script_u16.len() && is_eval_ws_or_lt(script_u16[i]) {
+        i += 1;
+    }
+    if i != script_u16.len() {
+        return None;
+    }
+
+    Some((pattern, flags))
+}
+
+fn contains_strict_legacy_octal_literal(script: &str) -> bool {
+    let chars: Vec<char> = script.chars().collect();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_template = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if in_line_comment {
+            if matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            if c == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_single {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == '\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_template {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == '`' {
+                in_template = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if c == '\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_double = true;
+            i += 1;
+            continue;
+        }
+        if c == '`' {
+            in_template = true;
+            i += 1;
+            continue;
+        }
+
+        if c == '0' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
+            let prev_ok = if i == 0 {
+                true
+            } else {
+                !matches!(chars[i - 1], '0'..='9' | 'a'..='z' | 'A'..='Z' | '_' | '$' | '.')
+            };
+            if prev_ok {
+                return true;
+            }
+        }
+
+        i += 1;
+    }
+
+    false
+}
+
 fn handle_eval_function<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -10126,6 +10314,10 @@ fn handle_eval_function<'gc>(
     // Diagnostic: print the type and brief value of eval first_arg to diagnose comment tests
     log::trace!("HANDLE_EVAL FIRST_ARG: {:?}", first_arg);
     if let Value::String(script_str) = first_arg {
+        if let Some((pattern_u16, flags)) = try_parse_simple_eval_regex_literal(&script_str) {
+            return crate::js_regexp::create_regexp_object_fast_for_eval(mc, pattern_u16, flags);
+        }
+
         let script = utf16_to_utf8(&script_str);
         let mut tokens = tokenize(&script)?;
         if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
@@ -10497,6 +10689,21 @@ fn handle_eval_function<'gc>(
             .unwrap_or(false);
 
         let is_strict_eval = starts_with_use_strict || (caller_is_strict && !is_indirect_eval);
+
+        if is_strict_eval && contains_strict_legacy_octal_literal(&script) {
+            let msg = "Legacy octal literals are not allowed in strict mode";
+            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(raise_syntax_error!(msg).into());
+            };
+            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+                Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(raise_syntax_error!(msg).into()),
+            }
+        }
 
         // Prepare execution environment
         // For strict evals (direct or indirect), create a fresh declarative environment
@@ -13218,6 +13425,16 @@ fn evaluate_expr_binary<'gc>(
                 if let Value::Object(obj) = l_val {
                     // Attempt to read prototype (this may throw and should propagate)
                     let prototype_val = crate::core::get_property_with_accessors(mc, env, &ctor, "prototype")?;
+
+                    // Compatibility path for internal RegExp objects that may not
+                    // have full prototype linkage.
+                    if crate::js_regexp::is_regex_object(&obj)
+                        && let Some(native_ctor_rc) = crate::core::object_get_key_value(&ctor, "__native_ctor")
+                        && let Value::String(name_u16) = &*native_ctor_rc.borrow()
+                        && crate::unicode::utf16_to_utf8(name_u16) == "RegExp"
+                    {
+                        return Ok(Value::Boolean(true));
+                    }
 
                     // Now ensure constructor is callable
                     let is_callable_ctor = ctor.borrow().get_closure().is_some()

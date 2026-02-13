@@ -568,15 +568,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 }
             }
             '/' => {
-                if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(TokenData {
-                        token: Token::DivAssign,
-                        line,
-                        column: start_col,
-                    });
-                    i += 2;
-                    column += 2;
-                } else if i + 1 < chars.len() && chars[i + 1] == '/' {
+                if i + 1 < chars.len() && chars[i + 1] == '/' {
                     // Single-line comment: //
                     i += 2; // skip //
                     column += 2;
@@ -631,6 +623,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             | Token::BigInt(_)
                             | Token::StringLit(_)
                             | Token::Identifier(_)
+                            | Token::PrivateIdentifier(_)
                             | Token::RBracket
                             | Token::RParen
                             | Token::RBrace
@@ -647,21 +640,40 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     }
 
                     if prev_end_expr {
-                        tokens.push(TokenData {
-                            token: Token::Divide,
-                            line,
-                            column: start_col,
-                        });
-                        i += 1;
-                        column += 1;
+                        if i + 1 < chars.len() && chars[i + 1] == '=' {
+                            tokens.push(TokenData {
+                                token: Token::DivAssign,
+                                line,
+                                column: start_col,
+                            });
+                            i += 2;
+                            column += 2;
+                        } else {
+                            tokens.push(TokenData {
+                                token: Token::Divide,
+                                line,
+                                column: start_col,
+                            });
+                            i += 1;
+                            column += 1;
+                        }
                     } else {
                         // Parse regex literal: /.../flags
                         let mut j = i + 1;
                         let mut col_j = column + 1;
                         let mut in_class = false;
                         while j < chars.len() {
+                            if matches!(chars[j], '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                                return Err(raise_tokenize_error!("Unterminated regex literal", line, column));
+                            }
                             if chars[j] == '\\' {
                                 // escape, skip next char
+                                if j + 1 >= chars.len() {
+                                    return Err(raise_tokenize_error!("Unterminated regex literal", line, column));
+                                }
+                                if matches!(chars[j + 1], '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                                    return Err(raise_tokenize_error!("Unterminated regex literal", line, column));
+                                }
                                 j += 2;
                                 col_j += 2;
                                 continue;
@@ -1697,6 +1709,11 @@ fn parse_string_literal(
                     current_line += 1;
                     current_col = 1;
                 }
+                '\u{2028}' | '\u{2029}' => {
+                    // Line continuation for LS/PS
+                    current_line += 1;
+                    current_col = 1;
+                }
                 'u' => {
                     // Unicode escape sequences: either \uXXXX or \u{HEX...}
                     *start += 1;
@@ -1796,7 +1813,9 @@ fn parse_string_literal(
             }
         } else {
             // Check for unescaped line terminators in string literals (but not template literals)
-            if (end_char == '"' || end_char == '\'') && (chars[*start] == '\n' || chars[*start] == '\r') {
+            if (end_char == '"' || end_char == '\'')
+                && (chars[*start] == '\n' || chars[*start] == '\r' || chars[*start] == '\u{2028}' || chars[*start] == '\u{2029}')
+            {
                 return Err(raise_tokenize_error!(
                     "Unterminated string literal (newline in string)",
                     current_line,

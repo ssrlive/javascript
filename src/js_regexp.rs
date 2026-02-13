@@ -88,50 +88,12 @@ pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSErro
     }
 }
 
-/// Handle RegExp constructor calls
-pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
-    let (pattern, flags) = if args.is_empty() {
-        // new RegExp() - empty regex
-        ("".to_string(), "".to_string())
-    } else if args.len() == 1 {
-        // new RegExp(pattern)
-        let pattern_val = args[0].clone();
-        let pattern = match pattern_val {
-            Value::String(s) => utf16_to_utf8(&s),
-            Value::Number(n) => n.to_string(),
-            Value::Boolean(b) => b.to_string(),
-            _ => {
-                return Err(raise_type_error!("Invalid RegExp pattern").into());
-            }
-        };
-        (pattern, "".to_string())
-    } else {
-        // new RegExp(pattern, flags)
-        let pattern_val = args[0].clone();
-        let flags_val = args[1].clone();
-
-        let pattern = match pattern_val {
-            Value::String(s) => utf16_to_utf8(&s),
-            Value::Number(n) => n.to_string(),
-            Value::Boolean(b) => b.to_string(),
-            _ => {
-                return Err(raise_type_error!("Invalid RegExp pattern").into());
-            }
-        };
-
-        let flags = match flags_val {
-            Value::String(s) => utf16_to_utf8(&s),
-            Value::Number(n) => n.to_string(),
-            Value::Boolean(b) => b.to_string(),
-            _ => {
-                return Err(raise_type_error!("Invalid RegExp flags").into());
-            }
-        };
-
-        (pattern, flags)
-    };
-
-    // Parse flags
+fn create_regexp_object_from_parts<'gc>(
+    mc: &MutationContext<'gc>,
+    pattern_u16: Vec<u16>,
+    flags: String,
+    validate_pattern: bool,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut global = false;
     let mut ignore_case = false;
     let mut multiline = false;
@@ -165,43 +127,22 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
         return Err(raise_syntax_error!("Invalid RegExp flags: cannot use both 'u' and 'v'").into());
     }
 
-    // Combine inline flags so fancy-regex can parse features like backreferences
-    // regress handles flags via the constructor, so we don't need inline flags for it.
-    // But we still need to validate the pattern.
-
-    // Validate the regex pattern using regress
-    let pattern_u16 = utf8_to_utf16(&pattern);
-    // We don't pass 'd' to regress as it doesn't affect matching logic, only result generation
-    // We pass 'v' if regress supports it, otherwise we might need to strip it or handle it?
-    // For now, let's pass the flags that regress likely understands or ignore the ones it doesn't if they are engine-only.
-    // 'd' is engine-only. 'v' affects syntax.
-
-    // Filter flags for regress
     let mut regress_flags = String::new();
     for c in flags.chars() {
         if "gimsuy".contains(c) {
             regress_flags.push(c);
         }
-        // 'v' implies 'u' but with different rules. If regress supports 'u', we might pass 'u' for 'v' if it's close enough,
-        // but 'v' has different escaping rules.
-        // If regress doesn't support 'v', we can't really support it fully.
-        // Let's assume for now we just accept 'v' but don't pass it to regress if regress doesn't support it,
-        // OR we pass 'u' instead if that's the fallback, but that's dangerous.
-        // Actually, let's try passing 'u' if 'v' is present, as 'v' is a superset of 'u' mostly.
         if c == 'v' {
             regress_flags.push('u');
         }
     }
 
-    if let Err(e) = create_regex_from_utf16(&pattern_u16, &regress_flags) {
+    if validate_pattern && let Err(e) = create_regex_from_utf16(&pattern_u16, &regress_flags) {
         return Err(raise_syntax_error!(format!("Invalid RegExp: {}", e)).into());
     }
 
-    // Create RegExp object
     let regexp_obj = new_js_object_data(mc);
-
-    // Store regex and flags as properties
-    object_set_key_value(mc, &regexp_obj, "__regex", &Value::String(utf8_to_utf16(&pattern)))?;
+    object_set_key_value(mc, &regexp_obj, "__regex", &Value::String(pattern_u16.clone()))?;
     object_set_key_value(mc, &regexp_obj, "__flags", &Value::String(utf8_to_utf16(&flags)))?;
     object_set_key_value(mc, &regexp_obj, "__global", &Value::Boolean(global))?;
     object_set_key_value(mc, &regexp_obj, "__ignoreCase", &Value::Boolean(ignore_case))?;
@@ -214,8 +155,15 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
     object_set_key_value(mc, &regexp_obj, "__hasIndices", &Value::Boolean(has_indices))?;
     object_set_key_value(mc, &regexp_obj, "__unicodeSets", &Value::Boolean(unicode_sets))?;
 
-    // Expose user-visible properties
     object_set_key_value(mc, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
+    regexp_obj.borrow_mut(mc).set_non_enumerable("lastIndex");
+    regexp_obj.borrow_mut(mc).set_non_configurable("lastIndex");
+
+    object_set_key_value(mc, &regexp_obj, "source", &Value::String(pattern_u16))?;
+    regexp_obj.borrow_mut(mc).set_non_enumerable("source");
+    regexp_obj.borrow_mut(mc).set_non_configurable("source");
+    regexp_obj.borrow_mut(mc).set_non_writable("source");
+
     object_set_key_value(mc, &regexp_obj, "global", &Value::Boolean(global))?;
     object_set_key_value(mc, &regexp_obj, "ignoreCase", &Value::Boolean(ignore_case))?;
     object_set_key_value(mc, &regexp_obj, "multiline", &Value::Boolean(multiline))?;
@@ -224,9 +172,8 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
     object_set_key_value(mc, &regexp_obj, "sticky", &Value::Boolean(sticky))?;
     object_set_key_value(mc, &regexp_obj, "hasIndices", &Value::Boolean(has_indices))?;
     object_set_key_value(mc, &regexp_obj, "unicodeSets", &Value::Boolean(unicode_sets))?;
-    object_set_key_value(mc, &regexp_obj, "flags", &Value::String(utf8_to_utf16(&flags)))?; // This should be a getter on prototype, but for now...
+    object_set_key_value(mc, &regexp_obj, "flags", &Value::String(utf8_to_utf16(&flags)))?;
 
-    // Add methods
     object_set_key_value(mc, &regexp_obj, "exec", &Value::Function("RegExp.prototype.exec".to_string()))?;
     object_set_key_value(mc, &regexp_obj, "test", &Value::Function("RegExp.prototype.test".to_string()))?;
     object_set_key_value(
@@ -237,6 +184,53 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
     )?;
 
     Ok(Value::Object(regexp_obj))
+}
+
+pub(crate) fn create_regexp_object_fast_for_eval<'gc>(
+    mc: &MutationContext<'gc>,
+    pattern_u16: Vec<u16>,
+    flags: String,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    create_regexp_object_from_parts(mc, pattern_u16, flags, false)
+}
+
+/// Handle RegExp constructor calls
+pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+    let (pattern_u16, flags) = if args.is_empty() {
+        (Vec::new(), String::new())
+    } else if args.len() == 1 {
+        let pattern_u16 = match &args[0] {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => utf8_to_utf16(&n.to_string()),
+            Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
+            _ => {
+                return Err(raise_type_error!("Invalid RegExp pattern").into());
+            }
+        };
+        (pattern_u16, String::new())
+    } else {
+        let pattern_u16 = match &args[0] {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => utf8_to_utf16(&n.to_string()),
+            Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
+            _ => {
+                return Err(raise_type_error!("Invalid RegExp pattern").into());
+            }
+        };
+
+        let flags = match &args[1] {
+            Value::String(s) => utf16_to_utf8(s),
+            Value::Number(n) => n.to_string(),
+            Value::Boolean(b) => b.to_string(),
+            _ => {
+                return Err(raise_type_error!("Invalid RegExp flags").into());
+            }
+        };
+
+        (pattern_u16, flags)
+    };
+
+    create_regexp_object_from_parts(mc, pattern_u16, flags, true)
 }
 
 /// Handle RegExp instance method calls

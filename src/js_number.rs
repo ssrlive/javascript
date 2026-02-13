@@ -360,13 +360,61 @@ pub fn handle_number_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Re
 pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
     match method {
         "toString" => {
-            if args.is_empty() {
-                // Use canonical JS string conversion for numbers
-                Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))))
-            } else {
-                let msg = format!("toString method expects no arguments, got {}", args.len());
-                Err(raise_eval_error!(msg))
+            if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))));
             }
+
+            let radix = match &args[0] {
+                Value::Number(r) => *r as i32,
+                Value::Boolean(b) => {
+                    if *b {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                Value::Null => 0,
+                Value::Undefined => 10,
+                _ => 10,
+            };
+
+            if radix != 0 && !(2..=36).contains(&radix) {
+                return Err(raise_eval_error!("toString() radix argument must be between 2 and 36"));
+            }
+
+            let radix = if radix == 0 { 10 } else { radix };
+            if radix == 10 {
+                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))));
+            }
+
+            if !n.is_finite() {
+                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))));
+            }
+
+            let mut integer = n.trunc() as i128;
+            if integer == 0 {
+                return Ok(Value::String(utf8_to_utf16("0")));
+            }
+
+            let negative = integer < 0;
+            if negative {
+                integer = -integer;
+            }
+
+            let mut digits = Vec::new();
+            let base = radix as i128;
+            while integer > 0 {
+                let d = (integer % base) as u8;
+                let ch = if d < 10 { (b'0' + d) as char } else { (b'a' + (d - 10)) as char };
+                digits.push(ch);
+                integer /= base;
+            }
+            digits.reverse();
+            let mut out: String = digits.into_iter().collect();
+            if negative {
+                out.insert(0, '-');
+            }
+            Ok(Value::String(utf8_to_utf16(&out)))
         }
         "valueOf" => {
             if args.is_empty() {

@@ -14260,88 +14260,74 @@ fn evaluate_expr_dynamic_import<'gc>(
     let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
     let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
 
-    let module_result: Result<Value<'gc>, EvalError<'gc>> = (|| {
-        let prim = crate::core::to_primitive(mc, &spec_val, "string", env)?;
-        let module_name = match prim {
-            Value::Symbol(_) => {
-                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
-            }
-            _ => crate::core::value_to_string(&prim),
+    if let Err(err) = options_processing_result(mc, env, &options_val) {
+        let reason = match err {
+            EvalError::Throw(val, _line, _column) => val,
+            EvalError::Js(js_err) => js_error_to_value(mc, env, &js_err),
+        };
+        crate::js_promise::reject_promise(mc, &promise, reason, env);
+        return Ok(Value::Object(promise_obj));
+    }
+
+    crate::js_promise::queue_dynamic_import(mc, promise, spec_val, *env);
+    Ok(Value::Object(promise_obj))
+}
+
+fn options_processing_result<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    options_val: &Option<Value<'gc>>,
+) -> Result<(), EvalError<'gc>> {
+    // Stage import-attributes option handling enough to preserve observable
+    // side effects required by Test262: read `with`/`assert`, enumerate own
+    // enumerable string keys, and Get each value.
+    if let Some(opt) = &options_val
+        && !matches!(opt, Value::Undefined)
+    {
+        let options_obj = match opt {
+            Value::Object(o) => *o,
+            _ => return Err(raise_type_error!("Import options must be an object").into()),
         };
 
-        // Stage import-attributes option handling enough to preserve observable
-        // side effects required by Test262: read `with`/`assert`, enumerate own
-        // enumerable string keys, and Get each value.
-        if let Some(opt) = &options_val
-            && !matches!(opt, Value::Undefined)
-        {
-            let options_obj = match opt {
-                Value::Object(o) => *o,
-                _ => return Err(raise_type_error!("Import options must be an object").into()),
+        let attrs_val = get_property_with_accessors(mc, env, &options_obj, "with")
+            .or_else(|_| get_property_with_accessors(mc, env, &options_obj, "assert"))?;
+
+        if !matches!(attrs_val, Value::Undefined) {
+            let attrs_obj = match attrs_val {
+                Value::Object(o) => o,
+                _ => return Err(raise_type_error!("Import attributes must be an object").into()),
             };
 
-            let attrs_val = get_property_with_accessors(mc, env, &options_obj, "with")
-                .or_else(|_| get_property_with_accessors(mc, env, &options_obj, "assert"))?;
-
-            if !matches!(attrs_val, Value::Undefined) {
-                let attrs_obj = match attrs_val {
-                    Value::Object(o) => o,
-                    _ => return Err(raise_type_error!("Import attributes must be an object").into()),
-                };
-
-                if let Some(proxy_ptr) = get_own_property(&attrs_obj, "__proxy__")
-                    && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
-                {
-                    let keys = crate::js_proxy::proxy_own_keys(mc, proxy)?;
-                    for key in keys {
-                        if !matches!(&key, PropertyKey::String(_)) {
-                            continue;
-                        }
-                        let is_enum = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false);
-                        if !is_enum {
-                            continue;
-                        }
-                        let _ = crate::js_proxy::proxy_get_property(mc, proxy, &key)?;
+            if let Some(proxy_ptr) = get_own_property(&attrs_obj, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
+            {
+                let keys = crate::js_proxy::proxy_own_keys(mc, proxy)?;
+                for key in keys {
+                    if !matches!(&key, PropertyKey::String(_)) {
+                        continue;
                     }
-                } else {
-                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &attrs_obj)?;
-                    for key in ordered {
-                        if !matches!(&key, PropertyKey::String(_)) {
-                            continue;
-                        }
-                        if !attrs_obj.borrow().is_enumerable(&key) {
-                            continue;
-                        }
-                        let _ = get_property_with_accessors(mc, env, &attrs_obj, key)?;
+                    let is_enum = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false);
+                    if !is_enum {
+                        continue;
                     }
+                    let _ = crate::js_proxy::proxy_get_property(mc, proxy, &key)?;
+                }
+            } else {
+                let ordered = crate::core::ordinary_own_property_keys_mc(mc, &attrs_obj)?;
+                for key in ordered {
+                    if !matches!(&key, PropertyKey::String(_)) {
+                        continue;
+                    }
+                    if !attrs_obj.borrow().is_enumerable(&key) {
+                        continue;
+                    }
+                    let _ = get_property_with_accessors(mc, env, &attrs_obj, key)?;
                 }
             }
         }
-
-        let base_path = if let Some(cell) = env_get(env, "__filepath")
-            && let Value::String(s) = cell.borrow().clone()
-        {
-            Some(utf16_to_utf8(&s))
-        } else {
-            None
-        };
-
-        crate::js_module::load_module(mc, &module_name, base_path.as_deref(), Some(*env))
-    })();
-
-    match module_result {
-        Ok(module_value) => {
-            crate::js_promise::resolve_promise(mc, &promise, module_value, env);
-        }
-        Err(err) => {
-            let reason = match err {
-                EvalError::Throw(val, _line, _column) => val,
-                EvalError::Js(js_err) => js_error_to_value(mc, env, &js_err),
-            };
-            crate::js_promise::reject_promise(mc, &promise, reason, env);
-        }
     }
-    Ok(Value::Object(promise_obj))
+
+    Ok(())
 }
 
 fn evaluate_expr_property<'gc>(

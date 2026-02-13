@@ -550,28 +550,6 @@ pub fn handle_global_function<'gc>(
     }
 }
 
-fn calc_module_result<'gc>(
-    mc: &MutationContext<'gc>,
-    module_specifier: &Value<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    let prim = crate::core::to_primitive(mc, module_specifier, "string", env)?;
-    let module_name = match prim {
-        Value::Symbol(_) => return Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
-        _ => crate::core::value_to_string(&prim),
-    };
-
-    let base_path = if let Some(cell) = crate::core::env_get(env, "__filepath")
-        && let Value::String(s) = cell.borrow().clone()
-    {
-        Some(utf16_to_utf8(&s))
-    } else {
-        None
-    };
-
-    crate::js_module::load_module(mc, &module_name, base_path.as_deref(), Some(*env))
-}
-
 fn dynamic_import_function<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
@@ -581,22 +559,11 @@ fn dynamic_import_function<'gc>(
     if args.len() != 1 {
         return Err(raise_type_error!("import() requires exactly one argument").into());
     }
-    let module_specifier = &args[0];
+    let module_specifier = args[0].clone();
     let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
     let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
 
-    match calc_module_result(mc, module_specifier, env) {
-        Ok(module_value) => {
-            crate::js_promise::resolve_promise(mc, &promise, module_value, env);
-        }
-        Err(err) => {
-            let reason = match err {
-                EvalError::Throw(val, _line, _column) => val,
-                EvalError::Js(js_err) => crate::core::js_error_to_value(mc, env, &js_err),
-            };
-            crate::js_promise::reject_promise(mc, &promise, reason, env);
-        }
-    }
+    crate::js_promise::queue_dynamic_import(mc, promise, module_specifier, *env);
 
     Ok(Value::Object(promise_obj))
 }

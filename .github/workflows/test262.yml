@@ -342,7 +342,7 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/coalesce" - "language/expressions/does-not-equals"
+      - name: Run a small test262 subset - "language/expressions/dynamic-import"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'

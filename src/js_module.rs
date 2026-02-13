@@ -72,6 +72,53 @@ pub fn load_module<'gc>(
     Ok(Value::Object(module_exports))
 }
 
+pub fn load_module_for_dynamic_import<'gc>(
+    mc: &MutationContext<'gc>,
+    module_name: &str,
+    base_path: Option<&str>,
+    caller_env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let module_path = resolve_module_path(module_name, base_path).map_err(EvalError::from)?;
+
+    let cache_env = if let Some(global_val) = crate::core::env_get(caller_env, "globalThis")
+        && let Value::Object(global_obj) = global_val.borrow().clone()
+    {
+        global_obj
+    } else {
+        *caller_env
+    };
+
+    let loading = get_or_create_module_loading(mc, &cache_env).map_err(EvalError::from)?;
+
+    loop {
+        let is_loading = if let Some(flag_rc) = object_get_key_value(&loading, module_path.as_str()) {
+            matches!(*flag_rc.borrow(), Value::Boolean(true))
+        } else {
+            false
+        };
+
+        if !is_loading {
+            break;
+        }
+
+        match crate::js_promise::run_event_loop(mc).map_err(EvalError::from)? {
+            crate::js_promise::PollResult::Executed => continue,
+            crate::js_promise::PollResult::Wait(d) => {
+                std::thread::sleep(d);
+                continue;
+            }
+            crate::js_promise::PollResult::Empty => {
+                if crate::js_promise::process_runtime_pending_unhandled(mc, &cache_env, false).map_err(EvalError::from)? {
+                    continue;
+                }
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    preload_async_transitive_module(mc, module_name, base_path, Some(*caller_env))
+}
+
 fn expr_contains_top_level_await(expr: &Expr) -> bool {
     match expr {
         Expr::Await(_) => true,
@@ -656,7 +703,7 @@ fn execute_module<'gc>(
         crate::core::initialize_global_constructors(mc, &env)?;
         object_set_key_value(mc, &env, "globalThis", &crate::core::Value::Object(env))?;
     } else if let Some(caller) = caller_env {
-        let global_obj = if let Some(global_val) = object_get_key_value(&caller, "globalThis") {
+        let global_obj = if let Some(global_val) = crate::core::env_get(&caller, "globalThis") {
             match global_val.borrow().clone() {
                 Value::Object(global_obj) => global_obj,
                 _ => caller,
@@ -1153,10 +1200,10 @@ pub fn ensure_deferred_namespace_evaluated<'gc>(
 
 fn resolve_cache_env<'gc>(caller_env: Option<JSObjectDataPtr<'gc>>) -> Option<JSObjectDataPtr<'gc>> {
     if let Some(env) = caller_env {
-        if let Some(global_val) = object_get_key_value(&env, "globalThis")
-            && let Value::Object(global_obj) = &*global_val.borrow()
+        if let Some(global_val) = crate::core::env_get(&env, "globalThis")
+            && let Value::Object(global_obj) = global_val.borrow().clone()
         {
-            return Some(*global_obj);
+            return Some(global_obj);
         }
         return Some(env);
     }

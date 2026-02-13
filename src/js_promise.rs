@@ -75,6 +75,12 @@ enum Task<'gc> {
         value: Value<'gc>,
         env: JSObjectDataPtr<'gc>,
     },
+    /// Host task to perform dynamic import and settle its promise
+    DynamicImport {
+        promise: GcPtr<'gc, JSPromise<'gc>>,
+        module_specifier: Value<'gc>,
+        env: JSObjectDataPtr<'gc>,
+    },
     /// Task to resume an async function generator step
     AsyncStep {
         generator: GcPtr<'gc, JSGenerator<'gc>>,
@@ -686,6 +692,7 @@ fn queue_task<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
         Task::ExecuteClosure { function, .. } => format!("ExecuteClosure function={:?}", function),
         Task::AttachHandlers { promise, .. } => format!("AttachHandlers promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::ResolvePromise { promise, .. } => format!("ResolvePromise promise_ptr={:p}", Gc::as_ptr(*promise)),
+        Task::DynamicImport { promise, .. } => format!("DynamicImport promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::AsyncStep { generator, is_reject, .. } => {
             format!("AsyncStep gen_ptr={:p} is_reject={}", Gc::as_ptr(*generator), is_reject)
         }
@@ -748,6 +755,7 @@ fn queue_task_front<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
         Task::ExecuteClosure { function, .. } => format!("ExecuteClosure function={:?}", function),
         Task::AttachHandlers { promise, .. } => format!("AttachHandlers promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::ResolvePromise { promise, .. } => format!("ResolvePromise promise_ptr={:p}", Gc::as_ptr(*promise)),
+        Task::DynamicImport { promise, .. } => format!("DynamicImport promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::AsyncStep { generator, is_reject, .. } => {
             format!("AsyncStep gen_ptr={:p} is_reject={}", Gc::as_ptr(*generator), is_reject)
         }
@@ -803,6 +811,22 @@ pub fn queue_async_step<'gc>(
             result: result.clone(),
             is_reject,
             env: *env,
+        },
+    );
+}
+
+pub fn queue_dynamic_import<'gc>(
+    mc: &MutationContext<'gc>,
+    promise: GcPtr<'gc, JSPromise<'gc>>,
+    module_specifier: Value<'gc>,
+    env: JSObjectDataPtr<'gc>,
+) {
+    queue_task(
+        mc,
+        Task::DynamicImport {
+            promise,
+            module_specifier,
+            env,
         },
     );
 }
@@ -888,6 +912,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
         Task::ExecuteClosure { function, .. } => format!("id={} ExecuteClosure function={:?}", task_id, function),
         Task::AttachHandlers { promise, .. } => format!("id={} AttachHandlers promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
         Task::ResolvePromise { promise, .. } => format!("id={} ResolvePromise promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
+        Task::DynamicImport { promise, .. } => format!("id={} DynamicImport promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
         Task::AsyncStep { generator, is_reject, .. } => {
             format!(
                 "id={} AsyncStep gen_ptr={:p} is_reject={}",
@@ -1265,6 +1290,43 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
             log::trace!("Processing ResolvePromise task");
             resolve_promise(mc, &promise, value, &env);
         }
+        Task::DynamicImport {
+            promise,
+            module_specifier,
+            env,
+        } => {
+            log::trace!("Processing DynamicImport task");
+            let import_result = (|| -> Result<Value<'gc>, EvalError<'gc>> {
+                let prim = crate::core::to_primitive(mc, &module_specifier, "string", &env)?;
+                let module_name = match prim {
+                    Value::Symbol(_) => {
+                        return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                    }
+                    _ => value_to_string(&prim),
+                };
+
+                let base_path = if let Some(cell) = crate::core::env_get(&env, "__filepath")
+                    && let Value::String(s) = cell.borrow().clone()
+                {
+                    Some(utf16_to_utf8(&s))
+                } else {
+                    None
+                };
+
+                crate::js_module::load_module_for_dynamic_import(mc, &module_name, base_path.as_deref(), &env)
+            })();
+
+            match import_result {
+                Ok(module_value) => resolve_promise(mc, &promise, module_value, &env),
+                Err(err) => {
+                    let reason = match err {
+                        EvalError::Throw(val, _line, _column) => val,
+                        EvalError::Js(js_err) => crate::core::js_error_to_value(mc, &env, &js_err),
+                    };
+                    reject_promise(mc, &promise, reason, &env);
+                }
+            }
+        }
         Task::AsyncStep {
             generator,
             resolve,
@@ -1618,6 +1680,7 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
                     Task::UnhandledCheck { .. } => "UnhandledCheck",
                     Task::AttachHandlers { .. } => "AttachHandlers",
                     Task::ResolvePromise { .. } => "ResolvePromise",
+                    Task::DynamicImport { .. } => "DynamicImport",
                     Task::AsyncStep { .. } => "AsyncStep",
                 };
                 *counts.entry(k).or_insert(0usize) += 1;
@@ -1680,16 +1743,18 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
             }
         }
 
-        if let Some(async_idx) = first_async_step {
-            ready_index = Some(async_idx);
-        } else if let Some(resolve_idx) = first_resolve_promise
-            && RESOLUTION_STREAK.with(|streak| streak.load(Ordering::SeqCst)) >= 2
-        {
-            ready_index = Some(resolve_idx);
-        } else if let Some(res_idx) = first_resolution {
-            ready_index = Some(res_idx);
-        } else if let Some(resolve_idx) = first_resolve_promise {
-            ready_index = Some(resolve_idx);
+        if ready_index.is_none() {
+            if let Some(async_idx) = first_async_step {
+                ready_index = Some(async_idx);
+            } else if let Some(resolve_idx) = first_resolve_promise
+                && RESOLUTION_STREAK.with(|streak| streak.load(Ordering::SeqCst)) >= 2
+            {
+                ready_index = Some(resolve_idx);
+            } else if let Some(res_idx) = first_resolution {
+                ready_index = Some(res_idx);
+            } else if let Some(resolve_idx) = first_resolve_promise {
+                ready_index = Some(resolve_idx);
+            }
         }
 
         if let Some(index) = ready_index {

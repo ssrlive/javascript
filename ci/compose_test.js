@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
 function extractMeta(filePath) {
   const src = fs.readFileSync(filePath, 'utf8');
@@ -60,6 +59,31 @@ function ensureArrayDistinct(arr) {
     }
   }
   return out;
+}
+
+function createComposedTarget(testPath) {
+  const testDir = path.dirname(path.resolve(testPath));
+  const tmpDir = fs.mkdtempSync(path.join(testDir, '.test262.'));
+  const tmpPath = path.join(tmpDir, path.basename(testPath));
+  return {tmpDir, tmpPath};
+}
+
+function mirrorSiblingModuleFiles(testPath, targetDir) {
+  const testDir = path.dirname(path.resolve(testPath));
+  const testAbs = path.resolve(testPath);
+  const siblings = fs.readdirSync(testDir, {withFileTypes: true});
+  for (const entry of siblings) {
+    if (!entry.isFile()) continue;
+    const name = entry.name;
+    if (/^\.test262\./.test(name)) continue;
+    if (!/\.(js|mjs|json)$/.test(name)) continue;
+    const src = path.join(testDir, name);
+    if (path.resolve(src) === testAbs) continue;
+    const dst = path.join(targetDir, name);
+    if (!fs.existsSync(dst)) {
+      fs.copyFileSync(src, dst);
+    }
+  }
 }
 
 const realmFeatureName = ['cross', 'realm'].join('-');
@@ -305,9 +329,8 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   })();
 
   // If no module tests: add strict wrapper
-  // Create tmp file
-  const prefix = path.join(os.tmpdir(), 'test262.');
-  const tmpName = fs.mkdtempSync(prefix) + '.js';
+  const composed = createComposedTarget(testPath);
+  const tmpName = composed.tmpPath;
   const outLines = [];
   if (needStrict) {
     outLines.push('"use strict";');
@@ -341,7 +364,7 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   inject262Shim(outLines, testPath, meta);
 
   // Ensure dynamic import resolves relative to the original test file path,
-  // not the ephemeral /tmp composed file. Only inject when the test actually
+  // not the composed file path. Only inject when the test actually
   // contains an import (either a static `import` declaration or dynamic
   // `import()` expression) to avoid polluting tests that don't need it.
   const _test_src = fs.readFileSync(testPath, 'utf8');
@@ -364,11 +387,13 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push(fs.readFileSync(testPath, 'utf8'));
 
   fs.writeFileSync(tmpName, outLines.join('\n'));
+  mirrorSiblingModuleFiles(testPath, composed.tmpDir);
 
   // verify assert was injected if test references assert
   if (referencesAssert(testPath) && !definesAssertInFile(tmpName)) {
     // rebuild ensuring sta/assert at top while preserving other PREPEND_FILES
-    const fixedTmp = fs.mkdtempSync(prefix) + '.js';
+    const fixedComposed = createComposedTarget(testPath);
+    const fixedTmp = fixedComposed.tmpPath;
     const lines2 = [];
     if (needStrict) {
       lines2.push('"use strict";');
@@ -401,6 +426,7 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
     lines2.push(`// Inject: ${absTest}`);
     lines2.push(fs.readFileSync(testPath, 'utf8'));
     fs.writeFileSync(fixedTmp, lines2.join('\n'));
+    mirrorSiblingModuleFiles(testPath, fixedComposed.tmpDir);
     return {testToRun: fixedTmp, tmpPath: fixedTmp, cleanupTmp: true};
   }
 

@@ -2,10 +2,9 @@
 const fs = require('fs');
 const path = require('path');
 const {spawnSync, spawn} = require('child_process');
-const os = require('os');
 const {composeTest, extractMeta, parseList, hasFlag} = require('./compose_test');
 
-const REPO_DIR = 'test262';
+const REPO_DIR = path.resolve(__dirname, '..', '..', 'test262');
 const RESULTS_FILE = 'test262-results.log';
 fs.writeFileSync(RESULTS_FILE, '');
 
@@ -17,7 +16,7 @@ let CAP_MULTIPLIER = 5;
 let FOCUS_LIST = [];
 let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 60;
 const envKeep = process.env.TEST262_KEEP_TMP;
-// Default: keep ephemeral /tmp files (use --no-keep-tmp or set TEST262_KEEP_TMP=0 to disable)
+// Default: keep composed temporary files (set TEST262_KEEP_TMP=0 to disable)
 let KEEP_TMP = (envKeep === undefined) ? true : (envKeep === '1' || envKeep === 'true');
 
 // Simple arg parsing
@@ -38,8 +37,29 @@ for (let i=0;i<argv.length;i++){
 }
 
 function log(line){ fs.appendFileSync(RESULTS_FILE, line + '\n'); }
+
+function cleanupComposedArtifacts(tmpPath){
+  try {
+    if (tmpPath && fs.existsSync(tmpPath)) {
+      fs.unlinkSync(tmpPath);
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    if (!tmpPath) return;
+    const dir = path.dirname(tmpPath);
+    if (path.basename(dir).startsWith('.test262.')) {
+      fs.rmSync(dir, {recursive: true, force: true});
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
 console.log(`Running Test262 tests (node runner)`);
-console.log(`Ephemeral /tmp files are kept by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=0 to disable.`);
+console.log(`Composed temporary files are kept by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=0 to disable.`);
 
 if (!fs.existsSync(REPO_DIR)){
   console.log('Cloning test262...');
@@ -152,6 +172,7 @@ function collectTests(){
     }
 
     for (const f of files){
+      if (f.includes('/.test262.')) continue;
       const meta = extractMeta(f);
       if ((/features:\s*\[.*Intl.*\]/.test(meta)) || /\bIntl\b/.test(fs.readFileSync(f,'utf8'))) {
         intl.push(f);
@@ -369,8 +390,8 @@ async function runAll(){
         // Progress indicator: print a dot to terminal after each successful test
         try { process.stdout.write('.'); } catch (e) { /* ignore */ }
         // On success, remove temporary composed file to avoid clutter
-        if (cleanupTmp && tmpPath && fs.existsSync(tmpPath)) {
-          try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
+        if (cleanupTmp) {
+          cleanupComposedArtifacts(tmpPath);
         }
         currentSucceeds = true;
       } else {
@@ -406,7 +427,7 @@ async function runAll(){
           }
           console.error('----------------');
         } catch (e) { /* ignore terminal print errors */ }
-        // If KEEP_TMP is true, keep the ephemeral tmp file in /tmp (do NOT copy into ci/retained)
+        // If KEEP_TMP is true, keep the composed temporary file for debugging.
         if (cleanupTmp && tmpPath && fs.existsSync(tmpPath)){
           try {
             if (KEEP_TMP) {
@@ -442,13 +463,13 @@ async function runAll(){
       } catch (e) { /* ignore terminal print errors */ }
       fail++;
     } finally {
-      // Remove tmp file unless KEEP_TMP is true; we keep ephemeral /tmp files when KEEP_TMP is true
+      // Remove composed temp file unless KEEP_TMP is true.
       try {
-        if (cleanupTmp && tmpPath && fs.existsSync(tmpPath)) {
+        if (cleanupTmp) {
           if (currentSucceeds || !KEEP_TMP) {
-            fs.unlinkSync(tmpPath);
+            cleanupComposedArtifacts(tmpPath);
           } else {
-            log(`NOTE: keeping ephemeral tmp file ${tmpPath} because TEST262_KEEP_TMP is set`);
+            log(`NOTE: keeping composed temp file ${tmpPath} because TEST262_KEEP_TMP is set`);
           }
         }
       } catch (e) {

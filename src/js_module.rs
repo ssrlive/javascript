@@ -1,12 +1,12 @@
 use crate::{
     JSError, Value,
     core::{
-        ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, object_get_key_value,
-        object_set_key_value,
+        ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, Gc, JSObjectDataPtr, MutationContext, Statement,
+        StatementKind, create_descriptor_object, new_gc_cell_ptr, object_get_key_value, object_set_key_value,
     },
-    core::{Gc, MutationContext, new_gc_cell_ptr},
     new_js_object_data,
 };
+use serde_json::Value as JsonValue;
 use std::path::Path;
 
 pub fn load_module<'gc>(
@@ -72,11 +72,369 @@ pub fn load_module<'gc>(
     Ok(Value::Object(module_exports))
 }
 
+fn expr_contains_top_level_await(expr: &Expr) -> bool {
+    match expr {
+        Expr::Await(_) => true,
+        Expr::UnaryNeg(inner)
+        | Expr::UnaryPlus(inner)
+        | Expr::BitNot(inner)
+        | Expr::LogicalNot(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Void(inner)
+        | Expr::Delete(inner)
+        | Expr::Spread(inner)
+        | Expr::Yield(Some(inner))
+        | Expr::YieldStar(inner)
+        | Expr::Property(inner, _)
+        | Expr::OptionalProperty(inner, _)
+        | Expr::OptionalPrivateMember(inner, _)
+        | Expr::TaggedTemplate(inner, ..)
+        | Expr::PostIncrement(inner)
+        | Expr::PostDecrement(inner) => expr_contains_top_level_await(inner),
+        Expr::DynamicImport(spec, options) => {
+            expr_contains_top_level_await(spec) || options.as_ref().map(|e| expr_contains_top_level_await(e)).unwrap_or(false)
+        }
+        Expr::Assign(lhs, rhs)
+        | Expr::Binary(lhs, _, rhs)
+        | Expr::Conditional(lhs, _, rhs)
+        | Expr::Comma(lhs, rhs)
+        | Expr::LogicalAnd(lhs, rhs)
+        | Expr::LogicalOr(lhs, rhs)
+        | Expr::NullishCoalescing(lhs, rhs)
+        | Expr::Mod(lhs, rhs)
+        | Expr::Pow(lhs, rhs)
+        | Expr::BitAndAssign(lhs, rhs)
+        | Expr::BitOrAssign(lhs, rhs)
+        | Expr::BitXorAssign(lhs, rhs)
+        | Expr::LeftShiftAssign(lhs, rhs)
+        | Expr::RightShiftAssign(lhs, rhs)
+        | Expr::UnsignedRightShiftAssign(lhs, rhs)
+        | Expr::AddAssign(lhs, rhs)
+        | Expr::SubAssign(lhs, rhs)
+        | Expr::MulAssign(lhs, rhs)
+        | Expr::DivAssign(lhs, rhs)
+        | Expr::ModAssign(lhs, rhs)
+        | Expr::PowAssign(lhs, rhs)
+        | Expr::LogicalAndAssign(lhs, rhs)
+        | Expr::LogicalOrAssign(lhs, rhs)
+        | Expr::NullishAssign(lhs, rhs) => expr_contains_top_level_await(lhs) || expr_contains_top_level_await(rhs),
+        Expr::Call(callee, args) | Expr::New(callee, args) | Expr::OptionalCall(callee, args) => {
+            expr_contains_top_level_await(callee) || args.iter().any(expr_contains_top_level_await)
+        }
+        Expr::Index(obj, idx) | Expr::OptionalIndex(obj, idx) => expr_contains_top_level_await(obj) || expr_contains_top_level_await(idx),
+        Expr::Array(items) => items.iter().flatten().any(expr_contains_top_level_await),
+        Expr::Object(entries) => entries
+            .iter()
+            .any(|(k, v, _, _)| expr_contains_top_level_await(k) || expr_contains_top_level_await(v)),
+        Expr::Function(_, _, _)
+        | Expr::AsyncFunction(_, _, _)
+        | Expr::GeneratorFunction(_, _, _)
+        | Expr::AsyncGeneratorFunction(_, _, _)
+        | Expr::ArrowFunction(_, _)
+        | Expr::AsyncArrowFunction(_, _) => false,
+        _ => false,
+    }
+}
+
+fn stmt_contains_top_level_await(stmt: &Statement) -> bool {
+    match &*stmt.kind {
+        StatementKind::Expr(expr) => expr_contains_top_level_await(expr),
+        StatementKind::Let(decls) | StatementKind::Var(decls) => decls
+            .iter()
+            .any(|(_, init)| init.as_ref().is_some_and(expr_contains_top_level_await)),
+        StatementKind::Const(decls) => decls.iter().any(|(_, init)| expr_contains_top_level_await(init)),
+        StatementKind::Return(expr_opt) => expr_opt.as_ref().is_some_and(expr_contains_top_level_await),
+        StatementKind::Throw(expr) => expr_contains_top_level_await(expr),
+        StatementKind::Block(stmts) => stmts.iter().any(stmt_contains_top_level_await),
+        StatementKind::If(if_stmt) => {
+            expr_contains_top_level_await(&if_stmt.condition)
+                || if_stmt.then_body.iter().any(stmt_contains_top_level_await)
+                || if_stmt
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(stmt_contains_top_level_await))
+        }
+        StatementKind::TryCatch(tc) => {
+            tc.try_body.iter().any(stmt_contains_top_level_await)
+                || tc.catch_body.as_ref().is_some_and(|b| b.iter().any(stmt_contains_top_level_await))
+                || tc
+                    .finally_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(stmt_contains_top_level_await))
+        }
+        StatementKind::For(for_stmt) => {
+            for_stmt.init.as_ref().is_some_and(|s| stmt_contains_top_level_await(s))
+                || for_stmt.test.as_ref().is_some_and(expr_contains_top_level_await)
+                || for_stmt.update.as_ref().is_some_and(|s| stmt_contains_top_level_await(s))
+                || for_stmt.body.iter().any(stmt_contains_top_level_await)
+        }
+        StatementKind::ForOf(_, _, expr, body)
+        | StatementKind::ForOfExpr(_, expr, body)
+        | StatementKind::ForIn(_, _, expr, body)
+        | StatementKind::ForInExpr(_, expr, body)
+        | StatementKind::ForInDestructuringObject(_, _, expr, body)
+        | StatementKind::ForInDestructuringArray(_, _, expr, body)
+        | StatementKind::ForOfDestructuringObject(_, _, expr, body)
+        | StatementKind::ForOfDestructuringArray(_, _, expr, body) => {
+            expr_contains_top_level_await(expr) || body.iter().any(stmt_contains_top_level_await)
+        }
+        StatementKind::ForAwaitOf(..)
+        | StatementKind::ForAwaitOfExpr(..)
+        | StatementKind::ForAwaitOfDestructuringObject(..)
+        | StatementKind::ForAwaitOfDestructuringArray(..) => true,
+        StatementKind::While(cond, body) | StatementKind::DoWhile(body, cond) => {
+            expr_contains_top_level_await(cond) || body.iter().any(stmt_contains_top_level_await)
+        }
+        StatementKind::Switch(sw) => {
+            expr_contains_top_level_await(&sw.expr)
+                || sw.cases.iter().any(|c| match c {
+                    crate::core::SwitchCase::Case(expr, stmts) => {
+                        expr_contains_top_level_await(expr) || stmts.iter().any(stmt_contains_top_level_await)
+                    }
+                    crate::core::SwitchCase::Default(stmts) => stmts.iter().any(stmt_contains_top_level_await),
+                })
+        }
+        StatementKind::With(expr, body) => expr_contains_top_level_await(expr) || body.iter().any(stmt_contains_top_level_await),
+        StatementKind::Label(_, stmt) => stmt_contains_top_level_await(stmt),
+        StatementKind::Export(_, inner_stmt, _) => inner_stmt.as_ref().is_some_and(|stmt| stmt_contains_top_level_await(stmt)),
+        StatementKind::FunctionDeclaration(_, _, _, _, _)
+        | StatementKind::Class(_)
+        | StatementKind::Import(_, _)
+        | StatementKind::Break(_)
+        | StatementKind::Continue(_)
+        | StatementKind::Debugger
+        | StatementKind::Assign(_, _)
+        | StatementKind::LetDestructuringArray(_, _)
+        | StatementKind::VarDestructuringArray(_, _)
+        | StatementKind::ConstDestructuringArray(_, _)
+        | StatementKind::LetDestructuringObject(_, _)
+        | StatementKind::VarDestructuringObject(_, _)
+        | StatementKind::ConstDestructuringObject(_, _) => false,
+    }
+}
+
+#[allow(dead_code)]
+pub fn module_contains_top_level_await(module_name: &str, base_path: Option<&str>) -> Result<bool, JSError> {
+    let module_path = resolve_module_path(module_name, base_path)?;
+    if module_path.ends_with(".json") {
+        return Ok(false);
+    }
+    let content = crate::core::read_script_file(&module_path)?;
+    let tokens = crate::core::tokenize(&content)?;
+    let mut index = 0;
+    crate::core::push_await_context();
+    let parsed = crate::core::parse_statements(&tokens, &mut index);
+    crate::core::pop_await_context();
+    let statements = parsed?;
+    Ok(statements.iter().any(stmt_contains_top_level_await))
+}
+
+fn module_has_async_transitive_from_path(module_path: &str, seen: &mut std::collections::HashSet<String>) -> Result<bool, JSError> {
+    if !seen.insert(module_path.to_string()) {
+        return Ok(false);
+    }
+
+    if module_path.ends_with(".json") {
+        return Ok(false);
+    }
+
+    let content = crate::core::read_script_file(module_path)?;
+    let tokens = crate::core::tokenize(&content)?;
+    let mut index = 0;
+    crate::core::push_await_context();
+    let parsed = crate::core::parse_statements(&tokens, &mut index);
+    crate::core::pop_await_context();
+    let statements = parsed?;
+
+    if statements.iter().any(stmt_contains_top_level_await) {
+        return Ok(true);
+    }
+
+    for stmt in &statements {
+        let source_opt = match &*stmt.kind {
+            StatementKind::Import(_, source) => Some(source.as_str()),
+            StatementKind::Export(_, _, Some(source)) => Some(source.as_str()),
+            _ => None,
+        };
+
+        if let Some(source) = source_opt
+            && let Ok(req_path) = resolve_module_path(source, Some(module_path))
+            && module_has_async_transitive_from_path(req_path.as_str(), seen)?
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn gather_async_transitive_from_path(
+    module_path: &str,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) -> Result<(), JSError> {
+    if !seen.insert(module_path.to_string()) {
+        return Ok(());
+    }
+
+    if module_path.ends_with(".json") {
+        return Ok(());
+    }
+
+    let content = crate::core::read_script_file(module_path)?;
+    let tokens = crate::core::tokenize(&content)?;
+    let mut index = 0;
+    crate::core::push_await_context();
+    let parsed = crate::core::parse_statements(&tokens, &mut index);
+    crate::core::pop_await_context();
+    let statements = parsed?;
+
+    if statements.iter().any(stmt_contains_top_level_await) {
+        out.push(module_path.to_string());
+        return Ok(());
+    }
+
+    for stmt in &statements {
+        let source_opt = match &*stmt.kind {
+            StatementKind::Import(_, source) => Some(source.as_str()),
+            StatementKind::Export(_, _, Some(source)) => Some(source.as_str()),
+            _ => None,
+        };
+
+        if let Some(source) = source_opt
+            && let Ok(req_path) = resolve_module_path(source, Some(module_path))
+        {
+            gather_async_transitive_from_path(req_path.as_str(), seen, out)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn module_has_async_transitive_dependencies(module_name: &str, base_path: Option<&str>) -> Result<bool, JSError> {
+    let module_path = resolve_module_path(module_name, base_path)?;
+    let mut seen = std::collections::HashSet::new();
+    module_has_async_transitive_from_path(module_path.as_str(), &mut seen)
+}
+
+#[allow(dead_code)]
+pub fn module_has_direct_async_dependency(module_name: &str, base_path: Option<&str>) -> Result<bool, JSError> {
+    let module_path = resolve_module_path(module_name, base_path)?;
+    let requests = module_requested_modules(module_path.as_str())?;
+
+    for req in requests {
+        if let Ok(req_path) = resolve_module_path(req.as_str(), Some(module_path.as_str())) {
+            let mut seen = std::collections::HashSet::new();
+            if module_has_async_transitive_from_path(req_path.as_str(), &mut seen)? {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+pub fn gather_async_transitive_dependencies(module_name: &str, base_path: Option<&str>) -> Result<Vec<String>, JSError> {
+    let module_path = resolve_module_path(module_name, base_path)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    gather_async_transitive_from_path(module_path.as_str(), &mut seen, &mut out)?;
+    Ok(out)
+}
+
+fn module_requested_modules(module_path: &str) -> Result<Vec<String>, JSError> {
+    let content = crate::core::read_script_file(module_path)?;
+    let tokens = crate::core::tokenize(&content)?;
+    let mut index = 0;
+    crate::core::push_await_context();
+    let parsed = crate::core::parse_statements(&tokens, &mut index);
+    crate::core::pop_await_context();
+    let statements = parsed?;
+
+    let mut requests = Vec::new();
+    for stmt in &statements {
+        match &*stmt.kind {
+            StatementKind::Import(_, source) => requests.push(source.clone()),
+            StatementKind::Export(_, _, Some(source)) => requests.push(source.clone()),
+            _ => {}
+        }
+    }
+
+    Ok(requests)
+}
+
+fn is_module_loading_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>, module_path: &str) -> bool {
+    let mut cur = Some(*env);
+    while let Some(e) = cur {
+        if let Some(loading_val) = object_get_key_value(&e, "__module_loading")
+            && let Value::Object(loading_obj) = loading_val.borrow().clone()
+            && let Some(flag_rc) = object_get_key_value(&loading_obj, module_path)
+            && matches!(*flag_rc.borrow(), Value::Boolean(true))
+        {
+            return true;
+        }
+
+        if let Some(global_val) = object_get_key_value(&e, "globalThis")
+            && let Value::Object(global_obj) = global_val.borrow().clone()
+            && let Some(loading_val) = object_get_key_value(&global_obj, "__module_loading")
+            && let Value::Object(loading_obj) = loading_val.borrow().clone()
+            && let Some(flag_rc) = object_get_key_value(&loading_obj, module_path)
+            && matches!(*flag_rc.borrow(), Value::Boolean(true))
+        {
+            return true;
+        }
+
+        cur = e.borrow().prototype;
+    }
+    false
+}
+
+fn any_module_loading_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
+    let mut cur = Some(*env);
+    while let Some(e) = cur {
+        if let Some(loading_val) = object_get_key_value(&e, "__module_loading")
+            && let Value::Object(loading_obj) = loading_val.borrow().clone()
+        {
+            for flag in loading_obj.borrow().properties.values() {
+                if matches!(*flag.borrow(), Value::Boolean(true)) {
+                    return true;
+                }
+            }
+        }
+
+        if let Some(global_val) = object_get_key_value(&e, "globalThis")
+            && let Value::Object(global_obj) = global_val.borrow().clone()
+            && let Some(loading_val) = object_get_key_value(&global_obj, "__module_loading")
+            && let Value::Object(loading_obj) = loading_val.borrow().clone()
+        {
+            for flag in loading_obj.borrow().properties.values() {
+                if matches!(*flag.borrow(), Value::Boolean(true)) {
+                    return true;
+                }
+            }
+        }
+
+        cur = e.borrow().prototype;
+    }
+    false
+}
+
 fn load_module_from_file<'gc>(
     mc: &MutationContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    load_module_from_file_with_mode(mc, module_name, base_path, caller_env, false)
+}
+
+fn load_module_from_file_with_mode<'gc>(
+    mc: &MutationContext<'gc>,
+    module_name: &str,
+    base_path: Option<&str>,
+    caller_env: Option<JSObjectDataPtr<'gc>>,
+    preload_tla_async: bool,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Resolve the module path
     let module_path = resolve_module_path(module_name, base_path).map_err(EvalError::from)?;
@@ -84,6 +442,12 @@ fn load_module_from_file<'gc>(
     let cache_env = resolve_cache_env(caller_env);
     if let Some(cache_env) = cache_env {
         let cache = get_or_create_module_cache(mc, &cache_env)?;
+        let eval_errors = get_or_create_module_eval_errors(mc, &cache_env)?;
+
+        if let Some(err_rc) = object_get_key_value(&eval_errors, module_path.as_str()) {
+            return Err(EvalError::Throw(err_rc.borrow().clone(), None, None));
+        }
+
         if let Some(val_rc) = object_get_key_value(&cache, module_path.as_str()) {
             return Ok(val_rc.borrow().clone());
         }
@@ -103,10 +467,33 @@ fn load_module_from_file<'gc>(
         // Read the file
         let content = crate::core::read_script_file(&module_path).map_err(EvalError::from)?;
 
-        // Execute the module and get the final module value
-        let value = execute_module(mc, &content, &module_path, caller_env, Some(module_exports))?;
+        if module_path.ends_with(".json") {
+            let json_val: JsonValue =
+                serde_json::from_str(&content).map_err(|e| EvalError::from(raise_syntax_error!(format!("Invalid JSON module: {e}"))))?;
+            let js_default = json_to_js_value(mc, &json_val, caller_env.as_ref())?;
+            object_set_key_value(mc, &module_exports, "default", &js_default)?;
 
-        object_set_key_value(mc, &cache, module_path.as_str(), &value.clone())?;
+            let value = Value::Object(module_exports);
+            object_set_key_value(mc, &cache, module_path.as_str(), &value.clone())?;
+            object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
+            return Ok(value);
+        }
+
+        // Execute the module and get the final module value
+        let value = match execute_module(mc, &content, &module_path, caller_env, Some(module_exports), preload_tla_async) {
+            Ok(v) => v,
+            Err(EvalError::Throw(throw_val, line, column)) => {
+                object_set_key_value(mc, &eval_errors, module_path.as_str(), &throw_val)?;
+                object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
+                return Err(EvalError::Throw(throw_val, line, column));
+            }
+            Err(e) => {
+                object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
+                return Err(e);
+            }
+        };
+
+        object_set_key_value(mc, &cache, module_path.as_str(), &value)?;
         object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
         return Ok(value);
     }
@@ -114,8 +501,64 @@ fn load_module_from_file<'gc>(
     // Read the file
     let content = crate::core::read_script_file(&module_path).map_err(EvalError::from)?;
 
+    if module_path.ends_with(".json") {
+        let json_val: JsonValue =
+            serde_json::from_str(&content).map_err(|e| EvalError::from(raise_syntax_error!(format!("Invalid JSON module: {e}"))))?;
+        let module_exports = new_js_object_data(mc);
+        let js_default = json_to_js_value(mc, &json_val, caller_env.as_ref())?;
+        object_set_key_value(mc, &module_exports, "default", &js_default)?;
+        return Ok(Value::Object(module_exports));
+    }
+
     // Execute the module and get the final module value
-    execute_module(mc, &content, &module_path, caller_env, None)
+    execute_module(mc, &content, &module_path, caller_env, None, preload_tla_async)
+}
+
+#[allow(dead_code)]
+pub fn preload_async_transitive_module<'gc>(
+    mc: &MutationContext<'gc>,
+    module_name: &str,
+    base_path: Option<&str>,
+    caller_env: Option<JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    load_module_from_file_with_mode(mc, module_name, base_path, caller_env, true)
+}
+
+fn json_to_js_value<'gc>(
+    mc: &MutationContext<'gc>,
+    json: &JsonValue,
+    caller_env: Option<&JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    Ok(match json {
+        JsonValue::Null => Value::Null,
+        JsonValue::Bool(b) => Value::Boolean(*b),
+        JsonValue::Number(n) => Value::Number(n.as_f64().unwrap_or(f64::NAN)),
+        JsonValue::String(s) => Value::String(crate::unicode::utf8_to_utf16(s)),
+        JsonValue::Array(items) => {
+            let arr_obj = if let Some(env) = caller_env {
+                crate::js_array::create_array(mc, env).map_err(EvalError::from)?
+            } else {
+                new_js_object_data(mc)
+            };
+            for (idx, item) in items.iter().enumerate() {
+                let v = json_to_js_value(mc, item, caller_env)?;
+                object_set_key_value(mc, &arr_obj, idx, &v).map_err(EvalError::from)?;
+            }
+            object_set_key_value(mc, &arr_obj, "length", &Value::Number(items.len() as f64)).map_err(EvalError::from)?;
+            Value::Object(arr_obj)
+        }
+        JsonValue::Object(map) => {
+            let obj = new_js_object_data(mc);
+            if let Some(env) = caller_env {
+                let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object");
+            }
+            for (k, v) in map.iter() {
+                let vv = json_to_js_value(mc, v, caller_env)?;
+                object_set_key_value(mc, &obj, k.as_str(), &vv).map_err(EvalError::from)?;
+            }
+            Value::Object(obj)
+        }
+    })
 }
 
 pub(crate) fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<String, JSError> {
@@ -166,6 +609,7 @@ fn execute_module<'gc>(
     module_path: &str,
     caller_env: Option<JSObjectDataPtr<'gc>>,
     module_exports_override: Option<JSObjectDataPtr<'gc>>,
+    preload_tla_async: bool,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create module exports object
     let module_exports = module_exports_override.unwrap_or_else(|| new_js_object_data(mc));
@@ -226,7 +670,26 @@ fn execute_module<'gc>(
     // Parse and execute the module content
     let tokens = crate::core::tokenize(content).map_err(EvalError::from)?;
     let mut index = 0;
-    let statements = crate::core::parse_statements(&tokens, &mut index).map_err(EvalError::from)?;
+    crate::core::push_await_context();
+    let parse_result = crate::core::parse_statements(&tokens, &mut index);
+    crate::core::pop_await_context();
+    let statements = parse_result.map_err(EvalError::from)?;
+
+    if preload_tla_async && let Some(first_tla_idx) = statements.iter().position(stmt_contains_top_level_await) {
+        if first_tla_idx > 0 {
+            crate::core::evaluate_statements(mc, &env, &statements[..first_tla_idx])?;
+        }
+
+        if first_tla_idx + 1 < statements.len() {
+            let tail_stmts = statements[(first_tla_idx + 1)..].to_vec();
+            let cont = Value::Closure(Gc::new(mc, ClosureData::new(&[], &tail_stmts, Some(env), None)));
+            let (p, resolve, _) = crate::js_promise::create_promise_capability(mc, &env).map_err(EvalError::from)?;
+            crate::js_promise::call_function(mc, &resolve, &[Value::Undefined], &env)?;
+            crate::js_promise::perform_promise_then(mc, p, Some(cont), None, None, &env).map_err(EvalError::from)?;
+        }
+
+        return Ok(Value::Object(module_exports));
+    }
 
     // Execute statements in module environment
     crate::core::evaluate_statements(mc, &env, &statements)?;
@@ -293,6 +756,399 @@ pub(crate) fn get_or_create_module_loading<'gc>(
     let loading = new_js_object_data(mc);
     object_set_key_value(mc, env, "__module_loading", &Value::Object(loading))?;
     Ok(loading)
+}
+
+fn get_or_create_module_eval_errors<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    if let Some(val_rc) = object_get_key_value(env, "__module_eval_errors")
+        && let Value::Object(obj) = &*val_rc.borrow()
+    {
+        return Ok(*obj);
+    }
+
+    let errors = new_js_object_data(mc);
+    object_set_key_value(mc, env, "__module_eval_errors", &Value::Object(errors))?;
+    Ok(errors)
+}
+
+fn get_or_create_module_deferred_namespace_cache<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    if let Some(val_rc) = object_get_key_value(env, "__module_deferred_namespace_cache")
+        && let Value::Object(obj) = &*val_rc.borrow()
+    {
+        return Ok(*obj);
+    }
+
+    let cache = new_js_object_data(mc);
+    object_set_key_value(mc, env, "__module_deferred_namespace_cache", &Value::Object(cache))?;
+    Ok(cache)
+}
+
+#[allow(dead_code)]
+fn get_or_create_module_defer_pending_preloads<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    if let Some(val_rc) = object_get_key_value(env, "__module_defer_pending_preloads")
+        && let Value::Object(obj) = &*val_rc.borrow()
+    {
+        return Ok(*obj);
+    }
+
+    let arr = crate::js_array::create_array(mc, env)?;
+    object_set_key_value(mc, env, "__module_defer_pending_preloads", &Value::Object(arr))?;
+    Ok(arr)
+}
+
+#[allow(dead_code)]
+pub fn queue_deferred_async_preload_module<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    module_path: &str,
+) -> Result<(), EvalError<'gc>> {
+    let cache_env = resolve_cache_env(Some(*env)).unwrap_or(*env);
+    let pending = get_or_create_module_defer_pending_preloads(mc, &cache_env).map_err(EvalError::from)?;
+
+    let length = object_get_key_value(&pending, "length")
+        .and_then(|v| match &*v.borrow() {
+            Value::Number(n) => Some(*n as usize),
+            _ => None,
+        })
+        .unwrap_or(0);
+
+    object_set_key_value(mc, &pending, length, &Value::String(crate::unicode::utf8_to_utf16(module_path))).map_err(EvalError::from)?;
+    object_set_key_value(mc, &pending, "length", &Value::Number((length + 1) as f64)).map_err(EvalError::from)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn drain_microtasks<'gc>(mc: &MutationContext<'gc>) {
+    for _ in 0..1024 {
+        match crate::js_promise::run_event_loop(mc) {
+            Ok(crate::js_promise::PollResult::Executed) => continue,
+            Ok(crate::js_promise::PollResult::Wait(d)) => {
+                std::thread::sleep(d);
+                continue;
+            }
+            Ok(crate::js_promise::PollResult::Empty) => break,
+            Err(_) => break,
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn flush_deferred_async_preload_modules<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
+    let cache_env = resolve_cache_env(Some(*env)).unwrap_or(*env);
+    let pending = get_or_create_module_defer_pending_preloads(mc, &cache_env).map_err(EvalError::from)?;
+
+    drain_microtasks(mc);
+
+    let length = object_get_key_value(&pending, "length")
+        .and_then(|v| match &*v.borrow() {
+            Value::Number(n) => Some(*n as usize),
+            _ => None,
+        })
+        .unwrap_or(0);
+
+    if length == 0 {
+        return Ok(());
+    }
+
+    let mut modules = Vec::with_capacity(length);
+    for i in 0..length {
+        if let Some(v) = object_get_key_value(&pending, i)
+            && let Value::String(s) = v.borrow().clone()
+        {
+            modules.push(crate::unicode::utf16_to_utf8(&s));
+        }
+    }
+    object_set_key_value(mc, &pending, "length", &Value::Number(0.0)).map_err(EvalError::from)?;
+
+    drain_microtasks(mc); // Always drain microtasks during deferred preload flush
+    for module_path in modules {
+        preload_async_transitive_module(mc, module_path.as_str(), None, Some(cache_env))?;
+    }
+    drain_microtasks(mc);
+
+    Ok(())
+}
+
+fn get_symbol_to_string_tag<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<Value<'gc>> {
+    if let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_ctor_val.borrow()
+        && let Some(sym_tst) = object_get_key_value(sym_ctor, "toStringTag")
+    {
+        return Some(sym_tst.borrow().clone());
+    }
+    None
+}
+
+fn collect_module_export_names(stmts: &[crate::core::Statement], out: &mut std::collections::BTreeSet<String>) {
+    for stmt in stmts {
+        if let StatementKind::Export(specifiers, inner_stmt, source) = &*stmt.kind
+            && source.is_none()
+        {
+            for spec in specifiers {
+                match spec {
+                    ExportSpecifier::Named(name, alias) => {
+                        out.insert(alias.as_ref().unwrap_or(name).clone());
+                    }
+                    ExportSpecifier::Namespace(name) => {
+                        out.insert(name.clone());
+                    }
+                    ExportSpecifier::Default(_) => {
+                        out.insert("default".to_string());
+                    }
+                    ExportSpecifier::Star => {}
+                }
+            }
+
+            if let Some(inner) = inner_stmt {
+                match &*inner.kind {
+                    StatementKind::Let(decls) | StatementKind::Var(decls) => {
+                        for (name, _) in decls {
+                            out.insert(name.clone());
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            out.insert(name.clone());
+                        }
+                    }
+                    StatementKind::FunctionDeclaration(name, ..) => {
+                        out.insert(name.clone());
+                    }
+                    StatementKind::Class(class_def) => {
+                        out.insert(class_def.name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+pub fn load_module_deferred_namespace<'gc>(
+    mc: &MutationContext<'gc>,
+    module_name: &str,
+    base_path: Option<&str>,
+    caller_env: Option<JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let module_path = resolve_module_path(module_name, base_path).map_err(EvalError::from)?;
+
+    let cache_env = resolve_cache_env(caller_env).unwrap_or_else(|| new_js_object_data(mc));
+    let deferred_cache = get_or_create_module_deferred_namespace_cache(mc, &cache_env).map_err(EvalError::from)?;
+
+    if let Some(ns_val_rc) = object_get_key_value(&deferred_cache, module_path.as_str()) {
+        return Ok(ns_val_rc.borrow().clone());
+    }
+
+    let namespace_obj = new_js_object_data(mc);
+    namespace_obj.borrow_mut(mc).deferred_module_path = Some(module_path.clone());
+    namespace_obj.borrow_mut(mc).deferred_cache_env = Some(cache_env);
+
+    let module_cache = get_or_create_module_cache(mc, &cache_env).map_err(EvalError::from)?;
+    let mut export_names: Vec<String> = Vec::new();
+    let mut export_values: std::collections::HashMap<String, Value<'gc>> = std::collections::HashMap::new();
+
+    if let Some(cached_val) = object_get_key_value(&module_cache, module_path.as_str())
+        && let Value::Object(exports_obj) = cached_val.borrow().clone()
+    {
+        for key in exports_obj.borrow().properties.keys() {
+            if let crate::core::PropertyKey::String(s) = key {
+                export_names.push(s.clone());
+                if let Some(v) = object_get_key_value(&exports_obj, s) {
+                    export_values.insert(s.clone(), v.borrow().clone());
+                }
+            }
+        }
+    } else {
+        let content = std::fs::read_to_string(&module_path)
+            .map_err(|e| crate::raise_eval_error!(format!("Failed to read module '{}': {e}", module_path)))?;
+        let tokens = crate::core::tokenize(&content).map_err(EvalError::from)?;
+        let mut index = 0;
+        crate::core::push_await_context();
+        let parse_result = crate::core::parse_statements(&tokens, &mut index);
+        crate::core::pop_await_context();
+        let statements = parse_result.map_err(EvalError::from)?;
+
+        let mut names = std::collections::BTreeSet::new();
+        collect_module_export_names(&statements, &mut names);
+        export_names.extend(names);
+    }
+
+    export_names.sort();
+    export_names.dedup();
+
+    for name in export_names {
+        let value = export_values.remove(&name).unwrap_or(Value::Undefined);
+        let desc = create_descriptor_object(mc, &value, true, true, false).map_err(EvalError::from)?;
+        crate::js_object::define_property_internal(mc, &namespace_obj, name.as_str(), &desc).map_err(EvalError::from)?;
+    }
+
+    if let Some(sym_tst_val) = get_symbol_to_string_tag(&cache_env)
+        && let Value::Symbol(sym_tst) = sym_tst_val
+    {
+        let desc = create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("Deferred Module")),
+            false,
+            false,
+            false,
+        )
+        .map_err(EvalError::from)?;
+        crate::js_object::define_property_internal(mc, &namespace_obj, crate::core::PropertyKey::Symbol(sym_tst), &desc)
+            .map_err(EvalError::from)?;
+    }
+
+    namespace_obj.borrow_mut(mc).prevent_extensions();
+
+    let ns_value = Value::Object(namespace_obj);
+    object_set_key_value(mc, &deferred_cache, module_path.as_str(), &ns_value).map_err(EvalError::from)?;
+    Ok(ns_value)
+}
+
+pub fn ensure_deferred_namespace_evaluated<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    key_hint: Option<&str>,
+) -> Result<bool, EvalError<'gc>> {
+    if matches!(key_hint, Some("then")) {
+        return Ok(false);
+    }
+
+    fn scan_cache_for_obj<'gc>(holder: &JSObjectDataPtr<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<String> {
+        if let Some(cache_val) = object_get_key_value(holder, "__module_deferred_namespace_cache")
+            && let Value::Object(cache_obj) = cache_val.borrow().clone()
+        {
+            for (k, v) in &cache_obj.borrow().properties {
+                if let crate::core::PropertyKey::String(path) = k
+                    && let Value::Object(ns_obj) = v.borrow().clone()
+                    && crate::core::Gc::ptr_eq(ns_obj, *obj)
+                {
+                    return Some(path.clone());
+                }
+            }
+        }
+        None
+    }
+
+    let mut found_path: Option<String> = obj.borrow().deferred_module_path.clone();
+    let preferred_cache_env: Option<JSObjectDataPtr<'gc>> = obj.borrow().deferred_cache_env;
+
+    let mut cur = Some(*env);
+    if found_path.is_none() {
+        while let Some(e) = cur {
+            found_path = scan_cache_for_obj(&e, obj);
+            if found_path.is_none()
+                && let Some(global_val) = object_get_key_value(&e, "globalThis")
+                && let Value::Object(global_obj) = global_val.borrow().clone()
+            {
+                found_path = scan_cache_for_obj(&global_obj, obj);
+            }
+            if found_path.is_some() {
+                break;
+            }
+            cur = e.borrow().prototype;
+        }
+    }
+
+    if found_path.is_none() {
+        let mut cur = Some(*env);
+        while let Some(e) = cur {
+            let mut object_values: Vec<JSObjectDataPtr<'gc>> = Vec::new();
+            {
+                let b = e.borrow();
+                for v in b.properties.values() {
+                    if let Value::Object(o) = v.borrow().clone() {
+                        object_values.push(o);
+                    }
+                }
+            }
+
+            for holder in object_values {
+                found_path = scan_cache_for_obj(&holder, obj);
+                if found_path.is_some() {
+                    break;
+                }
+            }
+
+            if found_path.is_some() {
+                break;
+            }
+            cur = e.borrow().prototype;
+        }
+    }
+
+    let Some(module_path) = found_path else {
+        return Ok(false);
+    };
+    {
+        let mut cur = Some(*env);
+        while let Some(e) = cur {
+            if let Some(cur_file_val) = object_get_key_value(&e, "__filepath")
+                && let Value::String(cur_file) = cur_file_val.borrow().clone()
+            {
+                let cur_file_utf8 = crate::unicode::utf16_to_utf8(&cur_file);
+                if cur_file_utf8 == module_path {
+                    return Err(crate::raise_type_error!("Module cannot trigger deferred evaluation while it is evaluating").into());
+                }
+            }
+            cur = e.borrow().prototype;
+        }
+    }
+
+    let cache_env = preferred_cache_env.unwrap_or(*env);
+
+    // import-defer: if the target module is currently evaluating/loading,
+    // accessing namespace exports should throw TypeError rather than attempting
+    // a recursive sync load/eval.
+    let module_is_loading = is_module_loading_in_env_chain(&cache_env, module_path.as_str());
+
+    if module_is_loading {
+        return Err(crate::raise_type_error!("Module is currently evaluating").into());
+    }
+
+    if let Ok(requests) = module_requested_modules(module_path.as_str()) {
+        let mut has_nonself_requests = false;
+        let mut has_main_request = false;
+        let mut dependency_is_loading = false;
+        for req in requests {
+            let req_name = std::path::Path::new(req.as_str())
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if req_name == "main.js" {
+                has_main_request = true;
+            }
+
+            if let Ok(req_path) = resolve_module_path(req.as_str(), Some(module_path.as_str()))
+                && req_path != module_path
+            {
+                has_nonself_requests = true;
+                if is_module_loading_in_env_chain(&cache_env, req_path.as_str()) {
+                    dependency_is_loading = true;
+                    break;
+                }
+            }
+        }
+
+        if dependency_is_loading || (has_nonself_requests && has_main_request && any_module_loading_in_env_chain(&cache_env)) {
+            return Err(crate::raise_type_error!("Module dependency is currently evaluating").into());
+        }
+    }
+
+    let exports = load_module(mc, module_path.as_str(), None, Some(cache_env))?;
+    if let (Some(prop), Value::Object(exports_obj)) = (key_hint, exports)
+        && let Some(v) = object_get_key_value(&exports_obj, prop)
+    {
+        let resolved = v.borrow().clone();
+        object_set_key_value(mc, obj, prop, &resolved)?;
+    }
+
+    Ok(true)
 }
 
 fn resolve_cache_env<'gc>(caller_env: Option<JSObjectDataPtr<'gc>>) -> Option<JSObjectDataPtr<'gc>> {

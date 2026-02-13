@@ -211,6 +211,10 @@ pub struct JSObjectData<'gc> {
     pub home_object: Option<GcCell<JSObjectDataPtr<'gc>>>,
     /// Internal executable closure for function objects (previously stored as an internal property)
     closure: Option<GcPtr<'gc, Value<'gc>>>,
+    /// Internal slot: absolute module path for deferred namespace objects.
+    pub deferred_module_path: Option<String>,
+    /// Internal slot: cache/global environment associated with deferred namespace objects.
+    pub deferred_cache_env: Option<JSObjectDataPtr<'gc>>,
     /// Map from ClassMember index to evaluated PropertyKey for computed fields.
     pub comp_field_keys: std::collections::HashMap<usize, PropertyKey<'gc>>,
     /// Cache of per-class private method functions so instances share the same object.
@@ -251,6 +255,9 @@ unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
         }
         if let Some(cl) = &self.closure {
             cl.trace(cc);
+        }
+        if let Some(cache_env) = &self.deferred_cache_env {
+            cache_env.trace(cc);
         }
     }
 }
@@ -1075,8 +1082,7 @@ pub fn object_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<Prop
     // `this.hasOwnProperty(...)` semantics in global code without materializing
     // those methods as own globals, dynamically fall back to Object.prototype
     // for a small set of Object prototype methods.
-    if obj.borrow().prototype.is_none()
-        && let Some(global_this_cell) = obj.borrow().properties.get(&PropertyKey::String("globalThis".to_string()))
+    if let Some(global_this_cell) = obj.borrow().properties.get(&PropertyKey::String("globalThis".to_string()))
         && let Value::Object(global_this_obj) = &*global_this_cell.borrow()
         && Gc::ptr_eq(*global_this_obj, *obj)
         && let PropertyKey::String(method_name) = &key
@@ -1233,8 +1239,23 @@ pub fn object_set_key_value<'gc>(
     // Exception: allow a very small whitelist of engine markers only on the
     // global environment object itself. This is needed for test harness/global
     // code plumbing, while still preventing arbitrary `__*` user properties.
+    let is_global_env_obj = obj
+        .borrow()
+        .properties
+        .get(&PropertyKey::String("globalThis".to_string()))
+        .and_then(|global_this_cell| {
+            if let Value::Object(global_this_obj) = &*global_this_cell.borrow()
+                && Gc::ptr_eq(*global_this_obj, *obj)
+            {
+                Some(true)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false);
+
     let allow_nonextensible_internal_write = if let PropertyKey::String(s) = &key {
-        obj.borrow().prototype.is_none()
+        is_global_env_obj
             && matches!(
                 s.as_str(),
                 "__test262_global_code_mode" | "__global_lex_env" | "__is_indirect_eval" | "__allow_dynamic_import_result"

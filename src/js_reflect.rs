@@ -205,6 +205,9 @@ pub fn handle_reflect_method<'gc>(
                             Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                             _ => return Err(raise_type_error!("Invalid property key").into()),
                         };
+                        if let PropertyKey::String(s) = &prop_key {
+                            crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                        }
                         match PropertyDescriptor::from_object(attr_obj) {
                             Ok(pd) => {
                                 if crate::core::validate_descriptor_for_define(mc, &pd).is_err() {
@@ -239,6 +242,9 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
+                    if let PropertyKey::String(s) = &prop_key {
+                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                    }
                     // For now, always return true as we don't have configurable properties
                     let _ = obj.borrow_mut(mc).properties.shift_remove(&prop_key);
                     Ok(Value::Boolean(true))
@@ -261,6 +267,9 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
+                    if let PropertyKey::String(s) = &prop_key {
+                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                    }
                     if let Some(value_rc) = object_get_key_value(&obj, &prop_key) {
                         Ok(value_rc.borrow().clone())
                     } else {
@@ -284,8 +293,43 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
+                    if let PropertyKey::String(s) = &prop_key {
+                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                    }
                     if let Some(_value_rc) = object_get_key_value(&obj, &prop_key) {
-                        if let Some(pd) = crate::core::build_property_descriptor(mc, &obj, &prop_key) {
+                        if let Some(mut pd) = crate::core::build_property_descriptor(mc, &obj, &prop_key) {
+                            let is_deferred_namespace = obj.borrow().deferred_module_path.is_some();
+                            let is_accessor_descriptor = pd.get.is_some() || pd.set.is_some();
+                            let needs_hydration = (is_deferred_namespace || !is_accessor_descriptor)
+                                && (pd.value.is_none() || matches!(pd.value, Some(Value::Undefined)));
+                            if needs_hydration && let PropertyKey::String(s) = &prop_key {
+                                let hydrated = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                                if !matches!(hydrated, Value::Undefined) {
+                                    pd.value = Some(hydrated);
+                                    pd.get = None;
+                                    pd.set = None;
+                                    if pd.writable.is_none() {
+                                        pd.writable = Some(true);
+                                    }
+                                } else {
+                                    let (module_path, cache_env) = {
+                                        let b = obj.borrow();
+                                        (b.deferred_module_path.clone(), b.deferred_cache_env)
+                                    };
+                                    if let (Some(module_path), Some(cache_env)) = (module_path, cache_env)
+                                        && let Ok(Value::Object(exports_obj)) =
+                                            crate::js_module::load_module(mc, module_path.as_str(), None, Some(cache_env))
+                                        && let Some(v) = object_get_key_value(&exports_obj, s)
+                                    {
+                                        pd.value = Some(v.borrow().clone());
+                                        pd.get = None;
+                                        pd.set = None;
+                                        if pd.writable.is_none() {
+                                            pd.writable = Some(true);
+                                        }
+                                    }
+                                }
+                            }
                             let desc_obj = pd.to_object(mc)?;
                             crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
                             Ok(Value::Object(desc_obj))
@@ -308,7 +352,7 @@ pub fn handle_reflect_method<'gc>(
                     if let Some(proto_rc) = obj.borrow().prototype {
                         Ok(Value::Object(proto_rc))
                     } else {
-                        Ok(Value::Undefined)
+                        Ok(Value::Null)
                     }
                 }
                 _ => Err(raise_type_error!("Reflect.getPrototypeOf target must be an object").into()),
@@ -328,6 +372,9 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(raise_type_error!("Invalid property key").into()),
                     };
+                    if let PropertyKey::String(s) = &prop_key {
+                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                    }
                     let has_prop = object_get_key_value(&obj, &prop_key).is_some();
                     Ok(Value::Boolean(has_prop))
                 }
@@ -351,6 +398,7 @@ pub fn handle_reflect_method<'gc>(
             }
             match args[0] {
                 Value::Object(obj) => {
+                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
                     // Diagnostic trace to ensure proxy wrapper is visible here
                     let obj_ptr = obj.as_ptr();
                     let has_proxy = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string())).is_some();
@@ -421,14 +469,28 @@ pub fn handle_reflect_method<'gc>(
             match &args[0] {
                 Value::Object(obj) => match &args[1] {
                     Value::Object(proto_obj) => {
+                        let current_proto = obj.borrow().prototype;
+                        let is_extensible = obj.borrow().is_extensible();
+                        let same_proto = current_proto.is_some_and(|p| crate::core::Gc::ptr_eq(p, *proto_obj));
+                        if !is_extensible && !same_proto {
+                            return Ok(Value::Boolean(false));
+                        }
                         obj.borrow_mut(mc).prototype = Some(*proto_obj);
                         Ok(Value::Boolean(true))
                     }
                     Value::Undefined | Value::Null => {
+                        let current_proto = obj.borrow().prototype;
+                        let is_extensible = obj.borrow().is_extensible();
+                        if !is_extensible && current_proto.is_some() {
+                            return Ok(Value::Boolean(false));
+                        }
                         obj.borrow_mut(mc).prototype = None;
                         Ok(Value::Boolean(true))
                     }
                     Value::Function(func_name) => {
+                        if !obj.borrow().is_extensible() {
+                            return Ok(Value::Boolean(false));
+                        }
                         // Functions are objects in JS. Our engine represents some built-ins as Value::Function,
                         // so wrap it in an object shell that behaves like a function object for prototype chains.
                         let fn_obj = new_js_object_data(mc);

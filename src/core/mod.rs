@@ -221,7 +221,10 @@ where
             parse_statements(&tokens, &mut index)?
         }
     } else {
-        parse_statements(&tokens, &mut index)?
+        crate::core::parser::push_await_context();
+        let res = parse_statements(&tokens, &mut index);
+        crate::core::parser::pop_await_context();
+        res?
     };
     // DEBUG: show parsed statements for troubleshooting
     log::trace!("DEBUG: PARSED STATEMENTS: {:#?}", statements);

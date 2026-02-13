@@ -481,7 +481,12 @@ pub fn handle_object_method<'gc>(
             };
 
             let has_own = match obj_val {
-                Value::Object(obj) => obj.borrow().properties.contains_key(&key),
+                Value::Object(obj) => {
+                    if let PropertyKey::String(s) = &key {
+                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                    }
+                    obj.borrow().properties.contains_key(&key)
+                }
                 Value::String(s) => {
                     if let PropertyKey::String(k) = key {
                         if k == "length" {
@@ -826,6 +831,7 @@ pub fn handle_object_method<'gc>(
             }
             match args[0] {
                 Value::Object(obj) => {
+                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
                     let result_obj = crate::js_array::create_array(mc, env)?;
                     let mut idx = 0;
                     let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
@@ -847,11 +853,15 @@ pub fn handle_object_method<'gc>(
             }
             match args[0] {
                 Value::Object(obj) => {
+                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
                     let result_obj = crate::js_array::create_array(mc, env)?;
                     let mut idx = 0;
                     let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
                     for key in ordered {
                         if let PropertyKey::String(s) = key {
+                            if s == "__is_array" {
+                                continue;
+                            }
                             object_set_key_value(mc, &result_obj, idx, &Value::String(utf8_to_utf16(&s)))?;
                             idx += 1;
                         }
@@ -889,8 +899,27 @@ pub fn handle_object_method<'gc>(
                 val => PropertyKey::String(value_to_string(&val)),
             };
 
+            if let PropertyKey::String(s) = &key {
+                crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+            }
+
             if let Some(_val_rc) = object_get_key_value(&obj, &key) {
-                if let Some(pd) = crate::core::build_property_descriptor(mc, &obj, &key) {
+                if let Some(mut pd) = crate::core::build_property_descriptor(mc, &obj, &key) {
+                    let is_deferred_namespace = obj.borrow().deferred_module_path.is_some();
+                    let is_accessor_descriptor = pd.get.is_some() || pd.set.is_some();
+                    let needs_hydration = (is_deferred_namespace || !is_accessor_descriptor)
+                        && (pd.value.is_none() || matches!(pd.value, Some(Value::Undefined)));
+                    if needs_hydration && let PropertyKey::String(s) = &key {
+                        let hydrated = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                        if !matches!(hydrated, Value::Undefined) {
+                            pd.value = Some(hydrated);
+                            pd.get = None;
+                            pd.set = None;
+                            if pd.writable.is_none() {
+                                pd.writable = Some(true);
+                            }
+                        }
+                    }
                     let desc_obj = pd.to_object(mc)?;
                     crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
                     Ok(Value::Object(desc_obj))
@@ -908,6 +937,7 @@ pub fn handle_object_method<'gc>(
             let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(ref obj) => {
+                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, obj, None)?;
                     let result_obj = new_js_object_data(mc);
 
                     let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
@@ -1033,6 +1063,10 @@ pub fn handle_object_method<'gc>(
                 Value::Symbol(s) => PropertyKey::Symbol(s),
                 _ => return Err(raise_type_error!("Unsupported property key type in Object.defineProperty")),
             };
+
+            if let PropertyKey::String(s) = &prop_key {
+                crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &target_obj, Some(s.as_str()))?;
+            }
 
             let desc_val = args[2].clone();
             let desc_obj = match desc_val {

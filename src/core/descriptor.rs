@@ -160,7 +160,24 @@ pub(crate) fn build_property_descriptor<'gc>(
     obj: &JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
 ) -> Option<PropertyDescriptor<'gc>> {
-    if let Some(val_rc) = object_get_key_value(obj, key) {
+    if let PropertyKey::String(s) = key
+        && !s.starts_with("__")
+        && s != "then"
+    {
+        let (module_path, cache_env) = {
+            let b = obj.borrow();
+            (b.deferred_module_path.clone(), b.deferred_cache_env)
+        };
+        if let (Some(module_path), Some(cache_env)) = (module_path, cache_env)
+            && let Ok(Value::Object(exports_obj)) = crate::js_module::load_module(mc, module_path.as_str(), None, Some(cache_env))
+            && let Some(v) = object_get_key_value(&exports_obj, s)
+        {
+            let resolved = v.borrow().clone();
+            let _ = crate::core::object_set_key_value(mc, obj, s.as_str(), &resolved);
+        }
+    }
+
+    if let Some(val_rc) = crate::core::get_own_property(obj, key.clone()) {
         let pd = match &*val_rc.borrow() {
             Value::Property { value, getter, setter } => {
                 let mut pd = PropertyDescriptor::default();

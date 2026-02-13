@@ -12,6 +12,7 @@ use crate::unicode::{
     utf8_to_utf16, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
     utf16_to_utf8,
 };
+use std::collections::BTreeMap;
 
 pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let string_ctor = new_js_object_data(mc);
@@ -233,7 +234,7 @@ pub fn handle_string_method<'gc>(
         "toLocaleUpperCase" => string_to_locale_uppercase(s, args),
         "normalize" => string_normalize_method(s, args),
         "toWellFormed" => string_to_well_formed_method(mc, s, args, env),
-        "replaceAll" => string_replace_all_method(s, args),
+        "replaceAll" => string_replace_all_method(mc, s, args, env),
         _ => Err(raise_eval_error!(format!("Unknown string method: {method}")).into()), // method not found
     }
 }
@@ -467,7 +468,6 @@ fn string_replace_method<'gc>(
 
                 let re = create_regex_from_utf16(&pattern_u16, &flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
 
-                // replacement string must be string (function replacement not supported yet)
                 if let Value::String(repl_u16) = replace_val {
                     let repl = utf16_to_utf8(&repl_u16);
                     let mut out: Vec<u16> = Vec::new();
@@ -478,6 +478,7 @@ fn string_replace_method<'gc>(
                         repl: &str,
                         matched: &[u16],
                         captures: &[Option<Vec<u16>>],
+                        named_captures: Option<&BTreeMap<String, Option<Vec<u16>>>>,
                         before: &[u16],
                         after: &[u16],
                     ) -> Vec<u16> {
@@ -502,6 +503,36 @@ fn string_replace_method<'gc>(
                                         '$' => {
                                             chars.next();
                                             out.push('$');
+                                        }
+                                        '<' => {
+                                            if named_captures.is_none() {
+                                                chars.next(); // consume '<'
+                                                out.push('$');
+                                                out.push('<');
+                                            } else {
+                                                chars.next(); // consume '<'
+                                                let mut name = String::new();
+                                                let mut closed = false;
+                                                while let Some(&c) = chars.peek() {
+                                                    chars.next();
+                                                    if c == '>' {
+                                                        closed = true;
+                                                        break;
+                                                    }
+                                                    name.push(c);
+                                                }
+                                                if closed {
+                                                    if let Some(named_captures) = named_captures
+                                                        && let Some(Some(cap)) = named_captures.get(&name)
+                                                    {
+                                                        out.push_str(&utf16_to_utf8(cap));
+                                                    }
+                                                } else {
+                                                    out.push('$');
+                                                    out.push('<');
+                                                    out.push_str(&name);
+                                                }
+                                            }
                                         }
                                         '0'..='9' => {
                                             // $1, $2, etc.
@@ -541,6 +572,114 @@ fn string_replace_method<'gc>(
                         utf8_to_utf16(&out)
                     }
 
+                    let exec_prop = crate::core::get_property_with_accessors(mc, env, &object, "exec")?;
+                    let has_custom_exec = !matches!(&exec_prop, Value::Function(name) if name == "RegExp.prototype.exec");
+
+                    if has_custom_exec && !global {
+                        let exec_res =
+                            evaluate_call_dispatch(mc, env, &exec_prop, Some(&Value::Object(object)), &[Value::String(s.to_vec())])?;
+
+                        match exec_res {
+                            Value::Null => return Ok(Value::String(s.to_vec())),
+                            Value::Object(match_obj) => {
+                                let matched_u16 = if let Some(v) = object_get_key_value(&match_obj, "0") {
+                                    match &*v.borrow() {
+                                        Value::String(ms) => ms.clone(),
+                                        other => utf8_to_utf16(&value_to_string(other)),
+                                    }
+                                } else {
+                                    Vec::new()
+                                };
+
+                                let start = if let Some(v) = object_get_key_value(&match_obj, "index") {
+                                    if let Value::Number(n) = *v.borrow() {
+                                        (n as isize).max(0) as usize
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
+
+                                let start = start.min(s.len());
+                                let end = (start + matched_u16.len()).min(s.len());
+                                let before = &s[..start];
+                                let after = &s[end..];
+
+                                let mut captures: Vec<Option<Vec<u16>>> = Vec::new();
+                                let cap_len = if let Some(v) = object_get_key_value(&match_obj, "length") {
+                                    if let Value::Number(n) = *v.borrow() {
+                                        (n as usize).saturating_sub(1)
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
+                                for idx in 1..=cap_len {
+                                    if let Some(v) = object_get_key_value(&match_obj, idx) {
+                                        match &*v.borrow() {
+                                            Value::String(cs) => captures.push(Some(cs.clone())),
+                                            Value::Undefined => captures.push(None),
+                                            other => captures.push(Some(utf8_to_utf16(&value_to_string(other)))),
+                                        }
+                                    } else {
+                                        captures.push(None);
+                                    }
+                                }
+
+                                let mut named_captures: BTreeMap<String, Option<Vec<u16>>> = BTreeMap::new();
+                                if let Some(groups_rc) = object_get_key_value(&match_obj, "groups")
+                                    && let Value::Object(groups_obj) = &*groups_rc.borrow()
+                                {
+                                    let mut cur = Some(*groups_obj);
+                                    while let Some(obj_ptr) = cur {
+                                        let mut entries: Vec<(String, Value<'gc>)> = Vec::new();
+                                        {
+                                            let b = obj_ptr.borrow();
+                                            for (k, v) in &b.properties {
+                                                if let PropertyKey::String(name) = k {
+                                                    entries.push((name.clone(), v.borrow().clone()));
+                                                }
+                                            }
+                                            cur = b.prototype;
+                                        }
+                                        for (name, v) in entries {
+                                            if named_captures.contains_key(&name) {
+                                                continue;
+                                            }
+                                            match v {
+                                                Value::String(cs) => {
+                                                    named_captures.insert(name, Some(cs));
+                                                }
+                                                Value::Undefined => {
+                                                    named_captures.insert(name, None);
+                                                }
+                                                other => {
+                                                    named_captures.insert(name, Some(utf8_to_utf16(&value_to_string(&other))));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let named_captures_opt = if named_captures.is_empty() { None } else { Some(&named_captures) };
+                                let mut out = before.to_vec();
+                                out.extend_from_slice(&expand_replacement(
+                                    &repl,
+                                    &matched_u16,
+                                    &captures,
+                                    named_captures_opt,
+                                    before,
+                                    after,
+                                ));
+                                out.extend_from_slice(after);
+                                return Ok(Value::String(out));
+                            }
+                            _ => return Ok(Value::String(s.to_vec())),
+                        }
+                    }
+
                     let mut offset = 0usize;
                     // regress doesn't have an iterator for matches that handles overlap/global automatically in a simple way?
                     // It has `find_iter` but that might not handle `lastIndex` updates if we were doing that.
@@ -575,8 +714,79 @@ fn string_replace_method<'gc>(
                             }
                         }
 
+                        let mut named_captures: BTreeMap<String, Option<Vec<u16>>> = BTreeMap::new();
+                        for (name, range_opt) in m.named_groups() {
+                            let val = range_opt.map(|range| s[range.start..range.end].to_vec());
+                            named_captures.insert(name.to_string(), val);
+                        }
+                        let named_captures_opt = if named_captures.is_empty() { None } else { Some(&named_captures) };
+
                         out.extend_from_slice(&s[last_pos..start]);
-                        out.extend_from_slice(&expand_replacement(&repl, matched, &captures, before, after));
+                        out.extend_from_slice(&expand_replacement(&repl, matched, &captures, named_captures_opt, before, after));
+                        last_pos = end;
+
+                        if !global {
+                            break;
+                        }
+
+                        if start == end {
+                            offset = end + 1;
+                        } else {
+                            offset = end;
+                        }
+                        if offset > s.len() {
+                            break;
+                        }
+                    }
+
+                    out.extend_from_slice(&s[last_pos..]);
+                    Ok(Value::String(out))
+                } else if matches!(replace_val, Value::Function(_) | Value::Closure(_) | Value::Object(_)) {
+                    let mut out: Vec<u16> = Vec::new();
+                    let mut last_pos = 0usize;
+                    let mut offset = 0usize;
+
+                    while let Some(m) = re.find_from_utf16(s, offset).next() {
+                        let start = m.range.start;
+                        let end = m.range.end;
+
+                        let matched = Value::String(s[start..end].to_vec());
+                        let mut call_args: Vec<Value<'gc>> = vec![matched];
+
+                        for cap in m.captures.iter() {
+                            if let Some(range) = cap {
+                                call_args.push(Value::String(s[range.start..range.end].to_vec()));
+                            } else {
+                                call_args.push(Value::Undefined);
+                            }
+                        }
+
+                        call_args.push(Value::Number(start as f64));
+                        call_args.push(Value::String(s.to_vec()));
+
+                        let mut named_captures: BTreeMap<String, Option<Vec<u16>>> = BTreeMap::new();
+                        for (name, range_opt) in m.named_groups() {
+                            let val = range_opt.map(|range| s[range.start..range.end].to_vec());
+                            named_captures.insert(name.to_string(), val);
+                        }
+
+                        if !named_captures.is_empty() {
+                            let groups_obj = new_js_object_data(mc);
+                            for (name, val_opt) in named_captures {
+                                if let Some(v) = val_opt {
+                                    object_set_key_value(mc, &groups_obj, name.as_str(), &Value::String(v))?;
+                                } else {
+                                    object_set_key_value(mc, &groups_obj, name.as_str(), &Value::Undefined)?;
+                                }
+                            }
+                            call_args.push(Value::Object(groups_obj));
+                        }
+
+                        let repl_val = evaluate_call_dispatch(mc, env, &replace_val, Some(&Value::Undefined), &call_args)?;
+                        let repl_u16 = utf8_to_utf16(&value_to_string(&repl_val));
+
+                        out.extend_from_slice(&s[last_pos..start]);
+                        out.extend_from_slice(&repl_u16);
                         last_pos = end;
 
                         if !global {
@@ -596,7 +806,7 @@ fn string_replace_method<'gc>(
                     out.extend_from_slice(&s[last_pos..]);
                     Ok(Value::String(out))
                 } else {
-                    Err(raise_eval_error!("replace only supports string as replacement argument for RegExp search").into())
+                    Err(raise_eval_error!("replace: replacement must be a string or function").into())
                 }
             } else {
                 Err(raise_eval_error!("replace: search argument must be a string or RegExp").into())
@@ -1421,7 +1631,12 @@ fn make_array_from_values<'gc>(
     Ok(Value::Object(arr))
 }
 
-fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_replace_all_method<'gc>(
+    mc: &MutationContext<'gc>,
+    s: &[u16],
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 2 {
         let search_val = args[0].clone();
         let replace_val = args[1].clone();
@@ -1455,6 +1670,7 @@ fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
                         repl: &str,
                         matched: &[u16],
                         captures: &[Option<Vec<u16>>],
+                        named_captures: Option<&BTreeMap<String, Option<Vec<u16>>>>,
                         before: &[u16],
                         after: &[u16],
                     ) -> Vec<u16> {
@@ -1479,6 +1695,36 @@ fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
                                         '$' => {
                                             chars.next();
                                             out.push('$');
+                                        }
+                                        '<' => {
+                                            if named_captures.is_none() {
+                                                chars.next(); // consume '<'
+                                                out.push('$');
+                                                out.push('<');
+                                            } else {
+                                                chars.next(); // consume '<'
+                                                let mut name = String::new();
+                                                let mut closed = false;
+                                                while let Some(&c) = chars.peek() {
+                                                    chars.next();
+                                                    if c == '>' {
+                                                        closed = true;
+                                                        break;
+                                                    }
+                                                    name.push(c);
+                                                }
+                                                if closed {
+                                                    if let Some(named_captures) = named_captures
+                                                        && let Some(Some(cap)) = named_captures.get(&name)
+                                                    {
+                                                        out.push_str(&utf16_to_utf8(cap));
+                                                    }
+                                                } else {
+                                                    out.push('$');
+                                                    out.push('<');
+                                                    out.push_str(&name);
+                                                }
+                                            }
                                         }
                                         '0'..='9' => {
                                             let mut num_str = String::new();
@@ -1531,8 +1777,75 @@ fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
                             }
                         }
 
+                        let mut named_captures: BTreeMap<String, Option<Vec<u16>>> = BTreeMap::new();
+                        for (name, range_opt) in m.named_groups() {
+                            let val = range_opt.map(|range| s[range.start..range.end].to_vec());
+                            named_captures.insert(name.to_string(), val);
+                        }
+                        let named_captures_opt = if named_captures.is_empty() { None } else { Some(&named_captures) };
+
                         out.extend_from_slice(&s[last_pos..start]);
-                        out.extend_from_slice(&expand_replacement(&repl, matched, &captures, before, after));
+                        out.extend_from_slice(&expand_replacement(&repl, matched, &captures, named_captures_opt, before, after));
+                        last_pos = end;
+
+                        if start == end {
+                            offset = end + 1;
+                        } else {
+                            offset = end;
+                        }
+                        if offset > s.len() {
+                            break;
+                        }
+                    }
+
+                    out.extend_from_slice(&s[last_pos..]);
+                    Ok(Value::String(out))
+                } else if matches!(replace_val, Value::Function(_) | Value::Closure(_) | Value::Object(_)) {
+                    let mut out: Vec<u16> = Vec::new();
+                    let mut last_pos = 0usize;
+                    let mut offset = 0usize;
+
+                    while let Some(m) = re.find_from_utf16(s, offset).next() {
+                        let start = m.range.start;
+                        let end = m.range.end;
+
+                        let matched = Value::String(s[start..end].to_vec());
+                        let mut call_args: Vec<Value<'gc>> = vec![matched];
+
+                        for cap in m.captures.iter() {
+                            if let Some(range) = cap {
+                                call_args.push(Value::String(s[range.start..range.end].to_vec()));
+                            } else {
+                                call_args.push(Value::Undefined);
+                            }
+                        }
+
+                        call_args.push(Value::Number(start as f64));
+                        call_args.push(Value::String(s.to_vec()));
+
+                        let mut named_captures: BTreeMap<String, Option<Vec<u16>>> = BTreeMap::new();
+                        for (name, range_opt) in m.named_groups() {
+                            let val = range_opt.map(|range| s[range.start..range.end].to_vec());
+                            named_captures.insert(name.to_string(), val);
+                        }
+
+                        if !named_captures.is_empty() {
+                            let groups_obj = new_js_object_data(mc);
+                            for (name, val_opt) in named_captures {
+                                if let Some(v) = val_opt {
+                                    object_set_key_value(mc, &groups_obj, name.as_str(), &Value::String(v))?;
+                                } else {
+                                    object_set_key_value(mc, &groups_obj, name.as_str(), &Value::Undefined)?;
+                                }
+                            }
+                            call_args.push(Value::Object(groups_obj));
+                        }
+
+                        let repl_val = evaluate_call_dispatch(mc, env, &replace_val, Some(&Value::Undefined), &call_args)?;
+                        let repl_u16 = utf8_to_utf16(&value_to_string(&repl_val));
+
+                        out.extend_from_slice(&s[last_pos..start]);
+                        out.extend_from_slice(&repl_u16);
                         last_pos = end;
 
                         if start == end {
@@ -1548,7 +1861,7 @@ fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Valu
                     out.extend_from_slice(&s[last_pos..]);
                     Ok(Value::String(out))
                 } else {
-                    Err(raise_eval_error!("replaceAll only supports string as replacement argument for RegExp search").into())
+                    Err(raise_eval_error!("replaceAll: replacement must be a string or function").into())
                 }
             } else {
                 Err(raise_eval_error!("replaceAll: search argument must be a string or RegExp").into())

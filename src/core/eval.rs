@@ -15737,6 +15737,36 @@ pub(crate) fn get_property_with_accessors<'gc>(
         }
     }
 
+    if let PropertyKey::String(prop_name) = key
+        && prop_name == "exec"
+        && get_own_property(obj, "__regex").is_some()
+    {
+        let own_is_builtin_exec = get_own_property(obj, "exec")
+            .map(|v| matches!(&*v.borrow(), Value::Function(name) if name == "RegExp.prototype.exec"))
+            .unwrap_or(false);
+
+        if own_is_builtin_exec
+            && let Some(proto) = obj.borrow().prototype
+            && let Some(proto_exec) = get_own_property(&proto, "exec")
+            && !matches!(&*proto_exec.borrow(), Value::Function(name) if name == "RegExp.prototype.exec")
+        {
+            let val = proto_exec.borrow().clone();
+            return match val {
+                Value::Property { getter, value, .. } => {
+                    if let Some(g) = getter {
+                        call_accessor(mc, env, obj, &g)
+                    } else if let Some(v) = value {
+                        Ok(v.borrow().clone())
+                    } else {
+                        Ok(Value::Undefined)
+                    }
+                }
+                Value::Getter(..) => call_accessor(mc, env, obj, &val),
+                _ => Ok(val),
+            };
+        }
+    }
+
     let mut cur = Some(*obj);
     while let Some(cur_obj) = cur {
         if let PropertyKey::String(prop_name) = key

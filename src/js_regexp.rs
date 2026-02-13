@@ -63,6 +63,58 @@ pub fn create_regex_from_utf16(pattern: &[u16], flags: &str) -> Result<Regex, St
     Regex::from_unicode(it, flags).map_err(|e| e.to_string())
 }
 
+fn contains_lone_surrogate(units: &[u16]) -> bool {
+    let mut i = 0;
+    while i < units.len() {
+        let u = units[i];
+        if (0xD800..=0xDBFF).contains(&u) {
+            if i + 1 >= units.len() {
+                return true;
+            }
+            let next = units[i + 1];
+            if !(0xDC00..=0xDFFF).contains(&next) {
+                return true;
+            }
+            i += 2;
+            continue;
+        }
+        if (0xDC00..=0xDFFF).contains(&u) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn validate_named_group_identifiers(pattern_u16: &[u16]) -> Result<(), JSError> {
+    let mut i = 0usize;
+    while i + 2 < pattern_u16.len() {
+        if pattern_u16[i] == b'(' as u16 && pattern_u16[i + 1] == b'?' as u16 && pattern_u16[i + 2] == b'<' as u16 {
+            if i + 3 < pattern_u16.len() {
+                let next = pattern_u16[i + 3];
+                if next == b'=' as u16 || next == b'!' as u16 {
+                    i += 1;
+                    continue;
+                }
+            }
+
+            let mut j = i + 3;
+            while j < pattern_u16.len() && pattern_u16[j] != b'>' as u16 {
+                j += 1;
+            }
+
+            if j < pattern_u16.len() {
+                if contains_lone_surrogate(&pattern_u16[i + 3..j]) {
+                    return Err(raise_syntax_error!("Invalid token at named capture group identifier"));
+                }
+                i = j;
+            }
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 pub fn is_regex_object(obj: &JSObjectDataPtr) -> bool {
     internal_get_regex_pattern(obj).is_ok()
 }
@@ -126,6 +178,10 @@ fn create_regexp_object_from_parts<'gc>(
     if unicode && unicode_sets {
         return Err(raise_syntax_error!("Invalid RegExp flags: cannot use both 'u' and 'v'").into());
     }
+
+    // Validate named capture identifiers to reject malformed UTF-16 names
+    // (e.g. lone surrogates), matching Test262 expectations.
+    validate_named_group_identifiers(&pattern_u16).map_err(EvalError::from)?;
 
     let mut regress_flags = String::new();
     for c in flags.chars() {
@@ -341,6 +397,8 @@ pub(crate) fn handle_regexp_method<'gc>(
                     object_set_key_value(mc, &result_array, "0", &Value::String(full_match_u16))?;
 
                     let indices_array = if has_indices { Some(create_array(mc, env)?) } else { None };
+                    let mut groups_obj: Option<JSObjectDataPtr<'gc>> = None;
+                    let mut indices_groups_obj: Option<JSObjectDataPtr<'gc>> = None;
 
                     if let Some(indices) = &indices_array {
                         let match_indices = create_array(mc, env)?;
@@ -376,13 +434,55 @@ pub(crate) fn handle_regexp_method<'gc>(
                         }
                         group_index += 1;
                     }
+
+                    for (name, range_opt) in m.named_groups() {
+                        let groups = groups_obj.get_or_insert_with(|| new_js_object_data(mc));
+                        match range_opt {
+                            Some(range) => {
+                                let (cs, ce) = if mapping {
+                                    (map_index_back(&input_u16, range.start), map_index_back(&input_u16, range.end))
+                                } else {
+                                    (range.start, range.end)
+                                };
+                                let cap_str = input_u16[cs..ce].to_vec();
+                                object_set_key_value(mc, groups, name, &Value::String(cap_str))?;
+
+                                if let Some(indices) = &indices_array {
+                                    let indices_groups = indices_groups_obj.get_or_insert_with(|| new_js_object_data(mc));
+                                    let group_indices = create_array(mc, env)?;
+                                    object_set_key_value(mc, &group_indices, "0", &Value::Number(cs as f64))?;
+                                    object_set_key_value(mc, &group_indices, "1", &Value::Number(ce as f64))?;
+                                    set_array_length(mc, &group_indices, 2)?;
+                                    object_set_key_value(mc, indices_groups, name, &Value::Object(group_indices))?;
+                                    let _ = indices;
+                                }
+                            }
+                            None => {
+                                object_set_key_value(mc, groups, name, &Value::Undefined)?;
+                                if let Some(indices) = &indices_array {
+                                    let indices_groups = indices_groups_obj.get_or_insert_with(|| new_js_object_data(mc));
+                                    object_set_key_value(mc, indices_groups, name, &Value::Undefined)?;
+                                    let _ = indices;
+                                }
+                            }
+                        }
+                    }
                     set_array_length(mc, &result_array, group_index)?;
 
                     object_set_key_value(mc, &result_array, "index", &Value::Number(orig_start as f64))?;
                     object_set_key_value(mc, &result_array, "input", &Value::String(input_u16.clone()))?;
-                    object_set_key_value(mc, &result_array, "groups", &Value::Undefined)?;
+                    if let Some(groups) = groups_obj {
+                        object_set_key_value(mc, &result_array, "groups", &Value::Object(groups))?;
+                    } else {
+                        object_set_key_value(mc, &result_array, "groups", &Value::Undefined)?;
+                    }
 
                     if let Some(indices) = indices_array {
+                        if let Some(indices_groups) = indices_groups_obj {
+                            object_set_key_value(mc, &indices, "groups", &Value::Object(indices_groups))?;
+                        } else {
+                            object_set_key_value(mc, &indices, "groups", &Value::Undefined)?;
+                        }
                         object_set_key_value(mc, &result_array, "indices", &Value::Object(indices))?;
                     }
 

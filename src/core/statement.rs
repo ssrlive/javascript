@@ -196,7 +196,7 @@ pub enum Expr {
     Comma(Box<Expr>, Box<Expr>),
     Function(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
     Call(Box<Expr>, Vec<Expr>),
-    DynamicImport(Box<Expr>),
+    DynamicImport(Box<Expr>, Option<Box<Expr>>),
     ValuePlaceholder,
 }
 

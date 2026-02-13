@@ -1536,6 +1536,8 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         }
     }
 
+    consume_import_attributes_clause(t, index)?;
+
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
         *index += 1;
     }
@@ -1545,6 +1547,43 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         line: t[start].line,
         column: t[start].column,
     })
+}
+
+fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Result<(), JSError> {
+    if *index >= t.len() {
+        return Ok(());
+    }
+
+    let is_with_clause = matches!(t[*index].token, Token::With) || matches!(&t[*index].token, Token::Identifier(s) if s == "with");
+
+    if !is_with_clause {
+        return Ok(());
+    }
+
+    *index += 1; // consume `with`
+
+    if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
+        return Err(raise_parse_error!("Expected '{' after import attributes 'with'"));
+    }
+
+    let mut depth = 0_i32;
+    while *index < t.len() {
+        match t[*index].token {
+            Token::LBrace => depth += 1,
+            Token::RBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    *index += 1; // consume final `}`
+                    return Ok(());
+                }
+            }
+            Token::EOF => return Err(raise_parse_error!("Unterminated import attributes clause")),
+            _ => {}
+        }
+        *index += 1;
+    }
+
+    Err(raise_parse_error!("Unterminated import attributes clause"))
 }
 
 fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
@@ -3620,11 +3659,25 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 // Dynamic import
                 *index += 1; // consume '('
                 let arg = parse_assignment(tokens, index)?;
+                // Optional second argument (e.g. import attributes/options).
+                let mut options_arg: Option<Box<Expr>> = None;
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
+                    *index += 1; // consume ','
+                    // Allow trailing comma: import(expr,)
+                    if !(*index < tokens.len() && matches!(tokens[*index].token, Token::RParen)) {
+                        let opt = parse_assignment(tokens, index)?;
+                        options_arg = Some(Box::new(opt));
+                        // Allow optional trailing comma after second arg: import(expr, opt,)
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
+                            *index += 1; // consume trailing ','
+                        }
+                    }
+                }
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                     return Err(raise_parse_error!("Expected ')' after import(...)"));
                 }
                 *index += 1; // consume ')'
-                Expr::DynamicImport(Box::new(arg))
+                Expr::DynamicImport(Box::new(arg), options_arg)
             } else {
                 Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column))
             }

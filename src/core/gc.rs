@@ -50,8 +50,11 @@ pub fn trace_expr<'gc, T: GcTrace<'gc>>(context: &mut T, expr: &Expr) {
                 trace_expr(context, arg);
             }
         }
-        Expr::DynamicImport(a) => {
+        Expr::DynamicImport(a, b) => {
             trace_expr(context, a);
+            if let Some(b) = b {
+                trace_expr(context, b);
+            }
         }
         Expr::Function(_, _, body) => {
             for stmt in body {

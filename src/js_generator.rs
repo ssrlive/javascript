@@ -639,6 +639,12 @@ fn replace_first_yield_in_expr(expr: &Expr, var_name: &str, replaced: &mut bool)
             Box::new(replace_first_yield_in_expr(b, var_name, replaced)),
             Box::new(replace_first_yield_in_expr(c, var_name, replaced)),
         ),
+        Expr::DynamicImport(specifier, options) => Expr::DynamicImport(
+            Box::new(replace_first_yield_in_expr(specifier, var_name, replaced)),
+            options
+                .as_ref()
+                .map(|o| Box::new(replace_first_yield_in_expr(o, var_name, replaced))),
+        ),
         Expr::Class(class_def) => Expr::Class(Box::new(replace_first_yield_in_class_def(class_def, var_name, replaced))),
         _ => expr.clone(),
     }
@@ -849,6 +855,7 @@ fn expr_contains_yield(e: &Expr) -> bool {
         | Expr::TypeOf(a)
         | Expr::Delete(a)
         | Expr::Void(a)
+        | Expr::Spread(a)
         | Expr::PostIncrement(a)
         | Expr::PostDecrement(a)
         | Expr::Increment(a)
@@ -858,8 +865,55 @@ fn expr_contains_yield(e: &Expr) -> bool {
         }
         Expr::OptionalCall(a, args) => expr_contains_yield(a) || args.iter().any(expr_contains_yield),
         Expr::OptionalIndex(a, b) => expr_contains_yield(a) || expr_contains_yield(b),
+        Expr::DynamicImport(specifier, options) => {
+            expr_contains_yield(specifier) || options.as_ref().map(|o| expr_contains_yield(o)).unwrap_or(false)
+        }
         Expr::Class(class_def) => expr_contains_yield_in_class_def(class_def),
         _ => false,
+    }
+}
+
+fn eval_prefix_until_first_yield<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<bool, EvalError<'gc>> {
+    match expr {
+        Expr::Yield(_) | Expr::YieldStar(_) | Expr::Await(_) => Ok(true),
+        Expr::Comma(left, right) => {
+            if eval_prefix_until_first_yield(mc, env, left)? {
+                return Ok(true);
+            }
+            eval_prefix_until_first_yield(mc, env, right)
+        }
+        Expr::DynamicImport(specifier, options) => {
+            if eval_prefix_until_first_yield(mc, env, specifier)? {
+                return Ok(true);
+            }
+            if let Some(options_expr) = options
+                && eval_prefix_until_first_yield(mc, env, options_expr)?
+            {
+                return Ok(true);
+            }
+            let _ = crate::core::evaluate_expr(mc, env, expr)?;
+            Ok(false)
+        }
+        Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
+            if eval_prefix_until_first_yield(mc, env, callee)? {
+                return Ok(true);
+            }
+            for arg in args {
+                if eval_prefix_until_first_yield(mc, env, arg)? {
+                    return Ok(true);
+                }
+            }
+            let _ = crate::core::evaluate_expr(mc, env, expr)?;
+            Ok(false)
+        }
+        _ => {
+            if expr_contains_yield(expr) {
+                Ok(true)
+            } else {
+                let _ = crate::core::evaluate_expr(mc, env, expr)?;
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -1190,6 +1244,9 @@ fn find_yield_in_expr(e: &Expr) -> Option<(YieldKind, Option<Box<Expr>>)> {
             .or_else(|| find_yield_in_expr(c)),
         Expr::OptionalCall(a, args) => find_yield_in_expr(a).or_else(|| args.iter().find_map(find_yield_in_expr)),
         Expr::OptionalIndex(a, b) => find_yield_in_expr(a).or_else(|| find_yield_in_expr(b)),
+        Expr::DynamicImport(specifier, options) => {
+            find_yield_in_expr(specifier).or_else(|| options.as_ref().and_then(|o| find_yield_in_expr(o)))
+        }
         Expr::Class(class_def) => find_yield_in_class_def(class_def),
         _ => None,
     }
@@ -1673,6 +1730,16 @@ pub fn generator_next<'gc>(
                     // env to hold parameter bindings for later resume.
                     Some(func_env)
                 };
+
+                // For yields nested inside expression statements (for example,
+                // `a(), import(x, yield), b()`), execute left-to-right side effects
+                // up to the first yield before suspending.
+                if idx < gen_obj.body.len()
+                    && let StatementKind::Expr(expr_stmt) = &*gen_obj.body[idx].kind
+                    && yield_inner.is_none()
+                {
+                    let _ = eval_prefix_until_first_yield(mc, &func_env, expr_stmt)?;
+                }
 
                 // Suspend at the containing top-level statement index and store the
                 // pre-execution environment so that resumed execution can reuse it.

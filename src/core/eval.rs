@@ -43,6 +43,23 @@ pub enum ControlFlow<'gc> {
     Continue(Option<String>),
 }
 
+fn is_global_environment<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
+    env_get_own(env, "globalThis").is_some()
+}
+
+fn find_global_environment<'gc>(env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'gc> {
+    let mut cur = Some(*env);
+    let mut last = *env;
+    while let Some(e) = cur {
+        last = e;
+        if is_global_environment(&e) {
+            return e;
+        }
+        cur = e.borrow().prototype;
+    }
+    last
+}
+
 pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     match val {
         Value::Number(n) => Ok(*n),
@@ -1105,7 +1122,7 @@ fn hoist_name<'gc>(
         // If target is global object, use CreateGlobalVarBinding semantics
         // For indirect eval, CreateGlobalVarBinding(..., true) should be used which creates
         // a configurable=true property. Detect indirect eval marker on the global env.
-        if target_env.borrow().prototype.is_none() {
+        if is_global_environment(&target_env) {
             // If creating a global var binding during an indirect eval, the spec
             // requires we detect conflicts with existing global lexical
             // declarations and throw a SyntaxError. Check for that here before
@@ -1157,23 +1174,15 @@ fn hoist_name<'gc>(
         // If the binding already exists in a non-global function scope, we do
         // not need to perform global lexical conflict checks. Var declarations
         // inside functions may share names with global lexicals without error.
-        if target_env.borrow().prototype.is_some() {
+        if !is_global_environment(&target_env) {
             return Ok(());
         }
         // If there's already an own binding, then detect the special case where an
         // existing lexical declaration (TDZ / Uninitialized) blocks creation of a
         // global var binding for indirect evals in non-strict mode. The ECMAScript
         // semantics require a SyntaxError in that situation.
-        // Compute the topmost global environment (prototype == None).
-        let mut top_env = Some(*env);
-        let mut global_env = None;
-        while let Some(e) = top_env {
-            if e.borrow().prototype.is_none() {
-                global_env = Some(e);
-                break;
-            }
-            top_env = e.borrow().prototype;
-        }
+        // Compute the global environment (own globalThis binding).
+        let global_env = Some(find_global_environment(env));
 
         if let Some(g_env) = global_env {
             // Use the provided is_indirect_eval flag to decide whether to apply
@@ -1555,7 +1564,7 @@ fn hoist_declarations<'gc>(
                     object_set_key_value(mc, func_obj, "name", &Value::String(utf8_to_utf16(name)))?;
                     // CreateGlobalFunctionBinding semantics when executing in the global environment
                     let key = crate::core::PropertyKey::String(name.clone());
-                    if env.borrow().prototype.is_none() {
+                    if is_global_environment(env) {
                         let existing = get_own_property(env, &key);
                         log::trace!(
                             "hoist_declarations: creating global function binding for '{}' existing={:?} is_configurable={}",
@@ -1613,9 +1622,16 @@ fn hoist_declarations<'gc>(
                     log::trace!("hoist_declarations: hoisted class lexical '{}' into env {:p}", class_def.name, env);
                 }
                 StatementKind::Import(specifiers, _) => {
+                    let is_import_defer_marker_form = specifiers
+                        .iter()
+                        .any(|s| matches!(s, ImportSpecifier::Default(name) if name == "defer"))
+                        && specifiers.iter().any(|s| matches!(s, ImportSpecifier::Namespace(_)));
                     for spec in specifiers {
                         match spec {
                             ImportSpecifier::Default(name) => {
+                                if is_import_defer_marker_form && name == "defer" {
+                                    continue;
+                                }
                                 object_set_key_value(mc, env, name, &Value::Uninitialized)?;
                             }
                             ImportSpecifier::Named(name, alias) => {
@@ -2090,10 +2106,7 @@ pub fn evaluate_statements_with_labels<'gc>(
     if is_indirect_eval && global_code_mode {
         // $262.evalScript path: use the shared global lexical environment
         // so that lexical bindings persist across evalScript calls.
-        let mut global_env = *env;
-        while let Some(proto) = global_env.borrow().prototype {
-            global_env = proto;
-        }
+        let global_env = find_global_environment(env);
         log::trace!(
             "evaluate_statements: is_indirect_eval && global_code_mode: global_env={:p}",
             global_env
@@ -2171,16 +2184,8 @@ pub fn evaluate_statements_with_labels<'gc>(
             // is the global env, but var/function/var-hoisted declarations still
             // go into the global variable environment.
             log::trace!("evaluate_statements: non-strict indirect eval - create lex env for lexical bindings");
-            // Find topmost global environment (prototype == None)
-            let mut top_env = Some(*env);
-            let mut global_env = *env;
-            while let Some(e) = top_env {
-                if e.borrow().prototype.is_none() {
-                    global_env = e;
-                    break;
-                }
-                top_env = e.borrow().prototype;
-            }
+            // Find global environment (own globalThis binding)
+            let global_env = find_global_environment(env);
 
             log::trace!(
                 "evaluate_statements: computed global_env ptr={:p} extensible={}",
@@ -2237,9 +2242,16 @@ pub fn evaluate_statements_with_labels<'gc>(
                         );
                     }
                     StatementKind::Import(specifiers, _) => {
+                        let is_import_defer_marker_form = specifiers
+                            .iter()
+                            .any(|s| matches!(s, ImportSpecifier::Default(name) if name == "defer"))
+                            && specifiers.iter().any(|s| matches!(s, ImportSpecifier::Namespace(_)));
                         for spec in specifiers {
                             match spec {
                                 ImportSpecifier::Default(name) => {
+                                    if is_import_defer_marker_form && name == "defer" {
+                                        continue;
+                                    }
                                     object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                                 }
                                 ImportSpecifier::Named(name, alias) => {
@@ -2261,9 +2273,10 @@ pub fn evaluate_statements_with_labels<'gc>(
         }
     } else {
         // Not an indirect eval: apply global-code mode only at the root
-        // global environment (prototype.is_none()) to avoid re-creating
+        // global environment (own globalThis binding) to avoid re-creating
         // the lex_env for nested function/block scope calls.
-        if global_code_mode && env.borrow().prototype.is_none() {
+        let is_root_global_env = crate::core::env_get_own(env, "globalThis").is_some();
+        if global_code_mode && is_root_global_env {
             let lex_env = crate::core::new_js_object_data(mc);
             lex_env.borrow_mut(mc).prototype = Some(*env);
             object_set_key_value(mc, &lex_env, "this", &Value::Object(*env))?;
@@ -2395,10 +2408,7 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
 
     if is_indirect_eval && global_code_mode {
         // $262.evalScript path: use the shared global lexical environment
-        let mut global_env = *env;
-        while let Some(proto) = global_env.borrow().prototype {
-            global_env = proto;
-        }
+        let global_env = find_global_environment(env);
         let lex_env = if let Some(v) = object_get_key_value(&global_env, "__global_lex_env")
             && let Value::Object(obj) = &*v.borrow()
         {
@@ -2473,9 +2483,16 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
                         object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
                     }
                     StatementKind::Import(specifiers, _) => {
+                        let is_import_defer_marker_form = specifiers
+                            .iter()
+                            .any(|s| matches!(s, ImportSpecifier::Default(name) if name == "defer"))
+                            && specifiers.iter().any(|s| matches!(s, ImportSpecifier::Namespace(_)));
                         for spec in specifiers {
                             match spec {
                                 ImportSpecifier::Default(name) => {
+                                    if is_import_defer_marker_form && name == "defer" {
+                                        continue;
+                                    }
                                     object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
                                 }
                                 ImportSpecifier::Named(name, alias) => {
@@ -2494,52 +2511,55 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
 
             exec_env = lex_env;
         }
-    } else if global_code_mode && env.borrow().prototype.is_none() {
-        let lex_env = crate::core::new_js_object_data(mc);
-        lex_env.borrow_mut(mc).prototype = Some(*env);
-        object_set_key_value(mc, &lex_env, "this", &Value::Object(*env))?;
-
-        // Store the global lex env for later use by $262.evalScript
-        object_set_key_value(mc, env, "__global_lex_env", &Value::Object(lex_env))?;
-
-        if starts_with_use_strict {
-            env_set_strictness(mc, &lex_env, true)?;
-        }
-
-        hoist_declarations(mc, env, statements, true, false)?;
-
-        // Initialize let/const/class bindings directly on lex_env using
-        // object_set_key_value (not env_set) to avoid walking the prototype
-        // chain and accidentally overwriting same-named globals.
-        for stmt in statements {
-            match &*stmt.kind {
-                StatementKind::Let(decls) => {
-                    for (name, _) in decls {
-                        object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
-                        lex_env.borrow_mut(mc).set_lexical(name.clone());
-                    }
-                }
-                StatementKind::Const(decls) => {
-                    for (name, _) in decls {
-                        object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
-                        lex_env.borrow_mut(mc).set_lexical(name.clone());
-                    }
-                }
-                StatementKind::Class(class_def) => {
-                    object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
-                    lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
-                }
-                _ => {}
-            }
-        }
-
-        exec_env = lex_env;
     } else {
-        if starts_with_use_strict {
-            env_set_strictness(mc, &exec_env, true)?;
-        }
+        let is_root_global_env = crate::core::env_get_own(env, "globalThis").is_some();
+        if global_code_mode && is_root_global_env {
+            let lex_env = crate::core::new_js_object_data(mc);
+            lex_env.borrow_mut(mc).prototype = Some(*env);
+            object_set_key_value(mc, &lex_env, "this", &Value::Object(*env))?;
 
-        hoist_declarations(mc, &exec_env, statements, false, false)?;
+            // Store the global lex env for later use by $262.evalScript
+            object_set_key_value(mc, env, "__global_lex_env", &Value::Object(lex_env))?;
+
+            if starts_with_use_strict {
+                env_set_strictness(mc, &lex_env, true)?;
+            }
+
+            hoist_declarations(mc, env, statements, true, false)?;
+
+            // Initialize let/const/class bindings directly on lex_env using
+            // object_set_key_value (not env_set) to avoid walking the prototype
+            // chain and accidentally overwriting same-named globals.
+            for stmt in statements {
+                match &*stmt.kind {
+                    StatementKind::Let(decls) => {
+                        for (name, _) in decls {
+                            object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                            lex_env.borrow_mut(mc).set_lexical(name.clone());
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                            lex_env.borrow_mut(mc).set_lexical(name.clone());
+                        }
+                    }
+                    StatementKind::Class(class_def) => {
+                        object_set_key_value(mc, &lex_env, &class_def.name, &Value::Uninitialized)?;
+                        lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                    }
+                    _ => {}
+                }
+            }
+
+            exec_env = lex_env;
+        } else {
+            if starts_with_use_strict {
+                env_set_strictness(mc, &exec_env, true)?;
+            }
+
+            hoist_declarations(mc, &exec_env, statements, false, false)?;
+        }
     }
 
     // Debug: show any const bindings hoisted into the execution environment
@@ -2573,10 +2593,18 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
     }
 
     let mut last_value = Value::Undefined;
+    let mut flushed_defer_preloads = false;
     for stmt in statements {
+        if !flushed_defer_preloads && !matches!(&*stmt.kind, StatementKind::Import(_, _)) {
+            crate::js_module::flush_deferred_async_preload_modules(mc, &exec_env)?;
+            flushed_defer_preloads = true;
+        }
         if let Some(cf) = eval_res(mc, stmt, &mut last_value, &exec_env, labels, own_labels)? {
             return Ok((cf, last_value));
         }
+    }
+    if !flushed_defer_preloads {
+        crate::js_module::flush_deferred_async_preload_modules(mc, &exec_env)?;
     }
     Ok((ControlFlow::Normal(last_value.clone()), last_value))
 }
@@ -2847,7 +2875,7 @@ fn eval_res<'gc>(
                         .unwrap_or(false);
 
                     // Do not treat top-level dynamic import() as the script result unless eval opted in.
-                    if matches!(expr, Expr::DynamicImport(_)) && suppress_dynamic_import && !allow_dynamic_import {
+                    if matches!(expr, Expr::DynamicImport(..)) && suppress_dynamic_import && !allow_dynamic_import {
                         *last_value = Value::Undefined;
                     } else {
                         *last_value = val;
@@ -2970,6 +2998,63 @@ fn eval_res<'gc>(
                 None
             };
 
+            let has_default_defer = specifiers
+                .iter()
+                .any(|s| matches!(s, ImportSpecifier::Default(name) if name == "defer"));
+
+            let defer_namespace_name = if has_default_defer {
+                specifiers.iter().find_map(|s| {
+                    if let ImportSpecifier::Namespace(name) = s {
+                        Some(name.as_str())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+            let is_import_defer_marker_form = has_default_defer && defer_namespace_name.is_some();
+
+            if is_import_defer_marker_form && let Some(ns_name) = defer_namespace_name {
+                let deferred_ns = crate::js_module::load_module_deferred_namespace(mc, source, base_path.as_deref(), Some(*env))
+                    .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
+                env_set(mc, env, ns_name, &deferred_ns)?;
+
+                let source_path = crate::js_module::resolve_module_path(source, base_path.as_deref())
+                    .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()))?;
+
+                let additional_modules = crate::js_module::gather_async_transitive_dependencies(source, base_path.as_deref())
+                    .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()))?;
+                for additional_module in additional_modules {
+                    let is_source_module = additional_module == source_path;
+                    if is_source_module {
+                        crate::js_module::load_module(mc, additional_module.as_str(), None, Some(*env))
+                            .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
+                    } else if crate::js_module::module_has_direct_async_dependency(additional_module.as_str(), None)
+                        .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()))?
+                    {
+                        crate::js_module::queue_deferred_async_preload_module(mc, env, additional_module.as_str())
+                            .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
+                    } else {
+                        crate::js_module::preload_async_transitive_module(mc, additional_module.as_str(), None, Some(*env))
+                            .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
+                    }
+                }
+            }
+
+            let should_load_eager = specifiers.is_empty()
+                || specifiers.iter().any(|s| match s {
+                    ImportSpecifier::Named(_, _) => true,
+                    ImportSpecifier::Default(name) if name != "defer" => true,
+                    ImportSpecifier::Default(_) => !is_import_defer_marker_form,
+                    ImportSpecifier::Namespace(name) => !is_import_defer_marker_form || Some(name.as_str()) != defer_namespace_name,
+                });
+
+            if !should_load_eager {
+                return Ok(None);
+            }
+
             let exports = crate::js_module::load_module(mc, source, base_path.as_deref(), Some(*env))
                 .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
 
@@ -2983,10 +3068,16 @@ fn eval_res<'gc>(
                             env_set(mc, env, binding_name, &val)?;
                         }
                         ImportSpecifier::Default(name) => {
+                            if is_import_defer_marker_form && name == "defer" {
+                                continue;
+                            }
                             let val = get_property_with_accessors(mc, env, &exports_obj, "default")?;
                             env_set(mc, env, name, &val)?;
                         }
                         ImportSpecifier::Namespace(name) => {
+                            if is_import_defer_marker_form && Some(name.as_str()) == defer_namespace_name {
+                                continue;
+                            }
                             env_set(mc, env, name, &Value::Object(exports_obj))?;
                         }
                     }
@@ -3641,7 +3732,9 @@ fn eval_res<'gc>(
         }
         StatementKind::Throw(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
-            if let Value::Object(obj) = val {
+            if is_error(&val)
+                && let Value::Object(obj) = val
+            {
                 let mut filename = String::new();
                 if let Some(val_ptr) = object_get_key_value(env, "__filepath")
                     && let Value::String(s) = &*val_ptr.borrow()
@@ -6207,7 +6300,9 @@ fn refresh_error_by_additional_stack_frame<'gc>(
             *l = Some(line);
             *c = Some(column);
         }
-        if let Value::Object(obj) = val {
+        if is_error(val)
+            && let Value::Object(obj) = val
+        {
             // For user-defined/non-native thrown objects (e.g., Test262Error),
             // prefer reporting the caller site as the top-level JS location so
             // test harnesses can point at the assertion call site. For native
@@ -9845,7 +9940,7 @@ fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has
         | Expr::Spread(obj)
         | Expr::OptionalCall(obj, _)
         | Expr::TaggedTemplate(obj, ..)
-        | Expr::DynamicImport(obj)
+        | Expr::DynamicImport(obj, _)
         | Expr::BitAndAssign(obj, _) => {
             walk_expr(obj, has_super_call, has_super_prop, has_new_target, has_arguments);
         }
@@ -10239,7 +10334,7 @@ fn handle_eval_function<'gc>(
         // checks for FunctionDeclarations per spec: if any function cannot be declared
         // as a global (e.g., conflicts with non-configurable existing property such
         // as 'NaN'), throw a TypeError and do not create any global functions.
-        if env.borrow().prototype.is_none() {
+        if is_global_environment(env) {
             check_global_declarations(env, &statements)?;
         }
 
@@ -10435,7 +10530,7 @@ fn handle_eval_function<'gc>(
         };
 
         // Run with temporary global strictness clearing if needed (Global Scope + Non-Strict Eval)
-        let res = if env.borrow().prototype.is_none() && !is_strict_eval {
+        let res = if is_global_environment(env) && !is_strict_eval {
             run_with_global_strictness_cleared(mc, env, run_stmts)
         } else {
             run_stmts()
@@ -10974,10 +11069,7 @@ fn lookup_or_create_import_meta<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     // `import.meta` as a per-module ordinary object stored under env.__import_meta.
     // Prefer the immediate environment but fall back to the root global environment.
     let meta = object_get_key_value(env, "__import_meta").or_else(|| {
-        let mut root = *env;
-        while let Some(proto) = root.borrow().prototype {
-            root = proto;
-        }
+        let root = find_global_environment(env);
         object_get_key_value(&root, "__import_meta")
     });
     if let Some(meta_rc) = meta
@@ -10989,10 +11081,7 @@ fn lookup_or_create_import_meta<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 
     // Fallback: create an import.meta object on the root environment
     log::trace!("lookup_or_create_import_meta: creating fallback import.meta on root env");
-    let mut root = *env;
-    while let Some(proto) = root.borrow().prototype {
-        root = proto;
-    }
+    let root = find_global_environment(env);
     let import_meta = new_js_object_data(mc);
     if let Some(cell) = env_get(&root, "__filepath")
         && let Value::String(s) = cell.borrow().clone()
@@ -11179,6 +11268,11 @@ fn evaluate_expr_call<'gc>(
                 // meaningful 'this' base value we can evaluate safely, so use `None` to indicate
                 // a plain function call (this -> undefined in strict mode).
                 (import_meta_val, None)
+            } else if let crate::core::Expr::Var(name, ..) = &**obj_expr
+                && name == "import"
+                && key == "defer"
+            {
+                (Value::Function("import.defer".to_string()), None)
             } else {
                 let obj_val = if expr_contains_optional_chain(obj_expr) {
                     match evaluate_optional_chain_base(mc, env, obj_expr)? {
@@ -11478,11 +11572,7 @@ fn evaluate_expr_call<'gc>(
     // declarations that live in the caller's global scope.
     let is_indirect_eval_call = matches!(func_val, Value::Function(ref name) if name == "eval") && !is_direct_eval;
     let env_for_call = if is_indirect_eval_call {
-        let mut t = *env;
-        while let Some(proto) = t.borrow().prototype {
-            t = proto;
-        }
-        t
+        find_global_environment(env)
     } else {
         *env
     };
@@ -12136,15 +12226,7 @@ fn evaluate_optional_chain_base<'gc>(
                 let result = match f_val {
                     Value::Function(name) => {
                         // Optional call invoking `eval` is always an indirect eval — use global env.
-                        let env_for_call = if name == "eval" {
-                            let mut t = *env;
-                            while let Some(proto) = t.borrow().prototype {
-                                t = proto;
-                            }
-                            t
-                        } else {
-                            *env
-                        };
+                        let env_for_call = if name == "eval" { find_global_environment(env) } else { *env };
                         let call_env = crate::js_class::prepare_call_env_with_this(
                             mc,
                             Some(&env_for_call),
@@ -12207,15 +12289,7 @@ fn evaluate_optional_chain_base<'gc>(
                 let result = match f_val {
                     Value::Function(name) => {
                         // Optional call invoking `eval` is always an indirect eval — use global env.
-                        let env_for_call = if name == "eval" {
-                            let mut t = *env;
-                            while let Some(proto) = t.borrow().prototype {
-                                t = proto;
-                            }
-                            t
-                        } else {
-                            *env
-                        };
+                        let env_for_call = if name == "eval" { find_global_environment(env) } else { *env };
                         let call_env = crate::js_class::prepare_call_env_with_this(
                             mc,
                             Some(&env_for_call),
@@ -12296,15 +12370,7 @@ fn evaluate_optional_chain_base<'gc>(
                 let result = match f_val {
                     Value::Function(name) => {
                         // Optional call invoking `eval` is always an indirect eval — use global env.
-                        let env_for_call = if name == "eval" {
-                            let mut t = *env;
-                            while let Some(proto) = t.borrow().prototype {
-                                t = proto;
-                            }
-                            t
-                        } else {
-                            *env
-                        };
+                        let env_for_call = if name == "eval" { find_global_environment(env) } else { *env };
                         let call_env = prepare_call_env_with_this(
                             mc,
                             Some(&env_for_call),
@@ -12376,15 +12442,7 @@ fn evaluate_optional_chain_base<'gc>(
                 let result = match f_val {
                     Value::Function(name) => {
                         // Optional call invoking `eval` is always an indirect eval — use global env.
-                        let env_for_call = if name == "eval" {
-                            let mut t = *env;
-                            while let Some(proto) = t.borrow().prototype {
-                                t = proto;
-                            }
-                            t
-                        } else {
-                            *env
-                        };
+                        let env_for_call = if name == "eval" { find_global_environment(env) } else { *env };
                         let call_env = prepare_call_env_with_this(
                             mc,
                             Some(&env_for_call),
@@ -12416,15 +12474,7 @@ fn evaluate_optional_chain_base<'gc>(
                 let result = match left_val {
                     Value::Function(name) => {
                         // Optional call invoking `eval` is always an indirect eval — use global env.
-                        let env_4_call = if name == "eval" {
-                            let mut t = *env;
-                            while let Some(proto) = t.borrow().prototype {
-                                t = proto;
-                            }
-                            t
-                        } else {
-                            *env
-                        };
+                        let env_4_call = if name == "eval" { find_global_environment(env) } else { *env };
                         let call_env = prepare_call_env_with_this(mc, Some(&env_4_call), None, None, &[], None, Some(&env_4_call), None)?;
                         // Dispatch, handling indirect global `eval` marking when necessary.
                         call_named_eval_or_dispatch(mc, &env_4_call, &call_env, &name, None, &eval_args)?
@@ -12761,18 +12811,34 @@ fn evaluate_expr_binary<'gc>(
                     return Ok(Value::Boolean(present));
                 }
 
-                let key = match l_val {
-                    Value::String(s) => utf16_to_utf8(&s),
-                    _ => value_to_string(&l_val),
+                let prop_key = match l_val.clone() {
+                    Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                    Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                    Value::BigInt(b) => PropertyKey::String(b.to_string()),
+                    Value::Symbol(s) => PropertyKey::Symbol(s),
+                    other => PropertyKey::String(value_to_string(&other)),
                 };
+                if let PropertyKey::String(s) = &prop_key {
+                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                    let mut proto = obj.borrow().prototype;
+                    while let Some(p) = proto {
+                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &p, Some(s.as_str()))?;
+                        proto = p.borrow().prototype;
+                    }
+                }
                 // Handle Proxy's has trap if present
                 if let Some(proxy_ptr) = get_own_property(&obj, "__proxy__")
                     && let Value::Proxy(p) = &*proxy_ptr.borrow()
                 {
-                    let present = crate::js_proxy::proxy_has_property(mc, p, &key)?;
+                    let key_str = match &prop_key {
+                        PropertyKey::String(s) => s.clone(),
+                        PropertyKey::Symbol(_) => return Ok(Value::Boolean(false)),
+                        PropertyKey::Private(..) => return Ok(Value::Boolean(false)),
+                    };
+                    let present = crate::js_proxy::proxy_has_property(mc, p, &key_str)?;
                     return Ok(Value::Boolean(present));
                 }
-                let present = object_get_key_value(&obj, key).is_some();
+                let present = object_get_key_value(&obj, prop_key).is_some();
                 Ok(Value::Boolean(present))
             } else {
                 log::trace!("DEBUG-IN: RHS is not object: {:?}", r_val);
@@ -13441,7 +13507,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::ArrowFunction(params, body) => evaluate_expr_arrow_function(mc, env, params, body),
         Expr::Call(func_expr, args) => evaluate_expr_call(mc, env, func_expr, args),
         Expr::New(ctor, args) => evaluate_expr_new(mc, env, ctor, args),
-        Expr::DynamicImport(specifier) => evaluate_expr_dynamic_import(mc, env, specifier),
+        Expr::DynamicImport(specifier, options) => evaluate_expr_dynamic_import(mc, env, specifier, options.as_deref()),
         Expr::Property(obj_expr, key) => evaluate_expr_property(mc, env, obj_expr, key),
         Expr::PrivateMember(obj_expr, key) => evaluate_expr_private_member(mc, env, obj_expr, key),
         Expr::OptionalPrivateMember(obj_expr, key) => evaluate_expr_optional_private_member(mc, env, obj_expr, key),
@@ -13959,10 +14025,20 @@ fn evaluate_expr_dynamic_import<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     specifier: &Expr,
+    options: Option<&Expr>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate the specifier before creating the promise capability so
     // abrupt completion at this stage throws synchronously.
     let spec_val = evaluate_expr(mc, env, specifier)?;
+
+    // Evaluate optional second parameter before promise creation.
+    // Per EvaluateImportCall semantics, abrupt completion during parameter
+    // evaluation is forwarded synchronously.
+    let options_val = if let Some(options_expr) = options {
+        Some(evaluate_expr(mc, env, options_expr)?)
+    } else {
+        None
+    };
 
     let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
     let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
@@ -13975,6 +14051,55 @@ fn evaluate_expr_dynamic_import<'gc>(
             }
             _ => crate::core::value_to_string(&prim),
         };
+
+        // Stage import-attributes option handling enough to preserve observable
+        // side effects required by Test262: read `with`/`assert`, enumerate own
+        // enumerable string keys, and Get each value.
+        if let Some(opt) = &options_val
+            && !matches!(opt, Value::Undefined)
+        {
+            let options_obj = match opt {
+                Value::Object(o) => *o,
+                _ => return Err(raise_type_error!("Import options must be an object").into()),
+            };
+
+            let attrs_val = get_property_with_accessors(mc, env, &options_obj, "with")
+                .or_else(|_| get_property_with_accessors(mc, env, &options_obj, "assert"))?;
+
+            if !matches!(attrs_val, Value::Undefined) {
+                let attrs_obj = match attrs_val {
+                    Value::Object(o) => o,
+                    _ => return Err(raise_type_error!("Import attributes must be an object").into()),
+                };
+
+                if let Some(proxy_ptr) = get_own_property(&attrs_obj, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
+                {
+                    let keys = crate::js_proxy::proxy_own_keys(mc, proxy)?;
+                    for key in keys {
+                        if !matches!(&key, PropertyKey::String(_)) {
+                            continue;
+                        }
+                        let is_enum = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false);
+                        if !is_enum {
+                            continue;
+                        }
+                        let _ = crate::js_proxy::proxy_get_property(mc, proxy, &key)?;
+                    }
+                } else {
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &attrs_obj)?;
+                    for key in ordered {
+                        if !matches!(&key, PropertyKey::String(_)) {
+                            continue;
+                        }
+                        if !attrs_obj.borrow().is_enumerable(&key) {
+                            continue;
+                        }
+                        let _ = get_property_with_accessors(mc, env, &attrs_obj, key)?;
+                    }
+                }
+            }
+        }
 
         let base_path = if let Some(cell) = env_get(env, "__filepath")
             && let Value::String(s) = cell.borrow().clone()
@@ -14016,10 +14141,7 @@ fn evaluate_expr_property<'gc>(
     {
         // Prefer the immediate environment but fall back to the root global environment
         let meta_rc = crate::core::object_get_key_value(env, "__import_meta").or_else(|| {
-            let mut root = *env;
-            while let Some(proto) = root.borrow().prototype {
-                root = proto;
-            }
+            let root = find_global_environment(env);
             crate::core::object_get_key_value(&root, "__import_meta")
         });
         if let Some(meta_rc) = meta_rc
@@ -14035,10 +14157,7 @@ fn evaluate_expr_property<'gc>(
             // `import.meta` accessors always produce an ordinary object in
             // module contexts. Use __filepath on the root env to populate the
             // 'url' property when available.
-            let mut root = *env;
-            while let Some(proto) = root.borrow().prototype {
-                root = proto;
-            }
+            let root = find_global_environment(env);
             // Create a new ordinary object for import.meta
             let import_meta = new_js_object_data(mc);
             if let Some(cell) = env_get(&root, "__filepath")
@@ -14049,6 +14168,13 @@ fn evaluate_expr_property<'gc>(
             object_set_key_value(mc, &root, "__import_meta", &Value::Object(import_meta))?;
             return Ok(Value::Object(import_meta));
         }
+    }
+
+    if let crate::core::Expr::Var(name, _, _) = obj_expr
+        && name == "import"
+        && key == "defer"
+    {
+        return Ok(Value::Function("import.defer".to_string()));
     }
 
     let obj_val = if expr_contains_optional_chain(obj_expr) {
@@ -14353,15 +14479,7 @@ fn evaluate_expr_optional_call<'gc>(
 
                 match prop_val {
                     Value::Function(name) => {
-                        let env_for_call = if name == "eval" {
-                            let mut t = *env;
-                            while let Some(proto) = t.borrow().prototype {
-                                t = proto;
-                            }
-                            t
-                        } else {
-                            *env
-                        };
+                        let env_for_call = if name == "eval" { find_global_environment(env) } else { *env };
                         let call_env = prepare_call_env_with_this(
                             mc,
                             Some(&env_for_call),
@@ -14416,15 +14534,7 @@ fn evaluate_expr_optional_call<'gc>(
                 match f_val {
                     Value::Function(name) => {
                         // Optional call invoking `eval` is always an indirect eval — use global env.
-                        let env_for_call = if name == "eval" {
-                            let mut t = *env;
-                            while let Some(proto) = t.borrow().prototype {
-                                t = proto;
-                            }
-                            t
-                        } else {
-                            *env
-                        };
+                        let env_for_call = if name == "eval" { find_global_environment(env) } else { *env };
                         let call_env = prepare_call_env_with_this(
                             mc,
                             Some(&env_for_call),
@@ -14473,15 +14583,7 @@ fn evaluate_expr_optional_call<'gc>(
 
             match prop_val {
                 Value::Function(name) => {
-                    let env_4_call = if name == "eval" {
-                        let mut t = *env;
-                        while let Some(proto) = t.borrow().prototype {
-                            t = proto;
-                        }
-                        t
-                    } else {
-                        *env
-                    };
+                    let env_4_call = if name == "eval" { find_global_environment(env) } else { *env };
                     let c_e = prepare_call_env_with_this(mc, Some(&env_4_call), Some(&this_val), None, &[], None, Some(&env_4_call), None)?;
                     if name == "eval" {
                         let key = PropertyKey::String("__is_indirect_eval".to_string());
@@ -14540,15 +14642,7 @@ fn evaluate_expr_optional_call<'gc>(
             match f_val {
                 Value::Function(name) => {
                     // Optional call invoking `eval` is always an indirect eval — use global env.
-                    let env_4_call = if name == "eval" {
-                        let mut t = *env;
-                        while let Some(proto) = t.borrow().prototype {
-                            t = proto;
-                        }
-                        t
-                    } else {
-                        *env
-                    };
+                    let env_4_call = if name == "eval" { find_global_environment(env) } else { *env };
                     let c_e = prepare_call_env_with_this(mc, Some(&env_4_call), Some(&obj_val), None, &[], None, Some(&env_4_call), None)?;
                     Ok(call_named_eval_or_dispatch(
                         mc,
@@ -14579,15 +14673,7 @@ fn evaluate_expr_optional_call<'gc>(
                         match left_val {
                             Value::Function(name) => {
                                 // Optional call invoking `eval` is always an indirect eval — use global env.
-                                let e_4_c = if name == "eval" {
-                                    let mut t = *env;
-                                    while let Some(proto) = t.borrow().prototype {
-                                        t = proto;
-                                    }
-                                    t
-                                } else {
-                                    *env
-                                };
+                                let e_4_c = if name == "eval" { find_global_environment(env) } else { *env };
                                 let c_e = prepare_call_env_with_this(mc, Some(&e_4_c), None, None, &[], None, Some(&e_4_c), None)?;
                                 Ok(call_named_eval_or_dispatch(mc, &e_4_c, &c_e, &name, None, &eval_args)?)
                             }
@@ -14633,6 +14719,7 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                 return Err(raise_type_error!("Cannot delete property of null or undefined").into());
             }
             if let Value::Object(obj) = obj_val {
+                crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(key.as_str()))?;
                 let key_val = PropertyKey::from(key.to_string());
                 // Proxy wrapper: delegate to deleteProperty trap
                 if let Some(proxy_ptr) = get_own_property(&obj, "__proxy__")
@@ -14666,6 +14753,9 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                 _ => PropertyKey::from(value_to_string(&key_val_res)),
             };
             if let Value::Object(obj) = obj_val {
+                if let PropertyKey::String(s) = &key {
+                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                }
                 if obj.borrow().non_configurable.contains(&key) {
                     Err(crate::raise_type_error!(format!(
                         "Cannot delete non-configurable property '{}'",
@@ -15064,6 +15154,18 @@ fn evaluate_expr_index<'gc>(
 
         // Now perform the lookup on the captured super base
         if let Value::Object(super_obj) = super_base
+            && let PropertyKey::String(s) = &key
+            && !s.starts_with("__")
+        {
+            crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &super_obj, Some(s.as_str()))?;
+            let mut proto = super_obj.borrow().prototype;
+            while let Some(p) = proto {
+                crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &p, Some(s.as_str()))?;
+                proto = p.borrow().prototype;
+            }
+        }
+
+        if let Value::Object(super_obj) = super_base
             && let Some(prop_rc) = object_get_key_value(&super_obj, &key)
         {
             match &*prop_rc.borrow() {
@@ -15353,6 +15455,12 @@ pub(crate) fn get_property_with_accessors<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let key = &key.into();
 
+    if let PropertyKey::String(prop_name) = key
+        && !prop_name.starts_with("__")
+    {
+        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, obj, Some(prop_name.as_str()))?;
+    }
+
     if let PropertyKey::Private(..) = key {
         // Private members are not inherited, so check own properties only.
         // Walking the prototype chain would incorrectly find private static methods
@@ -15414,7 +15522,13 @@ pub(crate) fn get_property_with_accessors<'gc>(
 
     let mut cur = Some(*obj);
     while let Some(cur_obj) = cur {
-        if let Some(val_ptr) = object_get_key_value(&cur_obj, key) {
+        if let PropertyKey::String(prop_name) = key
+            && !prop_name.starts_with("__")
+        {
+            crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &cur_obj, Some(prop_name.as_str()))?;
+        }
+
+        if let Some(val_ptr) = get_own_property(&cur_obj, key) {
             let val = val_ptr.borrow().clone();
             return match val {
                 Value::Property { getter, value, .. } => {
@@ -15490,6 +15604,41 @@ pub(crate) fn get_property_with_accessors<'gc>(
 
         cur = cur_obj.borrow().prototype;
     }
+
+    // Global environment object uses `prototype` as scope-parent links. For reads
+    // like `this.hasOwnProperty(...)` in global code, fallback to Object.prototype
+    // methods without mutating the global env prototype chain.
+    if let PropertyKey::String(method_name) = key {
+        let is_global_env_obj = obj
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("globalThis".to_string()))
+            .and_then(|global_this_cell| {
+                if let Value::Object(global_this_obj) = &*global_this_cell.borrow()
+                    && Gc::ptr_eq(*global_this_obj, *obj)
+                {
+                    Some(true)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false);
+
+        if is_global_env_obj
+            && matches!(
+                method_name.as_str(),
+                "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable" | "toLocaleString" | "toString" | "valueOf"
+            )
+            && let Some(obj_ctor_val) = object_get_key_value(obj, "Object")
+            && let Value::Object(obj_ctor) = &*obj_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
+            && let Value::Object(proto_obj) = &*proto_val.borrow()
+            && let Some(method_rc) = object_get_key_value(proto_obj, method_name.as_str())
+        {
+            return Ok(method_rc.borrow().clone());
+        }
+    }
+
     log::debug!(
         "get_property_with_accessors: property not found, returning Undefined for key={:?}",
         key
@@ -15506,6 +15655,20 @@ fn set_property_with_accessors<'gc>(
     receiver_opt: Option<&Value<'gc>>,
 ) -> Result<(), EvalError<'gc>> {
     let key = &key.into();
+
+    if receiver_opt.is_some()
+        && let PropertyKey::String(s) = key
+        && !s.starts_with("__")
+        && s != "then"
+    {
+        crate::js_module::ensure_deferred_namespace_evaluated(mc, _env, obj, Some(s.as_str()))?;
+        let mut p = obj.borrow().prototype;
+        while let Some(proto_obj) = p {
+            crate::js_module::ensure_deferred_namespace_evaluated(mc, _env, &proto_obj, Some(s.as_str()))?;
+            p = proto_obj.borrow().prototype;
+        }
+    }
+
     // Resolve receiver object: if receiver_opt is provided and is an Object use it, else default to obj
     let receiver_obj: crate::core::JSObjectDataPtr<'gc> = if let Some(Value::Object(o)) = receiver_opt { *o } else { *obj };
 
@@ -15859,7 +16022,7 @@ fn set_property_with_accessors<'gc>(
     } else {
         // No owner found in chain: create own property
         let allow_nonextensible_internal_write = if let PropertyKey::String(s) = key {
-            obj.borrow().prototype.is_none() && matches!(s.as_str(), "__test262_global_code_mode" | "__global_lex_env")
+            is_global_environment(obj) && matches!(s.as_str(), "__test262_global_code_mode" | "__global_lex_env")
         } else {
             false
         };

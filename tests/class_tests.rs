@@ -328,11 +328,11 @@ mod class_tests {
 
     #[test]
     fn test_super_getter_descriptor_inspect() {
-        // Debugging test: inspect the descriptor stored on C.prototype for 'value'
+        // Inspect descriptor on the defining prototype for 'value'
         let script = r#"
             class P { get value() { return "parent"; } }
             class C extends P { }
-            Object.getOwnPropertyDescriptor(C.prototype, 'value')
+            Object.getOwnPropertyDescriptor(P.prototype, 'value')
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         // Print descriptor to stderr for inspection when running with --nocapture

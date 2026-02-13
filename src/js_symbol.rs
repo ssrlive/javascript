@@ -54,6 +54,11 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let has_instance_sym = Value::Symbol(has_instance_data);
     object_set_key_value(mc, &symbol_ctor, "hasInstance", &has_instance_sym)?;
 
+    // Symbol.unscopables
+    let unscopables_data = Gc::new(mc, SymbolData::new(Some("Symbol.unscopables")));
+    let unscopables_sym = Value::Symbol(unscopables_data);
+    object_set_key_value(mc, &symbol_ctor, "unscopables", &unscopables_sym)?;
+
     // toString method
     let val = Value::Function("Symbol.prototype.toString".to_string());
     object_set_key_value(mc, &symbol_proto, "toString", &val)?;

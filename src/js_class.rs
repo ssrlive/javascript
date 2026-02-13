@@ -20,7 +20,6 @@ pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> 
     if let Some(proto_val) = object_get_key_value(obj, "__proto__")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
-        // Check if the prototype object has an internal class definition slot
         if proto_obj.borrow().class_def.is_some() {
             return Ok(true);
         }
@@ -809,17 +808,36 @@ fn initialize_instance_elements<'gc>(
                 ClassMember::Property(name, init_expr) => {
                     let val = evaluate_expr(mc, &field_scope, init_expr)?;
                     set_name_if_anonymous(mc, &val, init_expr, &PropertyKey::String(name.clone()))?;
+                    crate::js_module::ensure_deferred_namespace_evaluated(mc, &definition_env, instance, Some(name.as_str()))?;
                     object_set_key_value(mc, instance, name.as_str(), &val)?;
                 }
-                ClassMember::PropertyComputed(_key_expr, init_expr) => {
+                ClassMember::PropertyComputed(key_expr, init_expr) => {
                     let key = if let Some(k) = constructor.borrow().comp_field_keys.get(&idx) {
                         k.clone()
                     } else {
-                        return Err(raise_type_error!("Internal error: missing computed field key").into());
+                        let raw_key = evaluate_expr(mc, &field_scope, key_expr)?;
+                        match raw_key {
+                            Value::String(s) => PropertyKey::String(value_to_string(&Value::String(s))),
+                            Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                            Value::Symbol(sym) => PropertyKey::Symbol(sym),
+                            Value::Object(_) => {
+                                let prim = crate::core::to_primitive(mc, &raw_key, "string", &field_scope)?;
+                                match prim {
+                                    Value::String(s) => PropertyKey::String(value_to_string(&Value::String(s))),
+                                    Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                                    Value::Symbol(sym) => PropertyKey::Symbol(sym),
+                                    other => PropertyKey::String(value_to_string(&other)),
+                                }
+                            }
+                            other => PropertyKey::String(value_to_string(&other)),
+                        }
                     };
 
                     let val = evaluate_expr(mc, &field_scope, init_expr)?;
                     set_name_if_anonymous(mc, &val, init_expr, &key)?;
+                    if let PropertyKey::String(s) = &key {
+                        crate::js_module::ensure_deferred_namespace_evaluated(mc, &definition_env, instance, Some(s.as_str()))?;
+                    }
                     object_set_key_value(mc, instance, &key, &val)?;
                 }
                 _ => {}
@@ -1618,6 +1636,7 @@ pub(crate) fn evaluate_new<'gc>(
                                 if let Some(prototype_val) = object_get_key_value(class_obj, "prototype")
                                     && let Value::Object(proto_obj) = &*prototype_val.borrow()
                                     && computed_proto.is_none()
+                                    && inst_obj.borrow().is_extensible()
                                 {
                                     inst_obj.borrow_mut(mc).prototype = Some(*proto_obj);
                                     object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(*proto_obj))?;
@@ -1632,8 +1651,10 @@ pub(crate) fn evaluate_new<'gc>(
                                 // Finalize any deferred prototype on the instance returned from parent
                                 if let Some(proto) = computed_proto {
                                     // Always apply computed_proto to the parent-returned instance, overriding any previous prototype
-                                    inst_obj.borrow_mut(mc).prototype = Some(proto);
-                                    object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(proto))?;
+                                    if inst_obj.borrow().is_extensible() {
+                                        inst_obj.borrow_mut(mc).prototype = Some(proto);
+                                        object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(proto))?;
+                                    }
                                     log::warn!(
                                         "evaluate_new: finalized deferred prototype on parent-returned instance -> instance={:p} proto={:p}",
                                         Gc::as_ptr(*inst_obj),
@@ -3112,6 +3133,11 @@ pub(crate) fn evaluate_super_call<'gc>(
     }
     let current_function = chosen_function.ok_or_else(|| raise_type_error!("super() called in invalid context"))?;
 
+    let ctor_for_fields: Option<JSObjectDataPtr<'gc>> = match &current_function {
+        Value::Object(o) => Some(*o),
+        _ => find_binding(env, "__new_target").and_then(|v| if let Value::Object(o) = v { Some(o) } else { None }),
+    };
+
     let parent_class = if let Value::Object(func_obj) = &current_function {
         // Prefer using the internal prototype (the function object's [[Prototype]]) as
         // the parent class. Fallback to an own `__proto__` property if present.
@@ -3182,13 +3208,32 @@ pub(crate) fn evaluate_super_call<'gc>(
                     crate::core::object_set_key_value(mc, &func_env, "__super", &Value::Undefined)?;
                     // Create the arguments object
                     create_arguments_object(mc, &func_env, evaluated_args, None)?;
-                    let _ = evaluate_statements(mc, &func_env, body)?;
+                    let parent_result = crate::core::evaluate_statements_with_context(mc, &func_env, body, &[])?;
+                    let returned_object = match parent_result {
+                        ControlFlow::Return(Value::Object(o)) => Some(o),
+                        ControlFlow::Throw(v, l, c) => {
+                            return Err(crate::core::EvalError::Throw(v, l, c));
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(new_instance) = returned_object {
+                        bind_this_after_super(mc, Some(new_instance))?;
+                        if already_initialized {
+                            return Err(raise_reference_error!("super() called after this is initialized").into());
+                        }
+                        if let Some(ctor_obj) = ctor_for_fields {
+                            initialize_instance_elements(mc, &new_instance, &ctor_obj)?;
+                        }
+                        return Ok(Value::Object(new_instance));
+                    }
+
                     bind_this_after_super(mc, None)?;
                     if already_initialized {
                         return Err(raise_reference_error!("super() called after this is initialized").into());
                     }
-                    if let Value::Object(ctor_obj) = &current_function {
-                        initialize_instance_elements(mc, &instance, ctor_obj)?;
+                    if let Some(ctor_obj) = ctor_for_fields {
+                        initialize_instance_elements(mc, &instance, &ctor_obj)?;
                     }
                     return Ok(Value::Object(instance));
                 }
@@ -3202,8 +3247,8 @@ pub(crate) fn evaluate_super_call<'gc>(
             if already_initialized {
                 return Err(raise_reference_error!("super() called after this is initialized").into());
             }
-            if let Value::Object(ctor_obj) = &current_function {
-                initialize_instance_elements(mc, &instance, ctor_obj)?;
+            if let Some(ctor_obj) = ctor_for_fields {
+                initialize_instance_elements(mc, &instance, &ctor_obj)?;
             }
             return Ok(Value::Object(instance));
         }
@@ -3246,25 +3291,22 @@ pub(crate) fn evaluate_super_call<'gc>(
                             cur_update = env_ptr.borrow().prototype;
                         }
 
-                        // If the function environment chain had a deferred computed prototype attached,
-                        // locate the environment that actually owns the "__computed_proto" binding (searching the env chain)
-                        // so we can apply it to the actual instance returned by the parent constructor.
-                        if let Some(proto_env) = find_binding_env(&lexical_env, "__computed_proto") {
-                            if let Some(proto_rc) = object_get_key_value(&proto_env, "__computed_proto") {
-                                match &*proto_rc.borrow() {
-                                    Value::Object(proto_obj) => {
-                                        new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                                        object_set_key_value(mc, &new_instance, "__proto__", &Value::Object(*proto_obj))?;
-                                        // clear the pending slot on the environment that owned it
-                                        crate::core::object_set_key_value(mc, &proto_env, "__computed_proto", &Value::Undefined)?;
+                        // Only apply deferred computed-prototype transfer when the returned object
+                        // is the same instance under construction. For explicit object returns from
+                        // super constructors, preserve the returned object's own prototype.
+                        if Gc::ptr_eq(new_instance, instance) {
+                            if let Some(proto_env) = find_binding_env(&lexical_env, "__computed_proto") {
+                                if let Some(proto_rc) = object_get_key_value(&proto_env, "__computed_proto") {
+                                    match &*proto_rc.borrow() {
+                                        Value::Object(proto_obj) => {
+                                            new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
+                                            object_set_key_value(mc, &new_instance, "__proto__", &Value::Object(*proto_obj))?;
+                                            crate::core::object_set_key_value(mc, &proto_env, "__computed_proto", &Value::Undefined)?;
+                                        }
+                                        _other => {}
                                     }
-                                    _other => {}
                                 }
-                            }
-                        } else {
-                            // If no env binding was found, fall back to checking the original instance
-                            // for a pending computed proto marker and apply it to the new_instance.
-                            if let Some(orig_inst_rc) = object_get_key_value(&lexical_env, "__instance") {
+                            } else if let Some(orig_inst_rc) = object_get_key_value(&lexical_env, "__instance") {
                                 match &*orig_inst_rc.borrow() {
                                     Value::Object(orig_inst) => {
                                         if let Some(proto_rc) = object_get_key_value(orig_inst, "__computed_proto") {
@@ -3272,7 +3314,6 @@ pub(crate) fn evaluate_super_call<'gc>(
                                                 Value::Object(proto_obj) => {
                                                     new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
                                                     object_set_key_value(mc, &new_instance, "__proto__", &Value::Object(*proto_obj))?;
-                                                    // clear the pending slot on the original instance
                                                     crate::core::object_set_key_value(
                                                         mc,
                                                         orig_inst,
@@ -3293,8 +3334,8 @@ pub(crate) fn evaluate_super_call<'gc>(
                         if already_initialized {
                             return Err(raise_reference_error!("super() called after this is initialized").into());
                         }
-                        if let Value::Object(ctor_obj) = &current_function {
-                            initialize_instance_elements(mc, &new_instance, ctor_obj)?;
+                        if let Some(ctor_obj) = ctor_for_fields {
+                            initialize_instance_elements(mc, &new_instance, &ctor_obj)?;
                         }
                         return Ok(Value::Object(new_instance));
                     }
@@ -3302,8 +3343,8 @@ pub(crate) fn evaluate_super_call<'gc>(
                     if already_initialized {
                         return Err(raise_reference_error!("super() called after this is initialized").into());
                     }
-                    if let Value::Object(ctor_obj) = &current_function {
-                        initialize_instance_elements(mc, &instance, ctor_obj)?;
+                    if let Some(ctor_obj) = ctor_for_fields {
+                        initialize_instance_elements(mc, &instance, &ctor_obj)?;
                     }
                     return Ok(Value::Object(instance));
                 }
@@ -3368,8 +3409,8 @@ pub(crate) fn evaluate_super_call<'gc>(
                 if already_initialized {
                     return Err(raise_reference_error!("super() called after this is initialized").into());
                 }
-                if let Value::Object(ctor_obj) = &current_function {
-                    initialize_instance_elements(mc, &new_instance, ctor_obj)?;
+                if let Some(ctor_obj) = ctor_for_fields {
+                    initialize_instance_elements(mc, &new_instance, &ctor_obj)?;
                 }
                 return Ok(Value::Object(new_instance));
             }
@@ -3377,8 +3418,8 @@ pub(crate) fn evaluate_super_call<'gc>(
             if already_initialized {
                 return Err(raise_reference_error!("super() called after this is initialized").into());
             }
-            if let Value::Object(ctor_obj) = &current_function {
-                initialize_instance_elements(mc, &instance, ctor_obj)?;
+            if let Some(ctor_obj) = ctor_for_fields {
+                initialize_instance_elements(mc, &instance, &ctor_obj)?;
             }
             return Ok(Value::Object(instance));
         }
@@ -3412,6 +3453,11 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
         }
 
         if let Some(super_obj) = super_base {
+            if let crate::core::PropertyKey::String(s) = &key
+                && !s.starts_with("__")
+            {
+                crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &super_obj, Some(s.as_str())).map_err(JSError::from)?;
+            }
             // Look up property on super object
             if let Some(prop_val) = object_get_key_value(&super_obj, key.clone()) {
                 // If this is a property descriptor with a getter, call the getter with the current `this` as receiver
@@ -3502,6 +3548,12 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
         if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__")
             && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
         {
+            if let crate::core::PropertyKey::String(s) = &key
+                && !s.starts_with("__")
+            {
+                crate::js_module::ensure_deferred_namespace_evaluated(mc, env, parent_proto_obj, Some(s.as_str()))
+                    .map_err(JSError::from)?;
+            }
             // Look for property in parent prototype
             if let Some(prop_val) = object_get_key_value(parent_proto_obj, key.clone()) {
                 // If this is an accessor or getter, call it

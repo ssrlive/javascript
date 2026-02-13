@@ -32,7 +32,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export
+          node ci/runner.js --limit 10000 --focus language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export --timeout 120
 
       - name: Upload results
         if: ${{ !cancelled() }}

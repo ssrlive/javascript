@@ -30,6 +30,7 @@ jobs:
           - id: 17
           - id: 18
           - id: 19
+          - id: 20
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -137,6 +138,10 @@ jobs:
             19)
               TITLE='"language/statements/async-function" - "language/statements/for"'
               FOCUS='language/statements/async-function,language/statements/async-generator,language/statements/await-using,language/statements/block,language/statements/break,language/statements/const,language/statements/continue,language/statements/debugger,language/statements/do-while,language/statements/empty,language/statements/expression,language/statements/for'
+              ;;
+            20)
+              TITLE='"language/statements/for-await-of"'
+              FOCUS='language/statements/for-await-of'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

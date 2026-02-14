@@ -799,6 +799,28 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, var_name: &
                 }
             }
         }
+        StatementKind::ForAwaitOfExpr(lhs, iterable, body)
+        | StatementKind::ForOfExpr(lhs, iterable, body)
+        | StatementKind::ForInExpr(lhs, iterable, body) => {
+            let lhs_replaced = replace_first_yield_in_expr(lhs, var_name, replaced);
+            *lhs = lhs_replaced;
+            if *replaced {
+                return;
+            }
+
+            let iterable_replaced = replace_first_yield_in_expr(iterable, var_name, replaced);
+            *iterable = iterable_replaced;
+            if *replaced {
+                return;
+            }
+
+            for s in body.iter_mut() {
+                replace_first_yield_in_statement(s, var_name, replaced);
+                if *replaced {
+                    return;
+                }
+            }
+        }
         StatementKind::Block(stmts) => {
             for s in stmts.iter_mut() {
                 replace_first_yield_in_statement(s, var_name, replaced);
@@ -1595,9 +1617,26 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
             | StatementKind::ForOfDestructuringArray(_, _, _, body)
             | StatementKind::ForAwaitOf(_, _, _, body)
             | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
-            | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
-            | StatementKind::ForAwaitOfExpr(_, _, body)
-            | StatementKind::ForOfExpr(_, _, body) => {
+            | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body) => {
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, Some(inner_idx), kind, found));
+                }
+            }
+            StatementKind::ForAwaitOfExpr(lhs, iterable, body)
+            | StatementKind::ForOfExpr(lhs, iterable, body)
+            | StatementKind::ForInExpr(lhs, iterable, body) => {
+                if let Some((kind, found)) = find_yield_in_expr(lhs)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, None, kind, found));
+                }
+                if let Some((kind, found)) = find_yield_in_expr(iterable)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, None, kind, found));
+                }
                 if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
                     && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {

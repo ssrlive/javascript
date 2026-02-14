@@ -269,7 +269,15 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             init_decls = Some(decls);
         }
     } else if !matches!(t[*index].token, Token::Semicolon) {
-        init_expr = Some(parse_expression(t, index)?);
+        if matches!(t[*index].token, Token::LBracket) {
+            let pattern = parse_array_assignment_pattern(t, index)?;
+            init_expr = Some(Expr::Array(pattern));
+        } else if matches!(t[*index].token, Token::LBrace) {
+            let pattern = parse_object_assignment_pattern(t, index)?;
+            init_expr = Some(Expr::Object(pattern));
+        } else {
+            init_expr = Some(parse_expression(t, index)?);
+        }
     }
 
     // Handle 'of'
@@ -362,7 +370,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 // Allow property/index expressions (assignment form) as left-hand side
                 // e.g., `for (obj.prop of iterable) ...`
                 match expr {
-                    Expr::Property(_, _) | Expr::Index(_, _) => {
+                    Expr::Property(_, _) | Expr::Index(_, _) | Expr::Array(_) | Expr::Object(_) => {
                         if is_for_await {
                             StatementKind::ForAwaitOfExpr(expr, iterable, body_stmts)
                         } else {
@@ -540,7 +548,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             && let Some(expr) = init_expr
         {
             match expr {
-                Expr::Property(_, _) | Expr::Index(_, _) | Expr::Var(_, _, _) => {
+                Expr::Property(_, _) | Expr::Index(_, _) | Expr::Var(_, _, _) | Expr::Array(_) | Expr::Object(_) => {
                     return Ok(Statement {
                         kind: Box::new(StatementKind::ForInExpr(expr, rhs, body_stmts)),
                         line,

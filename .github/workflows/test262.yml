@@ -6,9 +6,30 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-test262-subset-1:
+  run-test262-subset:
     strategy:
       fail-fast: false
+      matrix:
+        include:
+          - id: 1
+          - id: 2
+          - id: 3
+          - id: 4
+          - id: 5
+          - id: 6
+          - id: 7
+          - id: 8
+          - id: 9
+          - id: 10
+          - id: 11
+          - id: 12
+          - id: 13
+          - id: 14
+          - id: 15
+          - id: 16
+          - id: 17
+          - id: 18
+          - id: 19
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,647 +48,170 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/arguments-object" - "language/export"
+      - name: Run test262 subset ${{ matrix.id }}
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export --timeout 120
+          set -euo pipefail
+
+          FOCUS=""
+          TIMEOUT=""
+          TITLE=""
+
+          case "${{ matrix.id }}" in
+            1)
+              TITLE='"language/arguments-object" - "language/export"'
+              FOCUS='language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export'
+              TIMEOUT='120'
+              ;;
+            2)
+              TITLE='"language/expressions/addition" - "language/expressions/assignment"'
+              FOCUS='language/expressions/addition,language/expressions/array,language/expressions/arrow-function,language/expressions/assignment'
+              ;;
+            3)
+              TITLE='"language/expressions/assignmenttargettype" - "language/expressions/await"'
+              FOCUS='language/expressions/assignmenttargettype,language/expressions/async-arrow-function,language/expressions/async-function,language/expressions/async-generator,language/expressions/await'
+              ;;
+            4)
+              TITLE='"language/expressions/bitwise-and" - "language/expressions/call"'
+              FOCUS='language/expressions/bitwise-and,language/expressions/bitwise-not,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/call'
+              ;;
+            5)
+              TITLE='"language/expressions/class/accessor-name-inst" - "language/expressions/class/decorator"'
+              FOCUS='language/expressions/class/accessor-name-inst,language/expressions/class/accessor-name-static,language/expressions/class/async-gen-method,language/expressions/class/async-gen-method-static,language/expressions/class/async-method,language/expressions/class/async-method-static,language/expressions/class/decorator'
+              ;;
+            6)
+              TITLE='"language/expressions/class/dstr"'
+              FOCUS='language/expressions/class/dstr'
+              ;;
+            7)
+              TITLE='"language/expressions/class/elements"'
+              FOCUS='language/expressions/class/elements'
+              ;;
+            8)
+              TITLE='"language/expressions/class/gen-method" - "language/expressions/class/(filesonly)"'
+              FOCUS='language/expressions/class/gen-method,language/expressions/class/gen-method-static,language/expressions/class/method,language/expressions/class/method-static,language/expressions/class/subclass-builtins,language/expressions/class/(filesonly)'
+              ;;
+            9)
+              TITLE='"language/expressions/coalesce" - "language/expressions/does-not-equals"'
+              FOCUS='language/expressions/coalesce,language/expressions/comma,language/expressions/compound-assignment,language/expressions/concatenation,language/expressions/conditional,language/expressions/delete,language/expressions/division,language/expressions/does-not-equals'
+              ;;
+            10)
+              TITLE='"dynamic-import,module-code,import,eval-code,export"'
+              FOCUS='language/expressions/dynamic-import,language/module-code,language/import,language/eval-code,language/export'
+              ;;
+            11)
+              TITLE='"language/expressions/equals" - "language/expressions/generators"'
+              FOCUS='language/expressions/equals,language/expressions/exponentiation,language/expressions/function,language/expressions/generators'
+              ;;
+            12)
+              TITLE='"language/expressions/greater-than" - "language/expressions/void"'
+              FOCUS='language/expressions/greater-than,language/expressions/greater-than-or-equal,language/expressions/less-than,language/expressions/less-than-or-equal,language/expressions/logical-and,language/expressions/logical-assignment,language/expressions/logical-not,language/expressions/logical-or,language/expressions/void'
+              ;;
+            13)
+              TITLE='"language/expressions/grouping" - "language/expressions/prefix-increment"'
+              FOCUS='language/expressions/grouping,language/expressions/import.meta,language/expressions/in,language/expressions/instanceof,language/expressions/left-shift,language/expressions/right-shift,language/expressions/optional-chaining,language/expressions/member-expression,language/expressions/modulus,language/expressions/multiplication,language/expressions/new,language/expressions/new.target,language/expressions/postfix-decrement,language/expressions/postfix-increment,language/expressions/prefix-decrement,language/expressions/prefix-increment'
+              ;;
+            14)
+              TITLE='"language/expressions/object"'
+              FOCUS='language/expressions/object'
+              ;;
+            15)
+              TITLE='"language/expressions/property-accessors" - "language/expressions/yield"'
+              FOCUS='language/expressions/property-accessors,language/expressions/relational,language/expressions/strict-does-not-equals,language/expressions/strict-equals,language/expressions/subtraction,language/expressions/super,language/expressions/tagged-template,language/expressions/template-literal,language/expressions/this,language/expressions/typeof,language/expressions/unary-minus,language/expressions/unary-plus,language/expressions/unsigned-right-shift,language/expressions/yield,language/expressions/(filesonly)'
+              ;;
+            16)
+              TITLE='"language/function-code" - "language/import"'
+              FOCUS='language/function-code,language/future-reserved-words,language/global-code,language/identifier-resolution,language/identifiers,language/import'
+              ;;
+            17)
+              TITLE='"language/literals"'
+              FOCUS='language/literals'
+              TIMEOUT='200'
+              ;;
+            18)
+              TITLE='"language/keywords" - "language/white-space"'
+              FOCUS='language/keywords,language/line-terminators,language/module-code,language/punctuators,language/reserved-words,language/rest-parameters,language/source-text,language/statementList,language/types,language/white-space'
+              ;;
+            19)
+              TITLE='"language/statements/async-function" - "language/statements/for"'
+              FOCUS='language/statements/async-function,language/statements/async-generator,language/statements/await-using,language/statements/block,language/statements/break,language/statements/const,language/statements/continue,language/statements/debugger,language/statements/do-while,language/statements/empty,language/statements/expression,language/statements/for'
+              ;;
+            *)
+              echo "Unknown subset id: ${{ matrix.id }}" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "Running subset ${{ matrix.id }}: $TITLE"
+          if [ -n "$TIMEOUT" ]; then
+            node ci/runner.js --limit 10000 --focus "$FOCUS" --timeout "$TIMEOUT"
+          else
+            node ci/runner.js --limit 10000 --focus "$FOCUS"
+          fi
 
       - name: Upload results
-        if: ${{ !cancelled() }}
+        if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: test262-results-1
+          name: test262-results-${{ matrix.id }}
           path: test262-results.log
 
-  run-test262-subset-2:
-    strategy:
-      fail-fast: false
+  summarize-test262-results:
+    if: ${{ always() }}
+    needs: [run-test262-subset]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Download all subset artifacts
+        uses: actions/download-artifact@v4
         with:
-          components: clippy, rustfmt
+          pattern: test262-results-*
+          path: test262-artifacts
+          merge-multiple: false
 
-      - name: Install prerequisites
+      - name: Summarize pass/fail/skip totals
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/addition" - "language/expressions/assignment"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/addition,language/expressions/array,language/expressions/arrow-function,language/expressions/assignment
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-2
-          path: test262-results.log
-
-  run-test262-subset-3:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/assignmenttargettype" - "language/expressions/await"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/assignmenttargettype,language/expressions/async-arrow-function,language/expressions/async-function,language/expressions/async-generator,language/expressions/await
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-3
-          path: test262-results.log
-
-  run-test262-subset-4:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/bitwise-and" - "language/expressions/call"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/bitwise-and,language/expressions/bitwise-not,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/call
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-4
-          path: test262-results.log
-
-  run-test262-subset-5:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/class/accessor-name-inst" - "language/expressions/class/decorator"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/class/accessor-name-inst,language/expressions/class/accessor-name-static,language/expressions/class/async-gen-method,language/expressions/class/async-gen-method-static,language/expressions/class/async-method,language/expressions/class/async-method-static,language/expressions/class/decorator
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-5
-          path: test262-results.log
-
-  run-test262-subset-6:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/class/dstr" - "language/expressions/class/dstr"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/class/dstr
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-6
-          path: test262-results.log
-
-  run-test262-subset-7:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/class/elements" - "language/expressions/class/elements"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/class/elements
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-7
-          path: test262-results.log
-
-  run-test262-subset-8:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/class/gen-method" - "language/expressions/class/(filesonly)"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/class/gen-method,language/expressions/class/gen-method-static,language/expressions/class/method,language/expressions/class/method-static,language/expressions/class/subclass-builtins,"language/expressions/class/(filesonly)"
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-8
-          path: test262-results.log
-
-  run-test262-subset-9:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/coalesce" - "language/expressions/does-not-equals"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/coalesce,language/expressions/comma,language/expressions/compound-assignment,language/expressions/concatenation,language/expressions/conditional,language/expressions/delete,language/expressions/division,language/expressions/does-not-equals
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-9
-          path: test262-results.log
-
-  run-test262-subset-10:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "dynamic-import,module-code,import,eval-code,export"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/dynamic-import,language/module-code,language/import,language/eval-code,language/export
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-10
-          path: test262-results.log
-
-  run-test262-subset-11:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/equals" - "language/expressions/generators"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/equals,language/expressions/exponentiation,language/expressions/function,language/expressions/generators
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-11
-          path: test262-results.log
-
-  run-test262-subset-12:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/greater-than" - "language/expressions/void"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/greater-than,language/expressions/greater-than-or-equal,language/expressions/less-than,language/expressions/less-than-or-equal,language/expressions/logical-and,language/expressions/logical-assignment,language/expressions/logical-not,language/expressions/logical-or,language/expressions/void
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-12
-          path: test262-results.log
-
-  run-test262-subset-13:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/grouping" - "language/expressions/prefix-increment"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/grouping,language/expressions/import.meta,language/expressions/in,language/expressions/instanceof,language/expressions/left-shift,language/expressions/right-shift,language/expressions/optional-chaining,language/expressions/member-expression,language/expressions/modulus,language/expressions/multiplication,language/expressions/new,language/expressions/new.target,language/expressions/postfix-decrement,language/expressions/postfix-increment,language/expressions/prefix-decrement,language/expressions/prefix-increment
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-13
-          path: test262-results.log
-
-  run-test262-subset-14:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/object"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/object
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-14
-          path: test262-results.log
-
-  run-test262-subset-15:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/expressions/property-accessors" - "language/expressions/yield"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/property-accessors,language/expressions/relational,language/expressions/strict-does-not-equals,language/expressions/strict-equals,language/expressions/subtraction,language/expressions/super,language/expressions/tagged-template,language/expressions/template-literal,language/expressions/this,language/expressions/typeof,language/expressions/unary-minus,language/expressions/unary-plus,language/expressions/unsigned-right-shift,language/expressions/yield,"language/expressions/(filesonly)"
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-15
-          path: test262-results.log
-
-  run-test262-subset-16:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/function-code" - "language/import"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/function-code,language/future-reserved-words,language/global-code,language/identifier-resolution,language/identifiers,language/import
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-16
-          path: test262-results.log
-
-  run-test262-subset-17:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/literals"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --timeout 200 --focus language/literals
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-17
-          path: test262-results.log
-
-  run-test262-subset-18:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/keywords" - "language/white-space"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/keywords,language/line-terminators,language/module-code,language/punctuators,language/reserved-words,language/rest-parameters,language/source-text,language/statementList,language/types,language/white-space
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-18
-          path: test262-results.log
-
-  run-test262-subset-19:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git
-
-      - name: Build JavaScript engine
-        run: |
-          cargo build --all-features --example js
-
-      - name: Run a small test262 subset - "language/statements/async-function" - "language/statements/for"
-        if: ${{ !cancelled() }}
-        env:
-          FAIL_ON_FAILURE: 'true'
-        run: |
-          node ci/runner.js --limit 10000 --focus language/statements/async-function,language/statements/async-generator,language/statements/await-using,language/statements/block,language/statements/break,language/statements/const,language/statements/continue,language/statements/debugger,language/statements/do-while,language/statements/empty,language/statements/expression,language/statements/for
-
-      - name: Upload results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-results-19
-          path: test262-results.log
+          set -euo pipefail
+
+          pass_total=0
+          fail_total=0
+          skip_total=0
+          logs_found=0
+
+          while IFS= read -r -d '' log_file; do
+            logs_found=$((logs_found + 1))
+            summary_line=$(grep -E "Ran [0-9]+ candidates: pass=[0-9]+ fail=[0-9]+ skip=[0-9]+" "$log_file" | tail -n1 || true)
+            if [ -z "$summary_line" ]; then
+              continue
+            fi
+
+            pass=$(echo "$summary_line" | sed -E 's/.*pass=([0-9]+).*/\1/')
+            fail=$(echo "$summary_line" | sed -E 's/.*fail=([0-9]+).*/\1/')
+            skip=$(echo "$summary_line" | sed -E 's/.*skip=([0-9]+).*/\1/')
+
+            pass_total=$((pass_total + pass))
+            fail_total=$((fail_total + fail))
+            skip_total=$((skip_total + skip))
+          done < <(find test262-artifacts -type f -name 'test262-results.log' -print0)
+
+          total_cases=$((pass_total + fail_total + skip_total))
+
+          {
+            echo "## Test262 Summary"
+            echo
+            echo "- Artifacts parsed: $logs_found"
+            echo "- Total cases: $total_cases"
+            echo "- Pass: $pass_total"
+            echo "- Fail: $fail_total"
+            echo "- Skip: $skip_total"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Test262 Summary"
+          echo "- Artifacts parsed: $logs_found"
+          echo "- Total cases: $total_cases"
+          echo "- Pass: $pass_total"
+          echo "- Fail: $fail_total"
+          echo "- Skip: $skip_total"
 

@@ -63,6 +63,31 @@ pub fn initialize_reflect<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     Ok(())
 }
 
+fn to_property_key<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    value: Value<'gc>,
+) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
+    let key = match value {
+        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+        Value::BigInt(b) => PropertyKey::String(b.to_string()),
+        Value::Symbol(s) => PropertyKey::Symbol(s),
+        Value::Object(_) => {
+            let prim = crate::core::to_primitive(mc, &value, "string", env)?;
+            match prim {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                Value::BigInt(b) => PropertyKey::String(b.to_string()),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                other => PropertyKey::String(crate::core::value_to_string(&other)),
+            }
+        }
+        other => PropertyKey::String(crate::core::value_to_string(&other)),
+    };
+    Ok(key)
+}
+
 /// Handle Reflect object method calls
 pub fn handle_reflect_method<'gc>(
     mc: &MutationContext<'gc>,
@@ -200,21 +225,74 @@ pub fn handle_reflect_method<'gc>(
             match target {
                 Value::Object(obj) => {
                     if let Value::Object(attr_obj) = &attributes {
-                        let prop_key = match property_key {
-                            Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                            Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                            _ => return Err(raise_type_error!("Invalid property key").into()),
-                        };
+                        let prop_key = to_property_key(mc, env, property_key)?;
                         if let PropertyKey::String(s) = &prop_key {
                             crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
                         }
-                        match PropertyDescriptor::from_object(attr_obj) {
-                            Ok(pd) => {
-                                if crate::core::validate_descriptor_for_define(mc, &pd).is_err() {
+
+                        let is_module_namespace = {
+                            let b = obj.borrow();
+                            b.deferred_module_path.is_some()
+                                || b.deferred_cache_env.is_some()
+                                || (b.prototype.is_none() && !b.is_extensible())
+                        };
+                        if is_module_namespace {
+                            let requested = match PropertyDescriptor::from_object(attr_obj) {
+                                Ok(pd) => pd,
+                                Err(_) => return Ok(Value::Boolean(false)),
+                            };
+                            if crate::core::validate_descriptor_for_define(mc, &requested).is_err() {
+                                return Ok(Value::Boolean(false));
+                            }
+                            if requested.get.is_some() || requested.set.is_some() {
+                                return Ok(Value::Boolean(false));
+                            }
+
+                            match &prop_key {
+                                PropertyKey::String(name) => {
+                                    if crate::core::build_property_descriptor(mc, &obj, &prop_key).is_none() {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                    if requested.configurable == Some(true)
+                                        || requested.enumerable == Some(false)
+                                        || requested.writable == Some(false)
+                                    {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                    if let Some(v) = requested.value {
+                                        let cur = crate::core::get_property_with_accessors(mc, env, &obj, name.as_str())?;
+                                        if !crate::core::values_equal(mc, &cur, &v) {
+                                            return Ok(Value::Boolean(false));
+                                        }
+                                    }
+                                    return Ok(Value::Boolean(true));
+                                }
+                                PropertyKey::Symbol(sym) if sym.description() == Some("Symbol.toStringTag") => {
+                                    if requested.configurable == Some(true)
+                                        || requested.enumerable == Some(true)
+                                        || requested.writable == Some(true)
+                                    {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                    if let Some(v) = requested.value
+                                        && !crate::core::values_equal(mc, &v, &Value::String(utf8_to_utf16("Module")))
+                                    {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                    return Ok(Value::Boolean(true));
+                                }
+                                _ => {
                                     return Ok(Value::Boolean(false));
                                 }
                             }
+                        }
+
+                        let requested = match PropertyDescriptor::from_object(attr_obj) {
+                            Ok(pd) => pd,
                             Err(_) => return Ok(Value::Boolean(false)),
+                        };
+                        if crate::core::validate_descriptor_for_define(mc, &requested).is_err() {
+                            return Ok(Value::Boolean(false));
                         }
 
                         match crate::js_object::define_property_internal(mc, &obj, &prop_key, attr_obj) {
@@ -237,15 +315,13 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(raise_type_error!("Invalid property key").into()),
-                    };
+                    let prop_key = to_property_key(mc, env, property_key)?;
                     if let PropertyKey::String(s) = &prop_key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
                     }
-                    // For now, always return true as we don't have configurable properties
+                    if obj.borrow().non_configurable.contains(&prop_key) {
+                        return Ok(Value::Boolean(false));
+                    }
                     let _ = obj.borrow_mut(mc).properties.shift_remove(&prop_key);
                     Ok(Value::Boolean(true))
                 }
@@ -262,11 +338,7 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(raise_type_error!("Invalid property key").into()),
-                    };
+                    let prop_key = to_property_key(mc, env, property_key)?;
                     if let PropertyKey::String(s) = &prop_key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
                     }
@@ -288,11 +360,7 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(raise_type_error!("Invalid property key").into()),
-                    };
+                    let prop_key = to_property_key(mc, env, property_key)?;
                     if let PropertyKey::String(s) = &prop_key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
                     }
@@ -367,11 +435,7 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(raise_type_error!("Invalid property key").into()),
-                    };
+                    let prop_key = to_property_key(mc, env, property_key)?;
                     if let PropertyKey::String(s) = &prop_key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
                     }
@@ -441,23 +505,28 @@ pub fn handle_reflect_method<'gc>(
             }
         }
         "set" => {
-            if args.len() < 3 {
-                return Err(raise_type_error!("Reflect.set requires at least 3 arguments").into());
+            if args.len() < 2 {
+                return Err(raise_type_error!("Reflect.set requires at least 2 arguments").into());
             }
             let target = args[0].clone();
             let property_key = args[1].clone();
-            let value = args[2].clone();
+            let value = if args.len() > 2 { args[2].clone() } else { Value::Undefined };
             let _receiver = if args.len() > 3 { args[3].clone() } else { target.clone() };
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        _ => return Err(raise_type_error!("Invalid property key").into()),
+                    let prop_key = to_property_key(mc, env, property_key)?;
+                    let is_module_namespace = {
+                        let b = obj.borrow();
+                        b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
                     };
-                    object_set_key_value(mc, &obj, &prop_key, &value)?;
-                    Ok(Value::Boolean(true))
+                    if is_module_namespace {
+                        return Ok(Value::Boolean(false));
+                    }
+                    match object_set_key_value(mc, &obj, &prop_key, &value) {
+                        Ok(()) => Ok(Value::Boolean(true)),
+                        Err(_) => Ok(Value::Boolean(false)),
+                    }
                 }
                 _ => Err(raise_type_error!("Reflect.set target must be an object").into()),
             }

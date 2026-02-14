@@ -1,6 +1,7 @@
 use crate::JSError;
 use crate::core::statement::{
-    ExportSpecifier, ForOfPattern, ForStatement, IfStatement, ImportSpecifier, Statement, StatementKind, SwitchStatement, TryCatchStatement,
+    CatchParamPattern, ExportSpecifier, ForOfPattern, ForStatement, IfStatement, ImportSpecifier, Statement, StatementKind,
+    SwitchStatement, TryCatchStatement,
 };
 use crate::core::{BinaryOp, ClassMember, DestructuringElement, Expr, ObjectDestructuringElement, TemplatePart, Token, TokenData};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1102,9 +1103,25 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         // Optional catch binding
         if *index < t.len() && matches!(t[*index].token, Token::LParen) {
             *index += 1; // consume (
-            if let Token::Identifier(name) = &t[*index].token {
-                catch_param = Some(name.clone());
-                *index += 1;
+            if *index < t.len() {
+                match &t[*index].token {
+                    Token::Identifier(name) => {
+                        catch_param = Some(CatchParamPattern::Identifier(name.clone()));
+                        *index += 1;
+                    }
+                    Token::LBracket => {
+                        let pattern = parse_array_destructuring_pattern(t, index)?;
+                        catch_param = Some(CatchParamPattern::Array(pattern));
+                    }
+                    Token::LBrace => {
+                        let pattern = parse_object_destructuring_pattern(t, index)?;
+                        catch_param = Some(CatchParamPattern::Object(pattern));
+                    }
+                    _ => {
+                        let msg = "Expected catch binding pattern";
+                        return Err(raise_parse_error_with_token!(t.get(*index).unwrap(), msg));
+                    }
+                }
             } else {
                 let msg = "Expected identifier in catch binding";
                 return Err(raise_parse_error_with_token!(t.get(*index).unwrap(), msg));
@@ -1437,8 +1454,8 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         // import { ... } from "..." or import * as name from "..." or import default from "..."
 
         // check for default import
-        if let Token::Identifier(name) = &t[*index].token {
-            specifiers.push(ImportSpecifier::Default(name.clone()));
+        if let Some(name) = t[*index].token.as_identifier_string() {
+            specifiers.push(ImportSpecifier::Default(name));
             *index += 1;
             if *index < t.len() && matches!(t[*index].token, Token::Comma) {
                 *index += 1;
@@ -1456,8 +1473,8 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
 
                 if is_as {
                     *index += 1;
-                    if let Token::Identifier(name) = &t[*index].token {
-                        specifiers.push(ImportSpecifier::Namespace(name.clone()));
+                    if let Some(name) = t[*index].token.as_identifier_string() {
+                        specifiers.push(ImportSpecifier::Namespace(name));
                         *index += 1;
                     } else {
                         return Err(raise_parse_error!("Expected identifier after '* as'"));
@@ -1471,15 +1488,17 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
             *index += 1;
             loop {
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+
                 if *index < t.len() && matches!(t[*index].token, Token::RBrace) {
                     *index += 1;
                     break;
                 }
 
-                let imported_name = if let Token::Identifier(n) = &t[*index].token {
-                    n.clone()
-                } else if matches!(t[*index].token, Token::Default) {
-                    "default".to_string()
+                let imported_name = if let Some(id_name) = t[*index].token.as_identifier_string() {
+                    id_name
                 } else {
                     return Err(raise_parse_error!("Expected identifier in named import"));
                 };
@@ -1495,8 +1514,8 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
 
                     if is_as {
                         *index += 1; // consume as
-                        if let Token::Identifier(alias) = &t[*index].token {
-                            local_name = Some(alias.clone());
+                        if let Some(alias) = t[*index].token.as_identifier_string() {
+                            local_name = Some(alias);
                             *index += 1;
                         } else {
                             return Err(raise_parse_error!("Expected identifier after 'as'"));
@@ -1590,6 +1609,10 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     let start = *index;
     *index += 1; // consume export
 
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+
     let mut specifiers = Vec::new();
     let mut inner_stmt = None;
     let mut source = None;
@@ -1597,7 +1620,21 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     if *index < t.len() && matches!(t[*index].token, Token::Default) {
         *index += 1; // consume default
         // export default expression;
-        let expr = parse_assignment(t, index)?;
+        let should_normalize_default_function_name =
+            *index < t.len() && matches!(t[*index].token, Token::Function | Token::FunctionStar | Token::Async);
+
+        let mut expr = parse_assignment(t, index)?;
+
+        if should_normalize_default_function_name {
+            expr = match expr {
+                Expr::Function(None, params, body) => Expr::Function(Some("default".to_string()), params, body),
+                Expr::GeneratorFunction(None, params, body) => Expr::GeneratorFunction(Some("default".to_string()), params, body),
+                Expr::AsyncFunction(None, params, body) => Expr::AsyncFunction(Some("default".to_string()), params, body),
+                Expr::AsyncGeneratorFunction(None, params, body) => Expr::AsyncGeneratorFunction(Some("default".to_string()), params, body),
+                other => other,
+            };
+        }
+
         specifiers.push(ExportSpecifier::Default(expr));
         if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
             *index += 1;
@@ -1618,16 +1655,11 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         if is_as {
             *index += 1; // consume 'as'
             let name = if *index < t.len() {
-                match &t[*index].token {
-                    Token::Identifier(n) => {
-                        *index += 1;
-                        n.clone()
-                    }
-                    Token::Default => {
-                        *index += 1;
-                        "default".to_string()
-                    }
-                    _ => return Err(raise_parse_error!("Expected identifier after 'as' in export statement")),
+                if let Some(id_name) = t[*index].token.as_identifier_string() {
+                    *index += 1;
+                    id_name
+                } else {
+                    return Err(raise_parse_error!("Expected identifier after 'as' in export statement"));
                 }
             } else {
                 return Err(raise_parse_error!("Expected identifier after 'as' in export statement"));
@@ -1655,21 +1687,26 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 }
             }
         }
+
+        consume_import_attributes_clause(t, index)?;
+
         if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
             *index += 1;
         }
     } else if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
         *index += 1; // consume {
         loop {
+            while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
+
             if *index < t.len() && matches!(t[*index].token, Token::RBrace) {
                 *index += 1;
                 break;
             }
 
-            let name = if let Token::Identifier(n) = &t[*index].token {
-                n.clone()
-            } else if matches!(t[*index].token, Token::Default) {
-                "default".to_string()
+            let name = if let Some(id_name) = t[*index].token.as_identifier_string() {
+                id_name
             } else {
                 return Err(raise_parse_error!("Expected identifier in export specifier"));
             };
@@ -1684,16 +1721,15 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 };
                 if is_as {
                     *index += 1;
-                    match &t[*index].token {
-                        Token::Identifier(a) => {
-                            alias = Some(a.clone());
+                    if *index < t.len() {
+                        if let Some(id_name) = t[*index].token.as_identifier_string() {
+                            alias = Some(id_name);
                             *index += 1;
+                        } else {
+                            return Err(raise_parse_error!("Expected identifier after as"));
                         }
-                        Token::Default => {
-                            alias = Some("default".to_string());
-                            *index += 1;
-                        }
-                        _ => return Err(raise_parse_error!("Expected identifier after as")),
+                    } else {
+                        return Err(raise_parse_error!("Expected identifier after as"));
                     }
                 }
             }
@@ -1722,6 +1758,9 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 }
             }
         }
+
+        consume_import_attributes_clause(t, index)?;
+
         if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
             *index += 1;
         }
@@ -1796,6 +1835,23 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 // Accept 'async' as an identifier name in variable declarations
                 // when it is not acting as the async keyword (e.g., `var async = 1;`).
                 let name = "async".to_string();
+                *index += 1;
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                    *index += 1;
+                    Some(parse_assignment(t, index)?)
+                } else {
+                    None
+                };
+                decls.push((name, init));
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+            }
+            Token::As => {
+                let name = "as".to_string();
                 *index += 1;
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
@@ -3383,6 +3439,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         | Token::This
                         | Token::Super
                         | Token::Import
+                        | Token::TemplateString(_)
                         | Token::Regex(_, _) => {
                             let inner = parse_primary(tokens, index, true)?;
                             Expr::Await(Box::new(inner))
@@ -3646,6 +3703,17 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 *index += 1;
                 let body = parse_arrow_body(tokens, index)?;
                 expr = Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body);
+            }
+            expr
+        }
+        Token::As => {
+            let line = token_data.line;
+            let column = token_data.column;
+            let mut expr = Expr::Var("as".to_string(), Some(line), Some(column));
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                *index += 1;
+                let body = parse_arrow_body(tokens, index)?;
+                expr = Expr::ArrowFunction(vec![DestructuringElement::Variable("as".to_string(), None)], body);
             }
             expr
         }

@@ -44,7 +44,8 @@ function references262(filePath) {
 function definesAssertInFile(filePath) {
   if (!fs.existsSync(filePath)) return false;
   const src = fs.readFileSync(filePath, 'utf8');
-  return /function\s+assert\b|var\s+assert\b|assert\._isSameValue/.test(src) || /defines:\s*\[([^\]]*\bassert\b[^\]]*)\]/.test(extractMeta(filePath));
+  const defines = parseList(extractMeta(filePath), 'defines');
+  return /function\s+assert\b|var\s+assert\b|assert\._isSameValue/.test(src) || defines.includes('assert');
 }
 
 function ensureArrayDistinct(arr) {
@@ -290,7 +291,8 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
       if (!p || !fs.existsSync(p)) continue;
       const src = fs.readFileSync(p, 'utf8');
       const references = /\bassert\b/.test(src);
-      const defines = /function\s+assert\b|var\s+assert\b|assert\._isSameValue/.test(src) || /defines:\s*\[[^\]]*\bassert\b/.test(extractMeta(p));
+      const definesMeta = parseList(extractMeta(p), 'defines');
+      const defines = /function\s+assert\b|var\s+assert\b|assert\._isSameValue/.test(src) || definesMeta.includes('assert');
       if (references && !defines) { needInject = true; break; }
     }
     if (needInject) {
@@ -360,6 +362,16 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push('}');
   outLines.push('');
 
+  // In module tests, harness declarations are module-scoped. Re-export common
+  // harness helpers onto globalThis so imported modules can access them.
+  outLines.push('// Inject: expose common harness helpers on globalThis for imported modules');
+  outLines.push('if (typeof globalThis !== "undefined") {');
+  outLines.push('  if (typeof assert !== "undefined" && typeof globalThis.assert === "undefined") globalThis.assert = assert;');
+  outLines.push('  if (typeof Test262Error !== "undefined" && typeof globalThis.Test262Error === "undefined") globalThis.Test262Error = Test262Error;');
+  outLines.push('  if (typeof $DONE !== "undefined" && typeof globalThis.$DONE === "undefined") globalThis.$DONE = $DONE;');
+  outLines.push('}');
+  outLines.push('');
+
   const meta = extractMeta(testPath);
   inject262Shim(outLines, testPath, meta);
 
@@ -417,6 +429,14 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
       lines2.push(fs.readFileSync(p, 'utf8'));
       lines2.push('');
     }
+
+    lines2.push('// Inject: expose common harness helpers on globalThis for imported modules');
+    lines2.push('if (typeof globalThis !== "undefined") {');
+    lines2.push('  if (typeof assert !== "undefined" && typeof globalThis.assert === "undefined") globalThis.assert = assert;');
+    lines2.push('  if (typeof Test262Error !== "undefined" && typeof globalThis.Test262Error === "undefined") globalThis.Test262Error = Test262Error;');
+    lines2.push('  if (typeof $DONE !== "undefined" && typeof globalThis.$DONE === "undefined") globalThis.$DONE = $DONE;');
+    lines2.push('}');
+    lines2.push('');
 
     // Inject unified $262 shim into the rebuilt file when required by test/meta
     const metaFixed = extractMeta(testPath);

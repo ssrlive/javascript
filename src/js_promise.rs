@@ -1296,8 +1296,12 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
             env,
         } => {
             log::trace!("Processing DynamicImport task");
-            let import_result = (|| -> Result<Value<'gc>, EvalError<'gc>> {
-                let prim = crate::core::to_primitive(mc, &module_specifier, "string", &env)?;
+            fn import_result<'gc>(
+                mc: &MutationContext<'gc>,
+                module_specifier: &Value<'gc>,
+                env: &JSObjectDataPtr<'gc>,
+            ) -> Result<Value<'gc>, EvalError<'gc>> {
+                let prim = crate::core::to_primitive(mc, module_specifier, "string", env)?;
                 let module_name = match prim {
                     Value::Symbol(_) => {
                         return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
@@ -1305,7 +1309,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                     _ => value_to_string(&prim),
                 };
 
-                let base_path = if let Some(cell) = crate::core::env_get(&env, "__filepath")
+                let base_path = if let Some(cell) = crate::core::env_get(env, "__filepath")
                     && let Value::String(s) = cell.borrow().clone()
                 {
                     Some(utf16_to_utf8(&s))
@@ -1313,10 +1317,10 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                     None
                 };
 
-                crate::js_module::load_module_for_dynamic_import(mc, &module_name, base_path.as_deref(), &env)
-            })();
+                crate::js_module::load_module_for_dynamic_import(mc, &module_name, base_path.as_deref(), env)
+            }
 
-            match import_result {
+            match import_result(mc, &module_specifier, &env) {
                 Ok(module_value) => resolve_promise(mc, &promise, module_value, &env),
                 Err(err) => {
                     let reason = match err {
@@ -2149,6 +2153,43 @@ pub fn resolve_promise<'gc>(
                     }
                     return;
                 }
+            }
+        }
+
+        // Thenable assimilation: Promise resolve must adopt objects with a callable `then`.
+        if let Value::Object(obj) = &value {
+            let then_value = match crate::core::get_property_with_accessors(mc, env, obj, "then") {
+                Ok(v) => v,
+                Err(err) => {
+                    let reason = match err {
+                        EvalError::Throw(v, ..) => v,
+                        EvalError::Js(js_err) => crate::core::js_error_to_value(mc, env, &js_err),
+                    };
+                    drop(promise_borrow);
+                    reject_promise(mc, promise, reason, env);
+                    return;
+                }
+            };
+
+            let then_callable = match &then_value {
+                Value::Function(_) | Value::Closure(_) => true,
+                Value::Object(o) => o.borrow().get_closure().is_some(),
+                _ => false,
+            };
+
+            if !matches!(then_value, Value::Undefined | Value::Null) && then_callable {
+                let resolve = create_resolve_function_direct(mc, *promise, env);
+                let reject = create_reject_function_direct(mc, *promise, env);
+                drop(promise_borrow);
+
+                if let Err(err) = call_function_with_this(mc, &then_value, Some(&Value::Object(*obj)), &[resolve, reject], env) {
+                    let reason = match err {
+                        EvalError::Throw(v, ..) => v,
+                        EvalError::Js(js_err) => crate::core::js_error_to_value(mc, env, &js_err),
+                    };
+                    reject_promise(mc, promise, reason, env);
+                }
+                return;
             }
         }
 

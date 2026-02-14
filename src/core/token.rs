@@ -228,6 +228,7 @@ impl Token {
             Token::Package => Some("package".to_string()),
             Token::Import => Some("import".to_string()),
             Token::Export => Some("export".to_string()),
+            Token::As => Some("as".to_string()),
             Token::Private => Some("private".to_string()),
             Token::Protected => Some("protected".to_string()),
             Token::Public => Some("public".to_string()),

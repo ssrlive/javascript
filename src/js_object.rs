@@ -1,6 +1,7 @@
 use crate::core::{
-    ClosureData, EvalError, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, evaluate_call_dispatch, new_js_object_data,
-    object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    ClosureData, EvalError, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, evaluate_call_dispatch, get_own_property,
+    get_property_with_accessors, new_js_object_data, object_get_key_value, object_set_key_value, prepare_closure_call_env,
+    prepare_function_call_env, value_to_string,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -116,7 +117,32 @@ pub(crate) fn define_property_internal<'gc>(
     prop_key: impl Into<PropertyKey<'gc>>,
     desc_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
-    let prop_key = &prop_key.into();
+    let mut effective_prop_key = prop_key.into();
+    let is_module_namespace = {
+        let b = target_obj.borrow();
+        b.deferred_module_path.is_some() || b.deferred_cache_env.is_some() || (b.prototype.is_none() && !b.is_extensible())
+    };
+    if object_get_key_value(target_obj, &effective_prop_key).is_none()
+        && is_module_namespace
+        && let PropertyKey::Symbol(sym_req) = &effective_prop_key
+        && sym_req.description() == Some("Symbol.toStringTag")
+    {
+        let fallback_key = {
+            let borrowed = target_obj.borrow();
+            borrowed.properties.keys().find_map(|k| {
+                if let PropertyKey::Symbol(sym_existing) = k
+                    && sym_existing.description() == Some("Symbol.toStringTag")
+                {
+                    return Some(k.clone());
+                }
+                None
+            })
+        };
+        if let Some(k) = fallback_key {
+            effective_prop_key = k;
+        }
+    }
+    let prop_key = &effective_prop_key;
     // Parse descriptor into typed PropertyDescriptor
     let pd = PropertyDescriptor::from_object(desc_obj)?;
     // DEBUG: print parsed descriptor flags
@@ -390,6 +416,13 @@ pub fn handle_object_method<'gc>(
                             continue;
                         }
                         if let PropertyKey::String(s) = key {
+                            let is_module_namespace = {
+                                let b = obj.borrow();
+                                b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                            };
+                            if is_module_namespace {
+                                let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                            }
                             // Only include string keys (array indices and others). Skip 'length' because it's non-enumerable
                             keys.push(Value::String(utf8_to_utf16(&s)));
                         }
@@ -428,6 +461,15 @@ pub fn handle_object_method<'gc>(
                             continue;
                         }
                         if let PropertyKey::String(_s) = &key {
+                            if let PropertyKey::String(s) = &key {
+                                let is_module_namespace = {
+                                    let b = obj.borrow();
+                                    b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                                };
+                                if is_module_namespace {
+                                    let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                                }
+                            }
                             // Only include string keys (array indices and others); 'length' is non-enumerable so won't appear
                             if let Some(v_rc) = object_get_key_value(&obj, &key) {
                                 values.push(v_rc.borrow().clone());
@@ -602,6 +644,28 @@ pub fn handle_object_method<'gc>(
             let arg = args[0].clone();
             match arg {
                 Value::Object(obj) => {
+                    let mut is_module_namespace = {
+                        let b = obj.borrow();
+                        b.deferred_module_path.is_some() || b.deferred_cache_env.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                    };
+                    if !is_module_namespace
+                        && let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol")
+                        && let Value::Object(sym_ctor) = sym_ctor_val.borrow().clone()
+                        && let Some(tag_sym_val) = object_get_key_value(&sym_ctor, "toStringTag")
+                        && let Value::Symbol(tag_sym) = tag_sym_val.borrow().clone()
+                    {
+                        let tag_key = PropertyKey::Symbol(tag_sym);
+                        if let Some(tag_pd) = crate::core::build_property_descriptor(mc, &obj, &tag_key)
+                            && tag_pd.configurable == Some(false)
+                            && matches!(tag_pd.value, Some(Value::String(ref s)) if utf16_to_utf8(s) == "Module")
+                        {
+                            is_module_namespace = true;
+                        }
+                    }
+                    if is_module_namespace {
+                        return Ok(Value::Boolean(false));
+                    }
+
                     if obj.borrow().is_extensible() {
                         return Ok(Value::Boolean(false));
                     }
@@ -623,6 +687,14 @@ pub fn handle_object_method<'gc>(
             }
             match &args[0] {
                 Value::Object(obj) => {
+                    let is_module_namespace = {
+                        let b = obj.borrow();
+                        b.deferred_module_path.is_some() || b.deferred_cache_env.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                    };
+                    if is_module_namespace {
+                        return Err(raise_type_error!("Cannot freeze module namespace object"));
+                    }
+
                     // For every own property: if data property -> make non-writable; in any case make non-configurable
                     let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
                     for k in ordered.clone() {
@@ -657,6 +729,28 @@ pub fn handle_object_method<'gc>(
             let arg = args[0].clone();
             match arg {
                 Value::Object(obj) => {
+                    let mut is_module_namespace = {
+                        let b = obj.borrow();
+                        b.deferred_module_path.is_some() || b.deferred_cache_env.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                    };
+                    if !is_module_namespace
+                        && let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol")
+                        && let Value::Object(sym_ctor) = sym_ctor_val.borrow().clone()
+                        && let Some(tag_sym_val) = object_get_key_value(&sym_ctor, "toStringTag")
+                        && let Value::Symbol(tag_sym) = tag_sym_val.borrow().clone()
+                    {
+                        let tag_key = PropertyKey::Symbol(tag_sym);
+                        if let Some(tag_pd) = crate::core::build_property_descriptor(mc, &obj, &tag_key)
+                            && tag_pd.configurable == Some(false)
+                            && matches!(tag_pd.value, Some(Value::String(ref s)) if utf16_to_utf8(s) == "Module")
+                        {
+                            is_module_namespace = true;
+                        }
+                    }
+                    if is_module_namespace {
+                        return Ok(Value::Boolean(false));
+                    }
+
                     if obj.borrow().is_extensible() {
                         return Ok(Value::Boolean(false));
                     }
@@ -796,14 +890,28 @@ pub fn handle_object_method<'gc>(
             match &args[0] {
                 Value::Object(obj) => match &args[1] {
                     Value::Object(proto_obj) => {
+                        let current_proto = obj.borrow().prototype;
+                        let is_extensible = obj.borrow().is_extensible();
+                        let same_proto = current_proto.is_some_and(|p| crate::core::Gc::ptr_eq(p, *proto_obj));
+                        if !is_extensible && !same_proto {
+                            return Err(raise_type_error!("Cannot set prototype of non-extensible object"));
+                        }
                         obj.borrow_mut(mc).prototype = Some(*proto_obj);
                         Ok(Value::Object(*obj))
                     }
                     Value::Undefined | Value::Null => {
+                        let current_proto = obj.borrow().prototype;
+                        let is_extensible = obj.borrow().is_extensible();
+                        if !is_extensible && current_proto.is_some() {
+                            return Err(raise_type_error!("Cannot set prototype of non-extensible object"));
+                        }
                         obj.borrow_mut(mc).prototype = None;
                         Ok(Value::Object(*obj))
                     }
                     Value::Function(func_name) => {
+                        if !obj.borrow().is_extensible() {
+                            return Err(raise_type_error!("Cannot set prototype of non-extensible object"));
+                        }
                         // Functions are objects in JS. Our engine represents some built-ins as Value::Function,
                         // so wrap it in an object shell that behaves like a function object for prototype chains.
                         let fn_obj = new_js_object_data(mc);
@@ -906,12 +1014,16 @@ pub fn handle_object_method<'gc>(
             if let Some(_val_rc) = object_get_key_value(&obj, &key) {
                 if let Some(mut pd) = crate::core::build_property_descriptor(mc, &obj, &key) {
                     let is_deferred_namespace = obj.borrow().deferred_module_path.is_some();
+                    let is_module_namespace = {
+                        let b = obj.borrow();
+                        is_deferred_namespace || (b.prototype.is_none() && !b.is_extensible())
+                    };
                     let is_accessor_descriptor = pd.get.is_some() || pd.set.is_some();
-                    let needs_hydration = (is_deferred_namespace || !is_accessor_descriptor)
+                    let needs_hydration = (is_module_namespace || !is_accessor_descriptor)
                         && (pd.value.is_none() || matches!(pd.value, Some(Value::Undefined)));
                     if needs_hydration && let PropertyKey::String(s) = &key {
                         let hydrated = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
-                        if !matches!(hydrated, Value::Undefined) {
+                        if is_module_namespace || !matches!(hydrated, Value::Undefined) {
                             pd.value = Some(hydrated);
                             pd.get = None;
                             pd.set = None;
@@ -1076,6 +1188,49 @@ pub fn handle_object_method<'gc>(
 
             let pd = PropertyDescriptor::from_object(&desc_obj)?;
             crate::core::validate_descriptor_for_define(mc, &pd)?;
+
+            let is_module_namespace = {
+                let b = target_obj.borrow();
+                b.deferred_module_path.is_some() || b.deferred_cache_env.is_some() || (b.prototype.is_none() && !b.is_extensible())
+            };
+            if is_module_namespace {
+                if pd.get.is_some() || pd.set.is_some() {
+                    return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                }
+
+                match &prop_key {
+                    PropertyKey::String(name) => {
+                        if crate::core::build_property_descriptor(mc, &target_obj, &prop_key).is_none() {
+                            return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                        }
+                        if pd.configurable == Some(true) || pd.enumerable == Some(false) || pd.writable == Some(false) {
+                            return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                        }
+                        if let Some(v) = pd.value {
+                            let cur = crate::core::get_property_with_accessors(mc, env, &target_obj, name.as_str())?;
+                            if !crate::core::values_equal(mc, &cur, &v) {
+                                return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                            }
+                        }
+                    }
+                    PropertyKey::Symbol(sym) if sym.description() == Some("Symbol.toStringTag") => {
+                        if pd.configurable == Some(true) || pd.enumerable == Some(true) || pd.writable == Some(true) {
+                            return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                        }
+                        if let Some(v) = pd.value
+                            && !crate::core::values_equal(mc, &v, &Value::String(utf8_to_utf16("Module")))
+                        {
+                            return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                        }
+                    }
+                    _ => {
+                        return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                    }
+                }
+
+                return Ok(Value::Object(target_obj));
+            }
+
             define_property_internal(mc, &target_obj, &prop_key, &desc_obj)?;
             Ok(Value::Object(target_obj))
         }
@@ -1570,6 +1725,38 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
                 return Err(raise_eval_error!("hasOwnProperty requires one argument").into());
             }
             let key_val = args[0].clone();
+            let ns_export_meta =
+                crate::core::get_own_property(object, PropertyKey::Private("__ns_export_names".to_string(), 1)).and_then(|v| {
+                    match &*v.borrow() {
+                        Value::Object(meta) => Some(*meta),
+                        _ => None,
+                    }
+                });
+            let is_module_namespace = {
+                let b = object.borrow();
+                b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible()) || ns_export_meta.is_some()
+            };
+            if is_module_namespace {
+                let key_opt = match &key_val {
+                    Value::String(s) => Some(utf16_to_utf8(s)),
+                    Value::Number(n) => Some(crate::core::value_to_string(&Value::Number(*n))),
+                    Value::BigInt(b) => Some(b.to_string()),
+                    Value::Boolean(b) => Some(b.to_string()),
+                    Value::Undefined => Some("undefined".to_string()),
+                    _ => None,
+                };
+                if let Some(key) = key_opt {
+                    let is_export_name = ns_export_meta
+                        .map(|meta| crate::core::get_own_property(&meta, key.as_str()).is_some())
+                        .unwrap_or(false);
+                    if crate::core::get_own_property(object, key.as_str()).is_some() || is_export_name {
+                        let val = crate::core::get_property_with_accessors(mc, env, object, key.as_str())?;
+                        if matches!(val, Value::Undefined) {
+                            return Err(raise_reference_error!("Cannot access binding before initialization").into());
+                        }
+                    }
+                }
+            }
             let exists = crate::core::has_own_property_value(object, &key_val);
             Ok(Some(Value::Boolean(exists)))
         }
@@ -1597,6 +1784,36 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
                 return Err(raise_eval_error!("propertyIsEnumerable requires one argument").into());
             }
             let key_val = args[0].clone();
+            let ns_export_meta =
+                get_own_property(object, PropertyKey::Private("__ns_export_names".to_string(), 1)).and_then(|v| match &*v.borrow() {
+                    Value::Object(meta) => Some(*meta),
+                    _ => None,
+                });
+            let is_module_namespace = {
+                let b = object.borrow();
+                b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible()) || ns_export_meta.is_some()
+            };
+            if is_module_namespace {
+                let key_opt = match &key_val {
+                    Value::String(s) => Some(utf16_to_utf8(s)),
+                    Value::Number(n) => Some(crate::core::value_to_string(&Value::Number(*n))),
+                    Value::BigInt(b) => Some(b.to_string()),
+                    Value::Boolean(b) => Some(b.to_string()),
+                    Value::Undefined => Some("undefined".to_string()),
+                    _ => None,
+                };
+                if let Some(key) = key_opt {
+                    let is_export_name = ns_export_meta
+                        .map(|meta| get_own_property(&meta, key.as_str()).is_some())
+                        .unwrap_or(false);
+                    if get_own_property(object, key.as_str()).is_some() || is_export_name {
+                        let val = get_property_with_accessors(mc, env, object, key.as_str())?;
+                        if matches!(val, Value::Undefined) {
+                            return Err(raise_reference_error!("Cannot access binding before initialization").into());
+                        }
+                    }
+                }
+            }
             let exists = crate::core::has_own_property_value(object, &key_val);
             Ok(Some(Value::Boolean(exists)))
         }

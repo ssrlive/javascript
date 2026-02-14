@@ -74,9 +74,16 @@ pub struct IfStatement {
 #[derive(Clone, Debug)]
 pub struct TryCatchStatement {
     pub try_body: Vec<Statement>,
-    pub catch_param: Option<String>,
+    pub catch_param: Option<CatchParamPattern>,
     pub catch_body: Option<Vec<Statement>>,
     pub finally_body: Option<Vec<Statement>>,
+}
+
+#[derive(Clone, Debug)]
+pub enum CatchParamPattern {
+    Identifier(String),
+    Array(Vec<DestructuringElement>),
+    Object(Vec<DestructuringElement>),
 }
 
 #[derive(Clone, Debug)]

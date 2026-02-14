@@ -187,6 +187,14 @@ enum ProgramKind {
     Module,
 }
 
+fn extract_injected_module_filepath(script: &str) -> Option<String> {
+    let marker = "globalThis.__filepath = \"";
+    let start = script.find(marker)? + marker.len();
+    let rest = &script[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 fn evaluate_program<T, P>(script: T, script_path: Option<P>, kind: ProgramKind) -> Result<String, JSError>
 where
     T: AsRef<str>,
@@ -259,7 +267,12 @@ where
         crate::js_promise::reset_global_state();
 
         if let Some(p) = script_path.as_ref() {
-            let p_str = p.as_ref().to_string_lossy().to_string();
+            let mut p_str = p.as_ref().to_string_lossy().to_string();
+            if kind == ProgramKind::Module
+                && let Some(injected_path) = extract_injected_module_filepath(script)
+            {
+                p_str = injected_path;
+            }
             // Store __filepath
             object_set_key_value(mc, &root.global_env, "__filepath", &Value::String(utf8_to_utf16(&p_str)))?;
         }
@@ -271,16 +284,24 @@ where
         if kind == ProgramKind::Module
             && let (Some(exports_obj), Some(p)) = (entry_module_exports, script_path.as_ref())
         {
-            let module_path = std::fs::canonicalize(p.as_ref()).unwrap_or_else(|_| p.as_ref().to_path_buf());
-            let module_path_str = module_path.to_string_lossy().to_string();
+            let script_fs_path = std::fs::canonicalize(p.as_ref()).unwrap_or_else(|_| p.as_ref().to_path_buf());
+            let script_fs_path_str = script_fs_path.to_string_lossy().to_string();
+            let logical_module_path = extract_injected_module_filepath(script).unwrap_or_else(|| script_fs_path_str.clone());
+            let module_path = std::fs::canonicalize(&logical_module_path)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(logical_module_path);
+
             let cache = crate::js_module::get_or_create_module_cache(mc, &root.global_env)?;
-            object_set_key_value(mc, &cache, module_path_str.as_str(), &Value::Object(exports_obj))?;
+            object_set_key_value(mc, &cache, module_path.as_str(), &Value::Object(exports_obj))?;
+            object_set_key_value(mc, &cache, script_fs_path_str.as_str(), &Value::Object(exports_obj))?;
             let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
-            object_set_key_value(mc, &loading, module_path_str.as_str(), &Value::Boolean(true))?;
+            object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(true))?;
+            object_set_key_value(mc, &loading, script_fs_path_str.as_str(), &Value::Boolean(true))?;
 
             // Create import.meta for the entry module so `import.meta` is defined in module scripts
             let import_meta = new_js_object_data(mc);
-            object_set_key_value(mc, &import_meta, "url", &Value::String(utf8_to_utf16(&module_path_str)))?;
+            object_set_key_value(mc, &import_meta, "url", &Value::String(utf8_to_utf16(&module_path)))?;
             object_set_key_value(mc, &root.global_env, "__import_meta", &Value::Object(import_meta))?;
         }
 
@@ -294,15 +315,65 @@ where
             object_set_key_value(mc, &root.global_env, "__test262_global_code_mode", &Value::Boolean(true))?;
         }
 
-        match evaluate_statements(mc, &root.global_env, &statements) {
+        let exec_env = if kind == ProgramKind::Module {
+            let module_env = new_js_object_data(mc);
+            module_env.borrow_mut(mc).is_function_scope = true;
+            module_env.borrow_mut(mc).prototype = Some(root.global_env);
+            object_set_key_value(mc, &module_env, "this", &Value::Undefined)?;
+            object_set_key_value(mc, &module_env, "globalThis", &Value::Object(root.global_env))?;
+
+            if let Some(exports_obj) = entry_module_exports {
+                object_set_key_value(mc, &module_env, "exports", &Value::Object(exports_obj))?;
+                let module_obj = new_js_object_data(mc);
+                object_set_key_value(mc, &module_obj, "exports", &Value::Object(exports_obj))?;
+                object_set_key_value(mc, &module_env, "module", &Value::Object(module_obj))?;
+            }
+
+            module_env
+        } else {
+            root.global_env
+        };
+
+        let eval_statements_slice: &[Statement] = if kind == ProgramKind::Module {
+            let split_idx = statements.iter().position(|stmt| {
+                if let StatementKind::Expr(expr) = &*stmt.kind
+                    && let Expr::Assign(lhs, rhs) = expr
+                    && let Expr::Property(base, prop) = &**lhs
+                    && let Expr::Var(name, ..) = &**base
+                {
+                    return name == "globalThis" && prop == "__filepath" && matches!(&**rhs, Expr::StringLit(_));
+                }
+                false
+            });
+
+            if let Some(idx) = split_idx {
+                let prefix = &statements[..=idx];
+                if !prefix.is_empty() {
+                    evaluate_statements(mc, &exec_env, prefix)?;
+                }
+                &statements[(idx + 1)..]
+            } else {
+                &statements
+            }
+        } else {
+            &statements
+        };
+
+        match evaluate_statements(mc, &exec_env, eval_statements_slice) {
             Ok(mut result) => {
                 if kind == ProgramKind::Module
                     && let (Some(_exports_obj), Some(p)) = (entry_module_exports, script_path.as_ref())
                 {
-                    let module_path = std::fs::canonicalize(p.as_ref()).unwrap_or_else(|_| p.as_ref().to_path_buf());
-                    let module_path_str = module_path.to_string_lossy().to_string();
+                    let script_fs_path = std::fs::canonicalize(p.as_ref()).unwrap_or_else(|_| p.as_ref().to_path_buf());
+                    let script_fs_path_str = script_fs_path.to_string_lossy().to_string();
+                    let logical_module_path = extract_injected_module_filepath(script).unwrap_or_else(|| script_fs_path_str.clone());
+                    let module_path = std::fs::canonicalize(&logical_module_path)
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or(logical_module_path);
                     let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
-                    object_set_key_value(mc, &loading, module_path_str.as_str(), &Value::Boolean(false))?;
+                    object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
+                    object_set_key_value(mc, &loading, script_fs_path_str.as_str(), &Value::Boolean(false))?;
                 }
                 let mut count = 0;
                 loop {
@@ -376,7 +447,7 @@ where
                 // Re-evaluate final expression/return after draining microtasks so that
                 // scripts which rely on `.then`/microtask side-effects (e.g. assigning
                 // to a top-level variable in a then callback) observe the updated value.
-                if let Some(last_stmt) = statements.last() {
+                if let Some(last_stmt) = eval_statements_slice.last() {
                     match &*last_stmt.kind {
                         // If the last statement is a simple variable reference, re-evaluate it
                         // to pick up any changes made by microtasks.
@@ -384,7 +455,7 @@ where
                             match expr {
                                 // e.g. final expression is a variable reference: `result`
                                 crate::core::Expr::Var(_name, ..) => {
-                                    if let Ok(new_val) = evaluate_expr(mc, &root.global_env, expr) {
+                                    if let Ok(new_val) = evaluate_expr(mc, &exec_env, expr) {
                                         result = new_val;
                                     }
                                 }

@@ -15,10 +15,10 @@ use crate::js_typedarray::{ensure_typedarray_in_bounds, get_array_like_element, 
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BinaryOp, ClassDefinition, ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, ImportSpecifier, JSObjectDataPtr,
-        ObjectDestructuringElement, Statement, StatementKind, create_error, env_get, env_get_own, env_get_strictness, env_set,
-        env_set_recursive, env_set_strictness, get_own_property, is_error, new_js_object_data, object_get_key_value, object_get_length,
-        object_set_key_value, object_set_length, to_primitive, value_to_string,
+        BinaryOp, CatchParamPattern, ClassDefinition, ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, ImportSpecifier,
+        JSObjectDataPtr, ObjectDestructuringElement, Statement, StatementKind, create_error, env_get, env_get_own, env_get_strictness,
+        env_set, env_set_recursive, env_set_strictness, get_own_property, is_error, new_js_object_data, object_get_key_value,
+        object_get_length, object_set_key_value, object_set_length, to_primitive, value_to_string,
     },
     js_math::handle_math_call,
     raise_eval_error, raise_reference_error,
@@ -31,6 +31,8 @@ use num_traits::{FromPrimitive, ToPrimitive, Zero};
 thread_local! {
     static OPT_CHAIN_RECURSION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
+
+const DEFAULT_EXPORT_SLOT: &str = "__default_export";
 
 const OPT_CHAIN_RECURSION_LIMIT: u32 = 2000;
 
@@ -1402,7 +1404,20 @@ fn hoist_declarations<'gc>(
 ) -> Result<(), EvalError<'gc>> {
     // 1. Hoist FunctionDeclarations (only top-level in this list of statements)
     for stmt in statements {
-        if let StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async) = &*stmt.kind {
+        let func_decl = match &*stmt.kind {
+            StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async) => {
+                Some((name, params, body, is_generator, is_async))
+            }
+            StatementKind::Export(_, Some(decl), None) => match &*decl.kind {
+                StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async) => {
+                    Some((name, params, body, is_generator, is_async))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
+        if let Some((name, params, body, is_generator, is_async)) = func_decl {
             let mut body_clone = body.clone();
             log::trace!(
                 "hoist_declarations: found function declaration '{}'; exec env proto is_none={}",
@@ -1633,18 +1648,42 @@ fn hoist_declarations<'gc>(
                                     continue;
                                 }
                                 object_set_key_value(mc, env, name, &Value::Uninitialized)?;
+                                env.borrow_mut(mc).set_lexical(name.clone());
+                                env.borrow_mut(mc).set_const(name.clone());
                             }
                             ImportSpecifier::Named(name, alias) => {
                                 let binding_name = alias.as_ref().unwrap_or(name);
                                 object_set_key_value(mc, env, binding_name, &Value::Uninitialized)?;
                                 env.borrow_mut(mc).set_lexical(binding_name.clone());
+                                env.borrow_mut(mc).set_const(binding_name.clone());
                             }
                             ImportSpecifier::Namespace(name) => {
                                 object_set_key_value(mc, env, name, &Value::Uninitialized)?;
+                                env.borrow_mut(mc).set_lexical(name.clone());
+                                env.borrow_mut(mc).set_const(name.clone());
                             }
                         }
                     }
                 }
+                StatementKind::Export(_, Some(decl), None) => match &*decl.kind {
+                    StatementKind::Let(decls) => {
+                        for (name, _) in decls {
+                            object_set_key_value(mc, env, name, &Value::Uninitialized)?;
+                            env.borrow_mut(mc).set_lexical(name.clone());
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            object_set_key_value(mc, env, name, &Value::Uninitialized)?;
+                            env.borrow_mut(mc).set_lexical(name.clone());
+                        }
+                    }
+                    StatementKind::Class(class_def) => {
+                        object_set_key_value(mc, env, &class_def.name, &Value::Uninitialized)?;
+                        env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                    }
+                    _ => {}
+                },
                 StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
                     let mut names = Vec::new();
                     collect_names_from_destructuring(pattern, &mut names);
@@ -1900,10 +1939,21 @@ fn check_stmt_for_var_forbidden_names(stmt: &Statement) -> bool {
         }),
         StatementKind::With(_, body) => body.iter().any(check_stmt_for_var_forbidden_names),
         StatementKind::TryCatch(try_stmt) => {
-            if let Some(param) = &try_stmt.catch_param
-                && (param == "eval" || param == "arguments")
-            {
-                return true;
+            if let Some(param) = &try_stmt.catch_param {
+                match param {
+                    CatchParamPattern::Identifier(name) => {
+                        if name == "eval" || name == "arguments" {
+                            return true;
+                        }
+                    }
+                    CatchParamPattern::Array(pattern) | CatchParamPattern::Object(pattern) => {
+                        let mut names = Vec::new();
+                        collect_names_from_destructuring(pattern, &mut names);
+                        if names.iter().any(|n| n == "eval" || n == "arguments") {
+                            return true;
+                        }
+                    }
+                }
             }
             try_stmt.try_body.iter().any(check_stmt_for_var_forbidden_names)
                 || try_stmt
@@ -2253,13 +2303,19 @@ pub fn evaluate_statements_with_labels<'gc>(
                                         continue;
                                     }
                                     object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                                    lex_env.borrow_mut(mc).set_lexical(name.clone());
+                                    lex_env.borrow_mut(mc).set_const(name.clone());
                                 }
                                 ImportSpecifier::Named(name, alias) => {
                                     let binding_name = alias.as_ref().unwrap_or(name);
                                     object_set_key_value(mc, &lex_env, binding_name, &Value::Uninitialized)?;
+                                    lex_env.borrow_mut(mc).set_lexical(binding_name.clone());
+                                    lex_env.borrow_mut(mc).set_const(binding_name.clone());
                                 }
                                 ImportSpecifier::Namespace(name) => {
                                     object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                                    lex_env.borrow_mut(mc).set_lexical(name.clone());
+                                    lex_env.borrow_mut(mc).set_const(name.clone());
                                 }
                             }
                         }
@@ -2363,11 +2419,52 @@ pub fn evaluate_statements_with_labels<'gc>(
         }
     }
 
+    let has_import_defer_marker_form = statements.iter().any(|s| {
+        if let StatementKind::Import(specifiers, _) = &*s.kind {
+            let has_default_defer = specifiers
+                .iter()
+                .any(|sp| matches!(sp, ImportSpecifier::Default(name) if name == "defer"));
+            let has_namespace = specifiers.iter().any(|sp| matches!(sp, ImportSpecifier::Namespace(_)));
+            return has_default_defer && has_namespace;
+        }
+        false
+    });
+
+    if statements
+        .iter()
+        .any(|s| matches!(&*s.kind, StatementKind::Import(..) | StatementKind::Export(..)))
+    {
+        preinitialize_exported_function_bindings(mc, &exec_env, statements)?;
+        if !has_import_defer_marker_form {
+            preload_requested_modules_in_source_order(mc, &exec_env, statements)?;
+        }
+
+        let mut module_last_value = Value::Undefined;
+        for stmt in statements {
+            if matches!(&*stmt.kind, StatementKind::Import(..) | StatementKind::Export(_, _, Some(_)))
+                && let Some(cf) = eval_res(mc, stmt, &mut module_last_value, &exec_env, labels, own_labels)?
+            {
+                return Ok(cf);
+            }
+        }
+    }
+
     let mut last_value = Value::Undefined;
+    let mut flushed_defer_preloads = false;
     for stmt in statements {
+        if matches!(&*stmt.kind, StatementKind::Import(..) | StatementKind::Export(_, _, Some(_))) {
+            continue;
+        }
+        if has_import_defer_marker_form && !flushed_defer_preloads {
+            crate::js_module::flush_deferred_async_preload_modules(mc, &exec_env)?;
+            flushed_defer_preloads = true;
+        }
         if let Some(cf) = eval_res(mc, stmt, &mut last_value, &exec_env, labels, own_labels)? {
             return Ok(cf);
         }
+    }
+    if has_import_defer_marker_form && !flushed_defer_preloads {
+        crate::js_module::flush_deferred_async_preload_modules(mc, &exec_env)?;
     }
     Ok(ControlFlow::Normal(last_value))
 }
@@ -2494,13 +2591,19 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
                                         continue;
                                     }
                                     object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                                    lex_env.borrow_mut(mc).set_lexical(name.clone());
+                                    lex_env.borrow_mut(mc).set_const(name.clone());
                                 }
                                 ImportSpecifier::Named(name, alias) => {
                                     let binding_name = alias.as_ref().unwrap_or(name);
                                     object_set_key_value(mc, &lex_env, binding_name, &Value::Uninitialized)?;
+                                    lex_env.borrow_mut(mc).set_lexical(binding_name.clone());
+                                    lex_env.borrow_mut(mc).set_const(binding_name.clone());
                                 }
                                 ImportSpecifier::Namespace(name) => {
                                     object_set_key_value(mc, &lex_env, name, &Value::Uninitialized)?;
+                                    lex_env.borrow_mut(mc).set_lexical(name.clone());
+                                    lex_env.borrow_mut(mc).set_const(name.clone());
                                 }
                             }
                         }
@@ -2592,9 +2695,29 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
         }
     }
 
+    if statements
+        .iter()
+        .any(|s| matches!(&*s.kind, StatementKind::Import(..) | StatementKind::Export(..)))
+    {
+        preinitialize_exported_function_bindings(mc, &exec_env, statements)?;
+        preload_requested_modules_in_source_order(mc, &exec_env, statements)?;
+
+        let mut module_last_value = Value::Undefined;
+        for stmt in statements {
+            if matches!(&*stmt.kind, StatementKind::Import(..) | StatementKind::Export(_, _, Some(_)))
+                && let Some(cf) = eval_res(mc, stmt, &mut module_last_value, &exec_env, labels, own_labels)?
+            {
+                return Ok((cf, module_last_value));
+            }
+        }
+    }
+
     let mut last_value = Value::Undefined;
     let mut flushed_defer_preloads = false;
     for stmt in statements {
+        if matches!(&*stmt.kind, StatementKind::Import(..) | StatementKind::Export(_, _, Some(_))) {
+            continue;
+        }
         if !flushed_defer_preloads && !matches!(&*stmt.kind, StatementKind::Import(_, _)) {
             crate::js_module::flush_deferred_async_preload_modules(mc, &exec_env)?;
             flushed_defer_preloads = true;
@@ -2842,6 +2965,146 @@ fn evaluate_destructuring_element_rec<'gc>(
     Ok(())
 }
 
+fn preload_requested_modules_in_source_order<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &[Statement],
+) -> Result<(), EvalError<'gc>> {
+    let base_path = env_get(env, "__filepath").and_then(|cell| match cell.borrow().clone() {
+        Value::String(s) => Some(utf16_to_utf8(&s)),
+        _ => None,
+    });
+
+    for (idx, stmt) in statements.iter().enumerate() {
+        match &*stmt.kind {
+            StatementKind::Import(specifiers, source) => {
+                let is_import_defer_marker_form = specifiers
+                    .iter()
+                    .any(|s| matches!(s, ImportSpecifier::Default(name) if name == "defer"))
+                    && specifiers.iter().any(|s| matches!(s, ImportSpecifier::Namespace(_)));
+
+                if is_import_defer_marker_form {
+                    continue;
+                }
+
+                let has_later_bound_import = statements
+                    .iter()
+                    .skip(idx + 1)
+                    .any(|s| matches!(&*s.kind, StatementKind::Import(next_specs, _) if !next_specs.is_empty()));
+
+                let should_nonblocking_preload = specifiers.is_empty()
+                    && has_later_bound_import
+                    && crate::js_module::module_has_async_transitive_dependencies(source, base_path.as_deref())?;
+
+                if should_nonblocking_preload {
+                    crate::js_module::preload_async_transitive_module(mc, source, base_path.as_deref(), Some(*env))?;
+                } else {
+                    crate::js_module::load_module(mc, source, base_path.as_deref(), Some(*env))?;
+                }
+            }
+            StatementKind::Export(_, _, Some(source)) => {
+                crate::js_module::load_module(mc, source, base_path.as_deref(), Some(*env))?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn preinitialize_exported_function_bindings<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &[Statement],
+) -> Result<(), EvalError<'gc>> {
+    let ensure_uninitialized_lexical = |name: &str| -> Result<(), EvalError<'gc>> {
+        if env_get(env, name).is_none() {
+            object_set_key_value(mc, env, name, &Value::Uninitialized)?;
+            env.borrow_mut(mc).set_lexical(name.to_string());
+        }
+        Ok(())
+    };
+
+    let bind_name = |name: &str| -> Result<(), EvalError<'gc>> {
+        if env_get(env, name).is_some() {
+            export_binding(mc, env, name, name)?;
+        }
+        Ok(())
+    };
+
+    for stmt in statements {
+        if let StatementKind::Export(specifiers, inner_stmt, source) = &*stmt.kind {
+            if let Some(inner) = inner_stmt {
+                match &*inner.kind {
+                    StatementKind::FunctionDeclaration(name, ..) => bind_name(name)?,
+                    StatementKind::Class(class_def) => {
+                        ensure_uninitialized_lexical(&class_def.name)?;
+                        export_binding(mc, env, &class_def.name, &class_def.name)?;
+                    }
+                    StatementKind::Var(decls) => {
+                        for (name, _) in decls {
+                            bind_name(name)?;
+                        }
+                    }
+                    StatementKind::Let(decls) => {
+                        for (name, _) in decls {
+                            ensure_uninitialized_lexical(name)?;
+                            export_binding(mc, env, name, name)?;
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            ensure_uninitialized_lexical(name)?;
+                            export_binding(mc, env, name, name)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            for spec in specifiers {
+                match spec {
+                    ExportSpecifier::Named(name, alias) => {
+                        let export_name = alias.as_ref().unwrap_or(name);
+                        if source.is_none() && env_get(env, name).is_some() {
+                            export_binding(mc, env, export_name, name)?;
+                        }
+                    }
+                    ExportSpecifier::Default(expr) => {
+                        if env_get(env, DEFAULT_EXPORT_SLOT).is_none() {
+                            object_set_key_value(mc, env, DEFAULT_EXPORT_SLOT, &Value::Uninitialized)?;
+                            env.borrow_mut(mc).set_lexical(DEFAULT_EXPORT_SLOT.to_string());
+                        }
+
+                        let is_default_function_declaration_form = matches!(
+                            expr,
+                            Expr::Function(Some(_), ..)
+                                | Expr::GeneratorFunction(Some(_), ..)
+                                | Expr::AsyncFunction(Some(_), ..)
+                                | Expr::AsyncGeneratorFunction(Some(_), ..)
+                        );
+
+                        if is_default_function_declaration_form {
+                            let val = evaluate_expr(mc, env, expr)?;
+                            set_name_if_anonymous(mc, &val, expr, "default")?;
+                            object_set_key_value(mc, env, DEFAULT_EXPORT_SLOT, &val)?;
+                        }
+
+                        export_binding(mc, env, "default", DEFAULT_EXPORT_SLOT)?;
+                    }
+                    ExportSpecifier::Namespace(name) => {
+                        if source.is_none() && env_get(env, name).is_some() {
+                            export_binding(mc, env, name, name)?;
+                        }
+                    }
+                    ExportSpecifier::Star => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn eval_res<'gc>(
     mc: &MutationContext<'gc>,
     stmt: &Statement,
@@ -3019,27 +3282,19 @@ fn eval_res<'gc>(
             if is_import_defer_marker_form && let Some(ns_name) = defer_namespace_name {
                 let deferred_ns = crate::js_module::load_module_deferred_namespace(mc, source, base_path.as_deref(), Some(*env))
                     .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
-                env_set(mc, env, ns_name, &deferred_ns)?;
-
-                let source_path = crate::js_module::resolve_module_path(source, base_path.as_deref())
-                    .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()))?;
+                object_set_key_value(mc, env, ns_name, &deferred_ns)?;
 
                 let additional_modules = crate::js_module::gather_async_transitive_dependencies(source, base_path.as_deref())
                     .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()))?;
                 for additional_module in additional_modules {
-                    let is_source_module = additional_module == source_path;
-                    if is_source_module {
-                        crate::js_module::load_module(mc, additional_module.as_str(), None, Some(*env))
-                            .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
-                    } else if crate::js_module::module_has_direct_async_dependency(additional_module.as_str(), None)
-                        .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()))?
-                    {
-                        crate::js_module::queue_deferred_async_preload_module(mc, env, additional_module.as_str())
-                            .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
-                    } else {
+                    let ready_now = crate::js_module::deferred_preload_ready_now(additional_module.as_str(), env)
+                        .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()))?;
+                    if ready_now {
                         crate::js_module::preload_async_transitive_module(mc, additional_module.as_str(), None, Some(*env))
                             .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
                     }
+                    crate::js_module::queue_deferred_async_preload_module(mc, env, additional_module.as_str())
+                        .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
                 }
             }
 
@@ -3055,30 +3310,53 @@ fn eval_res<'gc>(
                 return Ok(None);
             }
 
-            let exports = crate::js_module::load_module(mc, source, base_path.as_deref(), Some(*env))
-                .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
+            let mut resolved_self = false;
+            let mut self_exports = None;
+            if let Some(base) = base_path.as_deref() {
+                let current_path = std::path::Path::new(base).canonicalize().ok();
+                let source_path = crate::js_module::resolve_module_path(source, base_path.as_deref())
+                    .ok()
+                    .and_then(|p| std::path::Path::new(&p).canonicalize().ok());
+                if let (Some(current), Some(target)) = (current_path, source_path)
+                    && current == target
+                    && let Some(cell) = env_get(env, "exports")
+                    && let Value::Object(exports_obj) = cell.borrow().clone()
+                {
+                    resolved_self = true;
+                    self_exports = Some(exports_obj);
+                }
+            }
+
+            let exports = if resolved_self {
+                match self_exports {
+                    Some(obj) => Value::Object(obj),
+                    None => return Err(raise_type_error!("Module is not an object").into()),
+                }
+            } else {
+                crate::js_module::load_module(mc, source, base_path.as_deref(), Some(*env))
+                    .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?
+            };
 
             if let Value::Object(exports_obj) = exports {
                 for spec in specifiers {
                     match spec {
                         ImportSpecifier::Named(name, alias) => {
                             let binding_name = alias.as_ref().unwrap_or(name);
-
-                            let val = get_property_with_accessors(mc, env, &exports_obj, name)?;
-                            env_set(mc, env, binding_name, &val)?;
+                            import_live_binding(mc, env, binding_name, &exports_obj, name, stmt.line, stmt.column)?;
                         }
                         ImportSpecifier::Default(name) => {
                             if is_import_defer_marker_form && name == "defer" {
                                 continue;
                             }
-                            let val = get_property_with_accessors(mc, env, &exports_obj, "default")?;
-                            env_set(mc, env, name, &val)?;
+                            import_live_binding(mc, env, name, &exports_obj, "default", stmt.line, stmt.column)?;
                         }
                         ImportSpecifier::Namespace(name) => {
                             if is_import_defer_marker_form && Some(name.as_str()) == defer_namespace_name {
                                 continue;
                             }
-                            env_set(mc, env, name, &Value::Object(exports_obj))?;
+                            let ns_val = crate::js_module::make_module_namespace_object(mc, env, &exports_obj)
+                                .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
+                            object_set_key_value(mc, env, name, &ns_val)?;
                         }
                     }
                 }
@@ -3128,16 +3406,12 @@ fn eval_res<'gc>(
                         match spec {
                             ExportSpecifier::Named(name, alias) => {
                                 let export_name = alias.as_ref().unwrap_or(name);
-                                let val_ptr_res = object_get_key_value(&exports_obj, name);
-                                let val = if let Some(cell) = val_ptr_res {
-                                    cell.borrow().clone()
-                                } else {
-                                    Value::Undefined
-                                };
-                                export_value(mc, env, export_name, &val)?;
+                                export_indirect_live_binding(mc, env, export_name, &exports_obj, name)?;
                             }
                             ExportSpecifier::Namespace(name) => {
-                                export_value(mc, env, name, &Value::Object(exports_obj))?;
+                                let ns_val = crate::js_module::make_module_namespace_object(mc, env, &exports_obj)
+                                    .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?;
+                                export_value(mc, env, name, &ns_val)?;
                             }
                             ExportSpecifier::Star => {
                                 for key in exports_obj.borrow().properties.keys() {
@@ -3204,6 +3478,28 @@ fn eval_res<'gc>(
                             export_binding(mc, env, name, name)?;
                         }
                     }
+                    StatementKind::VarDestructuringArray(pattern, _)
+                    | StatementKind::LetDestructuringArray(pattern, _)
+                    | StatementKind::ConstDestructuringArray(pattern, _) => {
+                        let mut names = Vec::new();
+                        collect_names_from_destructuring(pattern, &mut names);
+                        for name in names {
+                            if env_get(env, &name).is_some() {
+                                export_binding(mc, env, &name, &name)?;
+                            }
+                        }
+                    }
+                    StatementKind::VarDestructuringObject(pattern, _)
+                    | StatementKind::LetDestructuringObject(pattern, _)
+                    | StatementKind::ConstDestructuringObject(pattern, _) => {
+                        let mut names = Vec::new();
+                        collect_names_from_object_destructuring(pattern, &mut names);
+                        for name in names {
+                            if env_get(env, &name).is_some() {
+                                export_binding(mc, env, &name, &name)?;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -3232,7 +3528,22 @@ fn eval_res<'gc>(
                         } else {
                             evaluate_expr(mc, env, expr)?
                         };
-                        export_value(mc, env, "default", &val)?;
+                        let local_name = match expr {
+                            Expr::Function(Some(name), _, _)
+                            | Expr::GeneratorFunction(Some(name), _, _)
+                            | Expr::AsyncFunction(Some(name), _, _)
+                            | Expr::AsyncGeneratorFunction(Some(name), _, _) => Some(name.clone()),
+                            _ => None,
+                        };
+
+                        if let Some(local_name) = local_name {
+                            env_set(mc, env, &local_name, &val)?;
+                            export_binding(mc, env, "default", &local_name)?;
+                        } else {
+                            set_name_if_anonymous(mc, &val, expr, "default")?;
+                            object_set_key_value(mc, env, DEFAULT_EXPORT_SLOT, &val)?;
+                            export_binding(mc, env, "default", DEFAULT_EXPORT_SLOT)?;
+                        }
                     }
                     ExportSpecifier::Namespace(_) => {
                         return Err(raise_syntax_error!("Namespace export requires a module source").into());
@@ -3925,8 +4236,25 @@ fn eval_res<'gc>(
                 let catch_env = crate::core::new_js_object_data(mc);
                 catch_env.borrow_mut(mc).prototype = Some(*env);
 
-                if let Some(param_name) = &tc_stmt.catch_param {
-                    object_set_key_value(mc, &catch_env, param_name, val)?;
+                if let Some(param) = &tc_stmt.catch_param {
+                    match param {
+                        CatchParamPattern::Identifier(param_name) => {
+                            object_set_key_value(mc, &catch_env, param_name, val)?;
+                        }
+                        CatchParamPattern::Array(pattern) => {
+                            evaluate_destructuring_array_assignment(mc, &catch_env, pattern, val, false, None, None)?;
+                        }
+                        CatchParamPattern::Object(pattern) => {
+                            if matches!(val, Value::Undefined | Value::Null) {
+                                return Err(raise_type_error!("Cannot destructure undefined or null").into());
+                            }
+                            if let Value::Object(obj) = &val {
+                                bind_object_inner_for_letconst(mc, &catch_env, pattern, obj, false)?;
+                            } else {
+                                return Err(raise_eval_error!("Expected object for nested destructuring").into());
+                            }
+                        }
+                    }
                 }
 
                 let catch_stmts_clone = catch_stmts.clone();
@@ -4039,8 +4367,8 @@ fn eval_res<'gc>(
             let mut use_lexical_env = if let Some(init_stmt) = &for_stmt.init {
                 matches!(
                     &*init_stmt.kind,
-                    StatementKind::Let(_)
-                        | StatementKind::Const(_)
+                    StatementKind::Let(..)
+                        | StatementKind::Const(..)
                         | StatementKind::LetDestructuringArray(..)
                         | StatementKind::ConstDestructuringArray(..)
                         | StatementKind::LetDestructuringObject(..)
@@ -4976,6 +5304,13 @@ fn eval_res<'gc>(
                             // even if the current property is non-enumerable.
                             if !seen.contains(s) {
                                 seen.insert(s.clone());
+                                let is_module_namespace = {
+                                    let b = o.borrow();
+                                    b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                                };
+                                if is_module_namespace {
+                                    let _ = get_property_with_accessors(mc, env, &o, s.as_str())?;
+                                }
                                 if o.borrow().is_enumerable(key) {
                                     keys.push(s.clone());
                                 }
@@ -5158,13 +5493,21 @@ fn eval_res<'gc>(
                 let mut seen = std::collections::HashSet::new();
                 let mut current = Some(obj);
                 while let Some(o) = current {
-                    for (key, _val) in o.borrow().properties.iter() {
+                    let own_keys = crate::core::ordinary_own_property_keys_mc(mc, &o)?;
+                    for key in own_keys.iter() {
                         if let PropertyKey::String(s) = key {
                             if s == "length" {
                                 continue;
                             }
                             if !seen.contains(s) {
                                 seen.insert(s.clone());
+                                let is_module_namespace = {
+                                    let b = o.borrow();
+                                    b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                                };
+                                if is_module_namespace {
+                                    let _ = get_property_with_accessors(mc, env, &o, s.as_str())?;
+                                }
                                 if o.borrow().is_enumerable(key) {
                                     keys.push(s.clone());
                                 }
@@ -5291,13 +5634,17 @@ fn eval_res<'gc>(
                 let mut seen = std::collections::HashSet::new();
                 let mut current = Some(obj);
                 while let Some(o) = current {
-                    for (key, _val) in o.borrow().properties.iter() {
+                    let own_keys = crate::core::ordinary_own_property_keys_mc(mc, &o)?;
+                    for key in own_keys.iter() {
                         if let PropertyKey::String(s) = key {
                             if s == "length" {
                                 continue;
                             }
                             if !seen.contains(s) {
                                 seen.insert(s.clone());
+                                if o.borrow().deferred_module_path.is_some() {
+                                    let _ = get_property_with_accessors(mc, env, &o, s.as_str())?;
+                                }
                                 if o.borrow().is_enumerable(key) {
                                     keys.push(s.clone());
                                 }
@@ -6267,6 +6614,81 @@ fn export_binding<'gc>(
             object_set_key_value(mc, exports_obj, export_name, &prop)?;
         }
     }
+    Ok(())
+}
+
+fn import_live_binding<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    local_name: &str,
+    exports_obj: &JSObjectDataPtr<'gc>,
+    export_name: &str,
+    line: usize,
+    column: usize,
+) -> Result<(), EvalError<'gc>> {
+    let hidden = format!("__import_src_{}_{}_{}", line, column, local_name);
+    object_set_key_value(mc, env, hidden.as_str(), &Value::Object(*exports_obj))?;
+
+    let getter_body = vec![Statement {
+        kind: Box::new(StatementKind::Return(Some(Expr::Property(
+            Box::new(Expr::Var(hidden.clone(), None, None)),
+            export_name.to_string(),
+        )))),
+        line: 0,
+        column: 0,
+    }];
+
+    let getter_val = Value::Getter(getter_body, *env, None);
+    let prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(getter_val)),
+        setter: None,
+    };
+
+    object_set_key_value(mc, env, local_name, &prop)?;
+    Ok(())
+}
+
+fn export_indirect_live_binding<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    export_name: &str,
+    source_exports_obj: &JSObjectDataPtr<'gc>,
+    source_export_name: &str,
+) -> Result<(), EvalError<'gc>> {
+    let hidden = format!("__reexport_src_{}_{}", export_name, source_export_name);
+    object_set_key_value(mc, env, hidden.as_str(), &Value::Object(*source_exports_obj))?;
+
+    let getter_body = vec![Statement {
+        kind: Box::new(StatementKind::Return(Some(Expr::Property(
+            Box::new(Expr::Var(hidden.clone(), None, None)),
+            source_export_name.to_string(),
+        )))),
+        line: 0,
+        column: 0,
+    }];
+
+    let getter_val = Value::Getter(getter_body, *env, None);
+    let prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(getter_val)),
+        setter: None,
+    };
+
+    if let Some(exports_cell) = env_get(env, "exports")
+        && let Value::Object(exports_obj) = exports_cell.borrow().clone()
+    {
+        object_set_key_value(mc, &exports_obj, export_name, &prop)?;
+    }
+
+    if let Some(module_cell) = env_get(env, "module")
+        && let Value::Object(module_obj) = module_cell.borrow().clone()
+        && let Some(exports_val) = object_get_key_value(&module_obj, "exports")
+        && let Value::Object(exports_obj) = exports_val.borrow().clone()
+    {
+        object_set_key_value(mc, &exports_obj, export_name, &prop)?;
+    }
+
     Ok(())
 }
 
@@ -11177,10 +11599,12 @@ pub fn evaluate_call_dispatch<'gc>(
             }
         }
         Value::Object(obj) => {
-            if let Some(cl_ptr) = obj.borrow().get_closure() {
-                match &*cl_ptr.borrow() {
+            let closure_opt = { obj.borrow().get_closure() };
+            if let Some(cl_ptr) = closure_opt {
+                let callable = { cl_ptr.borrow().clone() };
+                match callable {
                     Value::Closure(cl) => {
-                        let res = call_closure(mc, cl, this_val, eval_args, env, Some(*obj));
+                        let res = call_closure(mc, &cl, this_val, eval_args, env, Some(*obj));
                         match res {
                             Ok(v) => Ok(v),
                             Err(mut e) => {
@@ -11196,17 +11620,17 @@ pub fn evaluate_call_dispatch<'gc>(
                             }
                         }
                     }
-                    Value::AsyncClosure(cl) => Ok(handle_async_closure_call(mc, cl, this_val, eval_args, env, Some(*obj))?),
+                    Value::AsyncClosure(cl) => Ok(handle_async_closure_call(mc, &cl, this_val, eval_args, env, Some(*obj))?),
                     Value::GeneratorFunction(_, cl) => {
                         // Do not pre-read the function object's 'prototype' here because
                         // parameter default initializers may mutate it; let the
                         // generator call handler resolve the constructor prototype
                         // after parameter initialization by passing the function
                         // object so it can be observed at the correct time.
-                        Ok(handle_generator_function_call(mc, cl, eval_args, this_val, None, Some(*obj))?)
+                        Ok(handle_generator_function_call(mc, &cl, eval_args, this_val, None, Some(*obj))?)
                     }
                     // Async generator functions: create AsyncGenerator instance
-                    Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, cl, eval_args, Some(*obj))?),
+                    Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, &cl, eval_args, Some(*obj))?),
                     _ => Err(raise_type_error!("Not a function").into()),
                 }
             } else if obj.borrow().class_def.is_some() {
@@ -14393,7 +14817,10 @@ fn evaluate_expr_property<'gc>(
         let val = get_property_with_accessors(mc, env, obj, key)?;
         // Special-case `__proto__` getter: if not present as an own property, return
         // the internal prototype pointer (or null).
-        if key == "__proto__" {
+        if key == "__proto__"
+            && obj.borrow().deferred_module_path.is_none()
+            && (obj.borrow().prototype.is_some() || obj.borrow().is_extensible())
+        {
             let proto_key = PropertyKey::String("__proto__".to_string());
             if get_own_property(obj, &proto_key).is_none() {
                 if let Some(proto_ptr) = obj.borrow().prototype {
@@ -14476,6 +14903,9 @@ fn is_callable_for_typeof<'gc>(value: &Value<'gc>) -> bool {
         | Value::Setter(..) => true,
         Value::Proxy(proxy) => is_callable_for_typeof(&proxy.target),
         Value::Object(obj) => {
+            if obj.borrow().class_def.is_some() {
+                return true;
+            }
             if obj.borrow().get_closure().is_some() {
                 return true;
             }
@@ -15650,6 +16080,14 @@ fn evaluate_function_expression<'gc>(
     Ok(Value::Object(func_obj))
 }
 
+fn normalize_value<'gc>(v: Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    if matches!(v, Value::Uninitialized) {
+        Err(raise_reference_error!("Cannot access binding before initialization").into())
+    } else {
+        Ok(v)
+    }
+}
+
 pub(crate) fn get_property_with_accessors<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -15661,7 +16099,18 @@ pub(crate) fn get_property_with_accessors<'gc>(
     if let PropertyKey::String(prop_name) = key
         && !prop_name.starts_with("__")
     {
-        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, obj, Some(prop_name.as_str()))?;
+        let did_evaluate = crate::js_module::ensure_deferred_namespace_evaluated(mc, env, obj, Some(prop_name.as_str()))?;
+
+        let (module_path, cache_env) = {
+            let b = obj.borrow();
+            (b.deferred_module_path.clone(), b.deferred_cache_env)
+        };
+        if did_evaluate
+            && let (Some(module_path), Some(cache_env)) = (module_path, cache_env)
+            && let Ok(Value::Object(exports_obj)) = crate::js_module::load_module(mc, module_path.as_str(), None, Some(cache_env))
+        {
+            return normalize_value(get_property_with_accessors(mc, env, &exports_obj, prop_name.as_str())?);
+        }
     }
 
     if let PropertyKey::Private(..) = key {
@@ -15673,14 +16122,14 @@ pub(crate) fn get_property_with_accessors<'gc>(
             match val {
                 Value::Property { getter, value, .. } => {
                     if let Some(g) = getter {
-                        return call_accessor(mc, env, obj, &g);
+                        return normalize_value(call_accessor(mc, env, obj, &g)?);
                     } else if let Some(v) = value {
-                        return Ok(v.borrow().clone());
+                        return normalize_value(v.borrow().clone());
                     }
                     return Err(raise_type_error!("Private accessor has no getter").into());
                 }
-                Value::Getter(..) => return call_accessor(mc, env, obj, &val),
-                _ => return Ok(val),
+                Value::Getter(..) => return normalize_value(call_accessor(mc, env, obj, &val)?),
+                _ => return normalize_value(val),
             }
         } else {
             return Err(raise_type_error!("accessed private field from an ordinary object").into());
@@ -15696,15 +16145,15 @@ pub(crate) fn get_property_with_accessors<'gc>(
             match val {
                 Value::Property { getter, value, .. } => {
                     if let Some(g) = getter {
-                        return call_accessor(mc, env, obj, &g);
+                        return normalize_value(call_accessor(mc, env, obj, &g)?);
                     } else if let Some(v) = value {
-                        return Ok(v.borrow().clone());
+                        return normalize_value(v.borrow().clone());
                     } else {
                         return Ok(Value::Undefined);
                     }
                 }
-                Value::Getter(..) => return call_accessor(mc, env, obj, &val),
-                _ => return Ok(val),
+                Value::Getter(..) => return normalize_value(call_accessor(mc, env, obj, &val)?),
+                _ => return normalize_value(val),
             }
         } else {
             return Err(raise_type_error!("accessed private field from an ordinary object").into());
@@ -15740,15 +16189,15 @@ pub(crate) fn get_property_with_accessors<'gc>(
             return match val {
                 Value::Property { getter, value, .. } => {
                     if let Some(g) = getter {
-                        call_accessor(mc, env, obj, &g)
+                        normalize_value(call_accessor(mc, env, obj, &g)?)
                     } else if let Some(v) = value {
-                        Ok(v.borrow().clone())
+                        normalize_value(v.borrow().clone())
                     } else {
                         Ok(Value::Undefined)
                     }
                 }
-                Value::Getter(..) => call_accessor(mc, env, obj, &val),
-                _ => Ok(val),
+                Value::Getter(..) => normalize_value(call_accessor(mc, env, obj, &val)?),
+                _ => normalize_value(val),
             };
         }
     }
@@ -15766,15 +16215,15 @@ pub(crate) fn get_property_with_accessors<'gc>(
             return match val {
                 Value::Property { getter, value, .. } => {
                     if let Some(g) = getter {
-                        call_accessor(mc, env, obj, &g)
+                        normalize_value(call_accessor(mc, env, obj, &g)?)
                     } else if let Some(v) = value {
-                        Ok(v.borrow().clone())
+                        normalize_value(v.borrow().clone())
                     } else {
                         Ok(Value::Undefined)
                     }
                 }
-                Value::Getter(..) => call_accessor(mc, env, obj, &val),
-                _ => Ok(val),
+                Value::Getter(..) => normalize_value(call_accessor(mc, env, obj, &val)?),
+                _ => normalize_value(val),
             };
         }
 
@@ -15888,6 +16337,10 @@ fn set_property_with_accessors<'gc>(
     receiver_opt: Option<&Value<'gc>>,
 ) -> Result<(), EvalError<'gc>> {
     let key = &key.into();
+
+    if obj.borrow().deferred_module_path.is_some() {
+        return Err(raise_type_error!("Cannot assign to module namespace object").into());
+    }
 
     if receiver_opt.is_some()
         && let PropertyKey::String(s) = key
@@ -16260,7 +16713,8 @@ fn set_property_with_accessors<'gc>(
             false
         };
 
-        if !obj.borrow().is_extensible() && !allow_nonextensible_internal_write {
+        let is_extensible = { obj.borrow().is_extensible() };
+        if !is_extensible && !allow_nonextensible_internal_write {
             if crate::core::env_get_strictness(_env) {
                 return Err(raise_type_error!("Cannot add property to non-extensible object").into());
             }

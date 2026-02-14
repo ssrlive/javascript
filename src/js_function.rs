@@ -112,8 +112,8 @@ pub fn handle_global_function<'gc>(
             }
             return Err(raise_eval_error!("Object.prototype.toString called without this").into());
         }
-        "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(args, env),
-        "Object.prototype.propertyIsEnumerable" => return handle_object_property_is_enumerable(args, env),
+        "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(mc, args, env),
+        "Object.prototype.propertyIsEnumerable" => return handle_object_property_is_enumerable(mc, args, env),
         "RegExp.prototype.exec" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -2023,7 +2023,11 @@ fn internal_promise_race_resolve<'gc>(
     }
 }
 
-fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn handle_object_has_own_property<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // hasOwnProperty should inspect the bound `this` and take one argument
     if args.len() != 1 {
         return Err(raise_eval_error!("hasOwnProperty requires one argument").into());
@@ -2033,6 +2037,36 @@ fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPt
         let this_val = this_rc.borrow().clone();
         match this_val {
             Value::Object(obj) => {
+                let ns_export_meta =
+                    get_own_property(&obj, PropertyKey::Private("__ns_export_names".to_string(), 1)).and_then(|v| match &*v.borrow() {
+                        Value::Object(meta) => Some(*meta),
+                        _ => None,
+                    });
+                let is_module_namespace = {
+                    let b = obj.borrow();
+                    b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible()) || ns_export_meta.is_some()
+                };
+                if is_module_namespace {
+                    let key_opt = match &key_val {
+                        Value::String(s) => Some(utf16_to_utf8(s)),
+                        Value::Number(n) => Some(crate::core::value_to_string(&Value::Number(*n))),
+                        Value::BigInt(b) => Some(b.to_string()),
+                        Value::Boolean(b) => Some(b.to_string()),
+                        Value::Undefined => Some("undefined".to_string()),
+                        _ => None,
+                    };
+                    if let Some(key) = key_opt {
+                        let is_export_name = ns_export_meta
+                            .map(|meta| get_own_property(&meta, key.as_str()).is_some())
+                            .unwrap_or(false);
+                        if get_own_property(&obj, key.as_str()).is_some() || is_export_name {
+                            let val = crate::core::get_property_with_accessors(mc, env, &obj, key.as_str())?;
+                            if matches!(val, Value::Undefined) {
+                                return Err(raise_reference_error!("Cannot access binding before initialization").into());
+                            }
+                        }
+                    }
+                }
                 let exists = has_own_property_value(&obj, &key_val);
                 Ok(Value::Boolean(exists))
             }
@@ -2061,7 +2095,11 @@ fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPt
     }
 }
 
-fn handle_object_property_is_enumerable<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn handle_object_property_is_enumerable<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() != 1 {
         return Err(raise_eval_error!("propertyIsEnumerable requires one argument").into());
     }
@@ -2072,6 +2110,36 @@ fn handle_object_property_is_enumerable<'gc>(args: &[Value<'gc>], env: &JSObject
     let this_val = this_rc.borrow().clone();
     match this_val {
         Value::Object(obj) => {
+            let ns_export_meta =
+                get_own_property(&obj, PropertyKey::Private("__ns_export_names".to_string(), 1)).and_then(|v| match &*v.borrow() {
+                    Value::Object(meta) => Some(*meta),
+                    _ => None,
+                });
+            let is_module_namespace = {
+                let b = obj.borrow();
+                b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible()) || ns_export_meta.is_some()
+            };
+            if is_module_namespace {
+                let key_opt = match &key_val {
+                    Value::String(s) => Some(utf16_to_utf8(s)),
+                    Value::Number(n) => Some(crate::core::value_to_string(&Value::Number(*n))),
+                    Value::BigInt(b) => Some(b.to_string()),
+                    Value::Boolean(b) => Some(b.to_string()),
+                    Value::Undefined => Some("undefined".to_string()),
+                    _ => None,
+                };
+                if let Some(key) = key_opt {
+                    let is_export_name = ns_export_meta
+                        .map(|meta| get_own_property(&meta, key.as_str()).is_some())
+                        .unwrap_or(false);
+                    if get_own_property(&obj, key.as_str()).is_some() || is_export_name {
+                        let val = crate::core::get_property_with_accessors(mc, env, &obj, key.as_str())?;
+                        if matches!(val, Value::Undefined) {
+                            return Err(raise_reference_error!("Cannot access binding before initialization").into());
+                        }
+                    }
+                }
+            }
             // Convert key value to a PropertyKey
             let key: PropertyKey<'gc> = key_val.into();
 

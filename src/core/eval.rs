@@ -3876,15 +3876,18 @@ fn eval_res<'gc>(
                         match value {
                             DestructuringElement::Variable(name, default_expr) => {
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val
-                                    && let Some(cell) = object_get_key_value(obj, key)
-                                {
-                                    prop_val = cell.borrow().clone();
+                                if let Value::Object(obj) = &val {
+                                    prop_val = get_property_with_accessors(mc, env, obj, key)?;
                                 }
+                                let mut used_default = false;
                                 if matches!(prop_val, Value::Undefined)
                                     && let Some(def) = default_expr
                                 {
                                     prop_val = evaluate_expr(mc, env, def)?;
+                                    used_default = true;
+                                }
+                                if used_default && let Some(def) = default_expr {
+                                    maybe_set_function_name_for_default(mc, name, def, &prop_val)?;
                                 }
                                 // Bind var in function scope
                                 let mut target_env = *env;
@@ -3899,10 +3902,8 @@ fn eval_res<'gc>(
                             }
                             DestructuringElement::NestedObject(inner_pattern, inner_default) => {
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val
-                                    && let Some(cell) = object_get_key_value(obj, key)
-                                {
-                                    prop_val = cell.borrow().clone();
+                                if let Value::Object(obj) = &val {
+                                    prop_val = get_property_with_accessors(mc, env, obj, key)?;
                                 }
                                 if matches!(prop_val, Value::Undefined)
                                     && let Some(def) = inner_default
@@ -3931,10 +3932,8 @@ fn eval_res<'gc>(
                             }
                             DestructuringElement::NestedArray(inner_array, inner_default) => {
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val
-                                    && let Some(cell) = object_get_key_value(obj, key)
-                                {
-                                    prop_val = cell.borrow().clone();
+                                if let Value::Object(obj) = &val {
+                                    prop_val = get_property_with_accessors(mc, env, obj, key)?;
                                 }
                                 if matches!(prop_val, Value::Undefined)
                                     && let Some(def) = inner_default
@@ -3962,15 +3961,18 @@ fn eval_res<'gc>(
                         match value {
                             DestructuringElement::Variable(name, default_expr) => {
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val
-                                    && let Some(cell) = object_get_key_value(obj, &prop_key)
-                                {
-                                    prop_val = cell.borrow().clone();
+                                if let Value::Object(obj) = &val {
+                                    prop_val = get_property_with_accessors(mc, env, obj, &prop_key)?;
                                 }
+                                let mut used_default = false;
                                 if matches!(prop_val, Value::Undefined)
                                     && let Some(def) = default_expr
                                 {
                                     prop_val = evaluate_expr(mc, env, def)?;
+                                    used_default = true;
+                                }
+                                if used_default && let Some(def) = default_expr {
+                                    maybe_set_function_name_for_default(mc, name, def, &prop_val)?;
                                 }
                                 // Bind var in function scope
                                 let mut target_env = *env;
@@ -4400,6 +4402,25 @@ fn eval_res<'gc>(
                 *env
             };
 
+            let mut per_iteration_names: Vec<String> = Vec::new();
+            if let Some(init_stmt) = &for_stmt.init {
+                match &*init_stmt.kind {
+                    StatementKind::Let(decls) => {
+                        per_iteration_names.extend(decls.iter().map(|(name, _)| name.clone()));
+                    }
+                    StatementKind::Const(decls) => {
+                        per_iteration_names.extend(decls.iter().map(|(name, _)| name.clone()));
+                    }
+                    StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
+                        collect_names_from_destructuring(pattern, &mut per_iteration_names);
+                    }
+                    StatementKind::LetDestructuringObject(pattern, _) | StatementKind::ConstDestructuringObject(pattern, _) => {
+                        collect_names_from_object_destructuring(pattern, &mut per_iteration_names);
+                    }
+                    _ => {}
+                }
+            }
+
             if let Some(init_stmt) = &for_stmt.init {
                 evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(init_stmt), labels)?;
             }
@@ -4408,21 +4429,47 @@ fn eval_res<'gc>(
             // retain the init's result when the test is false and the loop
             // body is never evaluated.
             *last_value = Value::Undefined;
+            let mut iter_loop_env = loop_env;
+            if !per_iteration_names.is_empty() {
+                let first_iter_env = new_js_object_data(mc);
+                first_iter_env.borrow_mut(mc).prototype = iter_loop_env.borrow().prototype;
+                for name in per_iteration_names.iter() {
+                    let binding_val = if let Some(v) = env_get(&iter_loop_env, name) {
+                        v.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    };
+                    object_set_key_value(mc, &first_iter_env, name, &binding_val)?;
+                    if iter_loop_env.borrow().is_const(name) {
+                        first_iter_env.borrow_mut(mc).set_const(name.clone());
+                    }
+                }
+                iter_loop_env = first_iter_env;
+            }
+            let should_accumulate_completion = for_stmt.test.is_some() || for_stmt.update.is_some();
             loop {
                 if let Some(test_expr) = &for_stmt.test {
-                    let cond_val = evaluate_expr(mc, &loop_env, test_expr)?;
+                    let cond_val = evaluate_expr(mc, &iter_loop_env, test_expr)?;
                     let is_true = cond_val.to_truthy();
                     if !is_true {
                         break;
                     }
                 }
-                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &loop_env, &for_stmt.body, labels)?;
+                let iter_body_env = if use_lexical_env {
+                    let ie = new_js_object_data(mc);
+                    ie.borrow_mut(mc).prototype = Some(iter_loop_env);
+                    ie
+                } else {
+                    iter_loop_env
+                };
+                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_body_env, &for_stmt.body, labels)?;
                 match res {
-                    ControlFlow::Normal(_) => *last_value = vbody,
-                    ControlFlow::Break(label) => {
-                        if !matches!(&vbody, Value::Undefined) {
+                    ControlFlow::Normal(_) => {
+                        if should_accumulate_completion {
                             *last_value = vbody;
                         }
+                    }
+                    ControlFlow::Break(label) => {
                         if label.is_none() {
                             break;
                         }
@@ -4436,7 +4483,7 @@ fn eval_res<'gc>(
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
-                        if !matches!(&vbody, Value::Undefined) {
+                        if should_accumulate_completion && !matches!(&vbody, Value::Undefined) {
                             *last_value = vbody;
                         }
                         if let Some(ref l) = label {
@@ -4451,8 +4498,25 @@ fn eval_res<'gc>(
                     ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
                     ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                 }
+                if !per_iteration_names.is_empty() {
+                    let next_iter_env = new_js_object_data(mc);
+                    next_iter_env.borrow_mut(mc).prototype = iter_loop_env.borrow().prototype;
+                    for name in per_iteration_names.iter() {
+                        let binding_val = if let Some(v) = env_get(&iter_loop_env, name) {
+                            v.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        object_set_key_value(mc, &next_iter_env, name, &binding_val)?;
+                        if iter_loop_env.borrow().is_const(name) {
+                            next_iter_env.borrow_mut(mc).set_const(name.clone());
+                        }
+                    }
+                    iter_loop_env = next_iter_env;
+                }
+
                 if let Some(update_stmt) = &for_stmt.update {
-                    evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(update_stmt), labels)?;
+                    evaluate_statements_with_context(mc, &iter_loop_env, std::slice::from_ref(update_stmt), labels)?;
                 }
             }
             Ok(None)

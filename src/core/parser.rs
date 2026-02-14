@@ -228,6 +228,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     let mut init_decls: Option<Vec<(String, Option<Expr>)>> = None;
     let mut decl_kind = None;
     let mut for_of_pattern: Option<ForOfPattern> = None;
+    let mut for_pattern_init: Option<Expr> = None;
 
     if is_decl {
         decl_kind = Some(t[*index].token.clone());
@@ -242,6 +243,10 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 t.get(*index)
             );
             for_of_pattern = Some(ForOfPattern::Object(pattern));
+            if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                *index += 1;
+                for_pattern_init = Some(parse_assignment(t, index)?);
+            }
         } else if matches!(t[*index].token, Token::LBracket) {
             let pattern = parse_array_destructuring_pattern(t, index)?;
             log::trace!(
@@ -250,6 +255,10 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 t.get(*index)
             );
             for_of_pattern = Some(ForOfPattern::Array(pattern));
+            if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                *index += 1;
+                for_pattern_init = Some(parse_assignment(t, index)?);
+            }
         } else {
             let decls = parse_variable_declaration_list(t, index)?;
             log::trace!(
@@ -292,6 +301,13 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         });
 
         let kind = if let Some(pattern) = for_of_pattern {
+            if for_pattern_init.is_some() {
+                return Err(raise_parse_error!(
+                    "for-of destructuring declaration cannot have initializer",
+                    line,
+                    column
+                ));
+            }
             match pattern {
                 ForOfPattern::Object(destr_pattern) => {
                     // Convert Vec<DestructuringElement> -> Vec<ObjectDestructuringElement>
@@ -300,6 +316,9 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                         match elem {
                             DestructuringElement::Property(key, boxed) => {
                                 obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                            }
+                            DestructuringElement::ComputedProperty(expr, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::ComputedProperty { key: expr, value: *boxed });
                             }
                             DestructuringElement::Rest(name) => {
                                 obj_pattern.push(ObjectDestructuringElement::Rest(name));
@@ -452,6 +471,13 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         // If the LHS was a destructuring pattern (array/object) with a declaration
         // (e.g., `for (var [a, b] in obj) ...`), return a destructuring ForIn variant
         if let Some(pattern) = for_of_pattern {
+            if for_pattern_init.is_some() {
+                return Err(raise_parse_error!(
+                    "for-in destructuring declaration cannot have initializer",
+                    line,
+                    column
+                ));
+            }
             match pattern {
                 ForOfPattern::Object(destr_pattern) => {
                     // Convert Vec<DestructuringElement> -> Vec<ObjectDestructuringElement>
@@ -460,6 +486,9 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                         match elem {
                             DestructuringElement::Property(key, boxed) => {
                                 obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                            }
+                            DestructuringElement::ComputedProperty(expr, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::ComputedProperty { key: expr, value: *boxed });
                             }
                             DestructuringElement::Rest(name) => {
                                 obj_pattern.push(ObjectDestructuringElement::Rest(name));
@@ -608,25 +637,91 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     };
 
     let init_stmt = if is_decl {
-        let decls = match init_decls {
-            Some(d) => d,
-            None => return Err(raise_parse_error!("Missing declarations in for-init", line, column)),
-        };
-        let k = match decl_kind {
-            Some(Token::Var) => StatementKind::Var(decls),
-            Some(Token::Let) => StatementKind::Let(decls),
-            Some(Token::Const) => {
-                let mut c_decls = Vec::new();
-                for (n, e) in decls {
-                    if let Some(init) = e {
-                        c_decls.push((n, init));
-                    } else {
-                        return Err(raise_parse_error!("Missing initializer in const", line, column));
+        let k = if let Some(d) = init_decls {
+            let decls = d;
+            match decl_kind {
+                Some(Token::Var) => StatementKind::Var(decls),
+                Some(Token::Let) => StatementKind::Let(decls),
+                Some(Token::Const) => {
+                    let mut c_decls = Vec::new();
+                    for (n, e) in decls {
+                        if let Some(init) = e {
+                            c_decls.push((n, init));
+                        } else {
+                            return Err(raise_parse_error!("Missing initializer in const", line, column));
+                        }
                     }
+                    StatementKind::Const(c_decls)
                 }
-                StatementKind::Const(c_decls)
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
+        } else if let Some(pattern) = for_of_pattern {
+            let init = match for_pattern_init {
+                Some(expr) => expr,
+                None => return Err(raise_parse_error!("Missing initializer in destructuring declaration", line, column)),
+            };
+            match (decl_kind, pattern) {
+                (Some(Token::Var), ForOfPattern::Array(arr)) => StatementKind::VarDestructuringArray(arr, init),
+                (Some(Token::Let), ForOfPattern::Array(arr)) => StatementKind::LetDestructuringArray(arr, init),
+                (Some(Token::Const), ForOfPattern::Array(arr)) => StatementKind::ConstDestructuringArray(arr, init),
+                (Some(Token::Var), ForOfPattern::Object(destr_pattern)) => {
+                    let mut obj_pattern: Vec<ObjectDestructuringElement> = Vec::new();
+                    for elem in destr_pattern.into_iter() {
+                        match elem {
+                            DestructuringElement::Property(key, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                            }
+                            DestructuringElement::ComputedProperty(expr, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::ComputedProperty { key: expr, value: *boxed });
+                            }
+                            DestructuringElement::Rest(name) => {
+                                obj_pattern.push(ObjectDestructuringElement::Rest(name));
+                            }
+                            _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern", line, column)),
+                        }
+                    }
+                    StatementKind::VarDestructuringObject(obj_pattern, init)
+                }
+                (Some(Token::Let), ForOfPattern::Object(destr_pattern)) => {
+                    let mut obj_pattern: Vec<ObjectDestructuringElement> = Vec::new();
+                    for elem in destr_pattern.into_iter() {
+                        match elem {
+                            DestructuringElement::Property(key, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                            }
+                            DestructuringElement::ComputedProperty(expr, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::ComputedProperty { key: expr, value: *boxed });
+                            }
+                            DestructuringElement::Rest(name) => {
+                                obj_pattern.push(ObjectDestructuringElement::Rest(name));
+                            }
+                            _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern", line, column)),
+                        }
+                    }
+                    StatementKind::LetDestructuringObject(obj_pattern, init)
+                }
+                (Some(Token::Const), ForOfPattern::Object(destr_pattern)) => {
+                    let mut obj_pattern: Vec<ObjectDestructuringElement> = Vec::new();
+                    for elem in destr_pattern.into_iter() {
+                        match elem {
+                            DestructuringElement::Property(key, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                            }
+                            DestructuringElement::ComputedProperty(expr, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::ComputedProperty { key: expr, value: *boxed });
+                            }
+                            DestructuringElement::Rest(name) => {
+                                obj_pattern.push(ObjectDestructuringElement::Rest(name));
+                            }
+                            _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern", line, column)),
+                        }
+                    }
+                    StatementKind::ConstDestructuringObject(obj_pattern, init)
+                }
+                _ => return Err(raise_parse_error!("Missing declarations in for-init", line, column)),
+            }
+        } else {
+            return Err(raise_parse_error!("Missing declarations in for-init", line, column));
         };
         Some(Box::new(Statement {
             kind: Box::new(k),

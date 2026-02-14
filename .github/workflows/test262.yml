@@ -657,12 +657,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/statements/async-function" - "language/statements/expression"
+      - name: Run a small test262 subset - "language/statements/async-function" - "language/statements/for"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/statements/async-function,language/statements/async-generator,language/statements/await-using,language/statements/block,language/statements/break,language/statements/const,language/statements/continue,language/statements/debugger,language/statements/do-while,language/statements/empty,language/statements/expression
+          node ci/runner.js --limit 10000 --focus language/statements/async-function,language/statements/async-generator,language/statements/await-using,language/statements/block,language/statements/break,language/statements/const,language/statements/continue,language/statements/debugger,language/statements/do-while,language/statements/empty,language/statements/expression,language/statements/for
 
       - name: Upload results
         if: ${{ !cancelled() }}

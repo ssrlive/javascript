@@ -636,3 +636,38 @@ jobs:
           name: test262-results-18
           path: test262-results.log
 
+  run-test262-subset-19:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Build JavaScript engine
+        run: |
+          cargo build --all-features --example js
+
+      - name: Run a small test262 subset - "language/statements/async-function" - "language/statements/expression"
+        if: ${{ !cancelled() }}
+        env:
+          FAIL_ON_FAILURE: 'true'
+        run: |
+          node ci/runner.js --limit 10000 --focus language/statements/async-function,language/statements/async-generator,language/statements/await-using,language/statements/block,language/statements/break,language/statements/const,language/statements/continue,language/statements/debugger,language/statements/do-while,language/statements/empty,language/statements/expression
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-results-19
+          path: test262-results.log
+

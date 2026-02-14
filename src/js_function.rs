@@ -94,6 +94,7 @@ pub fn handle_global_function<'gc>(
         "import" => return dynamic_import_function(mc, args, env),
         "import.defer" => return dynamic_import_defer_function(mc, args, env),
         "Function" => return function_constructor(mc, args, env),
+        "AsyncGeneratorFunction" => return async_generator_function_constructor(mc, args, env),
         "new" => return evaluate_new_expression(mc, args, env),
         "eval" => return evalute_eval_function(mc, args, env),
         "Date" => return handle_date_constructor(mc, args, env),
@@ -1045,6 +1046,72 @@ fn function_constructor<'gc>(
     } else {
         Err(raise_type_error!("Failed to parse function body").into())
     }
+}
+
+fn async_generator_function_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let body_str = if !args.is_empty() {
+        let val = args.last().unwrap();
+        match val {
+            Value::String(s) => utf16_to_utf8(s),
+            _ => crate::core::value_to_string(val),
+        }
+    } else {
+        "".to_string()
+    };
+
+    let mut params_str = String::new();
+    if args.len() > 1 {
+        for (i, arg) in args.iter().take(args.len() - 1).enumerate() {
+            if i > 0 {
+                params_str.push(',');
+            }
+            let arg_str = match arg {
+                Value::String(s) => utf16_to_utf8(s),
+                _ => crate::core::value_to_string(arg),
+            };
+            params_str.push_str(&arg_str);
+        }
+    }
+
+    let func_source = format!("(async function* anonymous({params_str}) {{ {body_str} }})");
+    let tokens = crate::core::tokenize(&func_source)?;
+
+    // import.meta is not valid for the constructor's non-Module parsing goals.
+    for i in 0..tokens.len().saturating_sub(2) {
+        if matches!(tokens[i].token, Token::Import)
+            && matches!(tokens[i + 1].token, Token::Dot)
+            && matches!(tokens[i + 2].token, Token::Identifier(ref s) if s == "meta")
+        {
+            return Err(raise_syntax_error!("import.meta is not allowed in AsyncGeneratorFunction constructor context").into());
+        }
+    }
+
+    let mut index = 0;
+    let stmts = crate::core::parse_statements(&tokens, &mut index)?;
+
+    let mut global_env = if let Some(this_rc) = crate::core::env_get(env, "this") {
+        match &*this_rc.borrow() {
+            Value::Object(o) => *o,
+            _ => *env,
+        }
+    } else {
+        *env
+    };
+    while let Some(proto) = global_env.borrow().prototype {
+        global_env = proto;
+    }
+
+    if let Some(Statement { kind, .. }) = stmts.first()
+        && let StatementKind::Expr(expr) = &**kind
+    {
+        return crate::core::evaluate_expr(mc, &global_env, expr);
+    }
+
+    Err(raise_type_error!("Failed to parse async generator function body").into())
 }
 
 fn encode_uri_component<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {

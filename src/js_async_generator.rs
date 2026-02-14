@@ -1,7 +1,8 @@
 use crate::core::{
-    AsyncGeneratorRequest, ClosureData, EvalError, Expr, JSAsyncGenerator, JSObjectDataPtr, JSPromise, Statement, StatementKind, Value,
-    VarDeclKind, env_set, env_set_recursive, evaluate_call_dispatch, evaluate_expr, evaluate_statements, get_own_property,
-    new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env, prepare_function_call_env_with_home,
+    AsyncGeneratorRequest, ClosureData, EvalError, Expr, JSAsyncGenerator, JSObjectDataPtr, JSPromise, PropertyKey, Statement,
+    StatementKind, Value, VarDeclKind, env_set, env_set_recursive, evaluate_call_dispatch, evaluate_expr, evaluate_statements,
+    get_own_property, new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env,
+    prepare_function_call_env_with_home,
 };
 use crate::core::{Gc, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::{JSError, JSErrorKind};
@@ -198,8 +199,11 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     }
 
     let async_gen_proto = crate::core::new_js_object_data(mc);
-    // Ensure AsyncGenerator.prototype inherits from Object.prototype so ToPrimitive works.
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &async_gen_proto, env, "Object");
+    // Create an AsyncIteratorPrototype object and make AsyncGenerator.prototype
+    // inherit from it (instead of directly from Object.prototype).
+    let async_iter_proto = crate::core::new_js_object_data(mc);
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &async_iter_proto, env, "Object");
+    async_gen_proto.borrow_mut(mc).prototype = Some(async_iter_proto);
 
     // Attach prototype methods as named functions that dispatch to the async generator handler
     let val = Value::Function("AsyncGenerator.prototype.next".to_string());
@@ -257,11 +261,17 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         && let Some(async_iter_sym_val) = object_get_key_value(sym_obj, "asyncIterator")
         && let Value::Symbol(async_iter_sym) = &*async_iter_sym_val.borrow()
     {
+        let base_val = Value::Function("AsyncGenerator.prototype.asyncIterator".to_string());
+        object_set_key_value(mc, &async_iter_proto, async_iter_sym, &base_val)?;
+        async_iter_proto
+            .borrow_mut(mc)
+            .set_non_enumerable(PropertyKey::Symbol(*async_iter_sym));
+
         let val = Value::Function("AsyncGenerator.prototype.asyncIterator".to_string());
         object_set_key_value(mc, &async_gen_proto, async_iter_sym, &val)?;
         async_gen_proto
             .borrow_mut(mc)
-            .set_non_enumerable(crate::core::PropertyKey::Symbol(*async_iter_sym));
+            .set_non_enumerable(PropertyKey::Symbol(*async_iter_sym));
     }
 
     // Link prototype to constructor and expose on global env
@@ -272,6 +282,44 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_proto), true, false, false)?;
     crate::js_object::define_property_internal(mc, &async_gen_ctor, "prototype", &desc_proto)?;
     crate::core::env_set(mc, env, "AsyncGenerator", &Value::Object(async_gen_ctor))?;
+
+    // Create AsyncGeneratorFunction constructor/prototype so async generator
+    // function objects inherit from a distinct AsyncGeneratorFunction.prototype,
+    // whose own "prototype" points to AsyncGenerator.prototype.
+    let async_gen_func_ctor = crate::core::new_js_object_data(mc);
+    if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*proto_val.borrow()
+    {
+        async_gen_func_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+    }
+    object_set_key_value(
+        mc,
+        &async_gen_func_ctor,
+        "__native_ctor",
+        &Value::String(crate::unicode::utf8_to_utf16("AsyncGeneratorFunction")),
+    )?;
+    async_gen_func_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
+
+    let async_gen_func_proto = crate::core::new_js_object_data(mc);
+    if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*proto_val.borrow()
+    {
+        async_gen_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
+    }
+
+    let desc_fn_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_proto), true, false, false)?;
+    crate::js_object::define_property_internal(mc, &async_gen_func_proto, "prototype", &desc_fn_proto)?;
+
+    let desc_fn_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_ctor), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &async_gen_func_proto, "constructor", &desc_fn_ctor)?;
+
+    let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_proto), true, false, false)?;
+    crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "prototype", &desc_ctor_proto)?;
+    crate::core::env_set(mc, env, "AsyncGeneratorFunction", &Value::Object(async_gen_func_ctor))?;
     Ok(())
 }
 

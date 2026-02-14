@@ -83,12 +83,17 @@ console.log(`JS engine binary: ${BIN}`);
 
 // Build harness index
 const HARNESS_INDEX = {};
+function shouldSkipDirEntry(entryName){
+  return entryName.startsWith('.test262.');
+}
+
 function walkDir(dir){
   const out = [];
   // Read directory entries and sort by name for deterministic traversal
   let items = fs.readdirSync(dir, {withFileTypes:true});
   items = items.sort((a,b)=>a.name.localeCompare(b.name, 'en', {numeric:true}));
   for (const it of items){
+    if (it.isDirectory() && shouldSkipDirEntry(it.name)) continue;
     const p = path.join(dir, it.name);
     if (it.isDirectory()) out.push(...walkDir(p));
     else out.push(p);
@@ -144,6 +149,7 @@ function listFilesOnly(dir){
   let items = fs.readdirSync(dir, {withFileTypes:true});
   items = items.sort((a,b)=>a.name.localeCompare(b.name, 'en', {numeric:true}));
   return items
+    .filter(it => !(it.isDirectory() && shouldSkipDirEntry(it.name)))
     .filter(it => it.isFile())
     .map(it => path.join(dir, it.name))
     .sort((a,b)=>a.localeCompare(b, 'en', {numeric:true}));

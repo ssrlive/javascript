@@ -688,6 +688,11 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         // consume single Token::FunctionStar
         *index += 1;
     }
+
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+
     let name = if let Token::Identifier(name) = &t[*index].token {
         name.clone()
     } else if matches!(t[*index].token, Token::Await) {
@@ -1397,6 +1402,9 @@ fn parse_const_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
                 match elem {
                     DestructuringElement::Property(key, boxed) => {
                         obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                    }
+                    DestructuringElement::ComputedProperty(expr, boxed) => {
+                        obj_pattern.push(ObjectDestructuringElement::ComputedProperty { key: expr, value: *boxed });
                     }
                     DestructuringElement::Rest(name) => {
                         obj_pattern.push(ObjectDestructuringElement::Rest(name));

@@ -342,12 +342,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/expressions/dynamic-import"
+      - name: Run a small test262 subset - "dynamic-import,module-code,import,eval-code,export"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/expressions/dynamic-import
+          node ci/runner.js --limit 10000 --focus language/expressions/dynamic-import,language/module-code,language/import,language/eval-code,language/export
 
       - name: Upload results
         if: ${{ !cancelled() }}
@@ -622,12 +622,12 @@ jobs:
         run: |
           cargo build --all-features --example js
 
-      - name: Run a small test262 subset - "language/keywords" - "language/module-code"
+      - name: Run a small test262 subset - "language/keywords" - "language/white-space"
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          node ci/runner.js --limit 10000 --focus language/keywords,language/line-terminators,language/module-code
+          node ci/runner.js --limit 10000 --focus language/keywords,language/line-terminators,language/module-code,language/punctuators,language/reserved-words,language/rest-parameters,language/source-text,language/statementList,language/types,language/white-space
 
       - name: Upload results
         if: ${{ !cancelled() }}

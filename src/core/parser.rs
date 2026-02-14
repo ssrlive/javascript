@@ -2073,12 +2073,46 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
     if *index < tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
         loop {
             if matches!(tokens[*index].token, Token::Spread) {
-                // Handle rest parameter: ...args
+                // Handle rest parameter: ...args, ...[], ...{}
                 *index += 1; // consume ...
                 if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                     *index += 1;
                     log::trace!("parse_parameters: found rest parameter name={}", name);
                     params.push(DestructuringElement::Rest(name));
+
+                    if *index >= tokens.len() {
+                        return Err(raise_parse_error!("Unexpected end of parameters after rest"));
+                    }
+                    // Skip optional line terminators after rest identifier
+                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                        *index += 1;
+                    }
+                    // Rest parameter must be the last one
+                    if !matches!(tokens[*index].token, Token::RParen) {
+                        let msg = "Rest parameter must be last formal parameter";
+                        return Err(raise_parse_error_with_token!(tokens[*index], msg));
+                    }
+                    break;
+                } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                    let pattern = parse_array_destructuring_pattern(tokens, index)?;
+                    let inner = DestructuringElement::NestedArray(pattern, None);
+                    params.push(DestructuringElement::RestPattern(Box::new(inner)));
+
+                    if *index >= tokens.len() {
+                        return Err(raise_parse_error!("Unexpected end of parameters after rest"));
+                    }
+                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                        *index += 1;
+                    }
+                    if !matches!(tokens[*index].token, Token::RParen) {
+                        let msg = "Rest parameter must be last formal parameter";
+                        return Err(raise_parse_error_with_token!(tokens[*index], msg));
+                    }
+                    break;
+                } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+                    let pattern = parse_object_destructuring_pattern(tokens, index)?;
+                    let inner = DestructuringElement::NestedObject(pattern, None);
+                    params.push(DestructuringElement::RestPattern(Box::new(inner)));
 
                     if *index >= tokens.len() {
                         return Err(raise_parse_error!("Unexpected end of parameters after rest"));

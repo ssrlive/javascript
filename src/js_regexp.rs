@@ -142,6 +142,7 @@ pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSErro
 
 fn create_regexp_object_from_parts<'gc>(
     mc: &MutationContext<'gc>,
+    env: Option<&JSObjectDataPtr<'gc>>,
     pattern_u16: Vec<u16>,
     flags: String,
     validate_pattern: bool,
@@ -198,6 +199,14 @@ fn create_regexp_object_from_parts<'gc>(
     }
 
     let regexp_obj = new_js_object_data(mc);
+    if let Some(env) = env
+        && let Some(regexp_ctor_val) = object_get_key_value(env, "RegExp")
+        && let Value::Object(regexp_ctor_obj) = &*regexp_ctor_val.borrow()
+        && let Some(regexp_proto_val) = object_get_key_value(regexp_ctor_obj, "prototype")
+        && let Value::Object(regexp_proto_obj) = &*regexp_proto_val.borrow()
+    {
+        regexp_obj.borrow_mut(mc).prototype = Some(*regexp_proto_obj);
+    }
     object_set_key_value(mc, &regexp_obj, "__regex", &Value::String(pattern_u16.clone()))?;
     object_set_key_value(mc, &regexp_obj, "__flags", &Value::String(utf8_to_utf16(&flags)))?;
     object_set_key_value(mc, &regexp_obj, "__global", &Value::Boolean(global))?;
@@ -244,14 +253,23 @@ fn create_regexp_object_from_parts<'gc>(
 
 pub(crate) fn create_regexp_object_fast_for_eval<'gc>(
     mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
     pattern_u16: Vec<u16>,
     flags: String,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    create_regexp_object_from_parts(mc, pattern_u16, flags, false)
+    create_regexp_object_from_parts(mc, Some(env), pattern_u16, flags, false)
 }
 
 /// Handle RegExp constructor calls
 pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+    handle_regexp_constructor_with_env(mc, None, args)
+}
+
+pub(crate) fn handle_regexp_constructor_with_env<'gc>(
+    mc: &MutationContext<'gc>,
+    env: Option<&JSObjectDataPtr<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let (pattern_u16, flags) = if args.is_empty() {
         (Vec::new(), String::new())
     } else if args.len() == 1 {
@@ -286,7 +304,7 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
         (pattern_u16, flags)
     };
 
-    create_regexp_object_from_parts(mc, pattern_u16, flags, true)
+    create_regexp_object_from_parts(mc, env, pattern_u16, flags, true)
 }
 
 /// Handle RegExp instance method calls

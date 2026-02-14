@@ -447,8 +447,12 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
     while i < chars.len() {
         let start_col = column;
         match chars[i] {
-            // Treat common whitespace characters (including VT, FF, NBSP) as whitespace
-            ' ' | '\t' | '\u{000B}' | '\u{000C}' | '\u{00A0}' => {
+            // ECMAScript WhiteSpace (excluding LineTerminator):
+            // TAB, VT, FF, SP, NBSP, ZWNBSP, Ogham space mark,
+            // U+2000..U+200A, NNBSP, MMSP, Ideographic space.
+            ' ' | '\t' | '\u{000B}' | '\u{000C}' | '\u{00A0}' | '\u{FEFF}' | '\u{1680}' | '\u{2000}' | '\u{2001}' | '\u{2002}'
+            | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}' | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}'
+            | '\u{205F}' | '\u{3000}' => {
                 i += 1;
                 column += 1;
             }
@@ -616,18 +620,16 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     // division operator instead.
                     let mut prev_end_expr = false;
                     // Iterate backwards skipping LineTerminators to find the last significant token
-                    let last_token = tokens.iter().rev().find(|t| !matches!(t.token, Token::LineTerminator));
+                    let last_token_index = prev_non_lineterm_token_index(&tokens, tokens.len());
 
-                    if let Some(token_data) = last_token {
-                        match token_data.token {
+                    if let Some(last_token_index) = last_token_index {
+                        match &tokens[last_token_index].token {
                             Token::Number(_)
                             | Token::BigInt(_)
                             | Token::StringLit(_)
                             | Token::Identifier(_)
                             | Token::PrivateIdentifier(_)
                             | Token::RBracket
-                            | Token::RParen
-                            | Token::RBrace
                             | Token::True
                             | Token::False
                             | Token::Null
@@ -635,6 +637,12 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             | Token::Increment
                             | Token::Decrement => {
                                 prev_end_expr = true;
+                            }
+                            Token::RParen => {
+                                prev_end_expr = !rparen_closes_statement_header(&tokens, last_token_index);
+                            }
+                            Token::RBrace => {
+                                prev_end_expr = rbrace_ends_expression(&tokens, last_token_index);
                             }
                             _ => {}
                         }
@@ -1631,6 +1639,190 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
         }
     }
     Ok(tokens)
+}
+
+fn prev_non_lineterm_token_index(tokens: &[TokenData], mut idx_exclusive: usize) -> Option<usize> {
+    while idx_exclusive > 0 {
+        idx_exclusive -= 1;
+        if !matches!(tokens[idx_exclusive].token, Token::LineTerminator) {
+            return Some(idx_exclusive);
+        }
+    }
+    None
+}
+
+fn find_matching_open_index(tokens: &[TokenData], close_index: usize, open: &Token, close: &Token) -> Option<usize> {
+    let mut depth = 0usize;
+    for idx in (0..=close_index).rev() {
+        let tk = &tokens[idx].token;
+        if tk == close {
+            depth += 1;
+        } else if tk == open {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn rparen_closes_statement_header(tokens: &[TokenData], rparen_index: usize) -> bool {
+    let Some(lparen_index) = find_matching_open_index(tokens, rparen_index, &Token::LParen, &Token::RParen) else {
+        return false;
+    };
+    let Some(before_lparen_idx) = prev_non_lineterm_token_index(tokens, lparen_index) else {
+        return false;
+    };
+    matches!(
+        tokens[before_lparen_idx].token,
+        Token::With | Token::If | Token::For | Token::While | Token::Switch | Token::Catch
+    )
+}
+
+fn token_can_precede_function_expression(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Assign
+            | Token::AddAssign
+            | Token::SubAssign
+            | Token::MulAssign
+            | Token::DivAssign
+            | Token::ModAssign
+            | Token::PowAssign
+            | Token::LogicalAndAssign
+            | Token::LogicalOrAssign
+            | Token::NullishAssign
+            | Token::BitAndAssign
+            | Token::BitOrAssign
+            | Token::BitXorAssign
+            | Token::LeftShiftAssign
+            | Token::RightShiftAssign
+            | Token::UnsignedRightShiftAssign
+            | Token::Return
+            | Token::Throw
+            | Token::Yield
+            | Token::YieldStar
+            | Token::Case
+            | Token::Arrow
+            | Token::Comma
+            | Token::Colon
+            | Token::QuestionMark
+            | Token::LParen
+            | Token::LBracket
+            | Token::LBrace
+            | Token::Equal
+            | Token::StrictEqual
+            | Token::NotEqual
+            | Token::StrictNotEqual
+            | Token::LessThan
+            | Token::GreaterThan
+            | Token::LessEqual
+            | Token::GreaterEqual
+            | Token::LogicalAnd
+            | Token::LogicalOr
+            | Token::NullishCoalescing
+            | Token::BitAnd
+            | Token::BitOr
+            | Token::BitXor
+            | Token::Plus
+            | Token::Minus
+            | Token::Multiply
+            | Token::Divide
+            | Token::Mod
+            | Token::Exponent
+            | Token::New
+            | Token::Delete
+            | Token::Void
+            | Token::TypeOf
+            | Token::InstanceOf
+            | Token::In
+    )
+}
+
+fn rparen_closes_function_expression(tokens: &[TokenData], rparen_index: usize) -> bool {
+    let Some(lparen_index) = find_matching_open_index(tokens, rparen_index, &Token::LParen, &Token::RParen) else {
+        return false;
+    };
+
+    let Some(before_lparen_idx) = prev_non_lineterm_token_index(tokens, lparen_index) else {
+        return false;
+    };
+
+    let function_idx = match tokens[before_lparen_idx].token {
+        Token::Function | Token::FunctionStar => Some(before_lparen_idx),
+        Token::Identifier(_) => {
+            let Some(prev_idx) = prev_non_lineterm_token_index(tokens, before_lparen_idx) else {
+                return false;
+            };
+            if matches!(tokens[prev_idx].token, Token::Function | Token::FunctionStar) {
+                Some(prev_idx)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    let Some(function_idx) = function_idx else {
+        return false;
+    };
+
+    let Some(before_function_idx) = prev_non_lineterm_token_index(tokens, function_idx) else {
+        return false;
+    };
+
+    token_can_precede_function_expression(&tokens[before_function_idx].token)
+}
+
+fn rbrace_ends_expression(tokens: &[TokenData], rbrace_index: usize) -> bool {
+    let Some(lbrace_index) = find_matching_open_index(tokens, rbrace_index, &Token::LBrace, &Token::RBrace) else {
+        return true;
+    };
+    let Some(before_lbrace_idx) = prev_non_lineterm_token_index(tokens, lbrace_index) else {
+        return false;
+    };
+    if matches!(tokens[before_lbrace_idx].token, Token::RParen) {
+        if rparen_closes_statement_header(tokens, before_lbrace_idx) {
+            return false;
+        }
+        if rparen_closes_function_expression(tokens, before_lbrace_idx) {
+            return true;
+        }
+        return false;
+    }
+    matches!(
+        tokens[before_lbrace_idx].token,
+        Token::Assign
+            | Token::AddAssign
+            | Token::SubAssign
+            | Token::MulAssign
+            | Token::DivAssign
+            | Token::ModAssign
+            | Token::PowAssign
+            | Token::LogicalAndAssign
+            | Token::LogicalOrAssign
+            | Token::NullishAssign
+            | Token::BitAndAssign
+            | Token::BitOrAssign
+            | Token::BitXorAssign
+            | Token::LeftShiftAssign
+            | Token::RightShiftAssign
+            | Token::UnsignedRightShiftAssign
+            | Token::Return
+            | Token::Throw
+            | Token::Case
+            | Token::Arrow
+            | Token::Comma
+            | Token::Colon
+            | Token::QuestionMark
+            | Token::LParen
+            | Token::LBracket
+            | Token::Equal
+            | Token::StrictEqual
+            | Token::NotEqual
+            | Token::StrictNotEqual
+    )
 }
 
 fn parse_string_literal(

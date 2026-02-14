@@ -4094,7 +4094,9 @@ fn eval_res<'gc>(
             let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &block_env, &stmts_clone, labels)?;
             match res {
                 ControlFlow::Normal(_) => {
-                    *last_value = vbody;
+                    if !stmts_clone.is_empty() {
+                        *last_value = vbody;
+                    }
                     Ok(None)
                 }
                 other => {
@@ -7883,6 +7885,7 @@ fn evaluate_expr_assign<'gc>(
                 Value::Symbol(sym_rc) => {
                     let obj = new_js_object_data(mc);
                     object_set_key_value(mc, &obj, "__value__", &Value::Symbol(sym_rc))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
                     obj
                 }
                 _ => return Err(raise_eval_error!("Cannot assign to property of non-object").into()),
@@ -7945,6 +7948,7 @@ fn evaluate_expr_assign<'gc>(
                 Value::Symbol(sym_rc) => {
                     let obj = new_js_object_data(mc);
                     object_set_key_value(mc, &obj, "__value__", &Value::Symbol(sym_rc))?;
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
                     obj
                 }
                 _ => return Err(raise_eval_error!("Cannot assign to property of non-object").into()),
@@ -10737,7 +10741,7 @@ fn handle_eval_function<'gc>(
     log::trace!("HANDLE_EVAL FIRST_ARG: {:?}", first_arg);
     if let Value::String(script_str) = first_arg {
         if let Some((pattern_u16, flags)) = try_parse_simple_eval_regex_literal(&script_str) {
-            return crate::js_regexp::create_regexp_object_fast_for_eval(mc, pattern_u16, flags);
+            return crate::js_regexp::create_regexp_object_fast_for_eval(mc, env, pattern_u16, flags);
         }
 
         let script = utf16_to_utf8(&script_str);
@@ -11644,7 +11648,7 @@ pub fn evaluate_call_dispatch<'gc>(
                             let date_obj = crate::js_date::handle_date_constructor(mc, eval_args, env)?;
                             crate::js_date::handle_date_method(mc, &date_obj, "toString", &[], env)
                         } else if name == &crate::unicode::utf8_to_utf16("RegExp") {
-                            Ok(crate::js_regexp::handle_regexp_constructor(mc, eval_args)?)
+                            Ok(crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), eval_args)?)
                         } else if name == &crate::unicode::utf8_to_utf16("String") {
                             Ok(crate::js_string::string_constructor(mc, eval_args, env)?)
                         } else if name == &crate::unicode::utf8_to_utf16("Boolean") {
@@ -14133,7 +14137,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let flags_u16 = crate::unicode::utf8_to_utf16(flags);
             let arg1 = Value::String(pattern_utf16);
             let arg2 = Value::String(flags_u16);
-            Ok(crate::js_regexp::handle_regexp_constructor(mc, &[arg1, arg2])?)
+            Ok(crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), &[arg1, arg2])?)
         }
 
         Expr::Array(elements) => evaluate_expr_array(mc, env, elements),
@@ -16491,6 +16495,19 @@ fn set_property_with_accessors<'gc>(
             Some(*obj)
         };
         while let Some(proto_obj) = proto_check {
+            if let Some(proxy_ptr) = get_own_property(&proto_obj, "__proxy__")
+                && let Value::Proxy(p) = &*proxy_ptr.borrow()
+            {
+                let ok = crate::js_proxy::proxy_set_property(mc, p, key, val)?;
+                if ok {
+                    return Ok(());
+                }
+                if crate::core::env_get_strictness(_env) {
+                    return Err(raise_type_error!("Cannot assign to property").into());
+                }
+                return Ok(());
+            }
+
             // Diagnostic: print prototype object pointer, whether it owns the key,
             // and its writability for the key. This helps verify that the pre-check
             // sees the same non-writable marker that `define_property_internal` set.
@@ -18822,7 +18839,7 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "Array" {
                         return crate::js_array::handle_array_constructor(mc, &eval_args, env);
                     } else if name_str == "RegExp" {
-                        return crate::js_regexp::handle_regexp_constructor(mc, &eval_args);
+                        return crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), &eval_args);
                     } else if name_str == "Map" {
                         return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
                     } else if name_str == "Proxy" {

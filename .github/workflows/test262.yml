@@ -32,6 +32,7 @@ jobs:
           - id: 19
           - id: 20
           - id: 21
+          - id: 22
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -147,6 +148,10 @@ jobs:
             21)
               TITLE='"language/statements/for-in" - "language/statements/function"'
               FOCUS='language/statements/for-in,language/statements/for-of,language/statements/function'
+              ;;
+            22)
+              TITLE='"language/statements/generators" - "language/statements/with"'
+              FOCUS='language/statements/generators,language/statements/if,language/statements/labeled,language/statements/let,language/statements/return,language/statements/switch,language/statements/throw,language/statements/try,language/statements/using,language/statements/variable,language/statements/while,language/statements/with'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

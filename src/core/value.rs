@@ -1053,6 +1053,7 @@ pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value
         }
         (Value::String(s1), Value::String(s2)) => s1 == s2,
         (Value::Boolean(b1), Value::Boolean(b2)) => b1 == b2,
+        (Value::Function(f1), Value::Function(f2)) => f1 == f2,
         (Value::Undefined, Value::Undefined) => true,
         (Value::Null, Value::Null) => true,
         (Value::Object(o1), Value::Object(o2)) => Gc::ptr_eq(*o1, *o2),

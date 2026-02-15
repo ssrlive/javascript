@@ -105,12 +105,16 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
             })
         }
         _ => {
-            if let Token::Identifier(name) = &start_token.token
+            let label_name_opt = match &start_token.token {
+                Token::Identifier(name) => Some(name.clone()),
+                Token::Await => Some("await".to_string()),
+                _ => None,
+            };
+            if let Some(label_name) = label_name_opt
                 && *index + 1 < t.len()
                 && matches!(t[*index + 1].token, Token::Colon)
             {
-                let label_name = name.clone();
-                *index += 2; // consume Identifier and Colon
+                *index += 2; // consume label token and Colon
                 let stmt = parse_statement_item(t, index)?;
                 return Ok(Statement {
                     kind: Box::new(StatementKind::Label(label_name, Box::new(stmt))),
@@ -147,6 +151,16 @@ pub(crate) fn push_await_context() {
 
 pub(crate) fn pop_await_context() {
     AWAIT_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
+
+fn with_cleared_await_context<T, F: FnOnce() -> T>(f: F) -> T {
+    AWAIT_CONTEXT.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = 0;
+        let out = f();
+        *c.borrow_mut() = prev;
+        out
+    })
 }
 
 fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
@@ -837,7 +851,7 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         pop_await_context();
         b
     } else {
-        parse_statement_block(t, index)?
+        with_cleared_await_context(|| parse_statement_block(t, index))?
     };
 
     Ok(Statement {
@@ -1227,6 +1241,10 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                         catch_param = Some(CatchParamPattern::Identifier(name.clone()));
                         *index += 1;
                     }
+                    Token::Await if !in_await_context() => {
+                        catch_param = Some(CatchParamPattern::Identifier("await".to_string()));
+                        *index += 1;
+                    }
                     Token::LBracket => {
                         let pattern = parse_array_destructuring_pattern(t, index)?;
                         catch_param = Some(CatchParamPattern::Array(pattern));
@@ -1266,6 +1284,9 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
     if *index < t.len() && matches!(t[*index].token, Token::Finally) {
         *index += 1; // consume finally
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
         let finally_block = parse_block_statement(t, index)?;
         if let StatementKind::Block(stmts) = *finally_block.kind {
             finally_body = Some(stmts);
@@ -5433,14 +5454,14 @@ fn parse_arrow_body(tokens: &[TokenData], index: &mut usize) -> Result<Vec<State
     }
     if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
         *index += 1;
-        let body = parse_statements(tokens, index)?;
+        let body = with_cleared_await_context(|| parse_statements(tokens, index))?;
         if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
             return Err(raise_parse_error_at!(tokens.get(*index)));
         }
         *index += 1;
         Ok(body)
     } else {
-        let expr = parse_assignment(tokens, index)?;
+        let expr = with_cleared_await_context(|| parse_assignment(tokens, index))?;
         Ok(vec![Statement::from(StatementKind::Return(Some(expr)))])
     }
 }
@@ -5476,6 +5497,9 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
             if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                 *index += 1;
                 pattern.push(DestructuringElement::Rest(name));
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::Await) && !in_await_context() {
+                *index += 1;
+                pattern.push(DestructuringElement::Rest("await".to_string()));
             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                 let nested_pattern = parse_array_destructuring_pattern(tokens, index)?;
                 let inner = DestructuringElement::NestedArray(nested_pattern, None);
@@ -5582,6 +5606,32 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
                 }
             }
             pattern.push(DestructuringElement::Variable(name, default_expr));
+        } else if *index < tokens.len() && matches!(tokens[*index].token, Token::Await) && !in_await_context() {
+            *index += 1;
+            // Accept optional default initializer in patterns: e.g. `await = 1`
+            let mut default_expr: Option<Box<Expr>> = None;
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                *index += 1; // consume '='
+                let mut depth: i32 = 0;
+                let mut init_tokens: Vec<TokenData> = Vec::new();
+                while *index < tokens.len() {
+                    if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBracket)) {
+                        break;
+                    }
+                    match tokens[*index].token {
+                        Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                        Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                    init_tokens.push(tokens[*index].clone());
+                    *index += 1;
+                }
+                if !init_tokens.is_empty() {
+                    let expr = parse_expression(&init_tokens, &mut 0)?;
+                    default_expr = Some(Box::new(expr));
+                }
+            }
+            pattern.push(DestructuringElement::Variable("await".to_string(), default_expr));
         } else {
             return Err(raise_parse_error_at!(tokens.get(*index)));
         }
@@ -5704,6 +5754,10 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                 *index += 1;
                 key_name = Some(name);
                 is_identifier_key = true;
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::Await) && !in_await_context() {
+                *index += 1;
+                key_name = Some("await".to_string());
+                is_identifier_key = true;
             } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
                 *index += 1;
                 key_name = Some(n.to_string());
@@ -5803,6 +5857,33 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                         }
                     }
                     DestructuringElement::Variable(name, default_expr)
+                } else if *index < tokens.len() && matches!(tokens[*index].token, Token::Await) && !in_await_context() {
+                    *index += 1;
+                    // Allow default initializer for property value like `a: await = 1`
+                    let mut default_expr: Option<Box<Expr>> = None;
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                        *index += 1;
+                        let mut depth: i32 = 0;
+                        let mut init_tokens: Vec<TokenData> = Vec::new();
+                        while *index < tokens.len() {
+                            if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBrace))
+                            {
+                                break;
+                            }
+                            match tokens[*index].token {
+                                Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                                Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                                _ => {}
+                            }
+                            init_tokens.push(tokens[*index].clone());
+                            *index += 1;
+                        }
+                        if !init_tokens.is_empty() {
+                            let expr = parse_expression(&init_tokens, &mut 0)?;
+                            default_expr = Some(Box::new(expr));
+                        }
+                    }
+                    DestructuringElement::Variable("await".to_string(), default_expr)
                 } else {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }

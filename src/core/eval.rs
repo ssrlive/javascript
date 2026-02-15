@@ -1427,13 +1427,48 @@ fn hoist_declarations<'gc>(
             if *is_generator {
                 // Create a generator (or async generator) function object (hoisted)
                 let func_obj = crate::core::new_js_object_data(mc);
-                // Set __proto__ to Function.prototype
-                if let Some(func_ctor_val) = env_get(env, "Function")
+                // Set [[Prototype]] to GeneratorFunction.prototype (or AsyncGeneratorFunction.prototype)
+                // when available; otherwise fall back to Function.prototype.
+                let mut proto_set = false;
+                if *is_async {
+                    if let Some(async_gen_func_val) = env_get(env, "AsyncGeneratorFunction")
+                        && let Value::Object(async_gen_func_ctor) = &*async_gen_func_val.borrow()
+                        && let Some(proto_val) = object_get_key_value(async_gen_func_ctor, "prototype")
+                    {
+                        let proto_value = match &*proto_val.borrow() {
+                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                            other => other.clone(),
+                        };
+                        if let Value::Object(proto) = proto_value {
+                            func_obj.borrow_mut(mc).prototype = Some(proto);
+                            proto_set = true;
+                        }
+                    }
+                } else if let Some(gen_func_val) = env_get(env, "GeneratorFunction")
+                    && let Value::Object(gen_func_ctor) = &*gen_func_val.borrow()
+                    && let Some(proto_val) = object_get_key_value(gen_func_ctor, "prototype")
+                {
+                    let proto_value = match &*proto_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Object(proto) = proto_value {
+                        func_obj.borrow_mut(mc).prototype = Some(proto);
+                        proto_set = true;
+                    }
+                }
+                if !proto_set
+                    && let Some(func_ctor_val) = env_get(env, "Function")
                     && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
                     && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-                    && let Value::Object(proto) = &*proto_val.borrow()
                 {
-                    func_obj.borrow_mut(mc).prototype = Some(*proto);
+                    let proto_value = match &*proto_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Object(proto) = proto_value {
+                        func_obj.borrow_mut(mc).prototype = Some(proto);
+                    }
                 }
 
                 let is_strict = body.first()
@@ -1454,7 +1489,8 @@ fn hoist_declarations<'gc>(
                     Value::GeneratorFunction(Some(name.clone()), Gc::new(mc, closure_data))
                 };
                 func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                object_set_key_value(mc, &func_obj, "name", &Value::String(utf8_to_utf16(name)))?;
+                let name_desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(name)), false, false, true)?;
+                crate::js_object::define_property_internal(mc, &func_obj, "name", &name_desc)?;
 
                 // Set 'length' property for generator function
                 let mut fn_length = 0_usize;
@@ -4151,7 +4187,7 @@ fn eval_res<'gc>(
                         Ok(None)
                     }
                     other => {
-                        if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(vbody, Value::Undefined) {
+                        if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) {
                             *last_value = vbody;
                         }
                         Ok(Some(other))
@@ -4168,13 +4204,14 @@ fn eval_res<'gc>(
                         Ok(None)
                     }
                     other => {
-                        if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(vbody, Value::Undefined) {
+                        if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) {
                             *last_value = vbody;
                         }
                         Ok(Some(other))
                     }
                 }
             } else {
+                *last_value = Value::Undefined;
                 Ok(None)
             }
         }
@@ -4195,8 +4232,15 @@ fn eval_res<'gc>(
 
             let mut result = match try_res {
                 Ok((cf, val)) => {
-                    if !matches!(val, Value::Undefined) {
-                        *last_value = val;
+                    match &cf {
+                        ControlFlow::Break(_) | ControlFlow::Continue(_) => {
+                            *last_value = val.clone();
+                        }
+                        _ => {
+                            if !matches!(val, Value::Undefined) {
+                                *last_value = val.clone();
+                            }
+                        }
                     }
                     cf
                 }
@@ -4262,24 +4306,43 @@ fn eval_res<'gc>(
                     }
                 }
 
-                // Create new scope for catch
-                let catch_env = crate::core::new_js_object_data(mc);
-                catch_env.borrow_mut(mc).prototype = Some(*env);
+                // Catch parameter environment (if present) is distinct from catch block environment.
+                let catch_param_env = crate::core::new_js_object_data(mc);
+                catch_param_env.borrow_mut(mc).prototype = Some(*env);
 
                 if let Some(param) = &tc_stmt.catch_param {
+                    let declare_catch_binding = |name: &str| -> Result<(), EvalError<'gc>> {
+                        if env_get_own(&catch_param_env, name).is_none() {
+                            object_set_key_value(mc, &catch_param_env, name, &Value::Uninitialized)?;
+                            catch_param_env.borrow_mut(mc).set_lexical(name.to_string());
+                        }
+                        Ok(())
+                    };
+
                     match param {
                         CatchParamPattern::Identifier(param_name) => {
-                            object_set_key_value(mc, &catch_env, param_name, val)?;
+                            declare_catch_binding(param_name)?;
+                            object_set_key_value(mc, &catch_param_env, param_name, val)?;
                         }
                         CatchParamPattern::Array(pattern) => {
-                            evaluate_destructuring_array_assignment(mc, &catch_env, pattern, val, false, None, None)?;
+                            let mut names = Vec::new();
+                            collect_names_from_destructuring(pattern, &mut names);
+                            for name in names {
+                                declare_catch_binding(&name)?;
+                            }
+                            evaluate_destructuring_array_assignment(mc, &catch_param_env, pattern, val, false, None, None)?;
                         }
                         CatchParamPattern::Object(pattern) => {
+                            let mut names = Vec::new();
+                            collect_names_from_destructuring(pattern, &mut names);
+                            for name in names {
+                                declare_catch_binding(&name)?;
+                            }
                             if matches!(val, Value::Undefined | Value::Null) {
                                 return Err(raise_type_error!("Cannot destructure undefined or null").into());
                             }
                             if let Value::Object(obj) = &val {
-                                bind_object_inner_for_letconst(mc, &catch_env, pattern, obj, false)?;
+                                bind_object_inner_for_letconst(mc, &catch_param_env, pattern, obj, false)?;
                             } else {
                                 return Err(raise_eval_error!("Expected object for nested destructuring").into());
                             }
@@ -4287,13 +4350,26 @@ fn eval_res<'gc>(
                     }
                 }
 
+                let catch_block_env = crate::core::new_js_object_data(mc);
+                catch_block_env.borrow_mut(mc).prototype = if tc_stmt.catch_param.is_some() {
+                    Some(catch_param_env)
+                } else {
+                    Some(*env)
+                };
+
                 let catch_stmts_clone = catch_stmts.clone();
-                let catch_res = evaluate_statements_with_context_and_last_value(mc, &catch_env, &catch_stmts_clone, labels);
+                let catch_res = evaluate_statements_with_context_and_last_value(mc, &catch_block_env, &catch_stmts_clone, labels);
                 match catch_res {
                     Ok((cf, val)) => {
-                        // Catch executed.
-                        if !matches!(val, Value::Undefined) {
-                            *last_value = val;
+                        match &cf {
+                            ControlFlow::Break(_) | ControlFlow::Continue(_) => {
+                                *last_value = val.clone();
+                            }
+                            _ => {
+                                if !matches!(val, Value::Undefined) {
+                                    *last_value = val.clone();
+                                }
+                            }
                         }
                         result = cf
                     }
@@ -4322,9 +4398,9 @@ fn eval_res<'gc>(
                             }
                             _ => {
                                 // Abrupt completion -> override result
-                                // If break/continue, we might need value
-                                if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(val, Value::Undefined) {
-                                    *last_value = val;
+                                // For break/continue, UpdateEmpty should still set undefined when empty.
+                                if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) {
+                                    *last_value = val.clone();
                                 }
                                 result = other;
                             }
@@ -4495,6 +4571,9 @@ fn eval_res<'gc>(
                     }
                     ControlFlow::Break(label) => {
                         if label.is_none() {
+                            if should_accumulate_completion {
+                                *last_value = vbody;
+                            }
                             break;
                         }
                         // If break has label, check if it matches us? No, breaks targets are handled by Label stmt or loop.
@@ -4507,7 +4586,7 @@ fn eval_res<'gc>(
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
-                        if should_accumulate_completion && !matches!(&vbody, Value::Undefined) {
+                        if should_accumulate_completion {
                             *last_value = vbody;
                         }
                         if let Some(ref l) = label {
@@ -6501,6 +6580,75 @@ fn eval_res<'gc>(
                 Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
             };
 
+            // Switch CaseBlock creates a fresh lexical environment that is visible to
+            // case selector expressions and case statement lists.
+            let switch_env = new_js_object_data(mc);
+            switch_env.borrow_mut(mc).prototype = Some(*env);
+
+            let declare_switch_lex = |name: &str, is_const: bool| -> Result<(), EvalError<'gc>> {
+                if object_get_key_value(&switch_env, name).is_none() {
+                    object_set_key_value(mc, &switch_env, name, &Value::Uninitialized)?;
+                    switch_env.borrow_mut(mc).set_lexical(name.to_string());
+                    if is_const {
+                        switch_env.borrow_mut(mc).set_const(name.to_string());
+                    }
+                }
+                Ok(())
+            };
+
+            for case in &sw_stmt.cases {
+                let stmts = match case {
+                    crate::core::SwitchCase::Case(_, stmts) => stmts,
+                    crate::core::SwitchCase::Default(stmts) => stmts,
+                };
+                for s in stmts {
+                    match &*s.kind {
+                        StatementKind::Let(decls) => {
+                            for (name, _) in decls {
+                                declare_switch_lex(name, false)?;
+                            }
+                        }
+                        StatementKind::Const(decls) => {
+                            for (name, _) in decls {
+                                declare_switch_lex(name, true)?;
+                            }
+                        }
+                        StatementKind::Class(class_def) => {
+                            declare_switch_lex(&class_def.name, true)?;
+                        }
+                        StatementKind::LetDestructuringArray(pattern, _) => {
+                            let mut names = Vec::new();
+                            collect_names_from_destructuring(pattern, &mut names);
+                            for name in names {
+                                declare_switch_lex(&name, false)?;
+                            }
+                        }
+                        StatementKind::LetDestructuringObject(pattern, _) => {
+                            let mut names = Vec::new();
+                            collect_names_from_object_destructuring(pattern, &mut names);
+                            for name in names {
+                                declare_switch_lex(&name, false)?;
+                            }
+                        }
+                        StatementKind::ConstDestructuringArray(pattern, _) => {
+                            let mut names = Vec::new();
+                            collect_names_from_destructuring(pattern, &mut names);
+                            for name in names {
+                                declare_switch_lex(&name, true)?;
+                            }
+                        }
+                        StatementKind::ConstDestructuringObject(pattern, _) => {
+                            let mut names = Vec::new();
+                            collect_names_from_object_destructuring(pattern, &mut names);
+                            for name in names {
+                                declare_switch_lex(&name, true)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             // Find start index: first matching Case, otherwise first Default, otherwise nothing executes
             let mut start_idx: Option<usize> = None;
             let mut default_idx: Option<usize> = None;
@@ -6508,11 +6656,15 @@ fn eval_res<'gc>(
                 match case {
                     crate::core::SwitchCase::Case(test_expr, _stmts) => {
                         // Evaluate test expression and compare
-                        let test_val = match evaluate_expr(mc, env, test_expr) {
+                        let test_val = match evaluate_expr(mc, &switch_env, test_expr) {
                             Ok(v) => v,
                             Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                         };
-                        if crate::core::values_equal(mc, &disc, &test_val) {
+                        let matched = match (&disc, &test_val) {
+                            (Value::Number(a), Value::Number(b)) => a == b,
+                            _ => crate::core::values_equal(mc, &disc, &test_val),
+                        };
+                        if matched {
                             start_idx = Some(i);
                             break;
                         }
@@ -6530,22 +6682,27 @@ fn eval_res<'gc>(
             } else if let Some(d) = default_idx {
                 d
             } else {
+                *last_value = Value::Undefined;
                 return Ok(None);
             };
 
-            let switch_env = new_js_object_data(mc);
-            switch_env.borrow_mut(mc).prototype = Some(*env);
+            let mut switch_value = Value::Undefined;
 
             for i in start..sw_stmt.cases.len() {
                 match &sw_stmt.cases[i] {
                     crate::core::SwitchCase::Case(_test, stmts) => {
                         let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &switch_env, stmts, labels)?;
                         match res {
-                            ControlFlow::Normal(_) => *last_value = vbody,
+                            ControlFlow::Normal(_) => {
+                                if !matches!(vbody, Value::Undefined) {
+                                    switch_value = vbody;
+                                }
+                            }
                             ControlFlow::Break(label) => {
                                 if !matches!(vbody, Value::Undefined) {
-                                    *last_value = vbody;
+                                    switch_value = vbody;
                                 }
+                                *last_value = switch_value.clone();
                                 if label.is_none() {
                                     return Ok(None);
                                 }
@@ -6553,8 +6710,9 @@ fn eval_res<'gc>(
                             }
                             ControlFlow::Continue(label) => {
                                 if !matches!(vbody, Value::Undefined) {
-                                    *last_value = vbody;
+                                    switch_value = vbody;
                                 }
+                                *last_value = switch_value.clone();
                                 return Ok(Some(ControlFlow::Continue(label)));
                             }
                             ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
@@ -6564,11 +6722,16 @@ fn eval_res<'gc>(
                     crate::core::SwitchCase::Default(stmts) => {
                         let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &switch_env, stmts, labels)?;
                         match res {
-                            ControlFlow::Normal(_) => *last_value = vbody,
+                            ControlFlow::Normal(_) => {
+                                if !matches!(vbody, Value::Undefined) {
+                                    switch_value = vbody;
+                                }
+                            }
                             ControlFlow::Break(label) => {
                                 if !matches!(vbody, Value::Undefined) {
-                                    *last_value = vbody;
+                                    switch_value = vbody;
                                 }
+                                *last_value = switch_value.clone();
                                 if label.is_none() {
                                     return Ok(None);
                                 }
@@ -6576,8 +6739,9 @@ fn eval_res<'gc>(
                             }
                             ControlFlow::Continue(label) => {
                                 if !matches!(vbody, Value::Undefined) {
-                                    *last_value = vbody;
+                                    switch_value = vbody;
                                 }
+                                *last_value = switch_value.clone();
                                 return Ok(Some(ControlFlow::Continue(label)));
                             }
                             ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
@@ -6586,6 +6750,7 @@ fn eval_res<'gc>(
                     }
                 }
             }
+            *last_value = switch_value;
             Ok(None)
         }
         _ => todo!("Statement kind not implemented yet"),

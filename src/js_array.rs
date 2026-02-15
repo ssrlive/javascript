@@ -1819,6 +1819,7 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     arr.borrow_mut(mc).non_enumerable.insert("__is_array".into());
     // Mark 'length' as non-enumerable on arrays per spec
     arr.borrow_mut(mc).set_non_enumerable("length");
+    arr.borrow_mut(mc).set_non_configurable("length");
 
     // Set prototype
     let mut root_env_opt = Some(env.clone());

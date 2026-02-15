@@ -1779,6 +1779,24 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
                 "Array".to_string()
             } else if is_date_object(obj) {
                 "Date".to_string()
+            } else if let Some(ta_val) = object_get_key_value(obj, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_val.borrow() {
+                    match ta.kind {
+                        crate::core::TypedArrayKind::Int8 => "Int8Array".to_string(),
+                        crate::core::TypedArrayKind::Uint8 => "Uint8Array".to_string(),
+                        crate::core::TypedArrayKind::Uint8Clamped => "Uint8ClampedArray".to_string(),
+                        crate::core::TypedArrayKind::Int16 => "Int16Array".to_string(),
+                        crate::core::TypedArrayKind::Uint16 => "Uint16Array".to_string(),
+                        crate::core::TypedArrayKind::Int32 => "Int32Array".to_string(),
+                        crate::core::TypedArrayKind::Uint32 => "Uint32Array".to_string(),
+                        crate::core::TypedArrayKind::Float32 => "Float32Array".to_string(),
+                        crate::core::TypedArrayKind::Float64 => "Float64Array".to_string(),
+                        crate::core::TypedArrayKind::BigInt64 => "BigInt64Array".to_string(),
+                        crate::core::TypedArrayKind::BigUint64 => "BigUint64Array".to_string(),
+                    }
+                } else {
+                    "Object".to_string()
+                }
             } else {
                 let mut t = "Object".to_string();
                 if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -11929,6 +11947,31 @@ pub fn evaluate_call_dispatch<'gc>(
             }
         }
         Value::Object(obj) => {
+            if let Some(bound_target_rc) = crate::core::get_own_property(obj, "__bound_target") {
+                let bound_target = bound_target_rc.borrow().clone();
+                let bound_this = crate::core::get_own_property(obj, "__bound_this").map(|v| v.borrow().clone());
+                let bound_arg_len = crate::core::get_own_property(obj, "__bound_arg_len")
+                    .and_then(|v| {
+                        if let Value::Number(n) = *v.borrow() {
+                            Some(n.max(0.0) as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+
+                let mut merged_args = Vec::with_capacity(bound_arg_len + eval_args.len());
+                for i in 0..bound_arg_len {
+                    if let Some(arg_rc) = crate::core::get_own_property(obj, format!("__bound_arg_{i}")) {
+                        merged_args.push(arg_rc.borrow().clone());
+                    }
+                }
+                merged_args.extend_from_slice(eval_args);
+
+                let call_this = bound_this.as_ref().or(this_val);
+                return evaluate_call_dispatch(mc, env, &bound_target, call_this, &merged_args);
+            }
+
             let closure_opt = { obj.borrow().get_closure() };
             if let Some(cl_ptr) = closure_opt {
                 let callable = { cl_ptr.borrow().clone() };
@@ -11993,6 +12036,8 @@ pub fn evaluate_call_dispatch<'gc>(
                             Ok(crate::js_array::handle_array_constructor(mc, eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("Function") {
                             Ok(crate::js_function::handle_global_function(mc, "Function", eval_args, env)?)
+                        } else if name == crate::unicode::utf8_to_utf16("GeneratorFunction") {
+                            Ok(crate::js_function::handle_global_function(mc, "GeneratorFunction", eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("AsyncGeneratorFunction") {
                             Ok(crate::js_function::handle_global_function(
                                 mc,
@@ -14216,7 +14261,8 @@ fn evaluate_expr_binary<'gc>(
                     // Now ensure constructor is callable
                     let is_callable_ctor = ctor.borrow().get_closure().is_some()
                         || ctor.borrow().class_def.is_some()
-                        || crate::core::object_get_key_value(&ctor, "__is_constructor").is_some();
+                        || crate::core::object_get_key_value(&ctor, "__is_constructor").is_some()
+                        || crate::core::object_get_key_value(&ctor, "__native_ctor").is_some();
                     if !is_callable_ctor {
                         return Err(raise_type_error!("Only Function objects implement [[HasInstance]] and consequently can be proper ShiftExpression for The instanceof operator").into());
                     }
@@ -14239,7 +14285,8 @@ fn evaluate_expr_binary<'gc>(
                     // If LHS is not object we still must check whether constructor is callable
                     let is_callable_ctor = ctor.borrow().get_closure().is_some()
                         || ctor.borrow().class_def.is_some()
-                        || crate::core::object_get_key_value(&ctor, "__is_constructor").is_some();
+                        || crate::core::object_get_key_value(&ctor, "__is_constructor").is_some()
+                        || crate::core::object_get_key_value(&ctor, "__native_ctor").is_some();
                     if !is_callable_ctor {
                         return Err(raise_type_error!("Only Function objects implement [[HasInstance]] and consequently can be proper ShiftExpression for The instanceof operator").into());
                     }
@@ -17589,6 +17636,15 @@ pub fn call_native_function<'gc>(
         }
     }
 
+    if name == "ArrayBuffer.prototype.slice" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_method(mc, obj, "slice", args)?));
+        } else {
+            return Err(raise_eval_error!("TypeError: ArrayBuffer.prototype.slice called on non-object").into());
+        }
+    }
+
     if name == "SharedArrayBuffer.prototype.byteLength" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         if let Value::Object(obj) = this_v {
@@ -17750,6 +17806,7 @@ fn call_setter_raw<'gc>(
     params_env.borrow_mut(mc).prototype = Some(*env);
     params_env.borrow_mut(mc).is_function_scope = true;
     object_set_key_value(mc, &params_env, "this", &Value::Object(*receiver))?;
+    crate::js_class::create_arguments_object(mc, &params_env, std::slice::from_ref(val), None)?;
 
     // If the setter carried a home object, propagate it into call env so `super` resolves
     if let Some(home_obj) = &home_opt {
@@ -17762,18 +17819,72 @@ fn call_setter_raw<'gc>(
     }
     params_env.borrow_mut(mc).set_home_object(home_opt.clone());
 
-    if let Some(param) = params.first()
-        && let DestructuringElement::Variable(name, _) = param
-    {
-        crate::core::env_set(mc, &params_env, name, val)?;
-    }
-
-    // If this setter has a parameter default initializer expression, evaluate it
-    // in the parameter environment to ensure it cannot see body declarations.
-    if let Some(param) = params.first()
-        && let DestructuringElement::Variable(_name, Some(default_expr)) = param
-    {
-        let _ = evaluate_expr(mc, &params_env, default_expr)?;
+    if let Some(param) = params.first() {
+        match param {
+            DestructuringElement::Variable(name, default_expr_opt) => {
+                let mut arg_val = val.clone();
+                if matches!(arg_val, Value::Undefined)
+                    && let Some(default_expr) = default_expr_opt
+                {
+                    arg_val = evaluate_expr(mc, &params_env, default_expr)?;
+                }
+                crate::core::env_set(mc, &params_env, name, &arg_val)?;
+            }
+            DestructuringElement::NestedObject(inner_pattern, inner_default) => {
+                let mut arg_val = val.clone();
+                if matches!(arg_val, Value::Undefined)
+                    && let Some(def) = inner_default
+                {
+                    arg_val = evaluate_expr(mc, &params_env, def)?;
+                }
+                if matches!(arg_val, Value::Undefined) || matches!(arg_val, Value::Null) {
+                    return Err(raise_type_error!("Cannot convert undefined or null to object").into());
+                }
+                let binding_obj = match &arg_val {
+                    Value::Object(obj) => *obj,
+                    Value::Number(n) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "valueOf", &Value::Function("Number_valueOf".to_string()))?;
+                        object_set_key_value(mc, &obj, "toString", &Value::Function("Number_toString".to_string()))?;
+                        object_set_key_value(mc, &obj, "__value__", &Value::Number(*n))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &params_env, "Number")?;
+                        obj
+                    }
+                    Value::Boolean(b) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
+                        object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
+                        object_set_key_value(mc, &obj, "__value__", &Value::Boolean(*b))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &params_env, "Boolean")?;
+                        obj
+                    }
+                    Value::String(s) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "valueOf", &Value::Function("String_valueOf".to_string()))?;
+                        object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
+                        object_set_key_value(mc, &obj, "length", &Value::Number(s.len() as f64))?;
+                        object_set_key_value(mc, &obj, "__value__", &Value::String(s.clone()))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &params_env, "String")?;
+                        obj
+                    }
+                    Value::BigInt(h) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "__value__", &Value::BigInt(h.clone()))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &params_env, "BigInt")?;
+                        obj
+                    }
+                    Value::Symbol(sym_rc) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "__value__", &Value::Symbol(*sym_rc))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &params_env, "Symbol")?;
+                        obj
+                    }
+                    _ => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
+                };
+                bind_object_inner_for_letconst(mc, &params_env, inner_pattern, &binding_obj, false)?;
+            }
+            _ => {}
+        }
     }
 
     let call_env = crate::core::new_js_object_data(mc);
@@ -17966,6 +18077,10 @@ pub fn call_closure<'gc>(
             // creation environment, do NOT create a separate per-call binding for
             // the name (that behavior is only for Named Function Expressions).
             let mut should_bind_name = true;
+            if fn_obj_ptr.borrow().get_home_object().is_some() || cl.home_object.is_some() {
+                // Method calls must not create a per-call immutable name binding.
+                should_bind_name = false;
+            }
             if let Some(creation_env) = cl.env
                 && let Some(existing_cell) = crate::core::env_get_own(&creation_env, &name)
             {
@@ -18225,9 +18340,48 @@ pub fn call_closure<'gc>(
                 if matches!(arg_val, Value::Undefined) || matches!(arg_val, Value::Null) {
                     return Err(raise_type_error!("Cannot convert undefined or null to object").into());
                 }
-                if let Value::Object(obj) = &arg_val {
-                    bind_object_inner_for_letconst(mc, &param_env, inner_pattern, obj, false)?;
-                }
+                let binding_obj = match &arg_val {
+                    Value::Object(obj) => *obj,
+                    Value::Number(n) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "valueOf", &Value::Function("Number_valueOf".to_string()))?;
+                        object_set_key_value(mc, &obj, "toString", &Value::Function("Number_toString".to_string()))?;
+                        object_set_key_value(mc, &obj, "__value__", &Value::Number(*n))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &param_env, "Number")?;
+                        obj
+                    }
+                    Value::Boolean(b) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
+                        object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
+                        object_set_key_value(mc, &obj, "__value__", &Value::Boolean(*b))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &param_env, "Boolean")?;
+                        obj
+                    }
+                    Value::String(s) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "valueOf", &Value::Function("String_valueOf".to_string()))?;
+                        object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
+                        object_set_key_value(mc, &obj, "length", &Value::Number(s.len() as f64))?;
+                        object_set_key_value(mc, &obj, "__value__", &Value::String(s.clone()))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &param_env, "String")?;
+                        obj
+                    }
+                    Value::BigInt(h) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "__value__", &Value::BigInt(h.clone()))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &param_env, "BigInt")?;
+                        obj
+                    }
+                    Value::Symbol(sym_rc) => {
+                        let obj = new_js_object_data(mc);
+                        object_set_key_value(mc, &obj, "__value__", &Value::Symbol(*sym_rc))?;
+                        crate::core::set_internal_prototype_from_constructor(mc, &obj, &param_env, "Symbol")?;
+                        obj
+                    }
+                    _ => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
+                };
+                bind_object_inner_for_letconst(mc, &param_env, inner_pattern, &binding_obj, false)?;
             }
             _ => {}
         }
@@ -19141,6 +19295,30 @@ fn evaluate_expr_new<'gc>(
             }
         }
         Value::Object(obj) => {
+            if let Some(bound_target_rc) = crate::core::get_own_property(&obj, "__bound_target") {
+                let bound_target = bound_target_rc.borrow().clone();
+                let bound_arg_len = crate::core::get_own_property(&obj, "__bound_arg_len")
+                    .and_then(|v| {
+                        if let Value::Number(n) = *v.borrow() {
+                            Some(n.max(0.0) as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+
+                let mut merged_args = Vec::with_capacity(bound_arg_len + eval_args.len());
+                for i in 0..bound_arg_len {
+                    if let Some(arg_rc) = crate::core::get_own_property(&obj, format!("__bound_arg_{i}")) {
+                        merged_args.push(arg_rc.borrow().clone());
+                    }
+                }
+                merged_args.extend_from_slice(&eval_args);
+
+                let val = crate::js_class::evaluate_new(mc, env, &bound_target, &merged_args, Some(&bound_target))?;
+                return Ok(val);
+            }
+
             if let Some(cl_ptr) = obj.borrow().get_closure() {
                 log::debug!("evaluate_expr_new: constructor object has closure ptr = {:p}", Gc::as_ptr(obj));
                 match &*cl_ptr.borrow() {
@@ -19304,6 +19482,9 @@ fn evaluate_expr_new<'gc>(
 
                         let val = Value::Number(crate::unicode::utf16_len(&val) as f64);
                         object_set_key_value(mc, &new_obj, "length", &val)?;
+                        new_obj.borrow_mut(mc).set_non_enumerable("length");
+                        new_obj.borrow_mut(mc).set_non_writable("length");
+                        new_obj.borrow_mut(mc).set_non_configurable("length");
                         return Ok(Value::Object(new_obj));
                     } else if name_str == "Boolean" {
                         let val = match crate::js_boolean::boolean_constructor(&eval_args)? {

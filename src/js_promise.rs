@@ -3555,7 +3555,7 @@ pub fn handle_promise_constructor_val<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
-        return Err(raise_eval_error!("Promise constructor requires an executor function").into());
+        return Err(raise_type_error!("Promise constructor requires an executor function").into());
     }
     let executor = &args[0];
 
@@ -3574,11 +3574,7 @@ pub fn handle_promise_constructor_val<'gc>(
 
     if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(executor) {
         let executor_args = vec![resolve_func.clone(), reject_func.clone()];
-        let executor_env = if params.is_empty() {
-            prepare_closure_call_env(mc, Some(&captured_env), None, &[], None)?
-        } else {
-            prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &executor_args, None)?
-        };
+        let executor_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &executor_args, None)?;
         log::trace!("Promise executor params={:?}", params);
         match crate::core::evaluate_statements(mc, &executor_env, &body) {
             Ok(_) => {}

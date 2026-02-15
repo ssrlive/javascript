@@ -436,50 +436,40 @@ pub fn create_arguments_object<'gc>(
         object_set_key_value(mc, &arguments_obj, i, &arg.clone())?;
     }
 
-    if let Some(_c) = callee {
-        // In strict mode (which this engine seems to default to or enforces via "use strict" in test),
-        // 'callee' should be an accessor property that throws TypeError on get/set.
-        // However, checking strict mode context here is hard.
-        // BUT, for regular functions in strict mode, arguments.callee access throws.
-        // For now, let's just make it throw indiscriminately if we want to pass the strict mode test,
-        // OR implement strict mode check.
-        // The engine seems to be strict-by-default or similar? The user said "strict mode length writable".
-        // The test explicitly says "flags: [onlyStrict]".
+    if let Some(callee_val) = callee {
+        if crate::core::env_get_strictness(func_env) {
+            let thrower_body = vec![crate::core::Statement {
+                kind: Box::new(crate::core::StatementKind::Throw(crate::core::Expr::New(
+                    Box::new(crate::core::Expr::Var("TypeError".to_string(), None, None)),
+                    vec![crate::core::Expr::StringLit(crate::unicode::utf8_to_utf16(
+                        "'callee' and 'caller' restricted",
+                    ))],
+                ))),
+                line: 0,
+                column: 0,
+            }];
 
-        // Let's implement the thrower.
-        // We need to create a "thrower" accessor pair.
+            let thrower_data = crate::core::ClosureData {
+                body: thrower_body,
+                env: Some(*func_env),
+                enforce_strictness_inheritance: true,
+                ..ClosureData::default()
+            };
+            let thrower_val = crate::core::Value::Closure(crate::core::Gc::new(mc, thrower_data));
 
-        let thrower_body = vec![crate::core::Statement {
-            kind: Box::new(crate::core::StatementKind::Throw(crate::core::Expr::New(
-                Box::new(crate::core::Expr::Var("TypeError".to_string(), None, None)),
-                vec![crate::core::Expr::StringLit(crate::unicode::utf8_to_utf16(
-                    "'callee' and 'caller' restricted",
-                ))],
-            ))),
-            line: 0,
-            column: 0,
-        }];
+            let prop = crate::core::Value::Property {
+                value: None,
+                getter: Some(Box::new(thrower_val.clone())),
+                setter: Some(Box::new(thrower_val)),
+            };
 
-        // Construct thrower closure
-        let thrower_data = crate::core::ClosureData {
-            body: thrower_body,
-            env: Some(*func_env), // Capture current env? Or global? Ideally empty/global env.
-            enforce_strictness_inheritance: true,
-            ..ClosureData::default()
-        };
-        let thrower_val = crate::core::Value::Closure(crate::core::Gc::new(mc, thrower_data));
-
-        // Create Property Descriptor for callee: { get: thrower, set: thrower, enumerable: false, configurable: false }
-        let prop = crate::core::Value::Property {
-            value: None,
-            getter: Some(Box::new(thrower_val.clone())),
-            setter: Some(Box::new(thrower_val)),
-        };
-
-        object_set_key_value(mc, &arguments_obj, "callee", &prop)?;
-        // Non-enumerable is handled by object_set_key_value if we pass Property? No.
-        arguments_obj.borrow_mut(mc).set_non_enumerable("callee");
-        arguments_obj.borrow_mut(mc).set_non_configurable("callee");
+            object_set_key_value(mc, &arguments_obj, "callee", &prop)?;
+            arguments_obj.borrow_mut(mc).set_non_enumerable("callee");
+            arguments_obj.borrow_mut(mc).set_non_configurable("callee");
+        } else {
+            object_set_key_value(mc, &arguments_obj, "callee", callee_val)?;
+            arguments_obj.borrow_mut(mc).set_non_enumerable("callee");
+        }
     }
 
     object_set_key_value(mc, func_env, "arguments", &Value::Object(arguments_obj))?;
@@ -909,6 +899,33 @@ pub(crate) fn evaluate_new<'gc>(
     evaluated_args: &[Value<'gc>],
     new_target: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    if let Value::Object(bound_obj) = constructor_val
+        && let Some(bound_target_rc) = crate::core::get_own_property(bound_obj, "__bound_target")
+    {
+        let bound_target = bound_target_rc.borrow().clone();
+        let bound_arg_len = crate::core::get_own_property(bound_obj, "__bound_arg_len")
+            .and_then(|v| {
+                if let Value::Number(n) = *v.borrow() {
+                    Some(n.max(0.0) as usize)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        let mut merged_args = Vec::with_capacity(bound_arg_len + evaluated_args.len());
+        for i in 0..bound_arg_len {
+            if let Some(arg_rc) = crate::core::get_own_property(bound_obj, format!("__bound_arg_{i}")) {
+                merged_args.push(arg_rc.borrow().clone());
+            }
+        }
+        merged_args.extend_from_slice(evaluated_args);
+
+        let effective_new_target = if let Some(nt) = new_target { nt } else { &bound_target };
+
+        return evaluate_new(mc, env, &bound_target, &merged_args, Some(effective_new_target));
+    }
+
     // Evaluate arguments first
 
     match constructor_val {
@@ -1229,7 +1246,8 @@ pub(crate) fn evaluate_new<'gc>(
                     log::trace!("evaluate_new: called prepare_call_env_with_this");
 
                     // Create the arguments object
-                    create_arguments_object(mc, &func_env, evaluated_args, None)?;
+                    let ctor_val = Value::Object(*class_obj);
+                    create_arguments_object(mc, &func_env, evaluated_args, Some(&ctor_val))?;
 
                     // Execute constructor body and honor explicit returns.
                     // For ordinary function constructors invoked with `new`, an explicit
@@ -1249,7 +1267,11 @@ pub(crate) fn evaluate_new<'gc>(
                                     | Value::Uninitialized
                                     | Value::PrivateName(..)
                             );
-                            if !is_primitive {
+                            if is_primitive {
+                                if is_derived && !matches!(ret, Value::Undefined) {
+                                    return Err(raise_type_error!("Derived constructors may only return object values").into());
+                                }
+                            } else {
                                 return Ok(ret);
                             }
                         }
@@ -1403,6 +1425,9 @@ pub(crate) fn evaluate_new<'gc>(
                         let call_env_for_function = if let Some(re) = ctor_re_env { re } else { *env };
                         return crate::js_function::handle_global_function(mc, "Function", evaluated_args, &call_env_for_function);
                     }
+                    "GeneratorFunction" => {
+                        return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, env);
+                    }
                     "Map" => return Ok(crate::js_map::handle_map_constructor(mc, evaluated_args, env)?),
                     "Set" => return Ok(crate::js_set::handle_set_constructor(mc, evaluated_args, env)?),
                     "WeakMap" => return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, env)?),
@@ -1435,7 +1460,12 @@ pub(crate) fn evaluate_new<'gc>(
 
             // Check if this is a TypedArray constructor
             if get_own_property(class_obj, "__kind").is_some() {
-                return Ok(handle_typedarray_constructor(mc, class_obj, evaluated_args, env)?);
+                let ctor_for_typedarray = if let Some(Value::Object(nt_obj)) = new_target {
+                    nt_obj
+                } else {
+                    class_obj
+                };
+                return Ok(handle_typedarray_constructor(mc, ctor_for_typedarray, evaluated_args, env)?);
             }
 
             // Check if this is a class object (inspect internal slot `class_def`)
@@ -1608,35 +1638,39 @@ pub(crate) fn evaluate_new<'gc>(
                         let result = crate::core::evaluate_statements_with_context(mc, &func_env, body, &[])?;
 
                         // Check for explicit return
-                        if let crate::core::ControlFlow::Return(ret_val) = result
-                            && let Value::Object(_) = ret_val
-                        {
-                            // Finalize any deferred prototype on the explicitly-returned object
-                            if let Some(proto) = computed_proto
-                                && let Value::Object(obj) = &ret_val
-                                && obj.borrow().prototype.is_none()
-                            {
-                                obj.borrow_mut(mc).prototype = Some(proto);
-                                object_set_key_value(mc, obj, "__proto__", &Value::Object(proto))?;
-                                log::warn!(
-                                    "evaluate_new: finalized deferred prototype on explicit return -> instance={:p} proto={:p}",
-                                    Gc::as_ptr(*obj),
-                                    Gc::as_ptr(proto)
-                                );
-                                // Clear pending computed_proto markers
-                                crate::core::object_set_key_value(mc, &func_env, "__computed_proto", &Value::Undefined)?;
-                                crate::core::object_set_key_value(mc, &instance, "__computed_proto", &Value::Undefined)?;
-                                // Read-back diagnostics
-                                let read_proto = obj.borrow().prototype.map(Gc::as_ptr);
-                                let has_own = object_get_key_value(obj, "__proto__").is_some();
-                                log::warn!(
-                                    "evaluate_new: explicit-return instance readback -> instance={:p} read_proto={:?} has_own_proto={}",
-                                    Gc::as_ptr(*obj),
-                                    read_proto,
-                                    has_own
-                                );
+                        if let crate::core::ControlFlow::Return(ret_val) = result {
+                            if let Value::Object(_) = ret_val {
+                                // Finalize any deferred prototype on the explicitly-returned object
+                                if let Some(proto) = computed_proto
+                                    && let Value::Object(obj) = &ret_val
+                                    && obj.borrow().prototype.is_none()
+                                {
+                                    obj.borrow_mut(mc).prototype = Some(proto);
+                                    object_set_key_value(mc, obj, "__proto__", &Value::Object(proto))?;
+                                    log::warn!(
+                                        "evaluate_new: finalized deferred prototype on explicit return -> instance={:p} proto={:p}",
+                                        Gc::as_ptr(*obj),
+                                        Gc::as_ptr(proto)
+                                    );
+                                    // Clear pending computed_proto markers
+                                    crate::core::object_set_key_value(mc, &func_env, "__computed_proto", &Value::Undefined)?;
+                                    crate::core::object_set_key_value(mc, &instance, "__computed_proto", &Value::Undefined)?;
+                                    // Read-back diagnostics
+                                    let read_proto = obj.borrow().prototype.map(Gc::as_ptr);
+                                    let has_own = object_get_key_value(obj, "__proto__").is_some();
+                                    log::warn!(
+                                        "evaluate_new: explicit-return instance readback -> instance={:p} read_proto={:?} has_own_proto={}",
+                                        Gc::as_ptr(*obj),
+                                        read_proto,
+                                        has_own
+                                    );
+                                }
+                                return Ok(ret_val);
                             }
-                            return Ok(ret_val);
+
+                            if class_def_ptr.borrow().extends.is_some() && !matches!(ret_val, Value::Undefined) {
+                                return Err(raise_type_error!("Derived constructors may only return object values").into());
+                            }
                         }
 
                         // Retrieve 'this' from env, as it might have been changed by super().
@@ -1986,7 +2020,7 @@ pub(crate) fn evaluate_new<'gc>(
             // to the closure value so it can be returned directly.
             crate::core::object_set_key_value(mc, &func_env, "__function", &Value::Closure(*data))?;
 
-            create_arguments_object(mc, &func_env, evaluated_args, None)?;
+            create_arguments_object(mc, &func_env, evaluated_args, Some(constructor_val))?;
 
             // Execute function body
             evaluate_statements(mc, &func_env, body)?;
@@ -2017,6 +2051,9 @@ pub(crate) fn evaluate_new<'gc>(
                 "String" => {
                     return crate::js_string::string_constructor(mc, evaluated_args, env);
                 }
+                "GeneratorFunction" => {
+                    return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, env);
+                }
                 _ => {
                     log::warn!("evaluate_new - constructor is not an object or closure: Function({func_name})",);
                 }
@@ -2039,9 +2076,19 @@ pub(crate) fn create_class_object<'gc>(
     env: &JSObjectDataPtr<'gc>,
     bind_name_during_creation: bool,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    enum PendingStaticElement<'gc> {
+        Field(PropertyKey<'gc>, Expr),
+        Block(Vec<crate::core::Statement>),
+    }
+
     // Create class environment for private names
     let class_env = new_js_object_data(mc);
     class_env.borrow_mut(mc).prototype = Some(*env);
+
+    if !name.is_empty() {
+        object_set_key_value(mc, &class_env, name, &Value::Uninitialized)?;
+        class_env.borrow_mut(mc).set_const(name.to_string());
+    }
 
     for member in members {
         let (name, is_private) = match member {
@@ -2084,12 +2131,6 @@ pub(crate) fn create_class_object<'gc>(
         class_obj.borrow_mut(mc).prototype = Some(*func_proto);
     }
 
-    // If requested (class declaration), bind the class name into the surrounding environment
-    // early so that static blocks can reference it during class evaluation.
-    if bind_name_during_creation && !name.is_empty() {
-        crate::core::env_set(mc, env, name, &Value::Object(class_obj))?;
-    }
-
     // Determine constructor "length" (arity). Prefer explicit Constructor member, fallback to Method named "constructor" or default 0
     let mut ctor_len: usize = 0;
     for m in members {
@@ -2127,19 +2168,23 @@ pub(crate) fn create_class_object<'gc>(
     // Handle inheritance if extends is specified
     if let Some(parent_expr) = extends {
         // Evaluate the extends expression to get the parent class object
-        let parent_val = evaluate_expr(mc, env, parent_expr)?;
+        let parent_val = evaluate_expr(mc, &class_env, parent_expr)?;
         log::debug!("create_class_object class={} parent_val={:?}", name, parent_val);
 
         match parent_val {
             Value::Null => {
                 // extends null -> proto parent is null, constructor parent is Function.prototype
                 prototype_obj.borrow_mut(mc).prototype = None;
+                object_set_key_value(mc, &class_obj, "__extends_null", &Value::Boolean(true))?;
+                class_obj.borrow_mut(mc).set_non_enumerable("__extends_null");
             }
             Value::Object(parent_class_obj) => {
                 let is_constructor = if parent_class_obj.borrow().class_def.is_some() {
                     true
                 } else if let Some(flag_rc) = get_own_property(&parent_class_obj, "__is_constructor") {
                     matches!(*flag_rc.borrow(), Value::Boolean(true))
+                } else if get_own_property(&parent_class_obj, "__native_ctor").is_some() {
+                    true
                 } else if let Some(cl_ptr) = parent_class_obj.borrow().get_closure() {
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => !cl.is_arrow,
@@ -2203,7 +2248,11 @@ pub(crate) fn create_class_object<'gc>(
     // (do NOT create a visible own property such as "__definition_env").
     class_obj.borrow_mut(mc).definition_env = Some(class_env);
 
-    let mut pending_static_fields: Vec<(PropertyKey<'gc>, Expr)> = Vec::new();
+    if !name.is_empty() {
+        object_set_key_value(mc, &class_env, name, &Value::Object(class_obj))?;
+    }
+
+    let mut pending_static_elements: Vec<PendingStaticElement<'gc>> = Vec::new();
 
     // Add methods to prototype
     for (idx, member) in members.iter().enumerate() {
@@ -2665,7 +2714,8 @@ pub(crate) fn create_class_object<'gc>(
                 if prop_name == "prototype" {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                pending_static_fields.push((PropertyKey::String(prop_name.clone()), value_expr.clone()));
+                let key = PropertyKey::String(prop_name.clone());
+                pending_static_elements.push(PendingStaticElement::Field(key, value_expr.clone()));
             }
             ClassMember::StaticPropertyComputed(key_expr, value_expr) => {
                 let key_val = evaluate_expr(mc, &class_env, key_expr)?;
@@ -2681,7 +2731,8 @@ pub(crate) fn create_class_object<'gc>(
                 {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                pending_static_fields.push((PropertyKey::from(&key_prim), value_expr.clone()));
+                let key = PropertyKey::from(&key_prim);
+                pending_static_elements.push(PendingStaticElement::Field(key, value_expr.clone()));
             }
             ClassMember::StaticGetter(getter_name, body) => {
                 // Disallow static `prototype` property definitions
@@ -2986,7 +3037,7 @@ pub(crate) fn create_class_object<'gc>(
                         panic!("Missing private name")
                     }
                 };
-                pending_static_fields.push((key, value_expr.clone()));
+                pending_static_elements.push(PendingStaticElement::Field(key, value_expr.clone()));
             }
             ClassMember::PrivateStaticGetter(getter_name, body) => {
                 let key = {
@@ -3077,26 +3128,42 @@ pub(crate) fn create_class_object<'gc>(
                 class_obj.borrow_mut(mc).set_non_writable(key);
             }
             ClassMember::StaticBlock(body) => {
-                let block_env = new_js_object_data(mc);
-                block_env.borrow_mut(mc).prototype = Some(class_env);
-                object_set_key_value(mc, &block_env, "this", &Value::Object(class_obj))?;
-                evaluate_statements(mc, &block_env, body)?;
+                pending_static_elements.push(PendingStaticElement::Block(body.clone()));
             }
         }
     }
 
-    // Define static fields after all class elements are evaluated, preserving order.
-    for (key, value_expr) in pending_static_fields {
-        let static_env = prepare_call_env_with_this(mc, Some(&class_env), Some(&Value::Object(class_obj)), None, &[], None, None, None)?;
-        object_set_key_value(mc, &static_env, "__class_field_initializer", &Value::Boolean(true))?;
-        static_env.borrow_mut(mc).set_home_object(Some(class_obj.into()));
-        let value = evaluate_expr(mc, &static_env, &value_expr)?;
-        set_name_if_anonymous(mc, &value, &value_expr, &key)?;
-        object_set_key_value(mc, &class_obj, key, &value)?;
+    for pending in pending_static_elements {
+        match pending {
+            PendingStaticElement::Field(key, value_expr) => {
+                let static_env =
+                    prepare_call_env_with_this(mc, Some(&class_env), Some(&Value::Object(class_obj)), None, &[], None, None, None)?;
+                object_set_key_value(mc, &static_env, "__class_field_initializer", &Value::Boolean(true))?;
+                static_env.borrow_mut(mc).set_home_object(Some(class_obj.into()));
+                let value = evaluate_expr(mc, &static_env, &value_expr)?;
+                set_name_if_anonymous(mc, &value, &value_expr, &key)?;
+                object_set_key_value(mc, &class_obj, key, &value)?;
+            }
+            PendingStaticElement::Block(body) => {
+                let block_env = new_js_object_data(mc);
+                {
+                    let mut block_env_mut = block_env.borrow_mut(mc);
+                    block_env_mut.prototype = Some(class_env);
+                    block_env_mut.is_function_scope = true;
+                    block_env_mut.set_home_object(Some(class_obj.into()));
+                }
+                object_set_key_value(mc, &block_env, "this", &Value::Object(class_obj))?;
+                evaluate_statements(mc, &block_env, &body)?;
+            }
+        }
     }
 
     // Ensure constructor name is non-enumerable at end of creation (catch any overwrites)
     class_obj.borrow_mut(mc).set_non_enumerable("name");
+
+    if bind_name_during_creation && !name.is_empty() {
+        object_set_key_value(mc, env, name, &Value::Object(class_obj))?;
+    }
 
     Ok(Value::Object(class_obj))
 }
@@ -3336,6 +3403,16 @@ pub(crate) fn evaluate_super_call<'gc>(
         Value::Undefined
     };
 
+    let current_extends_null = if let Value::Object(func_obj) = &current_function {
+        if let Some(flag_rc) = get_own_property(func_obj, "__extends_null") {
+            matches!(*flag_rc.borrow(), Value::Boolean(true))
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     let bind_this_after_super =
         |mc: &MutationContext<'gc>, this_to_bind: Option<crate::core::JSObjectDataPtr<'gc>>| -> Result<(), JSError> {
             let to_set = this_to_bind.unwrap_or(instance);
@@ -3357,6 +3434,9 @@ pub(crate) fn evaluate_super_call<'gc>(
         };
 
     if let Value::Object(parent_class_obj) = parent_class {
+        if current_extends_null {
+            return Err(raise_type_error!("Super constructor is null").into());
+        }
         // If parent class has an internal class_def slot, use it
         if let Some(parent_class_def_ptr) = &parent_class_obj.borrow().class_def {
             // Get the parent constructor's definition environment (internal slot)
@@ -3475,10 +3555,14 @@ pub(crate) fn evaluate_super_call<'gc>(
                             cur_update = env_ptr.borrow().prototype;
                         }
 
-                        // Only apply deferred computed-prototype transfer when the returned object
-                        // is the same instance under construction. For explicit object returns from
-                        // super constructors, preserve the returned object's own prototype.
-                        if Gc::ptr_eq(new_instance, instance) {
+                        // Apply deferred computed-prototype transfer when the returned object is
+                        // the same instance under construction. Also apply for TypedArray native
+                        // constructors, which may allocate and return a different object but must
+                        // still use newTarget.prototype.
+                        let should_apply_proto_transfer =
+                            Gc::ptr_eq(new_instance, instance) || get_own_property(&parent_class_obj, "__kind").is_some();
+
+                        if should_apply_proto_transfer {
                             if let Some(proto_env) = find_binding_env(&lexical_env, "__computed_proto") {
                                 if let Some(proto_rc) = object_get_key_value(&proto_env, "__computed_proto") {
                                     match &*proto_rc.borrow() {
@@ -4137,7 +4221,8 @@ pub(crate) fn handle_object_constructor<'gc>(
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "valueOf", &Value::Function("String_valueOf".to_string()))?;
             object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
-            object_set_key_value(mc, &obj, "length", &Value::Number(s.len() as f64))?;
+            let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(s.len() as f64), false, false, false)?;
+            crate::js_object::define_property_internal(mc, &obj, "length", &len_desc)?;
             object_set_key_value(mc, &obj, "__value__", &Value::String(s))?;
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String")?;
             Ok(Value::Object(obj))

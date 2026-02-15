@@ -1,3 +1,5 @@
+"use strict";
+
 0e-5   // 0
 0e+5   // 0
 5e1    // 50
@@ -240,10 +242,10 @@ console.log("Testing Number methods...");
 
 // toExponential
 var num = 77.1234;
-assertEq(num.toExponential(), "7.71234e1");
-assertEq(num.toExponential(4), "7.7123e1");
-assertEq(num.toExponential(2), "7.71e1");
-assertEq((77.1234).toExponential(), "7.71234e1");
+assertEq(num.toExponential(), "7.71234e+1");
+assertEq(num.toExponential(4), "7.7123e+1");
+assertEq(num.toExponential(2), "7.71e+1");
+assertEq((77.1234).toExponential(), "7.71234e+1");
 
 // toFixed
 var num2 = 12345.6789;
@@ -266,7 +268,7 @@ assertEq(num4.toPrecision(), "0.000123"); // JS might output 0.000123 or 1.23e-4
 assertEq(num4.toPrecision(5), "0.00012300"); // or 1.2300e-4
 // Rust {:g} might behave slightly differently than JS toPrecision in edge cases, but let's test basic ones.
 
-assertEq((1234.5).toPrecision(2), "1.2e3"); // Rust {:g} does this
+assertEq((1234.5).toPrecision(2), "1.2e+3"); // Rust {:g} does this
 
 }
 
@@ -275,7 +277,7 @@ try {
     throw new Error("Expected TypeError when assigning to Number.MAX_VALUE");
 } catch (e) {
     if (!(e instanceof TypeError)) {
-        throw new Error("Expected TypeError when assigning to Number.MAX_VALUE but got " + typeof e);
+        throw new Error("Expected TypeError when assigning to Number.MAX_VALUE but got " + e);
     }
 }
 

@@ -956,23 +956,24 @@ pub fn handle_dataview_constructor<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     // DataView(buffer [, byteOffset [, byteLength]])
     if args.is_empty() {
-        return Err(raise_eval_error!("DataView constructor requires a buffer argument"));
+        return Err(raise_type_error!("DataView constructor requires a buffer argument"));
     }
 
     let buffer_val = args[0].clone();
+    let buffer_obj = if let Value::Object(obj) = &buffer_val { Some(*obj) } else { None };
     let buffer = match buffer_val {
         Value::Object(obj) => {
             if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     *ab
                 } else {
-                    return Err(raise_eval_error!("DataView buffer must be an ArrayBuffer"));
+                    return Err(raise_type_error!("DataView buffer must be an ArrayBuffer"));
                 }
             } else {
-                return Err(raise_eval_error!("DataView buffer must be an ArrayBuffer"));
+                return Err(raise_type_error!("DataView buffer must be an ArrayBuffer"));
             }
         }
-        _ => return Err(raise_eval_error!("DataView buffer must be an ArrayBuffer")),
+        _ => return Err(raise_type_error!("DataView buffer must be an ArrayBuffer")),
     };
 
     let byte_offset = if args.len() > 1 {
@@ -1013,6 +1014,9 @@ pub fn handle_dataview_constructor<'gc>(
     // Create the DataView object
     let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "__dataview", &Value::DataView(data_view))?;
+    if let Some(buf_obj) = buffer_obj {
+        object_set_key_value(mc, &obj, "__buffer_object", &Value::Object(buf_obj))?;
+    }
 
     // Set prototype
     let proto = make_dataview_prototype(mc)?;
@@ -1238,9 +1242,18 @@ pub fn handle_typedarray_constructor<'gc>(
 
     // Set prototype from constructor
     if let Some(proto_val) = object_get_key_value(constructor_obj, "prototype") {
-        if let Value::Object(proto_obj) = &*proto_val.borrow() {
-            obj.borrow_mut(mc).prototype = Some(*proto_obj);
-            object_set_key_value(mc, &obj, "__proto__", &Value::Object(*proto_obj))?;
+        let proto_candidate = match &*proto_val.borrow() {
+            Value::Object(proto_obj) => Some(*proto_obj),
+            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                Value::Object(proto_obj) => Some(*proto_obj),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        if let Some(proto_obj) = proto_candidate {
+            obj.borrow_mut(mc).prototype = Some(proto_obj);
+            object_set_key_value(mc, &obj, "__proto__", &Value::Object(proto_obj))?;
             obj.borrow_mut(mc).set_non_enumerable("__proto__");
         } else {
             // Fallback: create new prototype (legacy behavior, though incorrect for identity)
@@ -1748,7 +1761,15 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         // Property accessors
-        "buffer" => Ok(Value::ArrayBuffer(data_view_rc.buffer)),
+        "buffer" => {
+            if let Some(buffer_obj) = object_get_key_value(object, "__buffer_object")
+                && let Value::Object(obj) = &*buffer_obj.borrow()
+            {
+                Ok(Value::Object(*obj))
+            } else {
+                Ok(Value::ArrayBuffer(data_view_rc.buffer))
+            }
+        }
         "byteLength" => Ok(Value::Number(data_view_rc.byte_length as f64)),
         "byteOffset" => Ok(Value::Number(data_view_rc.byte_offset as f64)),
         _ => Err(raise_eval_error!(format!("DataView method '{method}' not implemented")).into()),
@@ -2091,12 +2112,53 @@ pub fn handle_arraybuffer_accessor<'gc>(
 }
 
 pub fn handle_arraybuffer_method<'gc>(
-    _mc: &MutationContext<'gc>,
+    mc: &MutationContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
     match method {
+        "slice" => {
+            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer")
+                && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
+            {
+                let data = (**ab).borrow().data.lock().unwrap().clone();
+                let len = data.len() as i64;
+
+                let to_index = |v: Option<&Value<'gc>>, default: i64| -> i64 {
+                    let raw = match v {
+                        Some(Value::Number(n)) => n.trunc() as i64,
+                        Some(Value::Undefined) | None => default,
+                        _ => default,
+                    };
+                    if raw < 0 { (len + raw).max(0) } else { raw.min(len) }
+                };
+
+                let start = to_index(args.first(), 0);
+                let end = to_index(args.get(1), len);
+                let final_end = end.max(start);
+                let start_usize = start as usize;
+                let end_usize = final_end as usize;
+                let slice_bytes = data[start_usize..end_usize].to_vec();
+
+                let new_ab = new_gc_cell_ptr(
+                    mc,
+                    JSArrayBuffer {
+                        data: Arc::new(Mutex::new(slice_bytes)),
+                        ..JSArrayBuffer::default()
+                    },
+                );
+
+                let new_obj = new_js_object_data(mc);
+                object_set_key_value(mc, &new_obj, "__arraybuffer", &Value::ArrayBuffer(new_ab))?;
+                new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+
+                return Ok(Value::Object(new_obj));
+            }
+            Err(raise_eval_error!(
+                "Method ArrayBuffer.prototype.slice called on incompatible receiver"
+            ))
+        }
         "resize" => {
             // Get the ArrayBuffer internal
             if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {

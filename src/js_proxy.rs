@@ -427,25 +427,6 @@ pub fn initialize_proxy<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     object_set_key_value(mc, &proxy_ctor, "__is_constructor", &Value::Boolean(true))?;
     object_set_key_value(mc, &proxy_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Proxy")))?;
 
-    // Set up prototype linked to Object.prototype if available
-    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
-        && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
-        && let Value::Object(proto) = &*proto_val.borrow()
-    {
-        Some(*proto)
-    } else {
-        None
-    };
-
-    let proxy_proto = new_js_object_data(mc);
-    if let Some(proto) = object_proto {
-        proxy_proto.borrow_mut(mc).prototype = Some(proto);
-    }
-
-    object_set_key_value(mc, &proxy_ctor, "prototype", &Value::Object(proxy_proto))?;
-    object_set_key_value(mc, &proxy_proto, "constructor", &Value::Object(proxy_ctor))?;
-
     // Register revocable static method
     object_set_key_value(mc, &proxy_ctor, "revocable", &Value::Function("Proxy.revocable".to_string()))?;
 

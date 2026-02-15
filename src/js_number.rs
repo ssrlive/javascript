@@ -445,9 +445,20 @@ pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'
                 None
             };
 
+            let normalize_exponent_sign = |s: String| {
+                if let Some((mantissa, exp)) = s.split_once('e')
+                    && !exp.starts_with('+')
+                    && !exp.starts_with('-')
+                {
+                    format!("{mantissa}e+{exp}")
+                } else {
+                    s
+                }
+            };
+
             match fraction_digits {
-                Some(d) => Ok(Value::String(utf8_to_utf16(&format!("{:.1$e}", n, d)))),
-                None => Ok(Value::String(utf8_to_utf16(&format!("{:e}", n)))),
+                Some(d) => Ok(Value::String(utf8_to_utf16(&normalize_exponent_sign(format!("{:.1$e}", n, d))))),
+                None => Ok(Value::String(utf8_to_utf16(&normalize_exponent_sign(format!("{:e}", n))))),
             }
         }
         "toFixed" => {
@@ -489,11 +500,20 @@ pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'
 
                     // Format in exponential to get the exponent
                     let s_exp = format!("{:.1$e}", n, p - 1);
+                    let normalized_s_exp = if let Some((mantissa, exp)) = s_exp.split_once('e') {
+                        if !exp.starts_with('+') && !exp.starts_with('-') {
+                            format!("{mantissa}e+{exp}")
+                        } else {
+                            s_exp.clone()
+                        }
+                    } else {
+                        s_exp.clone()
+                    };
                     let parts: Vec<&str> = s_exp.split('e').collect();
                     let exponent: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
                     if exponent < -6 || exponent >= p as i32 {
-                        Ok(Value::String(utf8_to_utf16(&s_exp)))
+                        Ok(Value::String(utf8_to_utf16(&normalized_s_exp)))
                     } else {
                         // Use fixed notation
                         // digits after decimal = p - 1 - exponent

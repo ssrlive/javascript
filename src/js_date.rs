@@ -307,12 +307,7 @@ pub(crate) fn handle_date_constructor<'gc>(
         // new Date(year, month, day, hours, minutes, seconds, milliseconds)
         let mut components = Vec::new();
         for arg in args {
-            match arg {
-                Value::Number(n) => components.push(*n),
-                _ => {
-                    return Err(raise_type_error!("Date constructor arguments must be numbers").into());
-                }
-            }
+            components.push(crate::core::to_number(arg)?);
         }
 
         if let Some(timestamp) = construct_date_from_components(&components) {
@@ -365,6 +360,14 @@ pub(crate) fn handle_date_method<'gc>(
                 Ok(Value::Number(f64::NAN))
             }
         }
+        "getUTCFullYear" => {
+            let timestamp = get_time_stamp_value(obj_ptr)?;
+            if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                Ok(Value::Number(dt.year() as f64))
+            } else {
+                Ok(Value::Number(f64::NAN))
+            }
+        }
         "getMonth" => {
             let timestamp = get_time_stamp_value(obj_ptr)?;
             if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
@@ -373,7 +376,23 @@ pub(crate) fn handle_date_method<'gc>(
                 Ok(Value::Number(f64::NAN))
             }
         }
+        "getUTCMonth" => {
+            let timestamp = get_time_stamp_value(obj_ptr)?;
+            if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                Ok(Value::Number((dt.month() - 1) as f64))
+            } else {
+                Ok(Value::Number(f64::NAN))
+            }
+        }
         "getDate" => {
+            let timestamp = get_time_stamp_value(obj_ptr)?;
+            if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                Ok(Value::Number(dt.day() as f64))
+            } else {
+                Ok(Value::Number(f64::NAN))
+            }
+        }
+        "getUTCDate" => {
             let timestamp = get_time_stamp_value(obj_ptr)?;
             if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                 Ok(Value::Number(dt.day() as f64))

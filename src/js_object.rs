@@ -264,13 +264,10 @@ pub(crate) fn define_property_internal<'gc>(
         }
     }
 
-    // If descriptor is a property descriptor (has value/get/set), unspecified attributes default to false
-    // Only apply defaults when the property does not exist yet or was configurable (before
-    // applying the new configurable flag). If the existing property was non-configurable,
-    // missing attributes should not be defaulted to false (per DefinePropertyOrThrow
-    // semantics); only explicitly provided attributes should be applied/checked.
-
-    if is_property_desc && existing_is_configurable {
+    // If descriptor is a property descriptor (has value/get/set), unspecified attributes
+    // default to false only when creating a new property. Redefining an existing property
+    // must preserve omitted attributes.
+    if is_property_desc && !existed {
         // Only default missing 'writable' to false for data descriptors (value or writable present).
         // For accessor descriptors (get/set) the 'writable' attribute does not apply and
         // must not be defaulted to false here.

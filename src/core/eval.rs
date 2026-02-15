@@ -5749,6 +5749,9 @@ fn eval_res<'gc>(
                     let iter_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
                         let e = new_js_object_data(mc);
                         e.borrow_mut(mc).prototype = Some(*env);
+                        for name in names.iter() {
+                            object_set_key_value(mc, &e, name, &Value::Uninitialized)?;
+                        }
                         e
                     } else {
                         // var or assignment form: use parent env (but create a delegating object for API compatibility)
@@ -5920,6 +5923,9 @@ fn eval_res<'gc>(
                     let iter_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
                         let e = new_js_object_data(mc);
                         e.borrow_mut(mc).prototype = Some(*env);
+                        for name in names.iter() {
+                            object_set_key_value(mc, &e, name, &Value::Uninitialized)?;
+                        }
                         e
                     } else {
                         // var or assignment form: use parent env (but create a delegating object for API compatibility)

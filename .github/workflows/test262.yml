@@ -145,8 +145,8 @@ jobs:
               FOCUS='language/statements/for-await-of'
               ;;
             21)
-              TITLE='"language/statements/for-in" - "language/statements/for-of"'
-              FOCUS='language/statements/for-in,language/statements/for-of'
+              TITLE='"language/statements/for-in" - "language/statements/function"'
+              FOCUS='language/statements/for-in,language/statements/for-of,language/statements/function'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2
@@ -240,12 +240,6 @@ jobs:
                 feat=$(echo "$row" | sed -E 's/^ *[0-9]+ +//')
                 echo "- $feat ($count)"
               done <<< "$unsupported_features_ranked"
-
-              echo
-              echo "### Unsupported features"
-              while IFS= read -r feat; do
-                [ -n "$feat" ] && echo "- $feat"
-              done <<< "$unsupported_features"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

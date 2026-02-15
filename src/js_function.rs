@@ -293,6 +293,23 @@ pub fn handle_global_function<'gc>(
                 }
                 let receiver_val = args[0].clone();
                 let evaluated_args = args[1..].to_vec();
+                if let Value::Function(func_name) = &this_val {
+                    let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
+                    return handle_global_function(mc, func_name, &evaluated_args, &call_env);
+                }
+                if let Value::Object(obj) = &this_val
+                    && let Some(native_ctor_rc) = crate::core::object_get_key_value(obj, "__native_ctor")
+                {
+                    let native_ctor_val = match &*native_ctor_rc.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::String(name) = native_ctor_val {
+                        let ctor_name = crate::unicode::utf16_to_utf8(&name);
+                        let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
+                        return handle_global_function(mc, &ctor_name, &evaluated_args, &call_env);
+                    }
+                }
                 return crate::core::evaluate_call_dispatch(mc, env, &this_val, Some(&receiver_val), &evaluated_args);
             } else {
                 return Err(raise_eval_error!("Function.prototype.call called without this").into());
@@ -2358,6 +2375,21 @@ pub fn handle_function_prototype_method<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    let make_bound_function_object = |callable: Value<'gc>| -> Result<Value<'gc>, EvalError<'gc>> {
+        let func_obj = crate::core::new_js_object_data(mc);
+        if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            func_obj.borrow_mut(mc).prototype = Some(*proto);
+        }
+        func_obj
+            .borrow_mut(mc)
+            .set_closure(Some(crate::core::new_gc_cell_ptr(mc, callable)));
+        Ok(Value::Object(func_obj))
+    };
+
     match method {
         "bind" => {
             let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
@@ -2381,7 +2413,7 @@ pub fn handle_function_prototype_method<'gc>(
                     native_target: None,
                     enforce_strictness_inheritance: true,
                 };
-                Ok(Value::Closure(Gc::new(mc, new_closure_data)))
+                make_bound_function_object(Value::Closure(Gc::new(mc, new_closure_data)))
             } else if let Value::AsyncClosure(closure_gc) = this_value {
                 let original = closure_gc;
                 let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
@@ -2401,7 +2433,7 @@ pub fn handle_function_prototype_method<'gc>(
                     native_target: None,
                     enforce_strictness_inheritance: true,
                 };
-                Ok(Value::AsyncClosure(Gc::new(mc, new_closure_data)))
+                make_bound_function_object(Value::AsyncClosure(Gc::new(mc, new_closure_data)))
             } else if let Value::Object(obj) = this_value {
                 // Support calling bind on a function object wrapper (object with internal closure)
                 if let Some(cl_prop) = obj.borrow().get_closure()
@@ -2424,7 +2456,7 @@ pub fn handle_function_prototype_method<'gc>(
                         native_target: None,
                         enforce_strictness_inheritance: true,
                     };
-                    return Ok(Value::Closure(Gc::new(mc, new_closure_data)));
+                    return make_bound_function_object(Value::Closure(Gc::new(mc, new_closure_data)));
                 }
                 Err(crate::raise_type_error!("Function.prototype.bind called on non-function").into())
             } else if let Value::Function(name) = this_value {
@@ -2436,7 +2468,7 @@ pub fn handle_function_prototype_method<'gc>(
                     enforce_strictness_inheritance: true,
                     ..ClosureData::default()
                 };
-                Ok(Value::Closure(Gc::new(mc, new_closure_data)))
+                make_bound_function_object(Value::Closure(Gc::new(mc, new_closure_data)))
             } else {
                 Err(crate::raise_type_error!("Function.prototype.bind called on non-function").into())
             }

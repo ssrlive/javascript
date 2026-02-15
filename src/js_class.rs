@@ -1164,8 +1164,22 @@ pub(crate) fn evaluate_new<'gc>(
                     // `return <object>` replaces the constructed instance; primitives are ignored.
                     let cf = crate::core::evaluate_statements_with_context(mc, &func_env, body, &[])?;
                     match cf {
-                        ControlFlow::Return(Value::Object(obj)) => {
-                            return Ok(Value::Object(obj));
+                        ControlFlow::Return(ret) => {
+                            let is_primitive = matches!(
+                                ret,
+                                Value::Number(_)
+                                    | Value::BigInt(_)
+                                    | Value::String(_)
+                                    | Value::Boolean(_)
+                                    | Value::Null
+                                    | Value::Undefined
+                                    | Value::Symbol(_)
+                                    | Value::Uninitialized
+                                    | Value::PrivateName(..)
+                            );
+                            if !is_primitive {
+                                return Ok(ret);
+                            }
                         }
                         ControlFlow::Throw(v, l, c) => {
                             return Err(crate::core::EvalError::Throw(v, l, c));

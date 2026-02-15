@@ -811,6 +811,10 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
     };
     *index += 1;
 
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+
     if !matches!(t[*index].token, Token::LParen) {
         return Err(raise_parse_error_at!(t.get(*index)));
     }

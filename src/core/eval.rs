@@ -1847,15 +1847,27 @@ fn check_expr_for_forbidden_assignment(e: &Expr) -> bool {
 
 fn check_expr_for_var_forbidden_names(e: &Expr) -> bool {
     match e {
-        Expr::Function(name, _, body) | Expr::GeneratorFunction(name, _, body) | Expr::AsyncFunction(name, _, body) => {
+        Expr::Function(name, params, body) | Expr::GeneratorFunction(name, params, body) | Expr::AsyncFunction(name, params, body) => {
             if let Some(n) = name
                 && (n == "eval" || n == "arguments")
             {
                 return true;
             }
+            let mut names = Vec::new();
+            collect_names_from_destructuring(params, &mut names);
+            if names.iter().any(|n| n == "eval" || n == "arguments") {
+                return true;
+            }
             body.iter().any(check_stmt_for_var_forbidden_names)
         }
-        Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => body.iter().any(check_stmt_for_var_forbidden_names),
+        Expr::ArrowFunction(params, body) | Expr::AsyncArrowFunction(params, body) => {
+            let mut names = Vec::new();
+            collect_names_from_destructuring(params, &mut names);
+            if names.iter().any(|n| n == "eval" || n == "arguments") {
+                return true;
+            }
+            body.iter().any(check_stmt_for_var_forbidden_names)
+        }
         Expr::Binary(l, _, r) => check_expr_for_var_forbidden_names(l) || check_expr_for_var_forbidden_names(r),
         Expr::Assign(l, r) => check_expr_for_var_forbidden_names(l) || check_expr_for_var_forbidden_names(r),
         Expr::Call(callee, args) => check_expr_for_var_forbidden_names(callee) || args.iter().any(check_expr_for_var_forbidden_names),
@@ -1878,16 +1890,24 @@ fn check_expr_for_var_forbidden_names(e: &Expr) -> bool {
 fn check_stmt_for_var_forbidden_names(stmt: &Statement) -> bool {
     match &*stmt.kind {
         StatementKind::Var(decls) | StatementKind::Let(decls) => {
-            for (name, _) in decls {
+            for (name, expr_opt) in decls {
                 if name == "eval" || name == "arguments" {
+                    return true;
+                }
+                if let Some(expr) = expr_opt
+                    && check_expr_for_var_forbidden_names(expr)
+                {
                     return true;
                 }
             }
             false
         }
         StatementKind::Const(decls) => {
-            for (name, _) in decls {
+            for (name, expr) in decls {
                 if name == "eval" || name == "arguments" {
+                    return true;
+                }
+                if check_expr_for_var_forbidden_names(expr) {
                     return true;
                 }
             }
@@ -1976,6 +1996,10 @@ fn check_stmt_for_var_forbidden_names(stmt: &Statement) -> bool {
 fn check_stmt_for_forbidden_assignment(stmt: &Statement) -> bool {
     match &*stmt.kind {
         StatementKind::Expr(e) => check_expr_for_forbidden_assignment(e),
+        StatementKind::Var(decls) | StatementKind::Let(decls) => decls
+            .iter()
+            .any(|(_, expr_opt)| expr_opt.as_ref().is_some_and(check_expr_for_forbidden_assignment)),
+        StatementKind::Const(decls) => decls.iter().any(|(_, expr)| check_expr_for_forbidden_assignment(expr)),
         StatementKind::If(if_stmt) => {
             check_expr_for_forbidden_assignment(&if_stmt.condition)
                 || if_stmt.then_body.iter().any(check_stmt_for_forbidden_assignment)
@@ -11527,12 +11551,14 @@ pub fn evaluate_call_dispatch<'gc>(
                         "toString" => Ok(crate::js_object::handle_to_string_method(mc, this_v, eval_args, env)?),
                         "toLocaleString" => Ok(crate::js_object::handle_to_string_method(mc, this_v, eval_args, env)?),
                         "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable" | "__lookupGetter__" | "__lookupSetter__" => {
-                            // Need object wrapper
                             if let Value::Object(o) = this_v {
                                 let res_opt = crate::js_object::handle_object_prototype_builtin(mc, name, o, eval_args, env)?;
                                 Ok(res_opt.unwrap_or(Value::Undefined))
-                            } else {
+                            } else if matches!(this_v, Value::Undefined | Value::Null) {
                                 Err(raise_type_error!("Object.prototype method called on non-object receiver").into())
+                            } else {
+                                let call_env = prepare_call_env_with_this(mc, Some(env), Some(this_v), None, &[], None, Some(env), None)?;
+                                Ok(crate::js_function::handle_global_function(mc, name, eval_args, &call_env)?)
                             }
                         }
                         _ => Err(raise_eval_error!(format!("Unknown Object function: {}", name)).into()),
@@ -11756,43 +11782,47 @@ pub fn evaluate_call_dispatch<'gc>(
             } else if obj.borrow().class_def.is_some() {
                 Err(raise_type_error!("Class constructor cannot be invoked without 'new'").into())
             } else if let Some(native_name) = object_get_key_value(obj, "__native_ctor") {
-                match &*native_name.borrow() {
+                let native_name_val = match &*native_name.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                match native_name_val {
                     Value::String(name) => {
-                        if name == &crate::unicode::utf8_to_utf16("Object") {
+                        if name == crate::unicode::utf8_to_utf16("Object") {
                             Ok(crate::js_class::handle_object_constructor(mc, eval_args, env)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("Date") {
+                        } else if name == crate::unicode::utf8_to_utf16("Date") {
                             let date_obj = crate::js_date::handle_date_constructor(mc, eval_args, env)?;
                             crate::js_date::handle_date_method(mc, &date_obj, "toString", &[], env)
-                        } else if name == &crate::unicode::utf8_to_utf16("RegExp") {
+                        } else if name == crate::unicode::utf8_to_utf16("RegExp") {
                             Ok(crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), eval_args)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("String") {
+                        } else if name == crate::unicode::utf8_to_utf16("String") {
                             Ok(crate::js_string::string_constructor(mc, eval_args, env)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("Boolean") {
+                        } else if name == crate::unicode::utf8_to_utf16("Boolean") {
                             Ok(crate::js_boolean::boolean_constructor(eval_args)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("Number") {
+                        } else if name == crate::unicode::utf8_to_utf16("Number") {
                             Ok(number_constructor(mc, eval_args, env)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("BigInt") {
+                        } else if name == crate::unicode::utf8_to_utf16("BigInt") {
                             Ok(bigint_constructor(mc, eval_args, env)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("Symbol") {
+                        } else if name == crate::unicode::utf8_to_utf16("Symbol") {
                             Ok(crate::js_symbol::handle_symbol_call(mc, eval_args, env)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("Array") {
+                        } else if name == crate::unicode::utf8_to_utf16("Array") {
                             Ok(crate::js_array::handle_array_constructor(mc, eval_args, env)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("Function") {
+                        } else if name == crate::unicode::utf8_to_utf16("Function") {
                             Ok(crate::js_function::handle_global_function(mc, "Function", eval_args, env)?)
-                        } else if name == &crate::unicode::utf8_to_utf16("AsyncGeneratorFunction") {
+                        } else if name == crate::unicode::utf8_to_utf16("AsyncGeneratorFunction") {
                             Ok(crate::js_function::handle_global_function(
                                 mc,
                                 "AsyncGeneratorFunction",
                                 eval_args,
                                 env,
                             )?)
-                        } else if name == &crate::unicode::utf8_to_utf16("Error")
-                            || name == &crate::unicode::utf8_to_utf16("TypeError")
-                            || name == &crate::unicode::utf8_to_utf16("ReferenceError")
-                            || name == &crate::unicode::utf8_to_utf16("RangeError")
-                            || name == &crate::unicode::utf8_to_utf16("SyntaxError")
-                            || name == &crate::unicode::utf8_to_utf16("EvalError")
-                            || name == &crate::unicode::utf8_to_utf16("URIError")
+                        } else if name == crate::unicode::utf8_to_utf16("Error")
+                            || name == crate::unicode::utf8_to_utf16("TypeError")
+                            || name == crate::unicode::utf8_to_utf16("ReferenceError")
+                            || name == crate::unicode::utf8_to_utf16("RangeError")
+                            || name == crate::unicode::utf8_to_utf16("SyntaxError")
+                            || name == crate::unicode::utf8_to_utf16("EvalError")
+                            || name == crate::unicode::utf8_to_utf16("URIError")
                         {
                             // For native Error constructors, calling them as a function
                             // should produce a new Error object with the provided message.
@@ -11928,9 +11958,15 @@ fn evaluate_expr_call<'gc>(
             let f_val = if let Value::Object(obj) = &obj_val {
                 // Use accessor-aware property lookup so getters are executed
                 let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                let prop_val = match prop_val {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other,
+                };
                 if !matches!(prop_val, Value::Undefined) {
                     prop_val
-                } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
+                } else if (key.as_str() == "call" || key.as_str() == "apply")
+                    && (obj.borrow().get_closure().is_some() || object_get_key_value(obj, "__native_ctor").is_some())
+                {
                     let name = if key.as_str() == "call" {
                         "Function.prototype.call"
                     } else {
@@ -12043,9 +12079,15 @@ fn evaluate_expr_call<'gc>(
                 let f_val = if let Value::Object(obj) = &obj_val {
                     // Use accessor-aware property lookup so getters are executed.
                     let prop_val = get_property_with_accessors(mc, env, obj, key)?;
+                    let prop_val = match prop_val {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other,
+                    };
                     if !matches!(prop_val, Value::Undefined) {
                         prop_val
-                    } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
+                    } else if (key.as_str() == "call" || key.as_str() == "apply")
+                        && (obj.borrow().get_closure().is_some() || object_get_key_value(obj, "__native_ctor").is_some())
+                    {
                         let name = if key.as_str() == "call" {
                             "Function.prototype.call"
                         } else {
@@ -17049,6 +17091,21 @@ pub fn call_native_function<'gc>(
                 }
             }
             Value::Object(obj) => {
+                if let Some(native_ctor_rc) = object_get_key_value(obj, "__native_ctor") {
+                    let native_ctor_val = match &*native_ctor_rc.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::String(name) = native_ctor_val {
+                        let ctor_name = crate::unicode::utf16_to_utf8(&name);
+                        let call_env = crate::core::new_js_object_data(mc);
+                        call_env.borrow_mut(mc).prototype = Some(*env);
+                        call_env.borrow_mut(mc).is_function_scope = true;
+                        object_set_key_value(mc, &call_env, "this", new_this)?;
+                        let result = handle_global_function(mc, &ctor_name, rest_args, &call_env)?;
+                        return Ok(Some(result));
+                    }
+                }
                 if let Some(cl_ptr) = obj.borrow().get_closure() {
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), rest_args, env, Some(*obj))?)),
@@ -17131,6 +17188,21 @@ pub fn call_native_function<'gc>(
                 }
             }
             Value::Object(obj) => {
+                if let Some(native_ctor_rc) = object_get_key_value(obj, "__native_ctor") {
+                    let native_ctor_val = match &*native_ctor_rc.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::String(name) = native_ctor_val {
+                        let ctor_name = crate::unicode::utf16_to_utf8(&name);
+                        let call_env = crate::core::new_js_object_data(mc);
+                        call_env.borrow_mut(mc).prototype = Some(*env);
+                        call_env.borrow_mut(mc).is_function_scope = true;
+                        object_set_key_value(mc, &call_env, "this", &new_this)?;
+                        let result = crate::js_function::handle_global_function(mc, &ctor_name, &rest_args, &call_env)?;
+                        return Ok(Some(result));
+                    }
+                }
                 if let Some(cl_ptr) = obj.borrow().get_closure() {
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(&new_this), &rest_args, env, Some(*obj))?)),

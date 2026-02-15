@@ -23,17 +23,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     // Initialize logger (controlled by RUST_LOG)
     env_logger::init();
 
-    #[cfg(windows)]
-    {
-        // Spawn a thread with larger stack size (8MB) to avoid stack overflow on Windows
-        // where the default stack size is 1MB.
-        let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
-        let handler = builder.spawn(run_main)?;
-        handler.join().unwrap()
+    // Run interpreter on a dedicated thread with a larger stack to support
+    // deeply nested function-call testcases across platforms.
+    let builder = std::thread::Builder::new().stack_size(64 * 1024 * 1024);
+    let handler = builder.spawn(run_main)?;
+    match handler.join() {
+        Ok(res) => res,
+        Err(_) => Err(Box::new(std::io::Error::other("js runtime thread panicked"))),
     }
-
-    #[cfg(unix)]
-    run_main()
 }
 
 fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {

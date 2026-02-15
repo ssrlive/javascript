@@ -1656,6 +1656,22 @@ fn evalute_eval_function<'gc>(
             cur_env = e.borrow().prototype;
         }
 
+        let mut in_class_field_initializer = false;
+        let mut init_env = Some(*env);
+        while let Some(e) = init_env {
+            if let Some(flag_rc) = object_get_key_value(&e, "__class_field_initializer")
+                && matches!(*flag_rc.borrow(), Value::Boolean(true))
+            {
+                in_class_field_initializer = true;
+                break;
+            }
+            init_env = e.borrow().prototype;
+        }
+
+        if in_class_field_initializer {
+            in_method = true;
+        }
+
         let in_constructor = if in_method {
             if let Some(func_val_ptr) = crate::core::env_get(env, "__function") {
                 match &*func_val_ptr.borrow() {
@@ -2436,27 +2452,50 @@ pub fn handle_function_prototype_method<'gc>(
                 make_bound_function_object(Value::AsyncClosure(Gc::new(mc, new_closure_data)))
             } else if let Value::Object(obj) = this_value {
                 // Support calling bind on a function object wrapper (object with internal closure)
-                if let Some(cl_prop) = obj.borrow().get_closure()
-                    && let Value::Closure(original) = &*cl_prop.borrow()
-                {
-                    let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
-                        original.bound_this.clone()
-                    } else {
-                        Some(this_arg)
-                    };
-                    let new_closure_data = ClosureData {
-                        params: original.params.clone(),
-                        body: original.body.clone(),
-                        env: original.env,
-                        home_object: original.home_object.clone(),
-                        captured_envs: original.captured_envs.clone(),
-                        bound_this: effective_bound_this,
-                        is_arrow: original.is_arrow,
-                        is_strict: original.is_strict,
-                        native_target: None,
-                        enforce_strictness_inheritance: true,
-                    };
-                    return make_bound_function_object(Value::Closure(Gc::new(mc, new_closure_data)));
+                if let Some(cl_prop) = obj.borrow().get_closure() {
+                    match &*cl_prop.borrow() {
+                        Value::Closure(original) => {
+                            let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
+                                original.bound_this.clone()
+                            } else {
+                                Some(this_arg.clone())
+                            };
+                            let new_closure_data = ClosureData {
+                                params: original.params.clone(),
+                                body: original.body.clone(),
+                                env: original.env,
+                                home_object: original.home_object.clone(),
+                                captured_envs: original.captured_envs.clone(),
+                                bound_this: effective_bound_this,
+                                is_arrow: original.is_arrow,
+                                is_strict: original.is_strict,
+                                native_target: None,
+                                enforce_strictness_inheritance: true,
+                            };
+                            return make_bound_function_object(Value::Closure(Gc::new(mc, new_closure_data)));
+                        }
+                        Value::AsyncClosure(original) => {
+                            let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
+                                original.bound_this.clone()
+                            } else {
+                                Some(this_arg.clone())
+                            };
+                            let new_closure_data = ClosureData {
+                                params: original.params.clone(),
+                                body: original.body.clone(),
+                                env: original.env,
+                                home_object: original.home_object.clone(),
+                                captured_envs: original.captured_envs.clone(),
+                                bound_this: effective_bound_this,
+                                is_arrow: original.is_arrow,
+                                is_strict: original.is_strict,
+                                native_target: None,
+                                enforce_strictness_inheritance: true,
+                            };
+                            return make_bound_function_object(Value::AsyncClosure(Gc::new(mc, new_closure_data)));
+                        }
+                        _ => {}
+                    }
                 }
                 Err(crate::raise_type_error!("Function.prototype.bind called on non-function").into())
             } else if let Value::Function(name) = this_value {

@@ -33,6 +33,8 @@ jobs:
           - id: 20
           - id: 21
           - id: 22
+          - id: 23
+          - id: 24
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -152,6 +154,14 @@ jobs:
             22)
               TITLE='"language/statements/generators" - "language/statements/with"'
               FOCUS='language/statements/generators,language/statements/if,language/statements/labeled,language/statements/let,language/statements/return,language/statements/switch,language/statements/throw,language/statements/try,language/statements/using,language/statements/variable,language/statements/while,language/statements/with'
+              ;;
+            23)
+              TITLE='"language/statements/class/accessor-name-inst" - "language/statements/class/definition"'
+              FOCUS='language/statements/class/accessor-name-inst,language/statements/class/accessor-name-static,language/statements/class/arguments,language/statements/class/async-gen-method,language/statements/class/async-gen-method-static,language/statements/class/async-method,language/statements/class/async-method-static,language/statements/class/decorator,language/statements/class/definition'
+              ;;
+            24)
+              TITLE='"language/statements/class/dstr"'
+              FOCUS='language/statements/class/dstr'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

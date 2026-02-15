@@ -190,6 +190,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                     match &*g.clone() {
                         Value::Getter(body, captured_env, _home) => {
                             let func_obj = new_js_object_data(mc);
+                            let _ = crate::core::set_internal_prototype_from_constructor(mc, &func_obj, captured_env, "Function");
                             let closure_data = ClosureData {
                                 body: body.clone(),
                                 env: Some(*captured_env),
@@ -233,6 +234,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                     match &*s.clone() {
                         Value::Setter(params, body, captured_env, _home) => {
                             let func_obj = new_js_object_data(mc);
+                            let _ = crate::core::set_internal_prototype_from_constructor(mc, &func_obj, captured_env, "Function");
                             let closure_data = ClosureData {
                                 params: params.clone(),
                                 body: body.clone(),
@@ -243,6 +245,27 @@ pub(crate) fn build_property_descriptor<'gc>(
                             let closure_val = Value::Closure(Gc::new(mc, closure_data));
                             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                             let _ = define_function_length(mc, &func_obj, compute_function_length(params));
+                            let prop_name = match key {
+                                PropertyKey::String(s) => s.clone(),
+                                PropertyKey::Symbol(sd) => {
+                                    if let Some(desc) = sd.description() {
+                                        format!("[{}]", desc)
+                                    } else {
+                                        String::new()
+                                    }
+                                }
+                                PropertyKey::Private(s, _) => s.clone(),
+                            };
+                            let full_name = format!("set {}", prop_name);
+                            let desc = crate::core::create_descriptor_object(
+                                mc,
+                                &Value::String(crate::unicode::utf8_to_utf16(&full_name)),
+                                false,
+                                false,
+                                true,
+                            )
+                            .unwrap();
+                            let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
                             pd.set = Some(Value::Object(func_obj));
                         }
                         other => {
@@ -256,6 +279,7 @@ pub(crate) fn build_property_descriptor<'gc>(
             }
             Value::Getter(body, captured_env, _home_opt) => {
                 let func_obj = new_js_object_data(mc);
+                let _ = crate::core::set_internal_prototype_from_constructor(mc, &func_obj, captured_env, "Function");
                 let closure_data = ClosureData {
                     body: body.clone(),
                     env: Some(*captured_env),
@@ -298,6 +322,7 @@ pub(crate) fn build_property_descriptor<'gc>(
             }
             Value::Setter(params, body, captured_env, _home_opt) => {
                 let func_obj = new_js_object_data(mc);
+                let _ = crate::core::set_internal_prototype_from_constructor(mc, &func_obj, captured_env, "Function");
                 let closure_data = ClosureData {
                     params: params.clone(),
                     body: body.clone(),

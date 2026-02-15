@@ -505,8 +505,11 @@ fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr:
         let name_string = match key {
             PropertyKey::String(s) => s.clone(),
             PropertyKey::Symbol(sym) => {
-                let desc = sym.description().unwrap_or_default();
-                format!("[{desc}]")
+                if let Some(desc) = sym.description() {
+                    format!("[{desc}]")
+                } else {
+                    String::new()
+                }
             }
             PropertyKey::Private(s, _) => format!("#{s}"),
         };
@@ -521,8 +524,11 @@ fn property_key_to_name_string<'gc>(key: &PropertyKey<'gc>) -> String {
     match key {
         PropertyKey::String(s) => s.clone(),
         PropertyKey::Symbol(sym) => {
-            let desc = sym.description().unwrap_or_default();
-            format!("[{desc}]")
+            if let Some(desc) = sym.description() {
+                format!("[{desc}]")
+            } else {
+                String::new()
+            }
         }
         PropertyKey::Private(s, _) => format!("#{s}"),
     }
@@ -560,11 +566,15 @@ fn initialize_instance_elements<'gc>(
         // If the constructor has a 'prototype' property (it should), set that as the HomeObject
         // of the field scope so that super property access works in field initializers
         let mut prototype_obj = *instance;
-        if let Some(p) = crate::core::object_get_key_value(constructor, "prototype")
-            && let Value::Object(o) = &*p.borrow()
-        {
-            field_scope.borrow_mut(mc).set_home_object(Some((*o).into()));
-            prototype_obj = *o;
+        if let Some(p) = crate::core::object_get_key_value(constructor, "prototype") {
+            let proto_value = match &*p.borrow() {
+                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                other => other.clone(),
+            };
+            if let Value::Object(o) = proto_value {
+                field_scope.borrow_mut(mc).set_home_object(Some(o.into()));
+                prototype_obj = o;
+            }
         }
 
         // Define private methods/accessors before evaluating field initializers.
@@ -858,11 +868,20 @@ pub(crate) fn evaluate_new<'gc>(
 
     match constructor_val {
         Value::Object(class_obj) => {
-            // If this function object has a [[HomeObject]] set, it is a
-            // method created on an object literal or class and per ECMAScript
-            // is not a constructor. Reject with TypeError.
+            // Methods are not constructors. Some ordinary functions may still carry
+            // a home object in this engine, so only reject when there is no valid
+            // own `.prototype` object.
             if class_obj.borrow().get_home_object().is_some() {
-                return Err(raise_type_error!("Not a constructor").into());
+                let has_constructor_prototype = object_get_key_value(class_obj, "prototype")
+                    .map(|p| match &*p.borrow() {
+                        Value::Object(_) => true,
+                        Value::Property { value: Some(v), .. } => matches!(&*v.borrow(), Value::Object(_)),
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+                if !has_constructor_prototype {
+                    return Err(raise_type_error!("Not a constructor").into());
+                }
             }
             // Keep a slot for any computed prototype we derive from the
             // constructor/newTarget search so we can finalize it on the
@@ -1404,8 +1423,12 @@ pub(crate) fn evaluate_new<'gc>(
                 if let Some(src_obj) = prototype_source_obj
                     && let Some(prototype_val) = object_get_key_value(&src_obj, "prototype")
                 {
-                    match &*prototype_val.borrow() {
-                        Value::Object(proto_obj) => assigned_proto = Some(*proto_obj),
+                    let proto_value = match &*prototype_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    match proto_value {
+                        Value::Object(proto_obj) => assigned_proto = Some(proto_obj),
                         other => log::debug!("evaluate_new (class): prototype property present but not object (val={:?})", other),
                     }
                 }
@@ -1518,10 +1541,14 @@ pub(crate) fn evaluate_new<'gc>(
                         // For class constructors, ensure the home object points at the class prototype
                         // so `super.prop` within the constructor (including via arrow functions)
                         // resolves against the parent prototype.
-                        if let Some(proto_val) = object_get_key_value(class_obj, "prototype")
-                            && let Value::Object(proto_obj) = &*proto_val.borrow()
-                        {
-                            func_env.borrow_mut(mc).set_home_object(Some(GcCell::new(*proto_obj)));
+                        if let Some(proto_val) = object_get_key_value(class_obj, "prototype") {
+                            let proto_value = match &*proto_val.borrow() {
+                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                other => other.clone(),
+                            };
+                            if let Value::Object(proto_obj) = proto_value {
+                                func_env.borrow_mut(mc).set_home_object(Some(GcCell::new(proto_obj)));
+                            }
                         }
 
                         // Execute constructor body
@@ -1559,7 +1586,18 @@ pub(crate) fn evaluate_new<'gc>(
                             return Ok(ret_val);
                         }
 
-                        // Retrieve 'this' from env, as it might have been changed by super()
+                        // Retrieve 'this' from env, as it might have been changed by super().
+                        // In derived constructors, returning without initializing `this`
+                        // must throw a ReferenceError.
+                        if let Some(final_this) = object_get_key_value(&func_env, "this")
+                            && class_def_ptr.borrow().extends.is_some()
+                            && matches!(*final_this.borrow(), Value::Uninitialized)
+                        {
+                            return Err(
+                                raise_reference_error!("Must call super constructor in derived class before accessing 'this'").into(),
+                            );
+                        }
+
                         if let Some(final_this) = object_get_key_value(&func_env, "this")
                             && let Value::Object(final_instance) = &*final_this.borrow()
                         {
@@ -1598,7 +1636,13 @@ pub(crate) fn evaluate_new<'gc>(
                             return Ok(Value::Object(*final_instance));
                         }
                         // Default: if constructor did not explicitly return an object and did not
-                        // set `this` (shouldn't usually happen), return the created instance per spec.
+                        // set `this`, derived constructors must throw; base constructors return instance.
+                        if class_def_ptr.borrow().extends.is_some() {
+                            return Err(
+                                raise_reference_error!("Must call super constructor in derived class before accessing 'this'").into(),
+                            );
+                        }
+
                         log::warn!(
                             "evaluate_new: returning original instance ptr={:p} proto={:?}",
                             Gc::as_ptr(instance),
@@ -1647,13 +1691,18 @@ pub(crate) fn evaluate_new<'gc>(
                             let parent_inst = evaluate_new(mc, env, &parent_ctor, evaluated_args, new_target)?;
                             if let Value::Object(inst_obj) = &parent_inst {
                                 // Fix prototype to point to this class's prototype only if we don't have a computed_proto to use
-                                if let Some(prototype_val) = object_get_key_value(class_obj, "prototype")
-                                    && let Value::Object(proto_obj) = &*prototype_val.borrow()
-                                    && computed_proto.is_none()
-                                    && inst_obj.borrow().is_extensible()
-                                {
-                                    inst_obj.borrow_mut(mc).prototype = Some(*proto_obj);
-                                    object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(*proto_obj))?;
+                                if let Some(prototype_val) = object_get_key_value(class_obj, "prototype") {
+                                    let proto_value = match &*prototype_val.borrow() {
+                                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                        other => other.clone(),
+                                    };
+                                    if let Value::Object(proto_obj) = proto_value
+                                        && computed_proto.is_none()
+                                        && inst_obj.borrow().is_extensible()
+                                    {
+                                        inst_obj.borrow_mut(mc).prototype = Some(proto_obj);
+                                        object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(proto_obj))?;
+                                    }
                                 }
                                 // Don't add an own 'constructor' property on instance; prototype carries it.
                                 // Fix __proto__ non-enumerable
@@ -1746,13 +1795,17 @@ pub(crate) fn evaluate_new<'gc>(
 
                 // Set prototype from the canonical constructor's `.prototype` if available
                 if let Some(prototype_val) = object_get_key_value(canonical_ctor, "prototype") {
-                    if let Value::Object(proto_obj) = &*prototype_val.borrow() {
-                        instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(*proto_obj))?;
+                    let proto_value = match &*prototype_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Object(proto_obj) = proto_value {
+                        instance.borrow_mut(mc).prototype = Some(proto_obj);
+                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto_obj))?;
                         // Ensure the instance __proto__ helper property is non-enumerable
                         instance.borrow_mut(mc).set_non_enumerable("__proto__");
                     } else {
-                        object_set_key_value(mc, &instance, "__proto__", &prototype_val.borrow().clone())?;
+                        object_set_key_value(mc, &instance, "__proto__", &proto_value)?;
                         instance.borrow_mut(mc).set_non_enumerable("__proto__");
                     }
                 }
@@ -1776,21 +1829,25 @@ pub(crate) fn evaluate_new<'gc>(
                 }
 
                 // Ensure prototype.constructor points back to the canonical constructor
-                if let Some(prototype_val) = object_get_key_value(canonical_ctor, "prototype")
-                    && let Value::Object(proto_obj) = &*prototype_val.borrow()
-                {
-                    match get_own_property(proto_obj, "constructor") {
-                        Some(existing_rc) => {
-                            if let Value::Object(existing_ctor_obj) = &*existing_rc.borrow() {
-                                if !Gc::ptr_eq(*existing_ctor_obj, *canonical_ctor) {
-                                    object_set_key_value(mc, proto_obj, "constructor", &Value::Object(*canonical_ctor))?;
+                if let Some(prototype_val) = object_get_key_value(canonical_ctor, "prototype") {
+                    let proto_value = match &*prototype_val.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Object(proto_obj) = proto_value {
+                        match get_own_property(&proto_obj, "constructor") {
+                            Some(existing_rc) => {
+                                if let Value::Object(existing_ctor_obj) = &*existing_rc.borrow() {
+                                    if !Gc::ptr_eq(*existing_ctor_obj, *canonical_ctor) {
+                                        object_set_key_value(mc, &proto_obj, "constructor", &Value::Object(*canonical_ctor))?;
+                                    }
+                                } else {
+                                    object_set_key_value(mc, &proto_obj, "constructor", &Value::Object(*canonical_ctor))?;
                                 }
-                            } else {
-                                object_set_key_value(mc, proto_obj, "constructor", &Value::Object(*canonical_ctor))?;
                             }
-                        }
-                        None => {
-                            object_set_key_value(mc, proto_obj, "constructor", &Value::Object(*canonical_ctor))?;
+                            None => {
+                                object_set_key_value(mc, &proto_obj, "constructor", &Value::Object(*canonical_ctor))?;
+                            }
                         }
                     }
                 }
@@ -2041,18 +2098,18 @@ pub(crate) fn create_class_object<'gc>(
                     return Err(raise_type_error!("Class extends value is not a constructor").into());
                 }
 
-                // Get the parent class's prototype
-                if let Some(parent_proto_val) = object_get_key_value(&parent_class_obj, "prototype") {
-                    log::debug!(
-                        "create_class_object class={} found parent prototype {:?}",
-                        name,
-                        parent_proto_val.borrow()
-                    );
-                    if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
-                        prototype_obj.borrow_mut(mc).prototype = Some(*parent_proto_obj);
+                let parent_proto = crate::core::get_property_with_accessors(mc, env, &parent_class_obj, "prototype")?;
+                log::debug!("create_class_object class={} found parent prototype {:?}", name, parent_proto);
+                match parent_proto {
+                    Value::Object(parent_proto_obj) => {
+                        prototype_obj.borrow_mut(mc).prototype = Some(parent_proto_obj);
                     }
-                } else {
-                    log::debug!("create_class_object class={} parent has no prototype property", name);
+                    Value::Null => {
+                        prototype_obj.borrow_mut(mc).prototype = None;
+                    }
+                    _ => {
+                        return Err(raise_type_error!("Class extends value does not have valid prototype property").into());
+                    }
                 }
 
                 // Set the class object's internal prototype to the parent class object so static properties are inherited
@@ -2069,9 +2126,8 @@ pub(crate) fn create_class_object<'gc>(
         let _ = crate::core::set_internal_prototype_from_constructor(mc, &prototype_obj, env, "Object");
     }
 
-    object_set_key_value(mc, &class_obj, "prototype", &Value::Object(prototype_obj))?;
-    // The 'prototype' property of constructor should be non-enumerable
-    class_obj.borrow_mut(mc).set_non_enumerable("prototype");
+    let proto_desc = create_descriptor_object(mc, &Value::Object(prototype_obj), false, false, false)?;
+    crate::js_object::define_property_internal(mc, &class_obj, "prototype", &proto_desc)?;
     object_set_key_value(mc, &prototype_obj, "constructor", &Value::Object(class_obj))?;
     // Make prototype internal properties non-enumerable so for..in does not list them
     prototype_obj.borrow_mut(mc).set_non_enumerable("__proto__");
@@ -2100,9 +2156,10 @@ pub(crate) fn create_class_object<'gc>(
             ClassMember::Method(method_name, params, body) => {
                 // Create a closure for the method
                 let method_func = create_class_method_function_object(mc, &class_env, params, body, prototype_obj, method_name)?;
-                object_set_key_value(mc, &prototype_obj, method_name, &method_func)?;
-                // Methods defined in class bodies are non-enumerable
-                prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
+                // Class element definition must use DefineProperty (not [[Set]])
+                // so inherited setters on parent prototypes are not invoked.
+                let method_desc = create_descriptor_object(mc, &method_func, true, false, true)?;
+                crate::js_object::define_property_internal(mc, &prototype_obj, method_name, &method_desc)?;
             }
             ClassMember::MethodComputed(key_expr, params, body) => {
                 // Evaluate computed key and set method (ToPropertyKey semantics)
@@ -2114,9 +2171,9 @@ pub(crate) fn create_class_object<'gc>(
                     key_val.clone()
                 };
                 let pk = crate::core::PropertyKey::from(&key_prim);
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(prototype_obj));
-                let method_closure = Value::Closure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &prototype_obj, &pk, &method_closure)?;
+                let method_name = property_key_to_name_string(&pk);
+                let method_func = create_class_method_function_object(mc, &class_env, params, body, prototype_obj, &method_name)?;
+                object_set_key_value(mc, &prototype_obj, &pk, &method_func)?;
                 // Computed methods are also non-enumerable
                 prototype_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
@@ -2155,9 +2212,9 @@ pub(crate) fn create_class_object<'gc>(
                     key_val.clone()
                 };
                 let pk = crate::core::PropertyKey::from(&key_prim);
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(prototype_obj));
-                let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &prototype_obj, pk.clone(), &method_closure)?;
+                let method_name = property_key_to_name_string(&pk);
+                let method_func = create_class_async_method_function_object(mc, &class_env, params, body, prototype_obj, &method_name)?;
+                object_set_key_value(mc, &prototype_obj, pk.clone(), &method_func)?;
                 // Computed methods are also non-enumerable
                 prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
             }
@@ -2167,9 +2224,8 @@ pub(crate) fn create_class_object<'gc>(
                 prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::MethodAsync(method_name, params, body) => {
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(prototype_obj));
-                let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &prototype_obj, method_name, &method_closure)?;
+                let method_func = create_class_async_method_function_object(mc, &class_env, params, body, prototype_obj, method_name)?;
+                object_set_key_value(mc, &prototype_obj, method_name, &method_func)?;
                 prototype_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::MethodAsyncGenerator(method_name, params, body) => {
@@ -2458,9 +2514,8 @@ pub(crate) fn create_class_object<'gc>(
                 if method_name == "prototype" {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(class_obj));
-                let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, method_name, &method_closure)?;
+                let method_func = create_class_async_method_function_object(mc, &class_env, params, body, class_obj, method_name)?;
+                object_set_key_value(mc, &class_obj, method_name, &method_func)?;
                 class_obj.borrow_mut(mc).set_non_enumerable(method_name);
             }
             ClassMember::StaticMethodAsyncGenerator(method_name, params, body) => {
@@ -2489,9 +2544,9 @@ pub(crate) fn create_class_object<'gc>(
                 {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(class_obj));
-                let method_closure = Value::Closure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, &pk, &method_closure)?;
+                let method_name = property_key_to_name_string(&pk);
+                let method_func = create_class_method_function_object(mc, &class_env, params, body, class_obj, &method_name)?;
+                object_set_key_value(mc, &class_obj, &pk, &method_func)?;
                 // Computed static keys are also non-enumerable
                 class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
@@ -2526,9 +2581,9 @@ pub(crate) fn create_class_object<'gc>(
                 {
                     return Err(raise_type_error!("Cannot define static 'prototype' property on class").into());
                 }
-                let closure_data = ClosureData::new(params, body, Some(class_env), Some(class_obj));
-                let method_closure = Value::AsyncClosure(Gc::new(mc, closure_data));
-                object_set_key_value(mc, &class_obj, &pk, &method_closure)?;
+                let method_name = property_key_to_name_string(&pk);
+                let method_func = create_class_async_method_function_object(mc, &class_env, params, body, class_obj, &method_name)?;
+                object_set_key_value(mc, &class_obj, &pk, &method_func)?;
                 class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticMethodComputedAsyncGenerator(key_expr, params, body) => {
@@ -2592,9 +2647,13 @@ pub(crate) fn create_class_object<'gc>(
                             object_set_key_value(mc, &class_obj, getter_name, &new_prop)?;
                             class_obj.borrow_mut(mc).set_non_enumerable(getter_name);
                         }
-                        Value::Property { value, getter: _, setter } => {
+                        Value::Property {
+                            value: _,
+                            getter: _,
+                            setter,
+                        } => {
                             let new_prop = Value::Property {
-                                value: *value,
+                                value: None,
                                 getter: Some(Box::new(getter_value)),
                                 setter: setter.clone(),
                             };
@@ -2602,12 +2661,22 @@ pub(crate) fn create_class_object<'gc>(
                             class_obj.borrow_mut(mc).set_non_enumerable(getter_name);
                         }
                         _ => {
-                            object_set_key_value(mc, &class_obj, getter_name, &getter_value)?;
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some(Box::new(getter_value)),
+                                setter: None,
+                            };
+                            object_set_key_value(mc, &class_obj, getter_name, &new_prop)?;
                             class_obj.borrow_mut(mc).set_non_enumerable(getter_name);
                         }
                     }
                 } else {
-                    object_set_key_value(mc, &class_obj, getter_name, &getter_value)?;
+                    let new_prop = Value::Property {
+                        value: None,
+                        getter: Some(Box::new(getter_value)),
+                        setter: None,
+                    };
+                    object_set_key_value(mc, &class_obj, getter_name, &new_prop)?;
                     class_obj.borrow_mut(mc).set_non_enumerable(getter_name);
                 }
             }
@@ -2639,9 +2708,13 @@ pub(crate) fn create_class_object<'gc>(
                             object_set_key_value(mc, &class_obj, &pk, &new_prop)?;
                             class_obj.borrow_mut(mc).set_non_enumerable(&pk);
                         }
-                        Value::Property { value, getter: _, setter } => {
+                        Value::Property {
+                            value: _,
+                            getter: _,
+                            setter,
+                        } => {
                             let new_prop = Value::Property {
-                                value: *value,
+                                value: None,
                                 getter: Some(Box::new(getter_value)),
                                 setter: setter.clone(),
                             };
@@ -2649,12 +2722,22 @@ pub(crate) fn create_class_object<'gc>(
                             class_obj.borrow_mut(mc).set_non_enumerable(&pk);
                         }
                         _ => {
-                            object_set_key_value(mc, &class_obj, &pk, &getter_value)?;
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some(Box::new(getter_value)),
+                                setter: None,
+                            };
+                            object_set_key_value(mc, &class_obj, &pk, &new_prop)?;
                             class_obj.borrow_mut(mc).set_non_enumerable(&pk);
                         }
                     }
                 } else {
-                    object_set_key_value(mc, &class_obj, &pk, &getter_value)?;
+                    let new_prop = Value::Property {
+                        value: None,
+                        getter: Some(Box::new(getter_value)),
+                        setter: None,
+                    };
+                    object_set_key_value(mc, &class_obj, &pk, &new_prop)?;
                     class_obj.borrow_mut(mc).set_non_enumerable(&pk);
                 }
             }
@@ -2677,9 +2760,13 @@ pub(crate) fn create_class_object<'gc>(
                             object_set_key_value(mc, &class_obj, setter_name, &new_prop)?;
                             class_obj.borrow_mut(mc).set_non_enumerable(setter_name);
                         }
-                        Value::Property { value, getter, setter: _ } => {
+                        Value::Property {
+                            value: _,
+                            getter,
+                            setter: _,
+                        } => {
                             let new_prop = Value::Property {
-                                value: *value,
+                                value: None,
                                 getter: getter.clone(),
                                 setter: Some(Box::new(setter_value)),
                             };
@@ -2687,12 +2774,22 @@ pub(crate) fn create_class_object<'gc>(
                             class_obj.borrow_mut(mc).set_non_enumerable(setter_name);
                         }
                         _ => {
-                            object_set_key_value(mc, &class_obj, setter_name, &setter_value)?;
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: None,
+                                setter: Some(Box::new(setter_value)),
+                            };
+                            object_set_key_value(mc, &class_obj, setter_name, &new_prop)?;
                             class_obj.borrow_mut(mc).set_non_enumerable(setter_name);
                         }
                     }
                 } else {
-                    object_set_key_value(mc, &class_obj, setter_name, &setter_value)?;
+                    let new_prop = Value::Property {
+                        value: None,
+                        getter: None,
+                        setter: Some(Box::new(setter_value)),
+                    };
+                    object_set_key_value(mc, &class_obj, setter_name, &new_prop)?;
                     class_obj.borrow_mut(mc).set_non_enumerable(setter_name);
                 }
             }
@@ -2724,9 +2821,13 @@ pub(crate) fn create_class_object<'gc>(
                             object_set_key_value(mc, &class_obj, &pk, &new_prop)?;
                             class_obj.borrow_mut(mc).set_non_enumerable(&pk);
                         }
-                        Value::Property { value, getter, setter: _ } => {
+                        Value::Property {
+                            value: _,
+                            getter,
+                            setter: _,
+                        } => {
                             let new_prop = Value::Property {
-                                value: *value,
+                                value: None,
                                 getter: getter.clone(),
                                 setter: Some(Box::new(setter_value)),
                             };
@@ -2734,12 +2835,22 @@ pub(crate) fn create_class_object<'gc>(
                             class_obj.borrow_mut(mc).set_non_enumerable(&pk);
                         }
                         _ => {
-                            object_set_key_value(mc, &class_obj, &pk, &setter_value)?;
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: None,
+                                setter: Some(Box::new(setter_value)),
+                            };
+                            object_set_key_value(mc, &class_obj, &pk, &new_prop)?;
                             class_obj.borrow_mut(mc).set_non_enumerable(&pk);
                         }
                     }
                 } else {
-                    object_set_key_value(mc, &class_obj, &pk, &setter_value)?;
+                    let new_prop = Value::Property {
+                        value: None,
+                        getter: None,
+                        setter: Some(Box::new(setter_value)),
+                    };
+                    object_set_key_value(mc, &class_obj, &pk, &new_prop)?;
                     class_obj.borrow_mut(mc).set_non_enumerable(&pk);
                 }
             }
@@ -3109,9 +3220,6 @@ pub(crate) fn evaluate_super_call<'gc>(
         .unwrap_or(false);
 
     // Check if this is super() call and this is already initialized
-    // NOTE: don't return early here — per spec the SuperCall will still call
-    // the parent constructor (so side-effects happen) and only after that the
-    // runtime should throw if `this` was already initialized.
     let already_initialized = this_initialized;
 
     // Find the current constructor function to get its prototype (the parent class).
@@ -3232,20 +3340,20 @@ pub(crate) fn evaluate_super_call<'gc>(
                     };
 
                     if let Some(new_instance) = returned_object {
-                        bind_this_after_super(mc, Some(new_instance))?;
                         if already_initialized {
                             return Err(raise_reference_error!("super() called after this is initialized").into());
                         }
+                        bind_this_after_super(mc, Some(new_instance))?;
                         if let Some(ctor_obj) = ctor_for_fields {
                             initialize_instance_elements(mc, &new_instance, &ctor_obj)?;
                         }
                         return Ok(Value::Object(new_instance));
                     }
 
-                    bind_this_after_super(mc, None)?;
                     if already_initialized {
                         return Err(raise_reference_error!("super() called after this is initialized").into());
                     }
+                    bind_this_after_super(mc, None)?;
                     if let Some(ctor_obj) = ctor_for_fields {
                         initialize_instance_elements(mc, &instance, &ctor_obj)?;
                     }
@@ -3257,10 +3365,10 @@ pub(crate) fn evaluate_super_call<'gc>(
             // Per spec there is an implicit default constructor — treat this as a
             // successful super() call that simply initializes instance fields and
             // binds `this` into the constructor environment.
-            bind_this_after_super(mc, None)?;
             if already_initialized {
                 return Err(raise_reference_error!("super() called after this is initialized").into());
             }
+            bind_this_after_super(mc, None)?;
             if let Some(ctor_obj) = ctor_for_fields {
                 initialize_instance_elements(mc, &instance, &ctor_obj)?;
             }
@@ -3344,19 +3452,19 @@ pub(crate) fn evaluate_super_call<'gc>(
                             }
                         }
 
-                        bind_this_after_super(mc, Some(new_instance))?;
                         if already_initialized {
                             return Err(raise_reference_error!("super() called after this is initialized").into());
                         }
+                        bind_this_after_super(mc, Some(new_instance))?;
                         if let Some(ctor_obj) = ctor_for_fields {
                             initialize_instance_elements(mc, &new_instance, &ctor_obj)?;
                         }
                         return Ok(Value::Object(new_instance));
                     }
-                    bind_this_after_super(mc, None)?;
                     if already_initialized {
                         return Err(raise_reference_error!("super() called after this is initialized").into());
                     }
+                    bind_this_after_super(mc, None)?;
                     if let Some(ctor_obj) = ctor_for_fields {
                         initialize_instance_elements(mc, &instance, &ctor_obj)?;
                     }
@@ -3419,19 +3527,19 @@ pub(crate) fn evaluate_super_call<'gc>(
                     cur_update = env_ptr.borrow().prototype;
                 }
 
-                bind_this_after_super(mc, Some(new_instance))?;
                 if already_initialized {
                     return Err(raise_reference_error!("super() called after this is initialized").into());
                 }
+                bind_this_after_super(mc, Some(new_instance))?;
                 if let Some(ctor_obj) = ctor_for_fields {
                     initialize_instance_elements(mc, &new_instance, &ctor_obj)?;
                 }
                 return Ok(Value::Object(new_instance));
             }
-            bind_this_after_super(mc, None)?;
             if already_initialized {
                 return Err(raise_reference_error!("super() called after this is initialized").into());
             }
+            bind_this_after_super(mc, None)?;
             if let Some(ctor_obj) = ctor_for_fields {
                 initialize_instance_elements(mc, &instance, &ctor_obj)?;
             }
@@ -3647,6 +3755,9 @@ pub(crate) fn evaluate_super_method<'gc>(
     evaluated_args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
     // super.method() calls parent class methods
+    // Per spec, SuperProperty resolution performs GetThisBinding first.
+    // This throws ReferenceError when `this` is still uninitialized.
+    let actual_this = evaluate_this(mc, env)?;
 
     // Use [[HomeObject]] if available; search up env prototype chain
     if let Some(home_obj) = find_home_object_in_env(env) {
@@ -3668,7 +3779,11 @@ pub(crate) fn evaluate_super_method<'gc>(
                 method
             );
             if let Some(method_val) = object_get_key_value(&super_obj, method) {
-                let method_type = match &*method_val.borrow() {
+                let resolved_method = match &*method_val.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                let method_type = match &resolved_method {
                     Value::Closure(..) => "Closure",
                     Value::AsyncClosure(..) => "AsyncClosure",
                     Value::Function(_) => "Function",
@@ -3677,8 +3792,8 @@ pub(crate) fn evaluate_super_method<'gc>(
                 };
                 log::trace!("evaluate_super_method - found method on super: method={method} type={method_type}");
                 // We need to call this method with the current 'this'
-                if let Some(this_val) = object_get_key_value(env, "this") {
-                    match &*method_val.borrow() {
+                {
+                    match &resolved_method {
                         Value::Closure(data) | Value::AsyncClosure(data) => {
                             let params = &data.params;
                             let body = &data.body;
@@ -3689,7 +3804,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                             let func_env = prepare_call_env_with_this(
                                 mc,
                                 captured_env.as_ref(),
-                                Some(&this_val.borrow().clone()),
+                                Some(&actual_this),
                                 Some(params),
                                 evaluated_args,
                                 None,
@@ -3706,7 +3821,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                         }
                         Value::Function(func_name) => {
                             let fname = func_name.as_str();
-                            let this_clone = this_val.borrow().clone();
+                            let this_clone = actual_this.clone();
                             // Handle common built-in prototype methods directly
                             if fname == "Object.prototype.toString" {
                                 return Ok(crate::core::handle_object_prototype_to_string(mc, &this_clone, env));
@@ -3731,7 +3846,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                                         let func_env = prepare_call_env_with_this(
                                             mc,
                                             captured_env.as_ref(),
-                                            Some(&this_val.borrow().clone()),
+                                            Some(&actual_this),
                                             Some(params),
                                             evaluated_args,
                                             None,
@@ -3759,8 +3874,7 @@ pub(crate) fn evaluate_super_method<'gc>(
     // Fallback: if [[HomeObject]] is not available, try to resolve `super` from the current
     // `this` binding (useful for methods defined as object literal properties where our
     // home propagation may not have occurred yet).
-    if let Some(this_val_rc) = object_get_key_value(env, "this")
-        && let Value::Object(this_obj) = &*this_val_rc.borrow()
+    if let Value::Object(this_obj) = &actual_this
         && let Some(super_obj) = this_obj.borrow().prototype
     {
         log::trace!(
@@ -3770,9 +3884,13 @@ pub(crate) fn evaluate_super_method<'gc>(
             method
         );
         if let Some(method_val) = object_get_key_value(&super_obj, method) {
+            let resolved_method = match &*method_val.borrow() {
+                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                other => other.clone(),
+            };
             // Call similar to above with the found method value
-            if let Some(this_val) = object_get_key_value(env, "this") {
-                match &*method_val.borrow() {
+            {
+                match &resolved_method {
                     Value::Closure(data) | Value::AsyncClosure(data) => {
                         let params = &data.params;
                         let body = &data.body;
@@ -3782,7 +3900,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                         let func_env = prepare_call_env_with_this(
                             mc,
                             captured_env.as_ref(),
-                            Some(&this_val.borrow().clone()),
+                            Some(&actual_this),
                             Some(params),
                             evaluated_args,
                             None,
@@ -3798,14 +3916,10 @@ pub(crate) fn evaluate_super_method<'gc>(
                     }
                     Value::Function(func_name) => {
                         if func_name == "Object.prototype.toString" {
-                            return Ok(crate::core::handle_object_prototype_to_string(
-                                mc,
-                                &this_val_rc.borrow().clone(),
-                                env,
-                            ));
+                            return Ok(crate::core::handle_object_prototype_to_string(mc, &actual_this, env));
                         }
                         if func_name == "Object.prototype.valueOf" {
-                            return Ok(this_val_rc.borrow().clone());
+                            return Ok(actual_this.clone());
                         }
                         return Err(raise_eval_error!(format!("Method '{}' not found in parent class", method)));
                     }
@@ -3821,7 +3935,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                                     let func_env = prepare_call_env_with_this(
                                         mc,
                                         captured_env.as_ref(),
-                                        Some(&this_val_rc.borrow().clone()),
+                                        Some(&actual_this),
                                         Some(params),
                                         evaluated_args,
                                         None,
@@ -3846,8 +3960,7 @@ pub(crate) fn evaluate_super_method<'gc>(
     }
 
     // Fallback for legacy class implementation
-    if let Some(this_val) = object_get_key_value(env, "this")
-        && let Value::Object(instance) = &*this_val.borrow()
+    if let Value::Object(instance) = &actual_this
         && let Some(proto_val) = object_get_key_value(instance, "__proto__")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
@@ -3857,7 +3970,11 @@ pub(crate) fn evaluate_super_method<'gc>(
         {
             // Look for method in parent prototype
             if let Some(method_val) = object_get_key_value(parent_proto_obj, method) {
-                match &*method_val.borrow() {
+                let resolved_method = match &*method_val.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                match &resolved_method {
                     Value::Closure(data) | Value::AsyncClosure(data) => {
                         let params = &data.params;
                         let body = &data.body;
@@ -3877,6 +3994,32 @@ pub(crate) fn evaluate_super_method<'gc>(
 
                         // Execute method body
                         return Ok(evaluate_statements(mc, &func_env, body)?);
+                    }
+                    Value::Object(func_obj) => {
+                        if let Some(cl_rc) = func_obj.borrow().get_closure() {
+                            match &*cl_rc.borrow() {
+                                Value::Closure(data) | Value::AsyncClosure(data) => {
+                                    let params = &data.params;
+                                    let body = &data.body;
+                                    let captured_env = &data.env;
+
+                                    let func_env = prepare_call_env_with_this(
+                                        mc,
+                                        captured_env.as_ref(),
+                                        Some(&Value::Object(*instance)),
+                                        Some(params),
+                                        evaluated_args,
+                                        None,
+                                        Some(env),
+                                        Some(*func_obj),
+                                    )?;
+
+                                    return Ok(evaluate_statements(mc, &func_env, body)?);
+                                }
+                                _ => {}
+                            }
+                        }
+                        return Err(raise_eval_error!(format!("'{method}' is not a method in parent class")));
                     }
                     _ => {
                         return Err(raise_eval_error!(format!("'{method}' is not a method in parent class")));

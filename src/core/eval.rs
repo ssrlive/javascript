@@ -7223,7 +7223,7 @@ fn precompute_target<'gc>(
             if let Value::Object(obj) = obj_val {
                 Ok(TargetTemp::PropBase(obj, key_str.clone()))
             } else {
-                Err(raise_eval_error!("Cannot assign to property of non-object").into())
+                Err(raise_type_error!("Cannot assign to property of non-object").into())
             }
         }
         Expr::Index(obj_expr, key_expr) => {
@@ -7248,7 +7248,7 @@ fn precompute_target<'gc>(
                 if let Value::Object(obj) = obj_val {
                     Ok(TargetTemp::IndexBase(obj, Box::new(raw_key), None))
                 } else {
-                    Err(raise_eval_error!("Cannot assign to property of non-object").into())
+                    Err(raise_type_error!("Cannot assign to property of non-object").into())
                 }
             }
         }
@@ -8085,7 +8085,7 @@ fn evaluate_expr_assign<'gc>(
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
                     obj
                 }
-                _ => return Err(raise_eval_error!("Cannot assign to property of non-object").into()),
+                _ => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
             };
             set_property_with_accessors(mc, env, &obj, &*key, &val, None)?;
             Ok(val)
@@ -8148,7 +8148,7 @@ fn evaluate_expr_assign<'gc>(
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
                     obj
                 }
-                _ => return Err(raise_eval_error!("Cannot assign to property of non-object").into()),
+                _ => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
             };
 
             set_property_with_accessors(mc, env, &obj, &key, &val, None)?;
@@ -19137,10 +19137,20 @@ fn evaluate_expr_new<'gc>(
                             cl.home_object.as_ref().map(|h| Gc::as_ptr(*h.borrow()))
                         );
 
-                        // If this closure or its function object has a [[HomeObject]] it was
-                        // created as a method and per ECMAScript it is not a constructor.
+                        // Methods are not constructors. Some ordinary functions may still carry
+                        // a home object in this engine, so only reject when there is no valid
+                        // own `.prototype` object (constructors must have one).
                         if obj.borrow().get_home_object().is_some() || cl.home_object.is_some() {
-                            return Err(raise_type_error!("Not a constructor").into());
+                            let has_constructor_prototype = object_get_key_value(&obj, "prototype")
+                                .map(|p| match &*p.borrow() {
+                                    Value::Object(_) => true,
+                                    Value::Property { value: Some(v), .. } => matches!(&*v.borrow(), Value::Object(_)),
+                                    _ => false,
+                                })
+                                .unwrap_or(false);
+                            if !has_constructor_prototype {
+                                return Err(raise_type_error!("Not a constructor").into());
+                            }
                         }
                         log::debug!("evaluate_expr_new: found closure; is_arrow={} params={:?}", cl.is_arrow, cl.params);
                         // Arrow functions are not constructors per ECMAScript; throw TypeError

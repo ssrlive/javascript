@@ -1060,6 +1060,8 @@ pub fn handle_typedarray_constructor<'gc>(
         TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
     };
 
+    let mut init_values: Option<Vec<Value<'gc>>> = None;
+
     let (buffer, byte_offset, length) = if args.is_empty() {
         // new TypedArray() - create empty array
         let buffer = new_gc_cell_ptr(
@@ -1091,6 +1093,34 @@ pub fn handle_typedarray_constructor<'gc>(
                     if let Value::TypedArray(ta) = &*ta_val.borrow() {
                         // new TypedArray(typedArray) - copy constructor
                         let src_length = ta.length;
+                        let mut copied = Vec::with_capacity(src_length);
+                        for idx in 0..src_length {
+                            let val = if matches!(ta.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) {
+                                let size = ta.element_size();
+                                let byte_offset = ta.byte_offset + idx * size;
+                                let buffer = ta.buffer.borrow();
+                                let data = buffer.data.lock().unwrap();
+                                if byte_offset + size <= data.len() {
+                                    let bytes = &data[byte_offset..byte_offset + size];
+                                    let big_int = if matches!(ta.kind, TypedArrayKind::BigInt64) {
+                                        let mut b = [0u8; 8];
+                                        b.copy_from_slice(bytes);
+                                        num_bigint::BigInt::from(i64::from_le_bytes(b))
+                                    } else {
+                                        let mut b = [0u8; 8];
+                                        b.copy_from_slice(bytes);
+                                        num_bigint::BigInt::from(u64::from_le_bytes(b))
+                                    };
+                                    Value::BigInt(Box::new(big_int))
+                                } else {
+                                    Value::Undefined
+                                }
+                            } else {
+                                Value::Number(ta.get(idx).unwrap_or(f64::NAN))
+                            };
+                            copied.push(val);
+                        }
+                        init_values = Some(copied);
                         let buffer = new_gc_cell_ptr(
                             mc,
                             JSArrayBuffer {
@@ -1098,7 +1128,6 @@ pub fn handle_typedarray_constructor<'gc>(
                                 ..JSArrayBuffer::default()
                             },
                         );
-                        // TODO: Copy data from source TypedArray
                         (buffer, 0, src_length)
                     } else {
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
@@ -1111,7 +1140,32 @@ pub fn handle_typedarray_constructor<'gc>(
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
                     }
                 } else {
-                    return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
+                    let src_length = crate::core::object_get_length(&obj).unwrap_or_else(|| {
+                        object_get_key_value(&obj, "length")
+                            .and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) if *n >= 0.0 && n.is_finite() => Some(*n as usize),
+                                _ => None,
+                            })
+                            .unwrap_or(0)
+                    });
+
+                    let mut copied = Vec::with_capacity(src_length);
+                    for idx in 0..src_length {
+                        let value = object_get_key_value(&obj, idx)
+                            .map(|cell| cell.borrow().clone())
+                            .unwrap_or(Value::Undefined);
+                        copied.push(value);
+                    }
+                    init_values = Some(copied);
+
+                    let buffer = new_gc_cell_ptr(
+                        mc,
+                        JSArrayBuffer {
+                            data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
+                            ..JSArrayBuffer::default()
+                        },
+                    );
+                    (buffer, 0, src_length)
                 }
             }
             _ => return Err(raise_eval_error!("Invalid TypedArray constructor argument")),
@@ -1239,6 +1293,53 @@ pub fn handle_typedarray_constructor<'gc>(
         kind,
         length_tracking
     );
+
+    if let Some(values) = init_values {
+        for (idx, v) in values.iter().enumerate() {
+            if idx >= length {
+                break;
+            }
+
+            if matches!(kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) {
+                let big_value = match v {
+                    Value::BigInt(b) => b.to_i64().unwrap_or(0) as f64,
+                    Value::Number(n) => *n,
+                    Value::Boolean(b) => {
+                        if *b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    Value::Null => 0.0,
+                    Value::Undefined => f64::NAN,
+                    _ => f64::NAN,
+                };
+                typed_array.set(mc, idx, big_value)?;
+                continue;
+            }
+
+            let num = match v {
+                Value::Number(n) => *n,
+                Value::Boolean(b) => {
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                Value::Null => 0.0,
+                Value::Undefined => f64::NAN,
+                Value::BigInt(b) => b.to_f64().unwrap_or(f64::NAN),
+                Value::String(s) => {
+                    let text = crate::unicode::utf16_to_utf8(s);
+                    text.parse::<f64>().unwrap_or(f64::NAN)
+                }
+                _ => f64::NAN,
+            };
+            typed_array.set(mc, idx, num)?;
+        }
+    }
 
     Ok(Value::Object(obj))
 }

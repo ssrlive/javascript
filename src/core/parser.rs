@@ -280,6 +280,12 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         }
     }
 
+    // Allow line terminators between the left-hand side and the `of` keyword
+    // so constructs like `for (let [x]\n  of iterable)` are recognized.
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+
     // Handle 'of'
     if *index < t.len() && matches!(t[*index].token, Token::Identifier(ref s) if s == "of") {
         *index += 1; // consume of
@@ -2468,11 +2474,37 @@ fn parse_array_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> Re
         if matches!(tokens[*index].token, Token::Spread) {
             *index += 1; // consume ...
             let rest_expr = if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
-                let inner = parse_array_assignment_pattern(tokens, index)?;
-                Expr::Array(inner)
+                let saved = *index;
+                match parse_array_assignment_pattern(tokens, index) {
+                    Ok(inner) => {
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                            *index = saved;
+                            parse_assignment(tokens, index)?
+                        } else {
+                            Expr::Array(inner)
+                        }
+                    }
+                    Err(_) => {
+                        *index = saved;
+                        parse_assignment(tokens, index)?
+                    }
+                }
             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
-                let inner = parse_object_assignment_pattern(tokens, index)?;
-                Expr::Object(inner)
+                let saved = *index;
+                match parse_object_assignment_pattern(tokens, index) {
+                    Ok(inner) => {
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                            *index = saved;
+                            parse_assignment(tokens, index)?
+                        } else {
+                            Expr::Object(inner)
+                        }
+                    }
+                    Err(_) => {
+                        *index = saved;
+                        parse_assignment(tokens, index)?
+                    }
+                }
             } else {
                 parse_assignment(tokens, index)?
             };
@@ -2487,21 +2519,35 @@ fn parse_array_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> Re
 
         let mut elem_expr = if matches!(tokens[*index].token, Token::LBracket) {
             let saved = *index;
-            let inner = parse_array_assignment_pattern(tokens, index)?;
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
-                *index = saved;
-                parse_assignment(tokens, index)?
-            } else {
-                Expr::Array(inner)
+            match parse_array_assignment_pattern(tokens, index) {
+                Ok(inner) => {
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                        *index = saved;
+                        parse_assignment(tokens, index)?
+                    } else {
+                        Expr::Array(inner)
+                    }
+                }
+                Err(_) => {
+                    *index = saved;
+                    parse_assignment(tokens, index)?
+                }
             }
         } else if matches!(tokens[*index].token, Token::LBrace) {
             let saved = *index;
-            let inner = parse_object_assignment_pattern(tokens, index)?;
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
-                *index = saved;
-                parse_assignment(tokens, index)?
-            } else {
-                Expr::Object(inner)
+            match parse_object_assignment_pattern(tokens, index) {
+                Ok(inner) => {
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                        *index = saved;
+                        parse_assignment(tokens, index)?
+                    } else {
+                        Expr::Object(inner)
+                    }
+                }
+                Err(_) => {
+                    *index = saved;
+                    parse_assignment(tokens, index)?
+                }
             }
         } else {
             parse_assignment(tokens, index)?
@@ -2564,11 +2610,37 @@ fn parse_object_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> R
         if matches!(tokens[*index].token, Token::Spread) {
             *index += 1; // consume ...
             let rest_expr = if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
-                let inner = parse_array_assignment_pattern(tokens, index)?;
-                Expr::Array(inner)
+                let saved = *index;
+                match parse_array_assignment_pattern(tokens, index) {
+                    Ok(inner) => {
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                            *index = saved;
+                            parse_assignment(tokens, index)?
+                        } else {
+                            Expr::Array(inner)
+                        }
+                    }
+                    Err(_) => {
+                        *index = saved;
+                        parse_assignment(tokens, index)?
+                    }
+                }
             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
-                let inner = parse_object_assignment_pattern(tokens, index)?;
-                Expr::Object(inner)
+                let saved = *index;
+                match parse_object_assignment_pattern(tokens, index) {
+                    Ok(inner) => {
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                            *index = saved;
+                            parse_assignment(tokens, index)?
+                        } else {
+                            Expr::Object(inner)
+                        }
+                    }
+                    Err(_) => {
+                        *index = saved;
+                        parse_assignment(tokens, index)?
+                    }
+                }
             } else {
                 parse_assignment(tokens, index)?
             };
@@ -2633,21 +2705,35 @@ fn parse_object_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> R
             *index += 1; // consume :
             let mut value_expr = if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                 let saved = *index;
-                let inner = parse_array_assignment_pattern(tokens, index)?;
-                if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
-                    *index = saved;
-                    parse_assignment(tokens, index)?
-                } else {
-                    Expr::Array(inner)
+                match parse_array_assignment_pattern(tokens, index) {
+                    Ok(inner) => {
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                            *index = saved;
+                            parse_assignment(tokens, index)?
+                        } else {
+                            Expr::Array(inner)
+                        }
+                    }
+                    Err(_) => {
+                        *index = saved;
+                        parse_assignment(tokens, index)?
+                    }
                 }
             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
                 let saved = *index;
-                let inner = parse_object_assignment_pattern(tokens, index)?;
-                if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
-                    *index = saved;
-                    parse_assignment(tokens, index)?
-                } else {
-                    Expr::Object(inner)
+                match parse_object_assignment_pattern(tokens, index) {
+                    Ok(inner) => {
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket | Token::Dot) {
+                            *index = saved;
+                            parse_assignment(tokens, index)?
+                        } else {
+                            Expr::Object(inner)
+                        }
+                    }
+                    Err(_) => {
+                        *index = saved;
+                        parse_assignment(tokens, index)?
+                    }
                 }
             } else {
                 parse_assignment(tokens, index)?

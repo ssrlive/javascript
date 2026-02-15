@@ -160,7 +160,8 @@ pub(crate) fn build_property_descriptor<'gc>(
     obj: &JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
 ) -> Option<PropertyDescriptor<'gc>> {
-    if let PropertyKey::String(s) = key
+    if crate::core::get_own_property(obj, key.clone()).is_none()
+        && let PropertyKey::String(s) = key
         && !s.starts_with("__")
         && s != "then"
     {

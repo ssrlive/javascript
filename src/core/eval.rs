@@ -4662,17 +4662,13 @@ fn eval_res<'gc>(
             let mut iterator = None;
 
             // Try to use Symbol.iterator
-            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+            if let Some(sym_ctor) = env_get(env, "Symbol")
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                 && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
-                        c.borrow().clone()
-                    } else {
-                        Value::Undefined
-                    }
+                    get_property_with_accessors(mc, env, obj, iter_sym_data)?
                 } else {
                     get_primitive_prototype_property(mc, env, &iter_val, iter_sym_data)?
                 };
@@ -4690,32 +4686,22 @@ fn eval_res<'gc>(
                 // V is the last normal completion value per spec ForIn/OfBodyEvaluation
                 let mut v = Value::Undefined;
                 loop {
-                    let next_method = object_get_key_value(&iter_obj, "next")
-                        .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
-                        .borrow()
-                        .clone();
+                    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                    if matches!(next_method, Value::Undefined | Value::Null) {
+                        return Err(EvalError::Js(raise_type_error!("Iterator has no next method")));
+                    }
 
                     let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
 
                     if let Value::Object(next_res) = next_res_val {
-                        let done = if let Some(done_val) = object_get_key_value(&next_res, "done") {
-                            match &*done_val.borrow() {
-                                Value::Boolean(b) => *b,
-                                _ => false,
-                            }
-                        } else {
-                            false
-                        };
+                        let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
+                        let done = done_val.to_truthy();
 
                         if done {
                             break;
                         }
 
-                        let value = if let Some(val) = object_get_key_value(&next_res, "value") {
-                            val.borrow().clone()
-                        } else {
-                            Value::Undefined
-                        };
+                        let value = get_property_with_accessors(mc, env, &next_res, "value")?;
 
                         match decl_kind_opt {
                             Some(crate::core::VarDeclKind::Var) | None => {
@@ -4730,8 +4716,10 @@ fn eval_res<'gc>(
                                         }
                                         *last_value = v.clone();
                                         if label.is_none() {
+                                            iterator_close(mc, env, &iter_obj)?;
                                             break;
                                         }
+                                        iterator_close(mc, env, &iter_obj)?;
                                         return Ok(Some(ControlFlow::Break(label)));
                                     }
                                     ControlFlow::Continue(label) => {
@@ -4741,12 +4729,19 @@ fn eval_res<'gc>(
                                         if let Some(ref l) = label
                                             && !own_labels.contains(l)
                                         {
+                                            iterator_close(mc, env, &iter_obj)?;
                                             *last_value = v.clone();
                                             return Ok(Some(ControlFlow::Continue(label)));
                                         }
                                     }
-                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
-                                    ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
+                                    ControlFlow::Return(val) => {
+                                        iterator_close(mc, env, &iter_obj)?;
+                                        return Ok(Some(ControlFlow::Return(val)));
+                                    }
+                                    ControlFlow::Throw(val, l, c) => {
+                                        let _ = iterator_close(mc, env, &iter_obj);
+                                        return Ok(Some(ControlFlow::Throw(val, l, c)));
+                                    }
                                 }
                             }
                             Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
@@ -4766,8 +4761,10 @@ fn eval_res<'gc>(
                                         }
                                         *last_value = v.clone();
                                         if label.is_none() {
+                                            iterator_close(mc, env, &iter_obj)?;
                                             break;
                                         }
+                                        iterator_close(mc, env, &iter_obj)?;
                                         return Ok(Some(ControlFlow::Break(label)));
                                     }
                                     ControlFlow::Continue(label) => {
@@ -4777,12 +4774,19 @@ fn eval_res<'gc>(
                                         if let Some(ref l) = label
                                             && !own_labels.contains(l)
                                         {
+                                            iterator_close(mc, env, &iter_obj)?;
                                             *last_value = v.clone();
                                             return Ok(Some(ControlFlow::Continue(label)));
                                         }
                                     }
-                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
-                                    ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
+                                    ControlFlow::Return(val) => {
+                                        iterator_close(mc, env, &iter_obj)?;
+                                        return Ok(Some(ControlFlow::Return(val)));
+                                    }
+                                    ControlFlow::Throw(val, l, c) => {
+                                        let _ = iterator_close(mc, env, &iter_obj);
+                                        return Ok(Some(ControlFlow::Throw(val, l, c)));
+                                    }
                                 }
                             }
                         }
@@ -4931,11 +4935,7 @@ fn eval_res<'gc>(
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
-                        c.borrow().clone()
-                    } else {
-                        Value::Undefined
-                    }
+                    get_property_with_accessors(mc, env, obj, iter_sym_data)?
                 } else {
                     get_primitive_prototype_property(mc, env, &iter_val, iter_sym_data)?
                 };
@@ -5097,11 +5097,7 @@ fn eval_res<'gc>(
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
-                        c.borrow().clone()
-                    } else {
-                        Value::Undefined
-                    }
+                    get_property_with_accessors(mc, env, obj, iter_sym_data)?
                 } else {
                     get_primitive_prototype_property(mc, env, &iter_val, iter_sym_data)?
                 };
@@ -5192,17 +5188,13 @@ fn eval_res<'gc>(
             let mut iterator = None;
 
             // Try to use Symbol.iterator
-            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+            if let Some(sym_ctor) = env_get(env, "Symbol")
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                 && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
-                        c.borrow().clone()
-                    } else {
-                        Value::Undefined
-                    }
+                    get_property_with_accessors(mc, env, obj, iter_sym_data)?
                 } else {
                     get_primitive_prototype_property(mc, env, &iter_val, iter_sym_data)?
                 };
@@ -5248,7 +5240,9 @@ fn eval_res<'gc>(
                         };
 
                         // Assignment form: assign to lhs expression
-                        evaluate_assign_target_with_value(mc, env, lhs, &value)?;
+                        if let Err(e) = evaluate_assign_target_with_value(mc, env, lhs, &value) {
+                            return Err(iterator_close_on_error(mc, env, &iter_obj, e));
+                        }
                         let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
                         match res {
                             ControlFlow::Normal(_) => v = vbody.clone(),
@@ -5258,8 +5252,10 @@ fn eval_res<'gc>(
                                 }
                                 *last_value = v.clone();
                                 if label.is_none() {
+                                    iterator_close(mc, env, &iter_obj)?;
                                     break;
                                 }
+                                iterator_close(mc, env, &iter_obj)?;
                                 return Ok(Some(ControlFlow::Break(label)));
                             }
                             ControlFlow::Continue(label) => {
@@ -5269,12 +5265,19 @@ fn eval_res<'gc>(
                                 if let Some(ref l) = label
                                     && !own_labels.contains(l)
                                 {
+                                    iterator_close(mc, env, &iter_obj)?;
                                     *last_value = v.clone();
                                     return Ok(Some(ControlFlow::Continue(label)));
                                 }
                             }
-                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
-                            ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
+                            ControlFlow::Return(val) => {
+                                iterator_close(mc, env, &iter_obj)?;
+                                return Ok(Some(ControlFlow::Return(val)));
+                            }
+                            ControlFlow::Throw(val, l, c) => {
+                                let _ = iterator_close(mc, env, &iter_obj);
+                                return Ok(Some(ControlFlow::Throw(val, l, c)));
+                            }
                         }
                     } else {
                         return Err(raise_type_error!("Iterator result is not an object").into());
@@ -6157,67 +6160,28 @@ fn eval_res<'gc>(
                 let len = object_get_length(&obj).unwrap_or(0);
                 for i in 0..len {
                     let val = get_property_with_accessors(mc, env, &obj, i)?;
-                    // Determine per-iteration env depending on decl kind
-                    let iter_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                    // Determine per-iteration env and perform full BindingInitialization.
+                    let pattern_expr = Expr::Object(convert_object_binding_pattern_from_object_elements(pattern));
+                    let body_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
                         let e = new_js_object_data(mc);
                         e.borrow_mut(mc).prototype = Some(*env);
-                        e
-                    } else {
-                        // For var or assignment form, reuse parent env (no fresh binding)
-                        new_js_object_data(mc) // use a temporary env that delegates to parent but we'll set into parent when needed
-                    };
-
-                    // Perform object destructuring
-                    for elem in pattern {
-                        match elem {
-                            ObjectDestructuringElement::Property { key, value } => {
-                                let prop_val = if let Value::Object(o) = &val {
-                                    get_property_with_accessors(mc, env, o, key)?
-                                } else {
-                                    Value::Undefined
-                                };
-                                if let DestructuringElement::Variable(name, _) = value {
-                                    match decl_kind_opt {
-                                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                            object_set_key_value(mc, &iter_env, name, &prop_val)?;
-                                        }
-                                        _ => {
-                                            crate::core::env_set_recursive(mc, env, name, &prop_val)?;
-                                        }
-                                    }
-                                }
-                            }
-                            ObjectDestructuringElement::ComputedProperty { key: key_expr, value } => {
-                                // Evaluate computed key expression and perform lookup
-                                let key_val = evaluate_expr(mc, &iter_env, key_expr)?;
-                                let key_str = match key_val {
-                                    Value::String(s) => crate::unicode::utf16_to_utf8(&s),
-                                    other => crate::core::value_to_string(&other),
-                                };
-                                let prop_val = if let Value::Object(o) = &val {
-                                    get_property_with_accessors(mc, env, o, &key_str)?
-                                } else {
-                                    Value::Undefined
-                                };
-                                if let DestructuringElement::Variable(name, _) = value {
-                                    match decl_kind_opt {
-                                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                            object_set_key_value(mc, &iter_env, name, &prop_val)?;
-                                        }
-                                        _ => {
-                                            crate::core::env_set_recursive(mc, env, name, &prop_val)?;
-                                        }
-                                    }
-                                }
-                            }
-                            ObjectDestructuringElement::Rest(_name) => {
-                                // Simplified rest
+                        for name in names.iter() {
+                            object_set_key_value(mc, &e, name, &Value::Uninitialized)?;
+                        }
+                        evaluate_binding_target_with_value(mc, &e, &pattern_expr, &val)?;
+                        if matches!(decl_kind_opt, Some(crate::core::VarDeclKind::Const)) {
+                            for name in names.iter() {
+                                e.borrow_mut(mc).set_const(name.clone());
                             }
                         }
-                    }
+                        e
+                    } else {
+                        evaluate_binding_target_with_value(mc, env, &pattern_expr, &val)?;
+                        *env
+                    };
 
                     let (res, vbody) = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
-                        evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?
+                        evaluate_statements_with_context_and_last_value(mc, &body_env, body, labels)?
                     } else {
                         // var or assignment form: evaluate in parent env
                         evaluate_statements_with_context_and_last_value(mc, env, body, labels)?
@@ -6281,17 +6245,13 @@ fn eval_res<'gc>(
             let mut iterator = None;
 
             // Try to use Symbol.iterator
-            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+            if let Some(sym_ctor) = env_get(env, "Symbol")
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                 && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
-                        c.borrow().clone()
-                    } else {
-                        Value::Undefined
-                    }
+                    get_property_with_accessors(mc, env, obj, iter_sym_data)?
                 } else {
                     get_primitive_prototype_property(mc, env, &iter_val, iter_sym_data)?
                 };
@@ -6307,131 +6267,85 @@ fn eval_res<'gc>(
 
             if let Some(iter_obj) = iterator {
                 loop {
-                    let next_method = object_get_key_value(&iter_obj, "next")
-                        .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
-                        .borrow()
-                        .clone();
+                    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                    if matches!(next_method, Value::Undefined | Value::Null) {
+                        return Err(EvalError::Js(raise_type_error!("Iterator has no next method")));
+                    }
 
                     let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
 
                     if let Value::Object(next_res) = next_res_val {
-                        let done = if let Some(done_val) = object_get_key_value(&next_res, "done") {
-                            match &*done_val.borrow() {
-                                Value::Boolean(b) => *b,
-                                _ => false,
-                            }
-                        } else {
-                            false
+                        let done = match get_property_with_accessors(mc, env, &next_res, "done")? {
+                            Value::Boolean(b) => b,
+                            _ => false,
                         };
 
                         if done {
                             break;
                         }
 
-                        let value = if let Some(val) = object_get_key_value(&next_res, "value") {
-                            val.borrow().clone()
-                        } else {
-                            Value::Undefined
-                        };
+                        let value = get_property_with_accessors(mc, env, &next_res, "value")?;
 
-                        match decl_kind_opt {
-                            Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
-                                // fresh lexical environment per iteration
-                                let iter_env = new_js_object_data(mc);
-                                iter_env.borrow_mut(mc).prototype = Some(*env);
-
-                                // perform destructuring into iter_env
-                                for (j, elem) in pattern.iter().enumerate() {
-                                    if let DestructuringElement::Variable(name, _) = elem {
-                                        let elem_val = if let Value::Object(o) = &value {
-                                            if is_array(mc, o) {
-                                                if let Some(cell) = object_get_key_value(o, j) {
-                                                    cell.borrow().clone()
-                                                } else {
-                                                    Value::Undefined
-                                                }
-                                            } else {
-                                                Value::Undefined
-                                            }
-                                        } else {
-                                            Value::Undefined
-                                        };
-                                        object_set_key_value(mc, &iter_env, name, &elem_val)?;
-                                    }
-                                }
-
-                                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
-                                match res {
-                                    ControlFlow::Normal(_) => *last_value = vbody,
-                                    ControlFlow::Break(label) => {
-                                        if !matches!(&vbody, Value::Undefined) {
-                                            *last_value = vbody;
-                                        }
-                                        if label.is_none() {
-                                            break;
-                                        }
-                                        return Ok(Some(ControlFlow::Break(label)));
-                                    }
-                                    ControlFlow::Continue(label) => {
-                                        if !matches!(&vbody, Value::Undefined) {
-                                            *last_value = vbody;
-                                        }
-                                        if let Some(ref l) = label
-                                            && !own_labels.contains(l)
-                                        {
-                                            return Ok(Some(ControlFlow::Continue(label)));
-                                        }
-                                    }
-                                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                        let pattern_expr = Expr::Array(convert_array_pattern_inner(pattern));
+                        let body_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                            let iter_env = new_js_object_data(mc);
+                            iter_env.borrow_mut(mc).prototype = Some(*env);
+                            for name in names.iter() {
+                                object_set_key_value(mc, &iter_env, name, &Value::Uninitialized)?;
+                            }
+                            if let Err(e) = evaluate_binding_target_with_value(mc, &iter_env, &pattern_expr, &value) {
+                                return Err(iterator_close_on_error(mc, env, &iter_obj, e));
+                            }
+                            if matches!(decl_kind_opt, Some(crate::core::VarDeclKind::Const)) {
+                                for name in names.iter() {
+                                    iter_env.borrow_mut(mc).set_const(name.clone());
                                 }
                             }
-                            _ => {
-                                // var or assignment form: bind into parent env
-                                for (j, elem) in pattern.iter().enumerate() {
-                                    if let DestructuringElement::Variable(name, _) = elem {
-                                        let elem_val = if let Value::Object(o) = &value {
-                                            if is_array(mc, o) {
-                                                if let Some(cell) = object_get_key_value(o, j) {
-                                                    cell.borrow().clone()
-                                                } else {
-                                                    Value::Undefined
-                                                }
-                                            } else {
-                                                Value::Undefined
-                                            }
-                                        } else {
-                                            Value::Undefined
-                                        };
-                                        crate::core::env_set_recursive(mc, env, name, &elem_val)?;
-                                    }
-                                }
+                            iter_env
+                        } else {
+                            if let Err(e) = evaluate_binding_target_with_value(mc, env, &pattern_expr, &value) {
+                                return Err(iterator_close_on_error(mc, env, &iter_obj, e));
+                            }
+                            *env
+                        };
 
-                                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
-                                match res {
-                                    ControlFlow::Normal(_) => *last_value = vbody,
-                                    ControlFlow::Break(label) => {
-                                        if !matches!(&vbody, Value::Undefined) {
-                                            *last_value = vbody;
-                                        }
-                                        if label.is_none() {
-                                            break;
-                                        }
-                                        return Ok(Some(ControlFlow::Break(label)));
-                                    }
-                                    ControlFlow::Continue(label) => {
-                                        if !matches!(&vbody, Value::Undefined) {
-                                            *last_value = vbody;
-                                        }
-                                        if let Some(ref l) = label
-                                            && !own_labels.contains(l)
-                                        {
-                                            return Ok(Some(ControlFlow::Continue(label)));
-                                        }
-                                    }
-                                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                        let (res, vbody) =
+                            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                                evaluate_statements_with_context_and_last_value(mc, &body_env, body, labels)?
+                            } else {
+                                evaluate_statements_with_context_and_last_value(mc, env, body, labels)?
+                            };
+                        match res {
+                            ControlFlow::Normal(_) => *last_value = vbody,
+                            ControlFlow::Break(label) => {
+                                if !matches!(&vbody, Value::Undefined) {
+                                    *last_value = vbody;
                                 }
+                                if label.is_none() {
+                                    iterator_close(mc, env, &iter_obj)?;
+                                    break;
+                                }
+                                iterator_close(mc, env, &iter_obj)?;
+                                return Ok(Some(ControlFlow::Break(label)));
+                            }
+                            ControlFlow::Continue(label) => {
+                                if !matches!(&vbody, Value::Undefined) {
+                                    *last_value = vbody;
+                                }
+                                if let Some(ref l) = label
+                                    && !own_labels.contains(l)
+                                {
+                                    iterator_close(mc, env, &iter_obj)?;
+                                    return Ok(Some(ControlFlow::Continue(label)));
+                                }
+                            }
+                            ControlFlow::Return(v) => {
+                                iterator_close(mc, env, &iter_obj)?;
+                                return Ok(Some(ControlFlow::Return(v)));
+                            }
+                            ControlFlow::Throw(v, l, c) => {
+                                let _ = iterator_close(mc, env, &iter_obj);
+                                return Ok(Some(ControlFlow::Throw(v, l, c)));
                             }
                         }
                     } else {
@@ -6445,27 +6359,38 @@ fn eval_res<'gc>(
             if let Value::Object(obj) = iter_val
                 && is_array(mc, &obj)
             {
-                let len = object_get_length(&obj).unwrap_or(0);
-                let loop_env = new_js_object_data(mc);
-                loop_env.borrow_mut(mc).prototype = Some(*env);
+                let len_val = object_get_key_value(&obj, "length")
+                    .map(|v| v.borrow().clone())
+                    .unwrap_or(Value::Number(0.0));
+                let len = match len_val {
+                    Value::Number(n) if n.is_finite() && n >= 0.0 => n as usize,
+                    _ => 0,
+                };
                 for i in 0..len {
                     let val = get_property_with_accessors(mc, env, &obj, i)?;
-                    // Perform array destructuring
-                    for (j, elem) in pattern.iter().enumerate() {
-                        if let DestructuringElement::Variable(name, _) = elem {
-                            let elem_val = if let Value::Object(o) = &val {
-                                if is_array(mc, o) {
-                                    get_property_with_accessors(mc, env, o, j)?
-                                } else {
-                                    Value::Undefined
-                                }
-                            } else {
-                                Value::Undefined
-                            };
-                            crate::core::env_set_recursive(mc, env, name, &elem_val)?;
+                    let pattern_expr = Expr::Array(convert_array_pattern_inner(pattern));
+                    let body_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                        let iter_env = new_js_object_data(mc);
+                        iter_env.borrow_mut(mc).prototype = Some(*env);
+                        for name in names.iter() {
+                            object_set_key_value(mc, &iter_env, name, &Value::Uninitialized)?;
                         }
-                    }
-                    let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &loop_env, body, labels)?;
+                        evaluate_binding_target_with_value(mc, &iter_env, &pattern_expr, &val)?;
+                        if matches!(decl_kind_opt, Some(crate::core::VarDeclKind::Const)) {
+                            for name in names.iter() {
+                                iter_env.borrow_mut(mc).set_const(name.clone());
+                            }
+                        }
+                        iter_env
+                    } else {
+                        evaluate_binding_target_with_value(mc, env, &pattern_expr, &val)?;
+                        *env
+                    };
+                    let (res, vbody) = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                        evaluate_statements_with_context_and_last_value(mc, &body_env, body, labels)?
+                    } else {
+                        evaluate_statements_with_context_and_last_value(mc, env, body, labels)?
+                    };
                     match res {
                         ControlFlow::Normal(_) => *last_value = vbody,
                         ControlFlow::Break(label) => {
@@ -8340,7 +8265,7 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
             }
             // Obtain iterator if available
             let mut iterator: Option<crate::core::JSObjectDataPtr<'gc>> = None;
-            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+            if let Some(sym_ctor) = env_get(env, "Symbol")
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                 && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
@@ -8361,81 +8286,172 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
             if let Some(iter_obj) = iterator {
                 // Iterate and assign
                 let mut iterator_done = false;
-                for elem_opt in elements.iter() {
-                    if let Some(elem_expr) = elem_opt
-                        && let Expr::Spread(spread_expr) = elem_expr
-                    {
-                        let rest_obj = crate::js_array::create_array(mc, env)?;
-                        let mut idx2 = 0_usize;
-                        if !iterator_done {
-                            loop {
-                                let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
-                                if matches!(next_method, Value::Undefined | Value::Null) {
-                                    return Err(raise_type_error!("Iterator has no next method").into());
-                                }
-                                let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
-                                if let Value::Object(next_res) = next_res_val {
-                                    let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
-                                    let done = matches!(done_val, Value::Boolean(true));
-                                    if done {
-                                        iterator_done = true;
-                                        break;
+                let bind_res: Result<(), EvalError<'gc>> = (|| {
+                    for elem_opt in elements.iter() {
+                        if let Some(elem_expr) = elem_opt
+                            && let Expr::Spread(spread_expr) = elem_expr
+                        {
+                            let precomputed_target = match &**spread_expr {
+                                Expr::Var(_, _, _) | Expr::Array(_) | Expr::Object(_) => None,
+                                other => Some(precompute_target(mc, env, other)?),
+                            };
+                            let rest_obj = crate::js_array::create_array(mc, env)?;
+                            let mut idx2 = 0_usize;
+                            if !iterator_done {
+                                loop {
+                                    let next_method = match get_property_with_accessors(mc, env, &iter_obj, "next") {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            iterator_done = true;
+                                            return Err(e);
+                                        }
+                                    };
+                                    if matches!(next_method, Value::Undefined | Value::Null) {
+                                        return Err(raise_type_error!("Iterator has no next method").into());
                                     }
-                                    let value = get_property_with_accessors(mc, env, &next_res, "value")?;
-                                    object_set_key_value(mc, &rest_obj, idx2, &value)?;
-                                    idx2 += 1;
-                                } else {
-                                    return Err(raise_type_error!("Iterator result is not an object").into());
+                                    let next_res_val =
+                                        match evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[]) {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                iterator_done = true;
+                                                return Err(e);
+                                            }
+                                        };
+                                    if let Value::Object(next_res) = next_res_val {
+                                        let done_val = match get_property_with_accessors(mc, env, &next_res, "done") {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                iterator_done = true;
+                                                return Err(e);
+                                            }
+                                        };
+                                        let done = matches!(done_val, Value::Boolean(true));
+                                        if done {
+                                            iterator_done = true;
+                                            break;
+                                        }
+                                        let value = match get_property_with_accessors(mc, env, &next_res, "value") {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                iterator_done = true;
+                                                return Err(e);
+                                            }
+                                        };
+                                        object_set_key_value(mc, &rest_obj, idx2, &value)?;
+                                        idx2 += 1;
+                                    } else {
+                                        return Err(raise_type_error!("Iterator result is not an object").into());
+                                    }
                                 }
                             }
-                        }
-                        object_set_key_value(mc, &rest_obj, "length", &Value::Number(idx2 as f64))?;
-                        match &**spread_expr {
-                            Expr::Var(name, _, _) => {
-                                env_set_recursive(mc, env, name, &Value::Object(rest_obj))?;
-                            }
-                            other => {
-                                evaluate_assign_target_with_value(mc, env, other, &Value::Object(rest_obj))?;
-                            }
-                        }
-                        break;
-                    }
-
-                    let value = if iterator_done {
-                        Value::Undefined
-                    } else {
-                        let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
-                        if matches!(next_method, Value::Undefined | Value::Null) {
-                            return Err(raise_type_error!("Iterator has no next method").into());
-                        }
-                        let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
-                        if let Value::Object(next_res) = next_res_val {
-                            let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
-                            let done = matches!(done_val, Value::Boolean(true));
-                            if done {
-                                iterator_done = true;
-                                Value::Undefined
+                            object_set_key_value(mc, &rest_obj, "length", &Value::Number(idx2 as f64))?;
+                            if let Some(temp) = precomputed_target {
+                                put_temp(mc, env, temp, &Value::Object(rest_obj))?;
                             } else {
-                                get_property_with_accessors(mc, env, &next_res, "value")?
+                                match &**spread_expr {
+                                    Expr::Var(name, _, _) => {
+                                        env_set_recursive(mc, env, name, &Value::Object(rest_obj))?;
+                                    }
+                                    other => {
+                                        evaluate_assign_target_with_value(mc, env, other, &Value::Object(rest_obj))?;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+
+                        let precomputed_target = if let Some(elem_expr) = elem_opt {
+                            match elem_expr {
+                                Expr::Var(_, _, _) | Expr::Array(_) | Expr::Object(_) => None,
+                                Expr::Assign(lhs, _) => match &**lhs {
+                                    Expr::Var(_, _, _) | Expr::Array(_) | Expr::Object(_) => None,
+                                    other => Some(precompute_target(mc, env, other)?),
+                                },
+                                other => Some(precompute_target(mc, env, other)?),
                             }
                         } else {
-                            return Err(raise_type_error!("Iterator result is not an object").into());
-                        }
-                    };
+                            None
+                        };
 
-                    if let Some(elem_expr) = elem_opt {
-                        match elem_expr {
-                            Expr::Var(name, _, _) => {
-                                env_set_recursive(mc, env, name, &value)?;
+                        let value = if iterator_done {
+                            Value::Undefined
+                        } else {
+                            let next_method = match get_property_with_accessors(mc, env, &iter_obj, "next") {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    iterator_done = true;
+                                    return Err(e);
+                                }
+                            };
+                            if matches!(next_method, Value::Undefined | Value::Null) {
+                                return Err(raise_type_error!("Iterator has no next method").into());
                             }
-                            Expr::Assign(_, _) => {
-                                evaluate_assign_target_with_value(mc, env, elem_expr, &value)?;
+                            let next_res_val = match evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[]) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    iterator_done = true;
+                                    return Err(e);
+                                }
+                            };
+                            if let Value::Object(next_res) = next_res_val {
+                                let done_val = match get_property_with_accessors(mc, env, &next_res, "done") {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        iterator_done = true;
+                                        return Err(e);
+                                    }
+                                };
+                                let done = matches!(done_val, Value::Boolean(true));
+                                if done {
+                                    iterator_done = true;
+                                    Value::Undefined
+                                } else {
+                                    match get_property_with_accessors(mc, env, &next_res, "value") {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            iterator_done = true;
+                                            return Err(e);
+                                        }
+                                    }
+                                }
+                            } else {
+                                return Err(raise_type_error!("Iterator result is not an object").into());
                             }
-                            other => {
-                                evaluate_assign_target_with_value(mc, env, other, &value)?;
+                        };
+
+                        if let Some(elem_expr) = elem_opt {
+                            match elem_expr {
+                                Expr::Var(name, _, _) => {
+                                    env_set_recursive(mc, env, name, &value)?;
+                                }
+                                Expr::Assign(_, default_expr) => {
+                                    if let Some(temp) = precomputed_target {
+                                        let mut assigned_val = value.clone();
+                                        if matches!(assigned_val, Value::Undefined) {
+                                            assigned_val = evaluate_expr(mc, env, default_expr)?;
+                                        }
+                                        put_temp(mc, env, temp, &assigned_val)?;
+                                    } else {
+                                        evaluate_assign_target_with_value(mc, env, elem_expr, &value)?;
+                                    }
+                                }
+                                other => {
+                                    if let Some(temp) = precomputed_target {
+                                        put_temp(mc, env, temp, &value)?;
+                                    } else {
+                                        evaluate_assign_target_with_value(mc, env, other, &value)?;
+                                    }
+                                }
                             }
                         }
                     }
+                    Ok(())
+                })();
+                if let Err(e) = bind_res {
+                    if !iterator_done {
+                        return Err(iterator_close_on_error(mc, env, &iter_obj, e));
+                    }
+                    return Err(e);
                 }
                 if !iterator_done {
                     iterator_close(mc, env, &iter_obj)?;
@@ -8691,81 +8707,98 @@ pub(crate) fn evaluate_binding_target_with_value<'gc>(
 
             if let Some(iter_obj) = iterator {
                 let mut iterator_done = false;
-                for elem_opt in elements.iter() {
-                    if let Some(elem_expr) = elem_opt
-                        && let Expr::Spread(spread_expr) = elem_expr
-                    {
-                        let rest_obj = crate::js_array::create_array(mc, env)?;
-                        let mut idx2 = 0_usize;
-                        if !iterator_done {
-                            loop {
-                                let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
-                                if matches!(next_method, Value::Undefined | Value::Null) {
-                                    return Err(raise_type_error!("Iterator has no next method").into());
-                                }
-                                let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
-                                if let Value::Object(next_res) = next_res_val {
-                                    let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
-                                    let done = matches!(done_val, Value::Boolean(true));
-                                    if done {
-                                        iterator_done = true;
-                                        break;
+                let bind_res: Result<(), EvalError<'gc>> = (|| {
+                    for elem_opt in elements.iter() {
+                        if let Some(elem_expr) = elem_opt
+                            && let Expr::Spread(spread_expr) = elem_expr
+                        {
+                            let precomputed_target = match &**spread_expr {
+                                Expr::Var(_, _, _) | Expr::Array(_) | Expr::Object(_) => None,
+                                other => Some(precompute_target(mc, env, other)?),
+                            };
+                            let rest_obj = crate::js_array::create_array(mc, env)?;
+                            let mut idx2 = 0_usize;
+                            if !iterator_done {
+                                loop {
+                                    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                                    if matches!(next_method, Value::Undefined | Value::Null) {
+                                        return Err(raise_type_error!("Iterator has no next method").into());
                                     }
-                                    let value = get_property_with_accessors(mc, env, &next_res, "value")?;
-                                    object_set_key_value(mc, &rest_obj, idx2, &value)?;
-                                    idx2 += 1;
+                                    let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+                                    if let Value::Object(next_res) = next_res_val {
+                                        let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
+                                        let done = matches!(done_val, Value::Boolean(true));
+                                        if done {
+                                            iterator_done = true;
+                                            break;
+                                        }
+                                        let value = get_property_with_accessors(mc, env, &next_res, "value")?;
+                                        object_set_key_value(mc, &rest_obj, idx2, &value)?;
+                                        idx2 += 1;
+                                    } else {
+                                        return Err(raise_type_error!("Iterator result is not an object").into());
+                                    }
+                                }
+                            }
+                            object_set_key_value(mc, &rest_obj, "length", &Value::Number(idx2 as f64))?;
+                            if let Some(temp) = precomputed_target {
+                                put_temp(mc, env, temp, &Value::Object(rest_obj))?;
+                            } else {
+                                match &**spread_expr {
+                                    Expr::Var(name, _, _) => {
+                                        env_set(mc, env, name, &Value::Object(rest_obj))?;
+                                    }
+                                    other => {
+                                        evaluate_binding_target_with_value(mc, env, other, &Value::Object(rest_obj))?;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+
+                        let value = if iterator_done {
+                            Value::Undefined
+                        } else {
+                            let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                            if matches!(next_method, Value::Undefined | Value::Null) {
+                                return Err(raise_type_error!("Iterator has no next method").into());
+                            }
+                            let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+                            if let Value::Object(next_res) = next_res_val {
+                                let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
+                                let done = matches!(done_val, Value::Boolean(true));
+                                if done {
+                                    iterator_done = true;
+                                    Value::Undefined
                                 } else {
-                                    return Err(raise_type_error!("Iterator result is not an object").into());
+                                    get_property_with_accessors(mc, env, &next_res, "value")?
+                                }
+                            } else {
+                                return Err(raise_type_error!("Iterator result is not an object").into());
+                            }
+                        };
+
+                        if let Some(elem_expr) = elem_opt {
+                            match elem_expr {
+                                Expr::Var(name, _, _) => {
+                                    env_set(mc, env, name, &value)?;
+                                }
+                                Expr::Assign(_, _) => {
+                                    evaluate_binding_target_with_value(mc, env, elem_expr, &value)?;
+                                }
+                                other => {
+                                    evaluate_binding_target_with_value(mc, env, other, &value)?;
                                 }
                             }
                         }
-                        object_set_key_value(mc, &rest_obj, "length", &Value::Number(idx2 as f64))?;
-                        match &**spread_expr {
-                            Expr::Var(name, _, _) => {
-                                env_set(mc, env, name, &Value::Object(rest_obj))?;
-                            }
-                            other => {
-                                evaluate_binding_target_with_value(mc, env, other, &Value::Object(rest_obj))?;
-                            }
-                        }
-                        break;
                     }
-
-                    let value = if iterator_done {
-                        Value::Undefined
-                    } else {
-                        let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
-                        if matches!(next_method, Value::Undefined | Value::Null) {
-                            return Err(raise_type_error!("Iterator has no next method").into());
-                        }
-                        let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
-                        if let Value::Object(next_res) = next_res_val {
-                            let done_val = get_property_with_accessors(mc, env, &next_res, "done")?;
-                            let done = matches!(done_val, Value::Boolean(true));
-                            if done {
-                                iterator_done = true;
-                                Value::Undefined
-                            } else {
-                                get_property_with_accessors(mc, env, &next_res, "value")?
-                            }
-                        } else {
-                            return Err(raise_type_error!("Iterator result is not an object").into());
-                        }
-                    };
-
-                    if let Some(elem_expr) = elem_opt {
-                        match elem_expr {
-                            Expr::Var(name, _, _) => {
-                                env_set(mc, env, name, &value)?;
-                            }
-                            Expr::Assign(_, _) => {
-                                evaluate_binding_target_with_value(mc, env, elem_expr, &value)?;
-                            }
-                            other => {
-                                evaluate_binding_target_with_value(mc, env, other, &value)?;
-                            }
-                        }
+                    Ok(())
+                })();
+                if let Err(e) = bind_res {
+                    if !iterator_done {
+                        return Err(iterator_close_on_error(mc, env, &iter_obj, e));
                     }
+                    return Err(e);
                 }
                 if !iterator_done {
                     iterator_close(mc, env, &iter_obj)?;
@@ -17353,6 +17386,21 @@ pub(crate) fn call_accessor<'gc>(
             }
         }
         Value::Getter(body, captured_env, home_opt) => {
+            if body.len() == 1
+                && let StatementKind::Return(Some(Expr::Property(obj_expr, prop_name))) = &*body[0].kind
+                && let Expr::Var(hidden, ..) = &**obj_expr
+                && let Some(src_cell) = env_get(captured_env, hidden)
+                && let Value::Object(src_obj) = src_cell.borrow().clone()
+            {
+                return normalize_value(get_property_with_accessors(mc, env, &src_obj, prop_name.as_str())?);
+            }
+
+            if body.len() == 1
+                && let StatementKind::Return(Some(Expr::Var(binding_name, ..))) = &*body[0].kind
+            {
+                return normalize_value(evaluate_var(mc, captured_env, binding_name)?);
+            }
+
             let call_env = crate::core::new_js_object_data(mc);
             call_env.borrow_mut(mc).prototype = Some(*captured_env);
             call_env.borrow_mut(mc).is_function_scope = true;
@@ -18253,6 +18301,82 @@ fn convert_object_pattern_inner(elms: &[DestructuringElement]) -> Vec<(Expr, Exp
                 out.push((Expr::Var(name.clone(), None, None), target_expr, true, false));
             }
             _ => {}
+        }
+    }
+    out
+}
+
+fn convert_object_binding_pattern_from_object_elements(elms: &[ObjectDestructuringElement]) -> Vec<(Expr, Expr, bool, bool)> {
+    let mut out: Vec<(Expr, Expr, bool, bool)> = Vec::new();
+    for e in elms.iter() {
+        match e {
+            ObjectDestructuringElement::Property { key, value } => {
+                let key_expr = Expr::StringLit(utf8_to_utf16(key));
+                let val_expr = match value {
+                    DestructuringElement::Variable(name, maybe_def) => {
+                        let base = Expr::Var(name.clone(), None, None);
+                        if let Some(def) = maybe_def {
+                            Expr::Assign(Box::new(base), Box::new((**def).clone()))
+                        } else {
+                            base
+                        }
+                    }
+                    DestructuringElement::NestedArray(sub, maybe_def) => {
+                        let inner = convert_array_pattern_inner(sub);
+                        let mut arr_expr = Expr::Array(inner);
+                        if let Some(def) = maybe_def {
+                            arr_expr = Expr::Assign(Box::new(arr_expr), Box::new((**def).clone()));
+                        }
+                        arr_expr
+                    }
+                    DestructuringElement::NestedObject(sub, maybe_def) => {
+                        let inner = convert_object_pattern_inner(sub);
+                        let mut obj_expr = Expr::Object(inner);
+                        if let Some(def) = maybe_def {
+                            obj_expr = Expr::Assign(Box::new(obj_expr), Box::new((**def).clone()));
+                        }
+                        obj_expr
+                    }
+                    DestructuringElement::Rest(name) => Expr::Var(name.clone(), None, None),
+                    _ => Expr::Var(String::new(), None, None),
+                };
+                out.push((key_expr, val_expr, false, false));
+            }
+            ObjectDestructuringElement::ComputedProperty { key, value } => {
+                let val_expr = match value {
+                    DestructuringElement::Variable(name, maybe_def) => {
+                        let base = Expr::Var(name.clone(), None, None);
+                        if let Some(def) = maybe_def {
+                            Expr::Assign(Box::new(base), Box::new((**def).clone()))
+                        } else {
+                            base
+                        }
+                    }
+                    DestructuringElement::NestedArray(sub, maybe_def) => {
+                        let inner = convert_array_pattern_inner(sub);
+                        let mut arr_expr = Expr::Array(inner);
+                        if let Some(def) = maybe_def {
+                            arr_expr = Expr::Assign(Box::new(arr_expr), Box::new((**def).clone()));
+                        }
+                        arr_expr
+                    }
+                    DestructuringElement::NestedObject(sub, maybe_def) => {
+                        let inner = convert_object_pattern_inner(sub);
+                        let mut obj_expr = Expr::Object(inner);
+                        if let Some(def) = maybe_def {
+                            obj_expr = Expr::Assign(Box::new(obj_expr), Box::new((**def).clone()));
+                        }
+                        obj_expr
+                    }
+                    DestructuringElement::Rest(name) => Expr::Var(name.clone(), None, None),
+                    _ => Expr::Var(String::new(), None, None),
+                };
+                out.push((key.clone(), val_expr, false, false));
+            }
+            ObjectDestructuringElement::Rest(name) => {
+                let target_expr = Expr::Var(name.clone(), None, None);
+                out.push((Expr::Var(name.clone(), None, None), target_expr, true, false));
+            }
         }
     }
     out

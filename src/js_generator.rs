@@ -1,9 +1,10 @@
 use crate::core::{Gc, GcCell, GcPtr, GeneratorState, MutationContext};
 use crate::{
     core::{
-        ClassDefinition, ClassMember, EvalError, Expr, JSGenerator, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value,
-        VarDeclKind, env_get, env_get_strictness, env_set, env_set_recursive, env_set_strictness, evaluate_call_dispatch, evaluate_expr,
-        new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env, prepare_function_call_env_with_home,
+        CatchParamPattern, ClassDefinition, ClassMember, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectDataPtr,
+        ObjectDestructuringElement, PropertyKey, Statement, StatementKind, Value, VarDeclKind, env_get, env_get_strictness, env_set,
+        env_set_recursive, env_set_strictness, evaluate_call_dispatch, evaluate_expr, new_js_object_data, object_get_key_value,
+        object_set_key_value, prepare_function_call_env, prepare_function_call_env_with_home,
     },
     error::JSError,
 };
@@ -138,6 +139,46 @@ fn get_for_await_iterator<'gc>(
     }
 
     Err(raise_type_error!("Value is not iterable").into())
+}
+
+fn bind_for_of_iteration_env<'gc>(
+    mc: &MutationContext<'gc>,
+    func_env: &JSObjectDataPtr<'gc>,
+    decl_kind: Option<VarDeclKind>,
+    var_name: &str,
+    value: &Value<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+    match decl_kind {
+        Some(VarDeclKind::Let) | Some(VarDeclKind::Const) => {
+            let iter_env = crate::core::new_js_object_data(mc);
+            iter_env.borrow_mut(mc).prototype = Some(*func_env);
+            object_set_key_value(mc, &iter_env, var_name, value)?;
+            if matches!(decl_kind, Some(VarDeclKind::Const)) {
+                iter_env.borrow_mut(mc).set_const(var_name.to_string());
+            }
+            Ok(iter_env)
+        }
+        _ => {
+            if object_get_key_value(func_env, var_name).is_none() {
+                object_set_key_value(mc, func_env, var_name, &Value::Undefined)?;
+            }
+            env_set_recursive(mc, func_env, var_name, value)?;
+            Ok(*func_env)
+        }
+    }
+}
+
+fn evaluate_for_of_body_first_yield<'gc>(
+    mc: &MutationContext<'gc>,
+    iter_env: &JSObjectDataPtr<'gc>,
+    body: &[Statement],
+) -> Result<(YieldKind, Option<Box<Expr>>), EvalError<'gc>> {
+    eval_statements_prefix_until_first_yield(mc, iter_env, body)?;
+    if let Some((_idx, _inner_idx_opt, yield_kind, yield_inner)) = find_first_yield_in_statements(body) {
+        Ok((yield_kind, yield_inner))
+    } else {
+        Err(raise_eval_error!("Expected yield in for-of body").into())
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -331,6 +372,7 @@ pub fn handle_generator_function_call<'gc>(
             pending_iterator_done: false,
             yield_star_iterator: None,
             pending_for_await: None,
+            pending_for_of: None,
         }),
     );
 
@@ -704,6 +746,88 @@ fn replace_first_yield_in_class_member(member: &mut ClassMember, var_name: &str,
     }
 }
 
+fn find_yield_in_destructuring_element(elem: &DestructuringElement) -> Option<(YieldKind, Option<Box<Expr>>)> {
+    match elem {
+        DestructuringElement::Variable(_, default_opt) => default_opt.as_ref().and_then(|e| find_yield_in_expr(e)),
+        DestructuringElement::Property(_, inner)
+        | DestructuringElement::ComputedProperty(_, inner)
+        | DestructuringElement::RestPattern(inner) => find_yield_in_destructuring_element(inner),
+        DestructuringElement::NestedArray(inner, default_opt) => default_opt
+            .as_ref()
+            .and_then(|e| find_yield_in_expr(e))
+            .or_else(|| inner.iter().find_map(find_yield_in_destructuring_element)),
+        DestructuringElement::NestedObject(inner, default_opt) => default_opt
+            .as_ref()
+            .and_then(|e| find_yield_in_expr(e))
+            .or_else(|| inner.iter().find_map(find_yield_in_destructuring_element)),
+        DestructuringElement::Empty | DestructuringElement::Rest(_) => None,
+    }
+}
+
+fn find_yield_in_object_destructuring_element(elem: &ObjectDestructuringElement) -> Option<(YieldKind, Option<Box<Expr>>)> {
+    match elem {
+        ObjectDestructuringElement::Property { value, .. } => find_yield_in_destructuring_element(value),
+        ObjectDestructuringElement::ComputedProperty { key, value } => {
+            find_yield_in_expr(key).or_else(|| find_yield_in_destructuring_element(value))
+        }
+        ObjectDestructuringElement::Rest(_) => None,
+    }
+}
+
+fn replace_first_yield_in_destructuring_element(elem: &mut DestructuringElement, var_name: &str, replaced: &mut bool) {
+    if *replaced {
+        return;
+    }
+    match elem {
+        DestructuringElement::Variable(_, default_opt) => {
+            if let Some(def) = default_opt.as_mut() {
+                let replaced_expr = replace_first_yield_in_expr(def, var_name, replaced);
+                **def = replaced_expr;
+            }
+        }
+        DestructuringElement::Property(_, inner)
+        | DestructuringElement::ComputedProperty(_, inner)
+        | DestructuringElement::RestPattern(inner) => {
+            replace_first_yield_in_destructuring_element(inner, var_name, replaced);
+        }
+        DestructuringElement::NestedArray(inner, default_opt) | DestructuringElement::NestedObject(inner, default_opt) => {
+            if let Some(def) = default_opt.as_mut() {
+                let replaced_expr = replace_first_yield_in_expr(def, var_name, replaced);
+                **def = replaced_expr;
+                if *replaced {
+                    return;
+                }
+            }
+            for e in inner.iter_mut() {
+                replace_first_yield_in_destructuring_element(e, var_name, replaced);
+                if *replaced {
+                    return;
+                }
+            }
+        }
+        DestructuringElement::Empty | DestructuringElement::Rest(_) => {}
+    }
+}
+
+fn replace_first_yield_in_object_destructuring_element(elem: &mut ObjectDestructuringElement, var_name: &str, replaced: &mut bool) {
+    if *replaced {
+        return;
+    }
+    match elem {
+        ObjectDestructuringElement::Property { value, .. } => {
+            replace_first_yield_in_destructuring_element(value, var_name, replaced);
+        }
+        ObjectDestructuringElement::ComputedProperty { key, value } => {
+            *key = replace_first_yield_in_expr(key, var_name, replaced);
+            if *replaced {
+                return;
+            }
+            replace_first_yield_in_destructuring_element(value, var_name, replaced);
+        }
+        ObjectDestructuringElement::Rest(_) => {}
+    }
+}
+
 pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, var_name: &str, replaced: &mut bool) {
     match stmt.kind.as_mut() {
         StatementKind::Expr(e) => {
@@ -788,10 +912,51 @@ pub(crate) fn replace_first_yield_in_statement(stmt: &mut Statement, var_name: &
             }
             *cond = replace_first_yield_in_expr(cond, var_name, replaced);
         }
-        StatementKind::ForOf(_, _, _, body)
-        | StatementKind::ForIn(_, _, _, body)
-        | StatementKind::ForOfDestructuringObject(_, _, _, body)
-        | StatementKind::ForOfDestructuringArray(_, _, _, body) => {
+        StatementKind::ForOf(_, _, iterable, body) | StatementKind::ForIn(_, _, iterable, body) => {
+            *iterable = replace_first_yield_in_expr(iterable, var_name, replaced);
+            if *replaced {
+                return;
+            }
+            for s in body.iter_mut() {
+                replace_first_yield_in_statement(s, var_name, replaced);
+                if *replaced {
+                    return;
+                }
+            }
+        }
+        StatementKind::ForOfDestructuringObject(_, pattern, iterable, body)
+        | StatementKind::ForInDestructuringObject(_, pattern, iterable, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, pattern, iterable, body) => {
+            for p in pattern.iter_mut() {
+                replace_first_yield_in_object_destructuring_element(p, var_name, replaced);
+                if *replaced {
+                    return;
+                }
+            }
+            *iterable = replace_first_yield_in_expr(iterable, var_name, replaced);
+            if *replaced {
+                return;
+            }
+            for s in body.iter_mut() {
+                replace_first_yield_in_statement(s, var_name, replaced);
+                if *replaced {
+                    return;
+                }
+            }
+        }
+        StatementKind::ForOfDestructuringArray(_, pattern, iterable, body)
+        | StatementKind::ForInDestructuringArray(_, pattern, iterable, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, pattern, iterable, body) => {
+            for p in pattern.iter_mut() {
+                replace_first_yield_in_destructuring_element(p, var_name, replaced);
+                if *replaced {
+                    return;
+                }
+            }
+            *iterable = replace_first_yield_in_expr(iterable, var_name, replaced);
+            if *replaced {
+                return;
+            }
             for s in body.iter_mut() {
                 replace_first_yield_in_statement(s, var_name, replaced);
                 if *replaced {
@@ -935,6 +1100,119 @@ fn eval_prefix_until_first_yield<'gc>(mc: &MutationContext<'gc>, env: &JSObjectD
                 let _ = crate::core::evaluate_expr(mc, env, expr)?;
                 Ok(false)
             }
+        }
+    }
+}
+
+fn eval_statement_prefix_until_first_yield<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    stmt: &Statement,
+) -> Result<(), EvalError<'gc>> {
+    match &*stmt.kind {
+        StatementKind::Expr(expr) => {
+            let _ = eval_prefix_until_first_yield(mc, env, expr)?;
+        }
+        StatementKind::Block(inner) => {
+            eval_statements_prefix_until_first_yield(mc, env, inner)?;
+        }
+        StatementKind::TryCatch(tc_stmt) => {
+            if find_first_yield_in_statements(&tc_stmt.try_body).is_some() {
+                eval_statements_prefix_until_first_yield(mc, env, &tc_stmt.try_body)?;
+                return Ok(());
+            }
+
+            let mut thrown_value: Option<Value> = None;
+            if !tc_stmt.try_body.is_empty() {
+                match crate::core::evaluate_statements_with_context_and_last_value(mc, env, &tc_stmt.try_body, &[]) {
+                    Ok((cf, _)) => {
+                        if let crate::core::ControlFlow::Throw(v, _, _) = cf {
+                            thrown_value = Some(v);
+                        }
+                    }
+                    Err(EvalError::Throw(v, _, _)) => {
+                        thrown_value = Some(v);
+                    }
+                    Err(EvalError::Js(js_err)) => {
+                        thrown_value = Some(crate::core::js_error_to_value(mc, env, &js_err));
+                    }
+                }
+            }
+
+            if let Some(catch_body) = &tc_stmt.catch_body
+                && find_first_yield_in_statements(catch_body).is_some()
+            {
+                let catch_env = crate::core::new_js_object_data(mc);
+                catch_env.borrow_mut(mc).prototype = Some(*env);
+                if let Some(catch_val) = thrown_value
+                    && let Some(CatchParamPattern::Identifier(name)) = &tc_stmt.catch_param
+                {
+                    object_set_key_value(mc, &catch_env, name, &catch_val)?;
+                }
+                eval_statements_prefix_until_first_yield(mc, &catch_env, catch_body)?;
+                return Ok(());
+            }
+
+            if let Some(finally_body) = &tc_stmt.finally_body
+                && find_first_yield_in_statements(finally_body).is_some()
+            {
+                let finally_env = crate::core::new_js_object_data(mc);
+                finally_env.borrow_mut(mc).prototype = Some(*env);
+                eval_statements_prefix_until_first_yield(mc, &finally_env, finally_body)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn eval_statements_prefix_until_first_yield<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    stmts: &[Statement],
+) -> Result<(), EvalError<'gc>> {
+    if let Some((idx, _inner_idx_opt, _yield_kind, _yield_inner)) = find_first_yield_in_statements(stmts) {
+        if idx > 0 {
+            crate::core::evaluate_statements(mc, env, &stmts[0..idx])?;
+        }
+        if let Some(stmt) = stmts.get(idx) {
+            eval_statement_prefix_until_first_yield(mc, env, stmt)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn trim_statement_to_post_first_yield(stmt: &mut Statement) {
+    match &mut *stmt.kind {
+        StatementKind::Block(inner) => {
+            trim_statements_to_post_first_yield(inner);
+        }
+        StatementKind::TryCatch(tc_stmt) => {
+            if find_first_yield_in_statements(&tc_stmt.try_body).is_some() {
+                trim_statements_to_post_first_yield(&mut tc_stmt.try_body);
+            } else if let Some(catch_body) = tc_stmt.catch_body.as_mut()
+                && find_first_yield_in_statements(catch_body).is_some()
+            {
+                trim_statements_to_post_first_yield(catch_body);
+            } else if let Some(finally_body) = tc_stmt.finally_body.as_mut()
+                && find_first_yield_in_statements(finally_body).is_some()
+            {
+                trim_statements_to_post_first_yield(finally_body);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn trim_statements_to_post_first_yield(stmts: &mut Vec<Statement>) {
+    if let Some((idx, _inner_idx_opt, _yield_kind, _yield_inner)) = find_first_yield_in_statements(stmts) {
+        if idx > 0 {
+            stmts.drain(0..idx);
+        }
+        if let Some(first_stmt) = stmts.first_mut() {
+            trim_statement_to_post_first_yield(first_stmt);
         }
     }
 }
@@ -1435,21 +1713,55 @@ fn prepare_pending_iterator_for_yield<'gc>(
     eval_env: &JSObjectDataPtr<'gc>,
     stmt: &Statement,
 ) -> Result<Option<(JSObjectDataPtr<'gc>, bool)>, EvalError<'gc>> {
-    let expr = if let StatementKind::Expr(e) = &*stmt.kind {
-        e
-    } else {
-        return Ok(None);
-    };
-
     let mut pre_steps: usize = 0;
-    let rhs = if let Some((lhs, rhs)) = find_array_assign(expr) {
-        if let Expr::Array(elements) = lhs {
+
+    let rhs_val: Value<'gc> = match &*stmt.kind {
+        StatementKind::Expr(expr) => {
+            let (lhs, rhs) = if let Some(pair) = find_array_assign(expr) {
+                pair
+            } else {
+                return Ok(None);
+            };
+
+            if let Expr::Array(elements) = lhs {
+                let mut consumed = 0usize;
+                for elem_opt in elements.iter() {
+                    match elem_opt {
+                        None => consumed += 1,
+                        Some(elem) => match elem {
+                            Expr::Spread(inner) => {
+                                if find_yield_in_expr(inner).is_some() {
+                                    pre_steps = consumed;
+                                }
+                                break;
+                            }
+                            _ => {
+                                if find_yield_in_expr(elem).is_some() {
+                                    pre_steps = consumed + 1;
+                                    break;
+                                }
+                                consumed += 1;
+                            }
+                        },
+                    }
+                }
+            } else {
+                return Ok(None);
+            }
+
+            crate::core::evaluate_expr(mc, eval_env, rhs)?
+        }
+        StatementKind::ForOfExpr(lhs, iterable, _) => {
+            let elements = if let Expr::Array(elements) = lhs {
+                elements
+            } else {
+                return Ok(None);
+            };
+
             let mut consumed = 0usize;
             for elem_opt in elements.iter() {
                 match elem_opt {
-                    None => {
-                        consumed += 1;
-                    }
+                    None => consumed += 1,
                     Some(elem) => match elem {
                         Expr::Spread(inner) => {
                             if find_yield_in_expr(inner).is_some() {
@@ -1461,64 +1773,56 @@ fn prepare_pending_iterator_for_yield<'gc>(
                             if find_yield_in_expr(elem).is_some() {
                                 pre_steps = consumed + 1;
                                 break;
-                            } else {
-                                consumed += 1;
                             }
+                            consumed += 1;
                         }
                     },
                 }
             }
+
+            let iter_val = crate::core::evaluate_expr(mc, eval_env, iterable)?;
+            let outer_iter = get_iterator(mc, &iter_val, eval_env)?;
+            let next_method = crate::core::get_property_with_accessors(mc, eval_env, &outer_iter, "next")?;
+            if matches!(next_method, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Iterator has no next method").into());
+            }
+            let next_res_val = evaluate_call_dispatch(mc, eval_env, &next_method, Some(&Value::Object(outer_iter)), &[])?;
+            let next_res = if let Value::Object(next_res) = next_res_val {
+                next_res
+            } else {
+                return Err(raise_type_error!("Iterator result is not an object").into());
+            };
+            let done_val = crate::core::get_property_with_accessors(mc, eval_env, &next_res, "done")?;
+            if matches!(done_val, Value::Boolean(true)) {
+                return Ok(None);
+            }
+            crate::core::get_property_with_accessors(mc, eval_env, &next_res, "value")?
         }
-        rhs
-    } else {
-        return Ok(None);
+        _ => return Ok(None),
     };
 
-    let rhs_val = crate::core::evaluate_expr(mc, eval_env, rhs)?;
     if matches!(rhs_val, Value::Undefined | Value::Null) {
         return Ok(None);
     }
 
-    let mut iterator: Option<JSObjectDataPtr<'gc>> = None;
-    if let Some(sym_ctor) = crate::core::env_get(eval_env, "Symbol")
-        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-        && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
-        && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
-    {
-        let method = if let Value::Object(obj) = &rhs_val {
-            crate::core::get_property_with_accessors(mc, eval_env, obj, iter_sym_data)?
-        } else {
-            Value::Undefined
-        };
-        if !matches!(method, Value::Undefined | Value::Null) {
-            let res = crate::core::evaluate_call_dispatch(mc, eval_env, &method, Some(&rhs_val), &[])?;
-            if let Value::Object(iter_obj) = res {
-                iterator = Some(iter_obj);
-            }
-        }
-    }
-
-    if let Some(iter_obj) = iterator {
-        let mut done = false;
-        if pre_steps > 0 {
-            let next_method = crate::core::get_property_with_accessors(mc, eval_env, &iter_obj, "next")?;
-            if !matches!(next_method, Value::Undefined | Value::Null) {
-                for _ in 0..pre_steps {
-                    let next_res_val = evaluate_call_dispatch(mc, eval_env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
-                    if let Value::Object(next_res) = next_res_val {
-                        let done_val = crate::core::get_property_with_accessors(mc, eval_env, &next_res, "done")?;
-                        if matches!(done_val, Value::Boolean(true)) {
-                            done = true;
-                            break;
-                        }
+    let iter_obj = get_iterator(mc, &rhs_val, eval_env)?;
+    let mut done = false;
+    if pre_steps > 0 {
+        let next_method = crate::core::get_property_with_accessors(mc, eval_env, &iter_obj, "next")?;
+        if !matches!(next_method, Value::Undefined | Value::Null) {
+            for _ in 0..pre_steps {
+                let next_res_val = evaluate_call_dispatch(mc, eval_env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+                if let Value::Object(next_res) = next_res_val {
+                    let done_val = crate::core::get_property_with_accessors(mc, eval_env, &next_res, "done")?;
+                    if matches!(done_val, Value::Boolean(true)) {
+                        done = true;
+                        break;
                     }
                 }
             }
         }
-        return Ok(Some((iter_obj, done)));
     }
-
-    Ok(None)
+    Ok(Some((iter_obj, done)))
 }
 
 // Helper to find a yield expression within statements. Returns the
@@ -1611,13 +1915,52 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
                     return Some((i, Some(inner_idx), kind, found));
                 }
             }
-            StatementKind::ForOf(_, _, _, body)
-            | StatementKind::ForIn(_, _, _, body)
-            | StatementKind::ForOfDestructuringObject(_, _, _, body)
-            | StatementKind::ForOfDestructuringArray(_, _, _, body)
-            | StatementKind::ForAwaitOf(_, _, _, body)
-            | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
-            | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body) => {
+            StatementKind::ForOf(_, _, iterable, body)
+            | StatementKind::ForIn(_, _, iterable, body)
+            | StatementKind::ForAwaitOf(_, _, iterable, body) => {
+                if let Some((kind, found)) = find_yield_in_expr(iterable)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, None, kind, found));
+                }
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, Some(inner_idx), kind, found));
+                }
+            }
+            StatementKind::ForOfDestructuringObject(_, pattern, iterable, body)
+            | StatementKind::ForInDestructuringObject(_, pattern, iterable, body)
+            | StatementKind::ForAwaitOfDestructuringObject(_, pattern, iterable, body) => {
+                if let Some((kind, found)) = pattern.iter().find_map(find_yield_in_object_destructuring_element)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, None, kind, found));
+                }
+                if let Some((kind, found)) = find_yield_in_expr(iterable)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, None, kind, found));
+                }
+                if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, Some(inner_idx), kind, found));
+                }
+            }
+            StatementKind::ForOfDestructuringArray(_, pattern, iterable, body)
+            | StatementKind::ForInDestructuringArray(_, pattern, iterable, body)
+            | StatementKind::ForAwaitOfDestructuringArray(_, pattern, iterable, body) => {
+                if let Some((kind, found)) = pattern.iter().find_map(find_yield_in_destructuring_element)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, None, kind, found));
+                }
+                if let Some((kind, found)) = find_yield_in_expr(iterable)
+                    && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
+                {
+                    return Some((i, None, kind, found));
+                }
                 if let Some((inner_idx, _inner_opt, kind, found)) = find_first_yield_in_statements(body)
                     && matches!(kind, YieldKind::Yield | YieldKind::YieldStar | YieldKind::Await)
                 {
@@ -1713,6 +2056,162 @@ pub fn generator_next<'gc>(
             }
 
             if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = find_first_yield_in_statements(&gen_obj.body) {
+                if let Some(stmt) = gen_obj.body.get(idx)
+                    && let StatementKind::ForOf(decl_kind_opt, var_name, iterable, body) = &*stmt.kind
+                    && inner_idx_opt.is_some()
+                {
+                    if idx > 0 {
+                        let pre_stmts = gen_obj.body[0..idx].to_vec();
+                        crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    }
+
+                    let iter_val = crate::core::evaluate_expr(mc, &func_env, iterable)?;
+                    let iter_obj = get_iterator(mc, &iter_val, &func_env)?;
+                    let next_method = crate::core::get_property_with_accessors(mc, &func_env, &iter_obj, "next")?;
+                    if matches!(next_method, Value::Undefined | Value::Null) {
+                        return Err(raise_type_error!("Iterator has no next method").into());
+                    }
+
+                    let next_res_val = evaluate_call_dispatch(mc, &func_env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+                    let next_res = if let Value::Object(o) = next_res_val {
+                        o
+                    } else {
+                        return Err(raise_type_error!("Iterator result is not an object").into());
+                    };
+
+                    let done_val = crate::core::get_property_with_accessors(mc, &func_env, &next_res, "done")?;
+                    if done_val.to_truthy() {
+                        gen_obj.state = GeneratorState::Suspended {
+                            pc: idx + 1,
+                            stack: vec![],
+                            pre_env: Some(func_env),
+                        };
+                        drop(gen_obj);
+                        return generator_next(mc, generator, &Value::Undefined);
+                    }
+
+                    let value = crate::core::get_property_with_accessors(mc, &func_env, &next_res, "value")?;
+                    let iter_env = bind_for_of_iteration_env(mc, &func_env, *decl_kind_opt, var_name, &value)?;
+                    let (body_yield_kind, body_yield_inner) = evaluate_for_of_body_first_yield(mc, &iter_env, body)?;
+
+                    gen_obj.pending_for_of = Some(crate::core::GeneratorForOfState {
+                        iterator: iter_obj,
+                        decl_kind: *decl_kind_opt,
+                        var_name: var_name.clone(),
+                        body: body.clone(),
+                        resume_pc: idx + 1,
+                        iter_env,
+                    });
+
+                    gen_obj.state = GeneratorState::Suspended {
+                        pc: idx,
+                        stack: vec![],
+                        pre_env: Some(func_env),
+                    };
+
+                    object_set_key_value(mc, &func_env, "__gen_throw_val", &Value::Undefined)?;
+                    let effective_kind = if matches!(yield_kind, YieldKind::YieldStar | YieldKind::Yield) {
+                        body_yield_kind
+                    } else {
+                        yield_kind
+                    };
+                    let effective_inner = if yield_inner.is_some() { yield_inner } else { body_yield_inner };
+
+                    if let Some(inner_expr_box) = effective_inner {
+                        if effective_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
+                            gen_obj.cached_initial_yield = Some(Value::Undefined);
+                            return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                        }
+
+                        match crate::core::evaluate_expr(mc, &iter_env, &inner_expr_box) {
+                            Ok(val) => {
+                                if matches!(effective_kind, YieldKind::YieldStar) {
+                                    let delegated = (|| -> Result<Value<'gc>, EvalError<'gc>> {
+                                        let iterator = get_iterator(mc, &val, &iter_env)?;
+                                        let next_method = crate::core::get_property_with_accessors(mc, &iter_env, &iterator, "next")?;
+                                        let iter_res = evaluate_call_dispatch(
+                                            mc,
+                                            &iter_env,
+                                            &next_method,
+                                            Some(&Value::Object(iterator)),
+                                            std::slice::from_ref(&Value::Undefined),
+                                        )?;
+
+                                        if let Value::Object(res_obj) = iter_res {
+                                            let done_val = crate::core::get_property_with_accessors(mc, &iter_env, &res_obj, "done")?;
+                                            let done = done_val.to_truthy();
+
+                                            if !done {
+                                                gen_obj.yield_star_iterator = Some(iterator);
+                                                let yielded = if let Some(v) = object_get_key_value(&res_obj, "value") {
+                                                    v.borrow().clone()
+                                                } else {
+                                                    Value::Undefined
+                                                };
+                                                gen_obj.cached_initial_yield = Some(yielded.clone());
+                                                return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                                            }
+                                            let value = crate::core::get_property_with_accessors(mc, &iter_env, &res_obj, "value")?;
+                                            Ok(value)
+                                        } else {
+                                            Err(raise_type_error!("Iterator result is not an object").into())
+                                        }
+                                    })();
+
+                                    match delegated {
+                                        Ok(v) => {
+                                            if let Some(_iter) = gen_obj.yield_star_iterator {
+                                                return Ok(v);
+                                            }
+                                            drop(gen_obj);
+                                            return generator_next(mc, generator, &v);
+                                        }
+                                        Err(e) => {
+                                            let throw_val = eval_error_to_value(mc, &iter_env, e);
+                                            drop(gen_obj);
+                                            return generator_throw(mc, generator, &throw_val);
+                                        }
+                                    }
+                                }
+
+                                gen_obj.cached_initial_yield = Some(val.clone());
+                                return Ok(create_iterator_result(mc, &val, false)?);
+                            }
+                            Err(e) => {
+                                let throw_val = eval_error_to_value(mc, &iter_env, e);
+                                drop(gen_obj);
+                                return generator_throw(mc, generator, &throw_val);
+                            }
+                        }
+                    }
+
+                    gen_obj.cached_initial_yield = Some(Value::Undefined);
+                    return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                }
+
+                if let Some(stmt) = gen_obj.body.get(idx)
+                    && let StatementKind::If(if_stmt) = &*stmt.kind
+                    && !expr_contains_yield(&if_stmt.condition)
+                {
+                    let cond_val = crate::core::evaluate_expr(mc, &func_env, &if_stmt.condition)?;
+                    let chosen_body = if cond_val.to_truthy() {
+                        &if_stmt.then_body
+                    } else {
+                        if_stmt.else_body.as_deref().unwrap_or(&[])
+                    };
+
+                    if find_first_yield_in_statements(chosen_body).is_none() {
+                        crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(stmt))?;
+                        gen_obj.state = GeneratorState::Suspended {
+                            pc: idx + 1,
+                            stack: vec![],
+                            pre_env: Some(func_env),
+                        };
+                        drop(gen_obj);
+                        return generator_next(mc, generator, &Value::Undefined);
+                    }
+                }
+
                 log::debug!(
                     "generator_next: found first yield at idx={} inner_idx={:?} body_len={} func_env_pre={} ",
                     idx,
@@ -1755,6 +2254,25 @@ pub fn generator_next<'gc>(
                                     let pre_stmts = tc_stmt.try_body[0..inner_idx].to_vec();
                                     let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
                                     seed_simple_decl_bindings(mc, &func_env, &pre_stmts)?;
+                                }
+                                StatementKind::ForOf(_, _, _, body)
+                                | StatementKind::ForIn(_, _, _, body)
+                                | StatementKind::ForAwaitOf(_, _, _, body)
+                                | StatementKind::ForOfExpr(_, _, body)
+                                | StatementKind::ForInExpr(_, _, body)
+                                | StatementKind::ForAwaitOfExpr(_, _, body)
+                                | StatementKind::ForOfDestructuringObject(_, _, _, body)
+                                | StatementKind::ForInDestructuringObject(_, _, _, body)
+                                | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
+                                | StatementKind::ForOfDestructuringArray(_, _, _, body)
+                                | StatementKind::ForInDestructuringArray(_, _, _, body)
+                                | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body) => {
+                                    if inner_idx > 0 {
+                                        let pre_stmts = body[0..inner_idx].to_vec();
+                                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                    } else if let Some(first_body_stmt) = body.first() {
+                                        eval_statement_prefix_until_first_yield(mc, &func_env, first_body_stmt)?;
+                                    }
                                 }
                                 _ => {}
                             }
@@ -2067,6 +2585,148 @@ pub fn generator_next<'gc>(
                 } else {
                     return Err(raise_type_error!("Iterator result is not an object").into());
                 }
+            }
+
+            if let Some(mut for_of) = gen_obj.pending_for_of.take() {
+                let func_env = gen_obj.env;
+                let mut resumed_body = for_of.body.clone();
+                trim_statements_to_post_first_yield(&mut resumed_body);
+                let send_var = "__gen_forof_send";
+                object_set_key_value(mc, &for_of.iter_env, send_var, send_value)?;
+                for stmt in &mut resumed_body {
+                    let mut did_replace = false;
+                    replace_first_yield_in_statement(stmt, send_var, &mut did_replace);
+                    if did_replace {
+                        break;
+                    }
+                }
+
+                let (cf, _last) = crate::core::evaluate_statements_with_context_and_last_value(mc, &for_of.iter_env, &resumed_body, &[])?;
+                match cf {
+                    crate::core::ControlFlow::Normal(_) => {}
+                    crate::core::ControlFlow::Return(v) => {
+                        gen_obj.state = GeneratorState::Completed;
+                        return Ok(create_iterator_result(mc, &v, true)?);
+                    }
+                    crate::core::ControlFlow::Throw(v, l, c) => {
+                        return Err(crate::core::EvalError::Throw(v, l, c));
+                    }
+                    crate::core::ControlFlow::Break(_) | crate::core::ControlFlow::Continue(_) => {
+                        gen_obj.state = GeneratorState::Suspended {
+                            pc: for_of.resume_pc,
+                            stack: vec![],
+                            pre_env: Some(func_env),
+                        };
+                        drop(gen_obj);
+                        return generator_next(mc, generator, &Value::Undefined);
+                    }
+                }
+
+                let next_method = crate::core::get_property_with_accessors(mc, &func_env, &for_of.iterator, "next")?;
+                if matches!(next_method, Value::Undefined | Value::Null) {
+                    return Err(raise_type_error!("Iterator has no next method").into());
+                }
+                let next_res_val = evaluate_call_dispatch(mc, &func_env, &next_method, Some(&Value::Object(for_of.iterator)), &[])?;
+                let next_res = if let Value::Object(o) = next_res_val {
+                    o
+                } else {
+                    return Err(raise_type_error!("Iterator result is not an object").into());
+                };
+                let done_val = crate::core::get_property_with_accessors(mc, &func_env, &next_res, "done")?;
+                if done_val.to_truthy() {
+                    gen_obj.pending_for_of = None;
+                    gen_obj.state = GeneratorState::Suspended {
+                        pc: for_of.resume_pc,
+                        stack: vec![],
+                        pre_env: Some(func_env),
+                    };
+                    drop(gen_obj);
+                    return generator_next(mc, generator, &Value::Undefined);
+                }
+
+                let next_value = crate::core::get_property_with_accessors(mc, &func_env, &next_res, "value")?;
+                let iter_env = bind_for_of_iteration_env(mc, &func_env, for_of.decl_kind, &for_of.var_name, &next_value)?;
+                let (yield_kind, yield_inner) = evaluate_for_of_body_first_yield(mc, &iter_env, &for_of.body)?;
+                for_of.iter_env = iter_env;
+                gen_obj.pending_for_of = Some(for_of);
+                gen_obj.state = GeneratorState::Suspended {
+                    pc,
+                    stack: vec![],
+                    pre_env: Some(func_env),
+                };
+                object_set_key_value(mc, &func_env, "__gen_throw_val", &Value::Undefined)?;
+
+                if let Some(inner_expr_box) = yield_inner {
+                    if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
+                        gen_obj.cached_initial_yield = Some(Value::Undefined);
+                        return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                    }
+
+                    match crate::core::evaluate_expr(mc, &iter_env, &inner_expr_box) {
+                        Ok(val) => {
+                            if matches!(yield_kind, YieldKind::YieldStar) {
+                                let delegated = (|| -> Result<Value<'gc>, EvalError<'gc>> {
+                                    let iterator = get_iterator(mc, &val, &iter_env)?;
+                                    let next_method = crate::core::get_property_with_accessors(mc, &iter_env, &iterator, "next")?;
+                                    let iter_res = evaluate_call_dispatch(
+                                        mc,
+                                        &iter_env,
+                                        &next_method,
+                                        Some(&Value::Object(iterator)),
+                                        std::slice::from_ref(&Value::Undefined),
+                                    )?;
+
+                                    if let Value::Object(res_obj) = iter_res {
+                                        let done_val = crate::core::get_property_with_accessors(mc, &iter_env, &res_obj, "done")?;
+                                        let done = done_val.to_truthy();
+
+                                        if !done {
+                                            gen_obj.yield_star_iterator = Some(iterator);
+                                            let yielded = if let Some(v) = object_get_key_value(&res_obj, "value") {
+                                                v.borrow().clone()
+                                            } else {
+                                                Value::Undefined
+                                            };
+                                            gen_obj.cached_initial_yield = Some(yielded.clone());
+                                            return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                                        }
+
+                                        let value = crate::core::get_property_with_accessors(mc, &iter_env, &res_obj, "value")?;
+                                        Ok(value)
+                                    } else {
+                                        Err(raise_type_error!("Iterator result is not an object").into())
+                                    }
+                                })();
+
+                                match delegated {
+                                    Ok(v) => {
+                                        if let Some(_iter) = gen_obj.yield_star_iterator {
+                                            return Ok(v);
+                                        }
+                                        drop(gen_obj);
+                                        return generator_next(mc, generator, &v);
+                                    }
+                                    Err(e) => {
+                                        let throw_val = eval_error_to_value(mc, &iter_env, e);
+                                        drop(gen_obj);
+                                        return generator_throw(mc, generator, &throw_val);
+                                    }
+                                }
+                            }
+
+                            gen_obj.cached_initial_yield = Some(val.clone());
+                            return Ok(create_iterator_result(mc, &val, false)?);
+                        }
+                        Err(e) => {
+                            let throw_val = eval_error_to_value(mc, &iter_env, e);
+                            drop(gen_obj);
+                            return generator_throw(mc, generator, &throw_val);
+                        }
+                    }
+                }
+
+                gen_obj.cached_initial_yield = Some(Value::Undefined);
+                return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
             }
 
             // On resume, execute from the suspended statement index. If a
@@ -2500,6 +3160,28 @@ pub fn generator_next<'gc>(
             }
 
             if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = find_first_yield_in_statements(&tail) {
+                if let StatementKind::If(if_stmt) = &*tail[idx].kind
+                    && !expr_contains_yield(&if_stmt.condition)
+                {
+                    let cond_val = crate::core::evaluate_expr(mc, &func_env, &if_stmt.condition)?;
+                    let chosen_body = if cond_val.to_truthy() {
+                        &if_stmt.then_body
+                    } else {
+                        if_stmt.else_body.as_deref().unwrap_or(&[])
+                    };
+
+                    if find_first_yield_in_statements(chosen_body).is_none() {
+                        crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(&tail[idx]))?;
+                        gen_obj.state = GeneratorState::Suspended {
+                            pc: pc_val + idx + 1,
+                            stack: vec![],
+                            pre_env: Some(func_env),
+                        };
+                        drop(gen_obj);
+                        return generator_next(mc, generator, &Value::Undefined);
+                    }
+                }
+
                 let pre_env_opt: Option<JSObjectDataPtr> = if idx > 0 {
                     let pre_stmts = tail[0..idx].to_vec();
                     crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
@@ -2935,8 +3617,18 @@ fn generator_return<'gc>(
         gen_obj.pending_iterator = None;
         gen_obj.pending_iterator_done = false;
     }
-    gen_obj.state = GeneratorState::Completed;
-    Ok(create_iterator_result(mc, return_value, true)?)
+
+    match gen_obj.state {
+        GeneratorState::NotStarted | GeneratorState::Completed => {
+            gen_obj.state = GeneratorState::Completed;
+            Ok(create_iterator_result(mc, return_value, true)?)
+        }
+        GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running").into()),
+        GeneratorState::Suspended { .. } => {
+            drop(gen_obj);
+            resume_with_return_completion(mc, generator, return_value)
+        }
+    }
 }
 
 /// Execute generator.throw()

@@ -145,8 +145,8 @@ jobs:
               FOCUS='language/statements/for-await-of'
               ;;
             21)
-              TITLE='"language/statements/for-in"'
-              FOCUS='language/statements/for-in'
+              TITLE='"language/statements/for-in" - "language/statements/for-of"'
+              FOCUS='language/statements/for-in,language/statements/for-of'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

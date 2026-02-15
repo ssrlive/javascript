@@ -54,6 +54,7 @@ pub struct JSGenerator<'gc> {
     pub pending_iterator_done: bool,
     pub yield_star_iterator: Option<JSObjectDataPtr<'gc>>,
     pub pending_for_await: Option<GeneratorForAwaitState<'gc>>,
+    pub pending_for_of: Option<GeneratorForOfState<'gc>>,
 }
 
 #[derive(Clone, Collect)]
@@ -66,6 +67,17 @@ pub struct GeneratorForAwaitState<'gc> {
     pub body: Vec<Statement>,
     pub resume_pc: usize,
     pub awaiting_value: bool,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct GeneratorForOfState<'gc> {
+    pub iterator: JSObjectDataPtr<'gc>,
+    pub decl_kind: Option<VarDeclKind>,
+    pub var_name: String,
+    pub body: Vec<Statement>,
+    pub resume_pc: usize,
+    pub iter_env: JSObjectDataPtr<'gc>,
 }
 
 #[derive(Clone, Collect)]

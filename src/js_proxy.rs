@@ -127,7 +127,10 @@ pub(crate) fn apply_proxy_trap<'gc>(
     if let Value::Object(handler_obj) = &*proxy.handler
         && let Some(trap_val) = object_get_key_value(handler_obj, trap_name)
     {
-        let trap = trap_val.borrow().clone();
+        let trap = match &*trap_val.borrow() {
+            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+            other => other.clone(),
+        };
 
         // Accept either a direct `Value::Closure` or a function-object that
         // stores the executable closure in the internal closure slot.
@@ -222,7 +225,14 @@ pub(crate) fn proxy_get_property<'gc>(
             Value::Object(obj) => {
                 let val_opt = object_get_key_value(obj, key);
                 match val_opt {
-                    Some(val_rc) => Ok(val_rc.borrow().clone()),
+                    Some(val_rc) => {
+                        let unwrapped = match &*val_rc.borrow() {
+                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                            Value::Property { value: None, .. } => Value::Undefined,
+                            other => other.clone(),
+                        };
+                        Ok(unwrapped)
+                    }
                     None => Ok(Value::Undefined),
                 }
             }
@@ -313,6 +323,40 @@ pub(crate) fn proxy_set_property<'gc>(
     match result {
         Value::Boolean(b) => Ok(b),
         _ => Ok(true), // Non-boolean return from trap is treated as true
+    }
+}
+
+/// Define a data property on proxy target, applying defineProperty trap if available
+pub(crate) fn proxy_define_data_property<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
+    key: &PropertyKey<'gc>,
+    value: &Value<'gc>,
+) -> Result<bool, EvalError<'gc>> {
+    let desc_obj = new_js_object_data(mc);
+    object_set_key_value(mc, &desc_obj, "value", value)?;
+    object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;
+    object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(true))?;
+    object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+
+    let result = apply_proxy_trap(
+        mc,
+        proxy,
+        "defineProperty",
+        vec![(*proxy.target).clone(), property_key_to_value(key), Value::Object(desc_obj)],
+        || match &*proxy.target {
+            Value::Object(obj) => {
+                let target_desc = crate::core::create_descriptor_object(mc, value, true, true, true)?;
+                crate::js_object::define_property_internal(mc, obj, key.clone(), &target_desc)?;
+                Ok(Value::Boolean(true))
+            }
+            _ => Ok(Value::Boolean(false)),
+        },
+    )?;
+
+    match result {
+        Value::Boolean(b) => Ok(b),
+        _ => Ok(true),
     }
 }
 

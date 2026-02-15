@@ -1618,7 +1618,26 @@ fn evalute_eval_function<'gc>(
     // index for parsing start position
     let mut index: usize = 0;
 
-    let mut stmts = crate::core::parse_statements(&tokens, &mut index)?;
+    let private_names_for_eval: Vec<String> = {
+        let mut names = std::collections::HashSet::new();
+        let mut cur = Some(*env);
+        while let Some(e) = cur {
+            {
+                let borrowed = e.borrow();
+                for key in borrowed.properties.keys() {
+                    if let PropertyKey::String(s) = key
+                        && let Some(stripped) = s.strip_prefix('#')
+                    {
+                        names.insert(stripped.to_string());
+                    }
+                }
+            }
+            cur = e.borrow().prototype;
+        }
+        names.into_iter().collect()
+    };
+
+    let mut stmts = crate::core::parse_statements_with_private_names(&tokens, &mut index, &private_names_for_eval)?;
 
     // Early errors for eval code: importing/exporting and `super` usages are
     // not allowed inside eval code (Script) per the spec's early error rules.

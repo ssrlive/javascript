@@ -577,6 +577,33 @@ fn initialize_instance_elements<'gc>(
             }
         }
 
+        for member in class_def.members.iter() {
+            let private_name = match member {
+                ClassMember::PrivateMethod(name, _, _)
+                | ClassMember::PrivateMethodAsync(name, _, _)
+                | ClassMember::PrivateMethodGenerator(name, _, _)
+                | ClassMember::PrivateMethodAsyncGenerator(name, _, _)
+                | ClassMember::PrivateGetter(name, _)
+                | ClassMember::PrivateSetter(name, _, _)
+                | ClassMember::PrivateProperty(name, _) => Some(name),
+                _ => None,
+            };
+
+            if let Some(name) = private_name {
+                let key = {
+                    let v = crate::core::env_get(&definition_env, &format!("#{name}")).unwrap();
+                    if let Value::PrivateName(n, id) = &*v.borrow() {
+                        PropertyKey::Private(n.clone(), *id)
+                    } else {
+                        panic!("Missing private name")
+                    }
+                };
+                if get_own_property(instance, key).is_some() {
+                    return Err(raise_type_error!("Cannot initialize private element twice").into());
+                }
+            }
+        }
+
         // Define private methods/accessors before evaluating field initializers.
         for member in class_def.members.iter() {
             match member {
@@ -819,7 +846,16 @@ fn initialize_instance_elements<'gc>(
                     let val = evaluate_expr(mc, &field_scope, init_expr)?;
                     set_name_if_anonymous(mc, &val, init_expr, &PropertyKey::String(name.clone()))?;
                     crate::js_module::ensure_deferred_namespace_evaluated(mc, &definition_env, instance, Some(name.as_str()))?;
-                    object_set_key_value(mc, instance, name.as_str(), &val)?;
+                    if let Some(proxy_ptr) = get_own_property(instance, "__proxy__")
+                        && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
+                    {
+                        let ok = crate::js_proxy::proxy_define_data_property(mc, proxy, &PropertyKey::String(name.clone()), &val)?;
+                        if !ok {
+                            return Err(raise_type_error!("Proxy defineProperty trap returned false").into());
+                        }
+                    } else {
+                        object_set_key_value(mc, instance, name.as_str(), &val)?;
+                    }
                 }
                 ClassMember::PropertyComputed(key_expr, init_expr) => {
                     let key = if let Some(k) = constructor.borrow().comp_field_keys.get(&idx) {
@@ -848,7 +884,16 @@ fn initialize_instance_elements<'gc>(
                     if let PropertyKey::String(s) = &key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, &definition_env, instance, Some(s.as_str()))?;
                     }
-                    object_set_key_value(mc, instance, &key, &val)?;
+                    if let Some(proxy_ptr) = get_own_property(instance, "__proxy__")
+                        && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
+                    {
+                        let ok = crate::js_proxy::proxy_define_data_property(mc, proxy, &key, &val)?;
+                        if !ok {
+                            return Err(raise_type_error!("Proxy defineProperty trap returned false").into());
+                        }
+                    } else {
+                        object_set_key_value(mc, instance, &key, &val)?;
+                    }
                 }
                 _ => {}
             }
@@ -936,6 +981,8 @@ pub(crate) fn evaluate_new<'gc>(
                     if let Some(proto_obj) = assigned_proto {
                         // Defer actual assignment; remember it for finalization below.
                         computed_proto = Some(proto_obj);
+                        instance.borrow_mut(mc).prototype = Some(proto_obj);
+                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto_obj))?;
                         log::debug!("evaluate_new: computed prototype (deferred) -> proto={:p}", Gc::as_ptr(proto_obj));
                     } else {
                         // Fall back to the realm's Object.prototype for the
@@ -961,6 +1008,8 @@ pub(crate) fn evaluate_new<'gc>(
                         if let Some(obj_proto) = obj_proto_from_src {
                             // Defer assignment to final instance
                             computed_proto = Some(obj_proto);
+                            instance.borrow_mut(mc).prototype = Some(obj_proto);
+                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
                             log::warn!(
                                 "evaluate_new: computed fallback (from source obj) realm prototype (deferred) -> proto={:p}",
                                 Gc::as_ptr(obj_proto)
@@ -987,6 +1036,8 @@ pub(crate) fn evaluate_new<'gc>(
                                 if let Some(obj_proto) = proto_opt {
                                     // Defer assignment to final instance
                                     computed_proto = Some(obj_proto);
+                                    instance.borrow_mut(mc).prototype = Some(obj_proto);
+                                    object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
                                 }
                             }
                             // Try multiple strategies to discover the constructor's realm:
@@ -1063,6 +1114,8 @@ pub(crate) fn evaluate_new<'gc>(
                             if let Some(obj_proto) = obj_proto_opt {
                                 // Defer assignment to final instance
                                 computed_proto = Some(obj_proto);
+                                instance.borrow_mut(mc).prototype = Some(obj_proto);
+                                object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
                                 log::debug!(
                                     "evaluate_new: computed fallback realm prototype (deferred) -> proto={:p}",
                                     Gc::as_ptr(obj_proto)
@@ -1687,8 +1740,10 @@ pub(crate) fn evaluate_new<'gc>(
                         // Delegate to parent constructor
                         if let Some(parent_ctor_obj) = class_obj.borrow().prototype {
                             let parent_ctor = Value::Object(parent_ctor_obj);
+                            let default_new_target = Value::Object(*class_obj);
+                            let new_target_for_parent = new_target.or(Some(&default_new_target));
                             // Call parent constructor
-                            let parent_inst = evaluate_new(mc, env, &parent_ctor, evaluated_args, new_target)?;
+                            let parent_inst = evaluate_new(mc, env, &parent_ctor, evaluated_args, new_target_for_parent)?;
                             if let Value::Object(inst_obj) = &parent_inst {
                                 // Fix prototype to point to this class's prototype only if we don't have a computed_proto to use
                                 if let Some(prototype_val) = object_get_key_value(class_obj, "prototype") {
@@ -2163,7 +2218,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::MethodComputed(key_expr, params, body) => {
                 // Evaluate computed key and set method (ToPropertyKey semantics)
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 // Convert objects via ToPrimitive with hint 'string' to trigger toString/valueOf side-effects
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
@@ -2178,7 +2233,7 @@ pub(crate) fn create_class_object<'gc>(
                 prototype_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::MethodComputedGenerator(key_expr, params, body) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2191,7 +2246,7 @@ pub(crate) fn create_class_object<'gc>(
                 prototype_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::MethodComputedAsyncGenerator(key_expr, params, body) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2205,7 +2260,7 @@ pub(crate) fn create_class_object<'gc>(
                 prototype_obj.borrow_mut(mc).set_non_enumerable(pk);
             }
             ClassMember::MethodComputedAsync(key_expr, params, body) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2242,7 +2297,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::PropertyComputed(key_expr, _value_expr) => {
                 // Evaluate key for side-effects. Initializer is not evaluated here.
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let prim_key = crate::core::to_primitive(mc, &key_val, "string", env)?;
                 let key = match prim_key {
                     Value::Symbol(s) => PropertyKey::Symbol(s),
@@ -2300,7 +2355,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::GetterComputed(key_expr, body) => {
                 // Evaluate key, then perform same merging logic as Getter (use ToPropertyKey)
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2420,7 +2475,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::SetterComputed(key_expr, param, body) => {
                 // Computed setter: evaluate key, then merge like non-computed setter (ToPropertyKey)
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2529,7 +2584,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::StaticMethodComputed(key_expr, params, body) => {
                 // Add computed static method (evaluate key first)
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 // Convert objects via ToPrimitive with hint 'string' to trigger toString/valueOf side-effects
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
@@ -2551,7 +2606,7 @@ pub(crate) fn create_class_object<'gc>(
                 class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticMethodComputedGenerator(key_expr, params, body) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2569,7 +2624,7 @@ pub(crate) fn create_class_object<'gc>(
                 class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticMethodComputedAsync(key_expr, params, body) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2587,7 +2642,7 @@ pub(crate) fn create_class_object<'gc>(
                 class_obj.borrow_mut(mc).set_non_enumerable(&pk);
             }
             ClassMember::StaticMethodComputedAsyncGenerator(key_expr, params, body) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2613,7 +2668,7 @@ pub(crate) fn create_class_object<'gc>(
                 pending_static_fields.push((PropertyKey::String(prop_name.clone()), value_expr.clone()));
             }
             ClassMember::StaticPropertyComputed(key_expr, value_expr) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 // Convert objects via ToPrimitive with hint 'string' to trigger toString/valueOf side-effects
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
@@ -2681,7 +2736,7 @@ pub(crate) fn create_class_object<'gc>(
                 }
             }
             ClassMember::StaticGetterComputed(key_expr, body) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -2794,7 +2849,7 @@ pub(crate) fn create_class_object<'gc>(
                 }
             }
             ClassMember::StaticSetterComputed(key_expr, param, body) => {
-                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let key_val = evaluate_expr(mc, &class_env, key_expr)?;
                 let key_prim = if let Value::Object(_) = &key_val {
                     crate::core::to_primitive(mc, &key_val, "string", env)?
                 } else {
@@ -3213,6 +3268,13 @@ pub(crate) fn evaluate_super_call<'gc>(
     } else {
         return Err(raise_type_error!("super() called in invalid context").into());
     };
+
+    if let Some(proto_rc) = object_get_key_value(&instance, "__computed_proto")
+        && let Value::Object(proto_obj) = &*proto_rc.borrow()
+    {
+        instance.borrow_mut(mc).prototype = Some(*proto_obj);
+        object_set_key_value(mc, &instance, "__proto__", &Value::Object(*proto_obj))?;
+    }
 
     // Get this initialization status from lexical environment
     let this_initialized = object_get_key_value(&lexical_env, "__this_initialized")

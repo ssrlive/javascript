@@ -35,6 +35,7 @@ jobs:
           - id: 22
           - id: 23
           - id: 24
+          - id: 25
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -162,6 +163,10 @@ jobs:
             24)
               TITLE='"language/statements/class/dstr"'
               FOCUS='language/statements/class/dstr'
+              ;;
+            25)
+              TITLE='"language/statements/class/elements"'
+              FOCUS='language/statements/class/elements'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

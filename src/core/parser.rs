@@ -32,6 +32,22 @@ pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<Statem
     Ok(statements)
 }
 
+pub fn parse_statements_with_private_names(
+    t: &[TokenData],
+    index: &mut usize,
+    private_names: &[String],
+) -> Result<Vec<Statement>, JSError> {
+    let set = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
+    {
+        let mut b = set.borrow_mut();
+        for name in private_names {
+            b.insert(name.clone());
+        }
+    }
+    let _guard = ClassPrivateNamesGuard::new(set);
+    parse_statements(t, index)
+}
+
 fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     log::trace!("parse_statement_item: starting at index {} token={:?}", *index, t.get(*index));
     // Skip leading line terminators when parsing a single statement.
@@ -390,7 +406,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 // Allow property/index expressions (assignment form) as left-hand side
                 // e.g., `for (obj.prop of iterable) ...`
                 match expr {
-                    Expr::Property(_, _) | Expr::Index(_, _) | Expr::Array(_) | Expr::Object(_) => {
+                    Expr::Property(_, _) | Expr::Index(_, _) | Expr::PrivateMember(_, _) | Expr::Array(_) | Expr::Object(_) => {
                         if is_for_await {
                             StatementKind::ForAwaitOfExpr(expr, iterable, body_stmts)
                         } else {
@@ -462,7 +478,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     });
                 }
                 // Member/index assignment-form
-                Expr::Property(_, _) | Expr::Index(_, _) => {
+                Expr::Property(_, _) | Expr::Index(_, _) | Expr::PrivateMember(_, _) => {
                     *index += 1; // consume )
                     let body = parse_statement_item(t, index)?;
                     let body_stmts = match *body.kind {
@@ -568,7 +584,12 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             && let Some(expr) = init_expr
         {
             match expr {
-                Expr::Property(_, _) | Expr::Index(_, _) | Expr::Var(_, _, _) | Expr::Array(_) | Expr::Object(_) => {
+                Expr::Property(_, _)
+                | Expr::Index(_, _)
+                | Expr::PrivateMember(_, _)
+                | Expr::Var(_, _, _)
+                | Expr::Array(_)
+                | Expr::Object(_) => {
                     return Ok(Statement {
                         kind: Box::new(StatementKind::ForInExpr(expr, rhs, body_stmts)),
                         line,

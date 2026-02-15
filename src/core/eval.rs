@@ -24,7 +24,7 @@ use crate::{
     raise_eval_error, raise_reference_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
-use crate::{Token, parse_statements, raise_range_error, raise_syntax_error, raise_type_error, tokenize};
+use crate::{Token, raise_range_error, raise_syntax_error, raise_type_error, tokenize};
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
@@ -7834,7 +7834,7 @@ fn evaluate_expr_assign<'gc>(
                         precomputed_temp = Some(precompute_target(mc, env, lhs)?);
                     }
                 }
-                Expr::Var(..) | Expr::Property(..) | Expr::Index(..) => {
+                Expr::Var(..) | Expr::Property(..) | Expr::Index(..) | Expr::PrivateMember(..) => {
                     precomputed_temp = Some(precompute_target(mc, env, target_expr)?);
                 }
                 _ => {}
@@ -11232,7 +11232,26 @@ fn handle_eval_function<'gc>(
             }
             return Ok(Value::Undefined);
         }
-        let statements = parse_statements(&tokens, &mut index)?;
+        let private_names_for_eval: Vec<String> = {
+            let mut names = std::collections::HashSet::new();
+            let mut cur = Some(*env);
+            while let Some(e) = cur {
+                {
+                    let borrowed = e.borrow();
+                    for key in borrowed.properties.keys() {
+                        if let PropertyKey::String(s) = key
+                            && let Some(stripped) = s.strip_prefix('#')
+                        {
+                            names.insert(stripped.to_string());
+                        }
+                    }
+                }
+                cur = e.borrow().prototype;
+            }
+            names.into_iter().collect()
+        };
+
+        let statements = crate::core::parse_statements_with_private_names(&tokens, &mut index, &private_names_for_eval)?;
         log::trace!("HANDLE_EVAL PARSED: {:#?}", statements);
 
         if statements

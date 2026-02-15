@@ -4685,12 +4685,11 @@ fn eval_res<'gc>(
             if let Some(iter_obj) = iterator {
                 // V is the last normal completion value per spec ForIn/OfBodyEvaluation
                 let mut v = Value::Undefined;
+                let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                if matches!(next_method, Value::Undefined | Value::Null) {
+                    return Err(EvalError::Js(raise_type_error!("Iterator has no next method")));
+                }
                 loop {
-                    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
-                    if matches!(next_method, Value::Undefined | Value::Null) {
-                        return Err(EvalError::Js(raise_type_error!("Iterator has no next method")));
-                    }
-
                     let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
 
                     if let Value::Object(next_res) = next_res_val {

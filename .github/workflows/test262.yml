@@ -189,9 +189,15 @@ jobs:
           fail_total=0
           skip_total=0
           logs_found=0
+          unsupported_features_file=$(mktemp)
 
           while IFS= read -r -d '' log_file; do
             logs_found=$((logs_found + 1))
+
+            grep -Eo 'SKIP \(feature unsupported: [^)]+\)' "$log_file" \
+              | sed -E 's/^SKIP \(feature unsupported: (.+)\)$/\1/' \
+              >> "$unsupported_features_file" || true
+
             summary_line=$(grep -E "Ran [0-9]+ candidates: pass=[0-9]+ fail=[0-9]+ skip=[0-9]+" "$log_file" | tail -n1 || true)
             if [ -z "$summary_line" ]; then
               continue
@@ -207,6 +213,13 @@ jobs:
           done < <(find test262-artifacts -type f -name 'test262-results.log' -print0)
 
           total_cases=$((pass_total + fail_total + skip_total))
+          unsupported_features=$(sort -u "$unsupported_features_file" | sed '/^$/d' || true)
+          unsupported_features_ranked=$(sed '/^$/d' "$unsupported_features_file" | sort | uniq -c | sort -nr || true)
+
+          unsupported_features_count=0
+          if [ -n "$unsupported_features" ]; then
+            unsupported_features_count=$(printf '%s\n' "$unsupported_features" | wc -l | tr -d ' ')
+          fi
 
           {
             echo "## Test262 Summary"
@@ -216,6 +229,24 @@ jobs:
             echo "- Pass: $pass_total"
             echo "- Fail: $fail_total"
             echo "- Skip: $skip_total"
+            echo "- Unsupported features detected: $unsupported_features_count"
+
+            if [ "$unsupported_features_count" -gt 0 ]; then
+              echo
+              echo "### Unsupported features by occurrence"
+              while IFS= read -r row; do
+                [ -n "$row" ] || continue
+                count=$(echo "$row" | awk '{print $1}')
+                feat=$(echo "$row" | sed -E 's/^ *[0-9]+ +//')
+                echo "- $feat ($count)"
+              done <<< "$unsupported_features_ranked"
+
+              echo
+              echo "### Unsupported features"
+              while IFS= read -r feat; do
+                [ -n "$feat" ] && echo "- $feat"
+              done <<< "$unsupported_features"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "Test262 Summary"
@@ -224,4 +255,20 @@ jobs:
           echo "- Pass: $pass_total"
           echo "- Fail: $fail_total"
           echo "- Skip: $skip_total"
+          echo "- Unsupported features detected: $unsupported_features_count"
+
+          if [ "$unsupported_features_count" -gt 0 ]; then
+            echo "Unsupported features by occurrence:"
+            while IFS= read -r row; do
+              [ -n "$row" ] || continue
+              count=$(echo "$row" | awk '{print $1}')
+              feat=$(echo "$row" | sed -E 's/^ *[0-9]+ +//')
+              echo "- $feat ($count)"
+            done <<< "$unsupported_features_ranked"
+
+            echo "Unsupported features:"
+            while IFS= read -r feat; do
+              [ -n "$feat" ] && echo "- $feat"
+            done <<< "$unsupported_features"
+          fi
 

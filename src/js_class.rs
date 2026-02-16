@@ -1437,14 +1437,57 @@ pub(crate) fn evaluate_new<'gc>(
                         return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, evaluated_args, env)?);
                     }
                     "DataView" => return Ok(crate::js_typedarray::handle_dataview_constructor(mc, evaluated_args, env)?),
-                    "Error" | "TypeError" | "ReferenceError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError" => {
-                        let msg_val = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
-                        if let Some(prototype_rc) = object_get_key_value(class_obj, "prototype")
-                            && let Value::Object(proto_ptr) = &*prototype_rc.borrow()
-                        {
-                            return Ok(crate::core::create_error(mc, Some(*proto_ptr), msg_val)?);
+                    "Error" | "TypeError" | "ReferenceError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError"
+                    | "AggregateError" => {
+                        let mut prototype: Option<JSObjectDataPtr<'_>> = None;
+                        let mut had_new_target = false;
+                        let mut new_target_obj_for_realm: Option<JSObjectDataPtr<'_>> = None;
+                        if let Some(Value::Object(new_target_obj)) = new_target {
+                            had_new_target = true;
+                            new_target_obj_for_realm = Some(*new_target_obj);
+                            let prototype_val = crate::core::get_property_with_accessors(mc, env, new_target_obj, "prototype")?;
+                            if let Value::Object(proto_ptr) = prototype_val {
+                                prototype = Some(proto_ptr);
+                            }
                         }
-                        return Ok(crate::core::create_error(mc, None, msg_val)?);
+
+                        if prototype.is_none()
+                            && had_new_target
+                            && let Some(new_target_obj) = new_target_obj_for_realm
+                        {
+                            let origin_global_val = crate::core::get_property_with_accessors(mc, env, &new_target_obj, "__origin_global")?;
+                            if let Value::Object(origin_global) = origin_global_val {
+                                let ctor_val = crate::core::get_property_with_accessors(mc, env, &origin_global, "AggregateError")?;
+                                let ctor_val = match ctor_val {
+                                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                    other => other,
+                                };
+                                if let Value::Object(origin_agg_ctor) = ctor_val {
+                                    let origin_proto_val =
+                                        crate::core::get_property_with_accessors(mc, env, &origin_agg_ctor, "prototype")?;
+                                    if let Value::Object(origin_proto_obj) = origin_proto_val {
+                                        prototype = Some(origin_proto_obj);
+                                    }
+                                }
+                            }
+                        }
+
+                        if prototype.is_none() {
+                            let prototype_val = crate::core::get_property_with_accessors(mc, env, class_obj, "prototype")?;
+                            if let Value::Object(proto_ptr) = prototype_val {
+                                prototype = Some(proto_ptr);
+                            }
+                        }
+
+                        if name_desc == "AggregateError" {
+                            let errors_val = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
+                            let message_val = evaluated_args.get(1).cloned();
+                            let options_val = evaluated_args.get(2).cloned();
+                            return crate::core::js_error::create_aggregate_error(mc, env, prototype, errors_val, message_val, options_val);
+                        }
+
+                        let msg_val = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
+                        return Ok(crate::core::create_error(mc, prototype, msg_val)?);
                     }
                     "BigInt" | "Symbol" => {
                         return Err(raise_type_error!(format!("{} is not a constructor", name_desc)).into());

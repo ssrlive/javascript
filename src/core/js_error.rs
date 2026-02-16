@@ -1,7 +1,10 @@
 use crate::{
     JSError,
-    core::{JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, new_js_object_data, object_set_key_value, value_to_string},
-    object_get_key_value, utf8_to_utf16, utf16_to_utf8,
+    core::{
+        JSObjectDataPtr, MutationContext, PropertyKey, Value, create_descriptor_object, env_get, env_set, new_js_object_data,
+        object_set_key_value, to_primitive, value_to_string,
+    },
+    object_get_key_value, raise_type_error, utf8_to_utf16, utf16_to_utf8,
 };
 
 #[derive(Debug)]
@@ -96,6 +99,7 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     initialize_native_error(mc, env, "RangeError", &error_ctor_val, &error_proto_val)?;
     initialize_native_error(mc, env, "EvalError", &error_ctor_val, &error_proto_val)?;
     initialize_native_error(mc, env, "URIError", &error_ctor_val, &error_proto_val)?;
+    initialize_native_error(mc, env, "AggregateError", &error_ctor_val, &error_proto_val)?;
 
     Ok(())
 }
@@ -104,12 +108,13 @@ fn initialize_native_error<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &str,
-    _parent_ctor: &Value<'gc>,
+    parent_ctor: &Value<'gc>,
     parent_proto: &Value<'gc>,
 ) -> Result<(), JSError> {
     let ctor = new_js_object_data(mc);
-    // Ensure the native ctor object has Function.prototype as its internal prototype
-    if let Some(func_val_rc) = object_get_key_value(env, "Function")
+    if let Value::Object(parent_ctor_obj) = parent_ctor {
+        ctor.borrow_mut(mc).prototype = Some(*parent_ctor_obj);
+    } else if let Some(func_val_rc) = object_get_key_value(env, "Function")
         && let Value::Object(func_ctor) = &*func_val_rc.borrow()
         && let Some(func_proto_rc) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_rc.borrow()
@@ -138,8 +143,116 @@ fn initialize_native_error<'gc>(
     object_set_key_value(mc, &proto, "name", &Value::String(utf8_to_utf16(name)))?;
     object_set_key_value(mc, &proto, "message", &Value::String(utf8_to_utf16("")))?;
 
+    proto.borrow_mut(mc).set_non_enumerable("constructor");
+    proto.borrow_mut(mc).set_non_enumerable("name");
+    proto.borrow_mut(mc).set_non_enumerable("message");
+
+    if name == "AggregateError" {
+        let len_desc = create_descriptor_object(mc, &Value::Number(2.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &ctor, "length", &len_desc)?;
+
+        let name_desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16("AggregateError")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &ctor, "name", &name_desc)?;
+
+        let proto_desc = create_descriptor_object(mc, &Value::Object(proto), false, false, false)?;
+        crate::js_object::define_property_internal(mc, &ctor, "prototype", &proto_desc)?;
+    }
+
     env_set(mc, env, name, &Value::Object(ctor))?;
     Ok(())
+}
+
+pub fn create_aggregate_error<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    prototype: Option<JSObjectDataPtr<'gc>>,
+    errors: Value<'gc>,
+    message: Option<Value<'gc>>,
+    options: Option<Value<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let message_value = if let Some(msg_val) = message {
+        if matches!(msg_val, Value::Undefined) {
+            Value::Undefined
+        } else {
+            let prim = to_primitive(mc, &msg_val, "string", env)?;
+            if matches!(prim, Value::Symbol(_)) {
+                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+            }
+            Value::String(utf8_to_utf16(&value_to_string(&prim)))
+        }
+    } else {
+        Value::Undefined
+    };
+
+    let err_obj_val = create_error(mc, prototype, message_value).map_err(EvalError::from)?;
+    let err_obj = match &err_obj_val {
+        Value::Object(o) => *o,
+        _ => return Ok(err_obj_val),
+    };
+
+    let mut collected_errors: Vec<Value<'gc>> = Vec::new();
+    let iterator = if let Some(sym_ctor) = env_get(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+        && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+    {
+        match &errors {
+            Value::Object(obj) => {
+                let method = crate::core::eval::get_property_with_accessors(mc, env, obj, iter_sym_data)?;
+                if matches!(method, Value::Undefined | Value::Null) {
+                    return Err(raise_type_error!("Object is not iterable").into());
+                }
+                let iter = crate::core::eval::evaluate_call_dispatch(mc, env, &method, Some(&errors), &[])?;
+                match iter {
+                    Value::Object(iter_obj) => iter_obj,
+                    _ => return Err(raise_type_error!("Iterator is not an object").into()),
+                }
+            }
+            _ => return Err(raise_type_error!("Object is not iterable").into()),
+        }
+    } else {
+        return Err(raise_type_error!("Object is not iterable").into());
+    };
+
+    loop {
+        let next_method = crate::core::eval::get_property_with_accessors(mc, env, &iterator, "next")?;
+        if matches!(next_method, Value::Undefined | Value::Null) {
+            return Err(raise_type_error!("Iterator has no next method").into());
+        }
+        let next_result = crate::core::eval::evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iterator)), &[])?;
+        let next_obj = match next_result {
+            Value::Object(obj) => obj,
+            _ => return Err(raise_type_error!("Iterator result is not an object").into()),
+        };
+
+        let done = crate::core::eval::get_property_with_accessors(mc, env, &next_obj, "done")?;
+        if done.to_truthy() {
+            break;
+        }
+
+        let value = crate::core::eval::get_property_with_accessors(mc, env, &next_obj, "value")?;
+        collected_errors.push(value);
+    }
+
+    let errors_array = crate::js_array::create_array(mc, env).map_err(EvalError::from)?;
+    for (i, value) in collected_errors.iter().enumerate() {
+        object_set_key_value(mc, &errors_array, i, value).map_err(EvalError::from)?;
+    }
+    crate::core::object_set_length(mc, &errors_array, collected_errors.len()).map_err(EvalError::from)?;
+
+    object_set_key_value(mc, &err_obj, "errors", &Value::Object(errors_array)).map_err(EvalError::from)?;
+    err_obj.borrow_mut(mc).set_non_enumerable("errors");
+
+    if let Some(options_val) = options
+        && let Value::Object(options_obj) = options_val
+        && object_get_key_value(&options_obj, "cause").is_some()
+    {
+        let cause_val = crate::core::eval::get_property_with_accessors(mc, env, &options_obj, "cause")?;
+        object_set_key_value(mc, &err_obj, "cause", &cause_val).map_err(EvalError::from)?;
+        err_obj.borrow_mut(mc).set_non_enumerable("cause");
+    }
+
+    Ok(Value::Object(err_obj))
 }
 
 /// Create a new Error object with the given message.

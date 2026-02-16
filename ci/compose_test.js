@@ -158,6 +158,7 @@ function get262StubLines() {
     '      g.ReferenceError = ReferenceError;',
     '      g.SyntaxError = SyntaxError;',
     '      g.Error = Error;',
+    '      g.AggregateError = AggregateError;',
     '      g.Array = Array;',
     '      g.Date = Date;',
     '      g.RegExp = RegExp;',

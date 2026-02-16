@@ -12047,6 +12047,30 @@ pub fn evaluate_call_dispatch<'gc>(
                             )?)
                         } else if name == crate::unicode::utf8_to_utf16("AbstractModuleSource") {
                             Err(raise_type_error!("AbstractModuleSource constructor cannot be invoked").into())
+                        } else if name == crate::unicode::utf8_to_utf16("AggregateError") {
+                            let errors_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                            let message_val = eval_args.get(1).cloned();
+                            let options_val = eval_args.get(2).cloned();
+                            if let Some(prototype_rc) = object_get_key_value(obj, "prototype") {
+                                let prototype_val = match &*prototype_rc.borrow() {
+                                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                    other => other.clone(),
+                                };
+                                if let Value::Object(proto_ptr) = prototype_val {
+                                    crate::core::js_error::create_aggregate_error(
+                                        mc,
+                                        env,
+                                        Some(proto_ptr),
+                                        errors_val,
+                                        message_val,
+                                        options_val,
+                                    )
+                                } else {
+                                    crate::core::js_error::create_aggregate_error(mc, env, None, errors_val, message_val, options_val)
+                                }
+                            } else {
+                                crate::core::js_error::create_aggregate_error(mc, env, None, errors_val, message_val, options_val)
+                            }
                         } else if name == crate::unicode::utf8_to_utf16("Error")
                             || name == crate::unicode::utf8_to_utf16("TypeError")
                             || name == crate::unicode::utf8_to_utf16("ReferenceError")
@@ -19466,10 +19490,16 @@ fn evaluate_expr_new<'gc>(
                         "Error" | "ReferenceError" | "TypeError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError"
                     ) {
                         let msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
-                        let prototype = if let Some(proto_val) = object_get_key_value(&obj, "prototype")
-                            && let Value::Object(proto_obj) = &*proto_val.borrow()
-                        {
-                            Some(*proto_obj)
+                        let prototype = if let Some(proto_val) = object_get_key_value(&obj, "prototype") {
+                            let prototype_val = match &*proto_val.borrow() {
+                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                other => other.clone(),
+                            };
+                            if let Value::Object(proto_obj) = prototype_val {
+                                Some(proto_obj)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         };
@@ -19478,6 +19508,27 @@ fn evaluate_expr_new<'gc>(
                         if let Value::Object(err_obj) = &err_val {
                             object_set_key_value(mc, err_obj, "name", &Value::String(name.clone()))?;
                         }
+                        return Ok(err_val);
+                    } else if name_str == "AggregateError" {
+                        let errors_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                        let message_val = eval_args.get(1).cloned();
+                        let options_val = eval_args.get(2).cloned();
+                        let prototype = if let Some(proto_val) = object_get_key_value(&obj, "prototype") {
+                            let prototype_val = match &*proto_val.borrow() {
+                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                other => other.clone(),
+                            };
+                            if let Value::Object(proto_obj) = prototype_val {
+                                Some(proto_obj)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        let err_val =
+                            crate::core::js_error::create_aggregate_error(mc, env, prototype, errors_val, message_val, options_val)?;
                         return Ok(err_val);
                     } else if name_str == "Object" {
                         return crate::js_class::handle_object_constructor(mc, &eval_args, env);

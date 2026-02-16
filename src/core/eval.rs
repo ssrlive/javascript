@@ -12045,6 +12045,8 @@ pub fn evaluate_call_dispatch<'gc>(
                                 eval_args,
                                 env,
                             )?)
+                        } else if name == crate::unicode::utf8_to_utf16("AbstractModuleSource") {
+                            Err(raise_type_error!("AbstractModuleSource constructor cannot be invoked").into())
                         } else if name == crate::unicode::utf8_to_utf16("Error")
                             || name == crate::unicode::utf8_to_utf16("TypeError")
                             || name == crate::unicode::utf8_to_utf16("ReferenceError")
@@ -12296,6 +12298,11 @@ fn evaluate_expr_call<'gc>(
                 && key == "defer"
             {
                 (Value::Function("import.defer".to_string()), None)
+            } else if let crate::core::Expr::Var(name, ..) = &**obj_expr
+                && name == "import"
+                && key == "source"
+            {
+                (Value::Function("import.source".to_string()), None)
             } else {
                 let obj_val = if expr_contains_optional_chain(obj_expr) {
                     match evaluate_optional_chain_base(mc, env, obj_expr)? {
@@ -15225,6 +15232,13 @@ fn evaluate_expr_property<'gc>(
         return Ok(Value::Function("import.defer".to_string()));
     }
 
+    if let crate::core::Expr::Var(name, _, _) = obj_expr
+        && name == "import"
+        && key == "source"
+    {
+        return Ok(Value::Function("import.source".to_string()));
+    }
+
     let obj_val = if expr_contains_optional_chain(obj_expr) {
         match evaluate_optional_chain_base(mc, env, obj_expr)? {
             Some(val) => val,
@@ -17670,6 +17684,10 @@ pub fn call_native_function<'gc>(
             return Err(raise_eval_error!("TypeError: TypedArray accessor called on non-object").into());
         }
     }
+
+    if name == "AbstractModuleSource.prototype.@@toStringTag" {
+        return Ok(Some(Value::Undefined));
+    }
     Ok(None)
 }
 
@@ -19579,6 +19597,8 @@ fn evaluate_expr_new<'gc>(
 
                         let call_env_for_function = if let Some(re) = ctor_re_env { re } else { *env };
                         return crate::js_function::handle_global_function(mc, "Function", &eval_args, &call_env_for_function);
+                    } else if name_str == "AbstractModuleSource" {
+                        return Err(raise_type_error!("AbstractModuleSource constructor cannot be invoked").into());
                     } else if name_str == "Symbol" {
                         return Err(raise_type_error!("Symbol is not a constructor").into());
                     }

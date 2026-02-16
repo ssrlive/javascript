@@ -93,12 +93,14 @@ pub fn handle_global_function<'gc>(
     match func_name {
         "import" => return dynamic_import_function(mc, args, env),
         "import.defer" => return dynamic_import_defer_function(mc, args, env),
+        "import.source" => return dynamic_import_source_function(mc, args, env),
         "Function" => return function_constructor(mc, args, env),
         "GeneratorFunction" => return generator_function_constructor(mc, args, env),
         "AsyncGeneratorFunction" => return async_generator_function_constructor(mc, args, env),
         "new" => return evaluate_new_expression(mc, args, env),
         "eval" => return evalute_eval_function(mc, args, env),
         "Date" => return handle_date_constructor(mc, args, env),
+        "AbstractModuleSource.prototype.@@toStringTag" => return Ok(Value::Undefined),
 
         "Object.prototype.valueOf" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
@@ -607,6 +609,62 @@ fn dynamic_import_defer_function<'gc>(
             }
             _ => crate::core::value_to_string(&prim),
         };
+
+        if module_name == "<module source>" {
+            return Ok(crate::js_abstract_module_source::create_module_source_placeholder(mc, env)?);
+        }
+
+        let base_path = if let Some(cell) = crate::core::env_get(env, "__filepath")
+            && let Value::String(s) = cell.borrow().clone()
+        {
+            Some(utf16_to_utf8(&s))
+        } else {
+            None
+        };
+
+        crate::js_module::load_module_deferred_namespace(mc, &module_name, base_path.as_deref(), Some(*env))
+    })();
+
+    match import_result {
+        Ok(module_value) => {
+            crate::js_promise::resolve_promise(mc, &promise, module_value, env);
+        }
+        Err(err) => {
+            let reason = match err {
+                EvalError::Throw(val, _line, _column) => val,
+                EvalError::Js(js_err) => crate::core::js_error_to_value(mc, env, &js_err),
+            };
+            crate::js_promise::reject_promise(mc, &promise, reason, env);
+        }
+    }
+
+    Ok(Value::Object(promise_obj))
+}
+
+fn dynamic_import_source_function<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if args.len() != 1 {
+        return Err(raise_type_error!("import.source() requires exactly one argument").into());
+    }
+
+    let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
+    let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+
+    let import_result = (|| -> Result<Value<'gc>, EvalError<'gc>> {
+        let prim = crate::core::to_primitive(mc, &args[0], "string", env)?;
+        let module_name = match prim {
+            Value::Symbol(_) => {
+                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+            }
+            _ => crate::core::value_to_string(&prim),
+        };
+
+        if module_name == "<module source>" {
+            return Ok(crate::js_abstract_module_source::create_module_source_placeholder(mc, env)?);
+        }
 
         let base_path = if let Some(cell) = crate::core::env_get(env, "__filepath")
             && let Value::String(s) = cell.borrow().clone()

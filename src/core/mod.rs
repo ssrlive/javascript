@@ -97,6 +97,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_weakset(mc, env)?;
     initialize_set(mc, env)?;
     crate::js_promise::initialize_promise(mc, env)?;
+    crate::js_abstract_module_source::initialize_abstract_module_source(mc, env)?;
 
     // Initialize generator prototype/constructor
     crate::js_generator::initialize_generator(mc, env)?;

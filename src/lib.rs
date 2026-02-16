@@ -3,6 +3,7 @@
 pub(crate) mod core;
 #[macro_use]
 pub(crate) mod error;
+pub(crate) mod js_abstract_module_source;
 pub(crate) mod js_array;
 pub(crate) mod js_async;
 pub(crate) mod js_async_generator;

@@ -19917,7 +19917,10 @@ fn evaluate_expr_new<'gc>(
                             return Err(raise_type_error!("Not a constructor").into());
                         }
                         if let Some(native_name) = &cl.native_target
-                            && (native_name == "Array.isArray" || native_name == "Array.from" || native_name == "Array.of")
+                            && (native_name == "Array.isArray"
+                                || native_name == "Array.from"
+                                || native_name == "Array.of"
+                                || native_name == "ArrayBuffer.isView")
                         {
                             return Err(raise_type_error!("Not a constructor").into());
                         }

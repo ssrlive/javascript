@@ -916,7 +916,7 @@ pub(crate) fn evaluate_new<'gc>(
             _ => None,
         };
         if let Some(name) = native_target
-            && (name == "Array.isArray" || name == "Array.from" || name == "Array.of")
+            && (name == "Array.isArray" || name == "Array.from" || name == "Array.of" || name == "ArrayBuffer.isView")
         {
             return Err(raise_type_error!("Constructor is not callable").into());
         }

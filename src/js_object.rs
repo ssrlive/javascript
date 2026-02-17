@@ -1,7 +1,7 @@
 use crate::core::{
     ClosureData, EvalError, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, evaluate_call_dispatch, get_own_property,
     get_property_with_accessors, new_js_object_data, object_get_key_value, object_set_key_value, prepare_closure_call_env,
-    prepare_function_call_env, value_to_string,
+    prepare_function_call_env,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -94,38 +94,40 @@ fn to_object_for_object_static<'gc>(
             for (i, cu) in s.iter().enumerate() {
                 object_set_key_value(mc, &obj, i, &Value::String(vec![*cu]))?;
             }
-            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String");
+            if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String") {
+                log::warn!("Failed to set internal prototype for String object: {e:?}");
+            }
             Ok(obj)
         }
-        Value::Number(n) => {
+        Value::Number(_n) => {
             let obj = new_js_object_data(mc);
-            let _ = n;
-            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number");
+            if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number") {
+                log::warn!("Failed to set internal prototype for Number object: {e:?}");
+            }
             Ok(obj)
         }
-        Value::Boolean(b) => {
+        Value::Boolean(_b) => {
             let obj = new_js_object_data(mc);
-            let _ = b;
-            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean");
+            if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean") {
+                log::warn!("Failed to set internal prototype for Boolean object: {e:?}");
+            }
             Ok(obj)
         }
-        Value::BigInt(h) => {
+        Value::BigInt(_h) => {
             let obj = new_js_object_data(mc);
-            let _ = h;
-            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
+            if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt") {
+                log::warn!("Failed to set internal prototype for BigInt object: {e:?}");
+            }
             Ok(obj)
         }
-        Value::Symbol(sd) => {
+        Value::Symbol(_sd) => {
             let obj = new_js_object_data(mc);
-            let _ = sd;
-            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
+            if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol") {
+                log::warn!("Failed to set internal prototype for Symbol object: {e:?}");
+            }
             Ok(obj)
         }
-        other => {
-            let obj = new_js_object_data(mc);
-            let _ = other;
-            Ok(obj)
-        }
+        _other => Ok(new_js_object_data(mc)),
     }
 }
 
@@ -249,9 +251,22 @@ pub(crate) fn define_property_internal<'gc>(
                 // get existing value for comparison
                 let existing_val = match &*existing_rc.borrow() {
                     Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    Value::Property { value: None, .. } => Value::Undefined,
                     other => other.clone(),
                 };
-                if !crate::core::values_equal(mc, &existing_val, pd_value) {
+                let same_value = match (&existing_val, pd_value) {
+                    (Value::Number(n1), Value::Number(n2)) => {
+                        if n1.is_nan() && n2.is_nan() {
+                            true
+                        } else if *n1 == 0.0 && *n2 == 0.0 {
+                            n1.to_bits() == n2.to_bits()
+                        } else {
+                            n1 == n2
+                        }
+                    }
+                    _ => crate::core::values_equal(mc, &existing_val, pd_value),
+                };
+                if !same_value {
                     return Err(raise_type_error!("Cannot change value of non-writable, non-configurable property"));
                 }
             }
@@ -262,8 +277,28 @@ pub(crate) fn define_property_internal<'gc>(
                 return Err(raise_type_error!("Cannot convert non-configurable accessor to a data property"));
             }
 
-            // Disallow changing getter/setter functions on non-configurable accessor
-            if pd.get.is_some() || pd.set.is_some() {
+            let (current_get, current_set) = match &*existing_rc.borrow() {
+                Value::Property { getter, setter, .. } => {
+                    let g = getter.as_ref().map(|v| (**v).clone()).unwrap_or(Value::Undefined);
+                    let s = setter.as_ref().map(|v| (**v).clone()).unwrap_or(Value::Undefined);
+                    (g, s)
+                }
+                Value::Getter(..) => (existing_rc.borrow().clone(), Value::Undefined),
+                Value::Setter(..) => (Value::Undefined, existing_rc.borrow().clone()),
+                _ => (Value::Undefined, Value::Undefined),
+            };
+
+            if let Some(new_get) = &pd.get
+                && !crate::core::values_equal(mc, new_get, &current_get)
+            {
+                return Err(raise_type_error!(
+                    "Cannot change getter/setter of non-configurable accessor property"
+                ));
+            }
+
+            if let Some(new_set) = &pd.set
+                && !crate::core::values_equal(mc, new_set, &current_set)
+            {
                 return Err(raise_type_error!(
                     "Cannot change getter/setter of non-configurable accessor property"
                 ));
@@ -321,7 +356,7 @@ pub(crate) fn define_property_internal<'gc>(
             other => Some(new_gc_cell_ptr(mc, other.clone())),
         }
     } else {
-        None
+        Some(new_gc_cell_ptr(mc, Value::Undefined))
     };
 
     // Create property descriptor value
@@ -338,7 +373,6 @@ pub(crate) fn define_property_internal<'gc>(
     // Compute existence and configurability BEFORE applying the new configurable flag.
     // This ensures that when a configurable property is being redefined as non-configurable,
     // we still allow writable/enumerable attributes to be updated in the same operation.
-    let is_property_desc = pd.value.is_some() || pd.get.is_some() || pd.set.is_some();
     let existed = object_get_key_value(target_obj, prop_key).is_some();
     let existing_is_configurable = !existed || target_obj.borrow().is_configurable(prop_key);
 
@@ -352,34 +386,38 @@ pub(crate) fn define_property_internal<'gc>(
         }
     }
 
-    // If descriptor is a property descriptor (has value/get/set), unspecified attributes
-    // default to false only when creating a new property. Redefining an existing property
-    // must preserve omitted attributes.
-    if is_property_desc && !existed {
-        // Only default missing 'writable' to false for data descriptors (value or writable present).
-        // For accessor descriptors (get/set) the 'writable' attribute does not apply and
-        // must not be defaulted to false here.
-        if (pd.value.is_some() || pd.writable.is_some()) && pd.writable.is_none() {
-            log::trace!(
-                "define_property_internal: writable absent -> default false; setting non-writable for {:?} on obj_ptr={:p}",
-                prop_key,
-                target_obj.as_ptr()
-            );
-            target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
+    // For a new property, omitted attributes default to false.
+    if !existed {
+        // Writable applies to data/generic descriptors only.
+        if pd.get.is_none() && pd.set.is_none() {
+            if pd.writable == Some(true) {
+                target_obj.borrow_mut(mc).set_writable(prop_key.clone());
+            } else {
+                log::trace!(
+                    "define_property_internal: writable absent/false -> default false; setting non-writable for {:?} on obj_ptr={:p}",
+                    prop_key,
+                    target_obj.as_ptr()
+                );
+                target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
+            }
         }
-        // Default missing 'enumerable' to false
-        if pd.enumerable.is_none() {
+
+        if pd.enumerable == Some(true) {
+            target_obj.borrow_mut(mc).set_enumerable(prop_key.clone());
+        } else {
             log::trace!(
-                "define_property_internal: enumerable absent -> default false; setting non-enumerable for {:?} on obj_ptr={:p}",
+                "define_property_internal: enumerable absent/false -> default false; setting non-enumerable for {:?} on obj_ptr={:p}",
                 prop_key,
                 target_obj.as_ptr()
             );
             target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
         }
-        // Default missing 'configurable' to false
-        if pd.configurable.is_none() {
+
+        if pd.configurable == Some(true) {
+            target_obj.borrow_mut(mc).set_configurable(prop_key.clone());
+        } else {
             log::trace!(
-                "define_property_internal: configurable absent -> default false; setting non-configurable for {:?} on obj_ptr={:p}",
+                "define_property_internal: configurable absent/false -> default false; setting non-configurable for {:?} on obj_ptr={:p}",
                 prop_key,
                 target_obj.as_ptr()
             );
@@ -631,22 +669,7 @@ pub fn handle_object_method<'gc>(
                 return Err(raise_type_error!("Cannot convert undefined or null to object"));
             }
 
-            let key = match prop_val {
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::BigInt(b) => PropertyKey::String(b.to_string()),
-                Value::Symbol(sd) => PropertyKey::Symbol(sd),
-                Value::Object(_) => {
-                    // ToPropertyKey semantics: ToPrimitive with hint 'string'
-                    let prim = crate::core::to_primitive(mc, &prop_val, "string", env)?;
-                    match prim {
-                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        Value::Symbol(s) => PropertyKey::Symbol(s),
-                        other => PropertyKey::String(value_to_string(&other)),
-                    }
-                }
-                val => PropertyKey::String(value_to_string(&val)),
-            };
+            let key = prop_val.to_property_key(mc, env)?;
 
             let has_own = match obj_val {
                 Value::Object(obj) => {
@@ -939,12 +962,7 @@ pub fn handle_object_method<'gc>(
                         return Err(raise_type_error!("Object.groupBy expects a function as second argument"));
                     };
 
-                    let key = match key_val {
-                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::BigInt(b) => PropertyKey::String(b.to_string()),
-                        Value::Symbol(sd) => PropertyKey::Symbol(sd),
-                        _ => PropertyKey::String(value_to_string(&key_val)),
-                    };
+                    let key = key_val.to_property_key(mc, env)?;
 
                     let group_arr = if let Some(arr_rc) = object_get_key_value(&result_obj, &key) {
                         if let Value::Object(arr) = &*arr_rc.borrow() {
@@ -1107,21 +1125,7 @@ pub fn handle_object_method<'gc>(
             }
             let obj_val = args[0].clone();
             let prop_val = args[1].clone();
-            let key = match prop_val {
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::BigInt(b) => PropertyKey::String(b.to_string()),
-                Value::Symbol(sd) => PropertyKey::Symbol(sd),
-                Value::Object(_) => {
-                    let prim = crate::core::to_primitive(mc, &prop_val, "string", env)?;
-                    match prim {
-                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                        Value::Symbol(s) => PropertyKey::Symbol(s),
-                        other => PropertyKey::String(value_to_string(&other)),
-                    }
-                }
-                val => PropertyKey::String(value_to_string(&val)),
-            };
+            let key = prop_val.to_property_key(mc, env)?;
 
             let obj = match obj_val {
                 Value::Object(o) => o,
@@ -1288,15 +1292,15 @@ pub fn handle_object_method<'gc>(
             // Evaluate target and apply ToObject semantics: throw on undefined,
             // box primitives into corresponding object wrappers, or use the
             // object directly.
-            let target_val = args[0].clone();
+            let target_val = args.first().unwrap();
             let target_obj = match target_val {
-                Value::Object(o) => o,
+                Value::Object(o) => *o,
                 Value::Undefined => return Err(raise_type_error!("Object.assign target cannot be undefined or null")),
                 Value::Number(n) => {
                     let obj = new_js_object_data(mc);
                     object_set_key_value(mc, &obj, "valueOf", &Value::Function("Number_valueOf".to_string()))?;
                     object_set_key_value(mc, &obj, "toString", &Value::Function("Number_toString".to_string()))?;
-                    object_set_key_value(mc, &obj, "__value__", &Value::Number(n))?;
+                    object_set_key_value(mc, &obj, "__value__", &Value::Number(*n))?;
                     // Set prototype to Number.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number");
                     obj
@@ -1305,7 +1309,7 @@ pub fn handle_object_method<'gc>(
                     let obj = new_js_object_data(mc);
                     object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
                     object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
-                    object_set_key_value(mc, &obj, "__value__", &Value::Boolean(b))?;
+                    object_set_key_value(mc, &obj, "__value__", &Value::Boolean(*b))?;
                     // Set prototype to Boolean.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean");
                     obj
@@ -1329,7 +1333,7 @@ pub fn handle_object_method<'gc>(
                 }
                 Value::Symbol(sd) => {
                     let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "__value__", &Value::Symbol(sd))?;
+                    object_set_key_value(mc, &obj, "__value__", &Value::Symbol(*sd))?;
 
                     // Set prototype to Symbol.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
@@ -1374,13 +1378,7 @@ pub fn handle_object_method<'gc>(
             };
 
             let prop_val = args[1].clone();
-            // Determine property key (support strings & numbers for now)
-            let prop_key = match prop_val {
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                Value::Symbol(s) => PropertyKey::Symbol(s),
-                _ => return Err(raise_type_error!("Unsupported property key type in Object.defineProperty")),
-            };
+            let prop_key = prop_val.to_property_key(mc, env)?;
 
             if let PropertyKey::String(s) = &prop_key {
                 crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &target_obj, Some(s.as_str()))?;
@@ -1527,17 +1525,30 @@ pub fn handle_object_method<'gc>(
                 _ => return Err(raise_type_error!("Object.defineProperties requires an object as second argument")),
             };
 
-            // Iterate over own properties of props_obj
-            for (key, val_rc) in props_obj.borrow().properties.iter() {
-                // Only process own properties (already handled by properties map)
-                // In JS, it also checks enumerability, but for now we iterate all.
-                // Actually, Object.defineProperties only uses own enumerable properties.
-                // Let's check enumerability.
-                if !props_obj.borrow().is_enumerable(key) {
+            // Collect all descriptors first (per spec ordering/atomicity), then define.
+            let keys = crate::core::ordinary_own_property_keys_mc(mc, &props_obj)?;
+            let mut descriptors: Vec<(PropertyKey<'gc>, JSObjectDataPtr<'gc>)> = Vec::new();
+
+            for key in keys {
+                let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&props_obj, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    match crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)? {
+                        Some(en) => en,
+                        None => continue,
+                    }
+                } else {
+                    if crate::core::get_own_property(&props_obj, &key).is_none() {
+                        continue;
+                    }
+                    props_obj.borrow().is_enumerable(&key)
+                };
+
+                if !is_enumerable {
                     continue;
                 }
 
-                let desc_val = val_rc.borrow().clone();
+                let desc_val = get_property_with_accessors(mc, env, &props_obj, &key)?;
                 let desc_obj = match desc_val {
                     Value::Object(o) => o,
                     _ => return Err(raise_type_error!("Property descriptor must be an object")),
@@ -1545,8 +1556,11 @@ pub fn handle_object_method<'gc>(
 
                 let pd = PropertyDescriptor::from_object(&desc_obj)?;
                 crate::core::validate_descriptor_for_define(mc, &pd)?;
+                descriptors.push((key, desc_obj));
+            }
 
-                define_property_internal(mc, &target_obj, key, &desc_obj)?;
+            for (key, desc_obj) in descriptors {
+                define_property_internal(mc, &target_obj, &key, &desc_obj)?;
             }
 
             Ok(Value::Object(target_obj))

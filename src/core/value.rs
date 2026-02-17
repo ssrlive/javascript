@@ -647,7 +647,7 @@ pub enum Value<'gc> {
     Uninitialized,
 }
 
-impl Value<'_> {
+impl<'gc> Value<'gc> {
     pub fn is_null_or_undefined(&self) -> bool {
         matches!(self, Value::Null | Value::Undefined)
     }
@@ -660,6 +660,32 @@ impl Value<'_> {
             Value::Null | Value::Undefined | Value::Uninitialized => false,
             Value::BigInt(b) => !num_traits::Zero::is_zero(&**b),
             _ => true,
+        }
+    }
+
+    pub fn normalize_slot(&self) -> Value<'gc> {
+        match self {
+            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+            Value::Property { value: None, .. } => Value::Undefined,
+            other => other.clone(),
+        }
+    }
+
+    pub fn to_property_key(&self, mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
+        match self {
+            Value::String(s) => Ok(PropertyKey::String(utf16_to_utf8(s))),
+            Value::BigInt(b) => Ok(PropertyKey::String(b.to_string())),
+            Value::Symbol(sd) => Ok(PropertyKey::Symbol(*sd)),
+            Value::Object(_) => {
+                let prim = crate::core::to_primitive(mc, self, "string", env)?;
+                match &prim {
+                    Value::String(s) => Ok(PropertyKey::String(utf16_to_utf8(s))),
+                    Value::Number(_) => Ok(PropertyKey::String(crate::core::value_to_string(&prim))),
+                    Value::Symbol(sd) => Ok(PropertyKey::Symbol(*sd)),
+                    other => Ok(PropertyKey::String(crate::core::value_to_string(other))),
+                }
+            }
+            other => Ok(PropertyKey::String(crate::core::value_to_string(other))),
         }
     }
 }

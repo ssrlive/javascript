@@ -1,16 +1,13 @@
-#![allow(warnings)]
-
+use crate::core::{
+    ClosureData, Gc, Value, get_own_property, new_gc_cell_ptr, object_get_key_value, object_set_key_value, value_to_sort_string,
+    values_equal,
+};
 use crate::core::{MutationContext, object_get_length, object_set_length};
+use crate::js_proxy::proxy_set_property_with_receiver;
 use crate::{
     core::{EvalError, JSObjectDataPtr, PropertyKey, env_get, env_set, evaluate_call_dispatch, new_js_object_data},
     error::JSError,
-    raise_eval_error, raise_range_error, raise_type_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
-};
-
-use crate::core::{
-    ClosureData, Expr, Gc, GcCell, Value, evaluate_expr, evaluate_statements, get_own_property, new_gc_cell_ptr, object_get_key_value,
-    object_set_key_value, value_to_sort_string, values_equal,
 };
 
 pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
@@ -132,14 +129,14 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         {
             let val = Value::Function("Array.prototype.values".to_string());
             object_set_key_value(mc, &array_proto, iter_sym, &val)?;
-            array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(iter_sym.clone()));
+            array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
         }
 
         if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
             object_set_key_value(mc, &array_proto, tag_sym, &Value::String(utf8_to_utf16("Array")))?;
-            array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(tag_sym.clone()));
+            array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
         }
 
         if let Some(unscopables_sym_val) = object_get_key_value(sym_ctor, "unscopables")
@@ -164,7 +161,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
             }
 
             let unscopables_desc = crate::core::create_descriptor_object(mc, &Value::Object(unscopables_obj), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &array_proto, PropertyKey::Symbol(unscopables_sym.clone()), &unscopables_desc)?;
+            crate::js_object::define_property_internal(mc, &array_proto, PropertyKey::Symbol(*unscopables_sym), &unscopables_desc)?;
         }
     }
 
@@ -188,10 +185,8 @@ pub(crate) fn handle_array_static_method<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut effective_this = if let Some(tv) = this_val {
         Some(tv.clone())
-    } else if let Some(tv_rc) = crate::core::env_get(env, "this") {
-        Some(tv_rc.borrow().clone())
     } else {
-        None
+        crate::core::env_get(env, "this").map(|tv_rc| tv_rc.borrow().clone())
     };
 
     if matches!(method, "from" | "of")
@@ -256,35 +251,6 @@ pub(crate) fn handle_array_static_method<'gc>(
                     }
                 }
 
-                Ok(out_obj)
-            };
-
-            let ensure_array_prototype = |out_obj: JSObjectDataPtr<'gc>| -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
-                if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
-                    && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
-                    && let Some(array_proto_rc) = object_get_key_value(array_ctor_obj, "prototype")
-                {
-                    let array_proto_candidate = match &*array_proto_rc.borrow() {
-                        Value::Object(p) => Some(*p),
-                        Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                            Value::Object(p) => Some(*p),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-
-                    if let Some(array_proto) = array_proto_candidate {
-                        let should_update = out_obj
-                            .borrow()
-                            .prototype
-                            .map(|p| !crate::core::Gc::ptr_eq(p, array_proto))
-                            .unwrap_or(true);
-                        if should_update {
-                            out_obj.borrow_mut(mc).prototype = Some(array_proto);
-                            let _ = object_set_key_value(mc, &out_obj, "__proto__", &Value::Object(array_proto));
-                        }
-                    }
-                }
                 Ok(out_obj)
             };
 
@@ -518,7 +484,14 @@ pub(crate) fn handle_array_static_method<'gc>(
             let mut result: Vec<Value<'gc>> = Vec::new();
             let mut used_iterator_or_string = false;
 
-            let mut map_value = |idx: usize, value: Value<'gc>| -> Result<Value<'gc>, EvalError<'gc>> {
+            fn map_value<'gc>(
+                mc: &MutationContext<'gc>,
+                env: &JSObjectDataPtr<'gc>,
+                mapper: &Option<Value<'gc>>,
+                this_arg: &Value<'gc>,
+                idx: usize,
+                value: Value<'gc>,
+            ) -> Result<Value<'gc>, EvalError<'gc>> {
                 if let Some(fn_val) = &mapper {
                     let mut actual_fn = fn_val.clone();
                     if let Value::Object(obj) = fn_val {
@@ -531,21 +504,20 @@ pub(crate) fn handle_array_static_method<'gc>(
                         }
                     }
                     let call_args = vec![value, Value::Number(idx as f64)];
-                    evaluate_call_dispatch(mc, env, &actual_fn, Some(&this_arg), &call_args)
+                    evaluate_call_dispatch(mc, env, &actual_fn, Some(this_arg), &call_args)
                 } else {
                     Ok(value)
                 }
-            };
+            }
 
             match items.clone() {
                 Value::String(s) => {
                     used_iterator_or_string = true;
                     for (idx, ch) in s.into_iter().enumerate() {
-                        result.push(map_value(idx, Value::String(vec![ch]))?);
+                        result.push(map_value(mc, env, &mapper, &this_arg, idx, Value::String(vec![ch]))?);
                     }
                 }
                 Value::Object(object) => {
-                    let mut used_iterator = false;
                     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                         && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
@@ -554,7 +526,6 @@ pub(crate) fn handle_array_static_method<'gc>(
                         let iter_fn = crate::core::get_property_with_accessors(mc, env, &object, iter_sym)?;
                         if !matches!(iter_fn, Value::Undefined) {
                             let out = create_with_ctor_or_array(None)?;
-                            used_iterator = true;
                             let close_iterator = |iter_obj: &JSObjectDataPtr<'gc>| {
                                 if let Ok(return_fn) = crate::core::get_property_with_accessors(mc, env, iter_obj, "return")
                                     && !matches!(return_fn, Value::Undefined | Value::Null)
@@ -609,7 +580,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                         return Err(err);
                                     }
                                 };
-                                let mapped = match map_value(idx, value) {
+                                let mapped = match map_value(mc, env, &mapper, &this_arg, idx, value) {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
@@ -628,25 +599,21 @@ pub(crate) fn handle_array_static_method<'gc>(
                         }
                     }
 
-                    if !used_iterator {
-                        let len_val = crate::core::get_property_with_accessors(mc, env, &object, "length")?;
-                        let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
-                        let len_num = crate::core::to_number(&len_prim)?;
-                        let max_len = 9007199254740991.0_f64;
-                        let len = if len_num.is_nan() || len_num <= 0.0 {
-                            0usize
-                        } else if !len_num.is_finite() {
-                            max_len as usize
-                        } else {
-                            len_num.floor().min(max_len) as usize
-                        };
-
-                        for i in 0..len {
-                            let element = crate::core::get_property_with_accessors(mc, env, &object, i.to_string())?;
-                            result.push(map_value(i, element)?);
-                        }
+                    let len_val = crate::core::get_property_with_accessors(mc, env, &object, "length")?;
+                    let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                    let len_num = crate::core::to_number(&len_prim)?;
+                    let max_len = 9007199254740991.0_f64;
+                    let len = if len_num.is_nan() || len_num <= 0.0 {
+                        0usize
+                    } else if !len_num.is_finite() {
+                        max_len as usize
                     } else {
-                        used_iterator_or_string = true;
+                        len_num.floor().min(max_len) as usize
+                    };
+
+                    for i in 0..len {
+                        let element = crate::core::get_property_with_accessors(mc, env, &object, i.to_string())?;
+                        result.push(map_value(mc, env, &mapper, &this_arg, i, element)?);
                     }
                 }
                 _ => return Err(raise_type_error!("Array.from requires an array-like or iterable object").into()),
@@ -674,6 +641,7 @@ pub(crate) fn handle_array_static_method<'gc>(
         _ => Err(raise_eval_error!(format!("Array.{method} is not implemented")).into()),
     }
 }
+
 pub(crate) fn handle_array_constructor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
@@ -784,7 +752,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let desc = crate::js_object::handle_object_method(
                     mc,
                     "getOwnPropertyDescriptor",
-                    &[Value::Object(object.clone()), Value::String(utf8_to_utf16("length"))],
+                    &[Value::Object(*object), Value::String(utf8_to_utf16("length"))],
                     env,
                 )?;
                 if let Value::Object(desc_obj) = desc {
@@ -826,7 +794,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                 setter: Some(setter_fn), ..
                             } => {
                                 let setter_args = vec![arg.clone()];
-                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                                 handled_by_setter = true;
                             }
                             Value::Property {
@@ -876,7 +844,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let desc = crate::js_object::handle_object_method(
                     mc,
                     "getOwnPropertyDescriptor",
-                    &[Value::Object(object.clone()), Value::String(utf8_to_utf16("length"))],
+                    &[Value::Object(*object), Value::String(utf8_to_utf16("length"))],
                     env,
                 )?;
                 if let Value::Object(desc_obj) = desc {
@@ -1175,16 +1143,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         if buf_len < needed { 0 } else { ta.length }
                     };
                     k < effective_len
-                } else {
-                    if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
-                        if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                            crate::js_proxy::proxy_has_property(mc, proxy, k.to_string())?
-                        } else {
-                            object_get_key_value(object, k.to_string()).is_some()
-                        }
+                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        crate::js_proxy::proxy_has_property(mc, proxy, k.to_string())?
                     } else {
                         object_get_key_value(object, k.to_string()).is_some()
                     }
+                } else {
+                    object_get_key_value(object, k.to_string()).is_some()
                 };
 
                 if has_property {
@@ -1252,11 +1218,11 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                    if let Value::String(name_vec) = &*nc.borrow() {
-                        let name = crate::unicode::utf16_to_utf8(name_vec);
-                        actual_callback_val = Value::Function(name);
-                    }
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                    && let Value::String(name_vec) = &*nc.borrow()
+                {
+                    let name = crate::unicode::utf16_to_utf8(name_vec);
+                    actual_callback_val = Value::Function(name);
                 }
             }
 
@@ -1281,7 +1247,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 if has_property {
                     let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                    let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
+                    let call_args = vec![val, Value::Number(i as f64), Value::Object(*object)];
                     evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 }
             }
@@ -1404,17 +1370,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 if has_property {
                     let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                    let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
+                    let call_args = vec![val, Value::Number(i as f64), Value::Object(*object)];
 
                     let mut actual_callback_val = callback_val.clone();
                     if let Value::Object(obj) = &callback_val {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_callback_val = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                            if let Value::String(name_vec) = &*nc.borrow() {
-                                let name = crate::unicode::utf16_to_utf8(name_vec);
-                                actual_callback_val = Value::Function(name);
-                            }
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                            && let Value::String(name_vec) = &*nc.borrow()
+                        {
+                            let name = crate::unicode::utf16_to_utf8(name_vec);
+                            actual_callback_val = Value::Function(name);
                         }
                     }
 
@@ -1537,17 +1503,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 if has_property {
                     let element_val = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                    let call_args = vec![element_val.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+                    let call_args = vec![element_val.clone(), Value::Number(i as f64), Value::Object(*object)];
 
                     let mut actual_callback_val = callback_val.clone();
                     if let Value::Object(obj) = &callback_val {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_callback_val = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                            if let Value::String(name_vec) = &*nc.borrow() {
-                                let name = crate::unicode::utf16_to_utf8(name_vec);
-                                actual_callback_val = Value::Function(name);
-                            }
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                            && let Value::String(name_vec) = &*nc.borrow()
+                        {
+                            let name = crate::unicode::utf16_to_utf8(name_vec);
+                            actual_callback_val = Value::Function(name);
                         }
                     }
 
@@ -1628,7 +1594,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     index < effective_len
                 } else {
                     let key = index.to_string();
-                    let mut cur = Some(object.clone());
+                    let mut cur = Some(*object);
                     while let Some(cur_obj) = cur {
                         if crate::core::get_own_property(&cur_obj, key.as_str()).is_some() {
                             return true;
@@ -1668,18 +1634,18 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                    if let Value::String(name_vec) = &*nc.borrow() {
-                        let name = crate::unicode::utf16_to_utf8(name_vec);
-                        actual_callback_val = Value::Function(name);
-                    }
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                    && let Value::String(name_vec) = &*nc.borrow()
+                {
+                    let name = crate::unicode::utf16_to_utf8(name_vec);
+                    actual_callback_val = Value::Function(name);
                 }
             }
 
             while k < current_len {
                 if has_property_at(k) {
                     let k_value = crate::core::get_property_with_accessors(mc, env, object, k)?;
-                    let call_args = vec![accumulator.clone(), k_value, Value::Number(k as f64), Value::Object(object.clone())];
+                    let call_args = vec![accumulator.clone(), k_value, Value::Number(k as f64), Value::Object(*object)];
                     accumulator = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&Value::Undefined), &call_args)?;
                 }
                 k += 1;
@@ -1794,18 +1760,18 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                    if let Value::String(name_vec) = &*nc.borrow() {
-                        let name = crate::unicode::utf16_to_utf8(name_vec);
-                        actual_callback_val = Value::Function(name);
-                    }
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                    && let Value::String(name_vec) = &*nc.borrow()
+                {
+                    let name = crate::unicode::utf16_to_utf8(name_vec);
+                    actual_callback_val = Value::Function(name);
                 }
             }
 
             loop {
                 if has_property_at(k) {
                     let k_value = crate::core::get_property_with_accessors(mc, env, object, k)?;
-                    let call_args = vec![accumulator.clone(), k_value, Value::Number(k as f64), Value::Object(object.clone())];
+                    let call_args = vec![accumulator.clone(), k_value, Value::Number(k as f64), Value::Object(*object)];
                     accumulator = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&Value::Undefined), &call_args)?;
                 }
 
@@ -1860,17 +1826,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                    if let Value::String(name_vec) = &*nc.borrow() {
-                        let name = crate::unicode::utf16_to_utf8(name_vec);
-                        actual_callback_val = Value::Function(name);
-                    }
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                    && let Value::String(name_vec) = &*nc.borrow()
+                {
+                    let name = crate::unicode::utf16_to_utf8(name_vec);
+                    actual_callback_val = Value::Function(name);
                 }
             }
 
             for i in 0..current_len {
                 let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                let call_args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+                let call_args = vec![element.clone(), Value::Number(i as f64), Value::Object(*object)];
                 let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 if res.to_truthy() {
                     return Ok(element);
@@ -1922,17 +1888,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                    if let Value::String(name_vec) = &*nc.borrow() {
-                        let name = crate::unicode::utf16_to_utf8(name_vec);
-                        actual_callback_val = Value::Function(name);
-                    }
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                    && let Value::String(name_vec) = &*nc.borrow()
+                {
+                    let name = crate::unicode::utf16_to_utf8(name_vec);
+                    actual_callback_val = Value::Function(name);
                 }
             }
 
             for i in 0..current_len {
                 let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                let call_args = vec![element, Value::Number(i as f64), Value::Object(object.clone())];
+                let call_args = vec![element, Value::Number(i as f64), Value::Object(*object)];
                 let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 if res.to_truthy() {
                     return Ok(Value::Number(i as f64));
@@ -2005,17 +1971,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 if has_property {
                     let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                    let call_args = vec![element, Value::Number(i as f64), Value::Object(object.clone())];
+                    let call_args = vec![element, Value::Number(i as f64), Value::Object(*object)];
 
                     let mut actual_callback_val = callback.clone();
                     if let Value::Object(obj) = &callback {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_callback_val = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                            if let Value::String(name_vec) = &*nc.borrow() {
-                                let name = crate::unicode::utf16_to_utf8(name_vec);
-                                actual_callback_val = Value::Function(name);
-                            }
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                            && let Value::String(name_vec) = &*nc.borrow()
+                        {
+                            let name = crate::unicode::utf16_to_utf8(name_vec);
+                            actual_callback_val = Value::Function(name);
                         }
                     }
 
@@ -2092,17 +2058,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 if has_property {
                     let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                    let call_args = vec![element, Value::Number(i as f64), Value::Object(object.clone())];
+                    let call_args = vec![element, Value::Number(i as f64), Value::Object(*object)];
 
                     let mut actual_callback_val = callback.clone();
                     if let Value::Object(obj) = &callback {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_callback_val = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                            if let Value::String(name_vec) = &*nc.borrow() {
-                                let name = crate::unicode::utf16_to_utf8(name_vec);
-                                actual_callback_val = Value::Function(name);
-                            }
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                            && let Value::String(name_vec) = &*nc.borrow()
+                        {
+                            let name = crate::unicode::utf16_to_utf8(name_vec);
+                            actual_callback_val = Value::Function(name);
                         }
                     }
 
@@ -2777,7 +2743,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             setter: Some(setter_fn), ..
                         } => {
                             let setter_args = vec![value.clone()];
-                            let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                            let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                             return Ok(());
                         }
                         Value::Property {
@@ -2803,7 +2769,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                 setter: Some(setter_fn), ..
                             } => {
                                 let setter_args = vec![value.clone()];
-                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                                 handled_by_setter = true;
                             }
                             Value::Property {
@@ -2858,7 +2824,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 idx += 1;
             }
 
-            Ok(Value::Object(object.clone()))
+            Ok(Value::Object(*object))
         }
         "reverse" => {
             let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
@@ -2910,15 +2876,15 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
-                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        let key_prop = PropertyKey::from(index.to_string());
-                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
-                        if !deleted {
-                            return Err(raise_type_error!("Cannot delete target property").into());
-                        }
-                        return Ok(());
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                    if !deleted {
+                        return Err(raise_type_error!("Cannot delete target property").into());
                     }
+                    return Ok(());
                 }
 
                 if crate::core::get_own_property(object, index).is_some() {
@@ -2932,21 +2898,15 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let set_property_or_throw = |index: usize, value: &Value<'gc>| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
-                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        let key_prop = PropertyKey::from(index.to_string());
-                        let ok = crate::js_proxy::proxy_set_property_with_receiver(
-                            mc,
-                            proxy,
-                            &key_prop,
-                            value,
-                            Some(&Value::Object(object.clone())),
-                        )?;
-                        if !ok {
-                            return Err(raise_type_error!("Cannot set target property").into());
-                        }
-                        return Ok(());
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    let ok = proxy_set_property_with_receiver(mc, proxy, &key_prop, value, Some(&Value::Object(*object)))?;
+                    if !ok {
+                        return Err(raise_type_error!("Cannot set target property").into());
                     }
+                    return Ok(());
                 }
 
                 object_set_key_value(mc, object, index, value)?;
@@ -2983,7 +2943,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
             }
 
-            Ok(Value::Object(object.clone()))
+            Ok(Value::Object(*object))
         }
         "splice" => {
             if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
@@ -3130,7 +3090,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             let call_env = crate::core::prepare_function_call_env_with_home(
                                 mc,
                                 Some(captured_env),
-                                Some(&Value::Object(object.clone())),
+                                Some(&Value::Object(*object)),
                                 Some(params),
                                 std::slice::from_ref(&arg),
                                 None,
@@ -3141,13 +3101,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             Ok(())
                         }
                         Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::Object(_) => {
-                            let _ = evaluate_call_dispatch(
-                                mc,
-                                env,
-                                setter_val,
-                                Some(&Value::Object(object.clone())),
-                                std::slice::from_ref(&arg),
-                            )?;
+                            let _ = evaluate_call_dispatch(mc, env, setter_val, Some(&Value::Object(*object)), std::slice::from_ref(&arg))?;
                             Ok(())
                         }
                         _ => Err(raise_type_error!("Cannot assign to read only property 'length'").into()),
@@ -3251,15 +3205,15 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
-                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        let key_prop = PropertyKey::from(index.to_string());
-                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
-                        if !deleted {
-                            return Err(raise_type_error!("Cannot delete target property").into());
-                        }
-                        return Ok(());
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                    if !deleted {
+                        return Err(raise_type_error!("Cannot delete target property").into());
                     }
+                    return Ok(());
                 }
 
                 if crate::core::get_own_property(object, index).is_some() {
@@ -3347,7 +3301,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let desc = crate::js_object::handle_object_method(
                     mc,
                     "getOwnPropertyDescriptor",
-                    &[Value::Object(object.clone()), Value::String(utf8_to_utf16("length"))],
+                    &[Value::Object(*object), Value::String(utf8_to_utf16("length"))],
                     env,
                 )?;
                 if let Value::Object(desc_obj) = desc {
@@ -3372,15 +3326,15 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
-                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        let key_prop = PropertyKey::from(index.to_string());
-                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
-                        if !deleted {
-                            return Err(raise_type_error!("Cannot delete target property").into());
-                        }
-                        return Ok(());
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                    if !deleted {
+                        return Err(raise_type_error!("Cannot delete target property").into());
                     }
+                    return Ok(());
                 }
 
                 if crate::core::get_own_property(object, index).is_some() {
@@ -3452,7 +3406,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let desc = crate::js_object::handle_object_method(
                     mc,
                     "getOwnPropertyDescriptor",
-                    &[Value::Object(object.clone()), Value::String(utf8_to_utf16("length"))],
+                    &[Value::Object(*object), Value::String(utf8_to_utf16("length"))],
                     env,
                 )?;
                 if let Value::Object(desc_obj) = desc {
@@ -3502,7 +3456,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             setter: Some(setter_fn), ..
                         } => {
                             let setter_args = vec![value.clone()];
-                            let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                            let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                             return Ok(());
                         }
                         Value::Property {
@@ -3532,7 +3486,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                 setter: Some(setter_fn), ..
                             } => {
                                 let setter_args = vec![value.clone()];
-                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                                 handled_by_setter = true;
                             }
                             Value::Property {
@@ -3569,15 +3523,15 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
-                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        let key_prop = PropertyKey::from(index.to_string());
-                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
-                        if !deleted {
-                            return Err(raise_type_error!("Cannot delete target property").into());
-                        }
-                        return Ok(());
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                    if !deleted {
+                        return Err(raise_type_error!("Cannot delete target property").into());
                     }
+                    return Ok(());
                 }
 
                 if crate::core::get_own_property(object, index).is_some() {
@@ -3749,7 +3703,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     } = &*existing_prop.borrow()
                 {
                     let setter_args = vec![fill_value.clone()];
-                    let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                    let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                     k += 1;
                     continue;
                 }
@@ -3758,7 +3712,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 k += 1;
             }
 
-            Ok(Value::Object(object.clone()))
+            Ok(Value::Object(*object))
         }
         "lastIndexOf" => {
             let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
@@ -3855,10 +3809,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
 
                 let start = std::cmp::min(k as usize, current_len.saturating_sub(1));
-                if start >= effective_len {
-                    if effective_len == 0 {
-                        return Ok(Value::Number(-1.0));
-                    }
+                if start >= effective_len && effective_len == 0 {
+                    return Ok(Value::Number(-1.0));
                 }
                 let mut idx = std::cmp::min(start, effective_len.saturating_sub(1));
 
@@ -4093,7 +4045,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             if join_callable {
-                let this_arg = Value::Object(object.clone());
+                let this_arg = Value::Object(*object);
                 return evaluate_call_dispatch(mc, env, &join_method, Some(&this_arg), &[]);
             }
 
@@ -4109,14 +4061,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
                 && let Value::Symbol(s) = &*tag_sym.borrow()
             {
-                let _ = crate::core::get_property_with_accessors(mc, env, object, s.clone())?;
+                let _ = crate::core::get_property_with_accessors(mc, env, object, *s)?;
             }
 
-            Ok(crate::core::handle_object_prototype_to_string(
-                mc,
-                &Value::Object(object.clone()),
-                env,
-            ))
+            Ok(crate::core::handle_object_prototype_to_string(mc, &Value::Object(*object), env))
         }
         "toLocaleString" => {
             let length_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
@@ -4190,7 +4138,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let new_array = create_array(mc, env)?;
             set_array_length(mc, &new_array, result.len())?;
             for (i, val) in result.iter().enumerate() {
-                object_set_key_value(mc, &new_array, i, &val)?;
+                object_set_key_value(mc, &new_array, i, val)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -4216,10 +4164,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         callback_val.clone()
                     };
 
-                    let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
+                    let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(*object)];
 
                     let mapped_val = match &actual_func {
-                        Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                        Value::Closure(cl) => crate::core::call_closure(mc, cl, None, &args, env, None)?,
                         Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
                         _ => return Err(raise_eval_error!("Array.flatMap expects a function").into()),
                     };
@@ -4231,7 +4179,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let new_array = create_array(mc, env)?;
             set_array_length(mc, &new_array, result.len())?;
             for (i, val) in result.iter().enumerate() {
-                object_set_key_value(mc, &new_array, i, &val)?;
+                object_set_key_value(mc, &new_array, i, val)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -4281,7 +4229,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             if args.is_empty() {
-                return Ok(Value::Object(object.clone()));
+                return Ok(Value::Object(*object));
             }
 
             let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
@@ -4338,7 +4286,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let mut count = (final_i - from).max(0).min((len_i - to).max(0));
             if count <= 0 {
-                return Ok(Value::Object(object.clone()));
+                return Ok(Value::Object(*object));
             }
 
             let mut from_idx = from;
@@ -4390,7 +4338,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         } = &*existing_prop.borrow()
                     {
                         let setter_args = vec![from_val];
-                        let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                        let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                     } else {
                         object_set_key_value(mc, object, to_key, &from_val)?;
                     }
@@ -4423,25 +4371,25 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 count -= 1;
             }
 
-            Ok(Value::Object(object.clone()))
+            Ok(Value::Object(*object))
         }
         "keys" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Array.prototype.keys takes no arguments").into());
             }
-            Ok(create_array_iterator(mc, env, object.clone(), "keys")?)
+            Ok(create_array_iterator(mc, env, *object, "keys")?)
         }
         "values" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Array.prototype.values takes no arguments").into());
             }
-            Ok(create_array_iterator(mc, env, object.clone(), "values")?)
+            Ok(create_array_iterator(mc, env, *object, "values")?)
         }
         "entries" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Array.prototype.entries takes no arguments").into());
             }
-            Ok(create_array_iterator(mc, env, object.clone(), "entries")?)
+            Ok(create_array_iterator(mc, env, *object, "entries")?)
         }
         "findLast" => {
             if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
@@ -4482,31 +4430,21 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_type_error!("Array.findLast callback must be a function").into());
             }
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
-                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
-                    Some(*ta)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
             let mut actual_callback_val = callback_val.clone();
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                    if let Value::String(name_vec) = &*nc.borrow() {
-                        let name = crate::unicode::utf16_to_utf8(name_vec);
-                        actual_callback_val = Value::Function(name);
-                    }
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                    && let Value::String(name_vec) = &*nc.borrow()
+                {
+                    let name = crate::unicode::utf16_to_utf8(name_vec);
+                    actual_callback_val = Value::Function(name);
                 }
             }
 
             for i in (0..current_len).rev() {
                 let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                let call_args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+                let call_args = vec![element.clone(), Value::Number(i as f64), Value::Object(*object)];
                 let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 if res.to_truthy() {
                     return Ok(element);
@@ -4558,17 +4496,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                    if let Value::String(name_vec) = &*nc.borrow() {
-                        let name = crate::unicode::utf16_to_utf8(name_vec);
-                        actual_callback_val = Value::Function(name);
-                    }
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                    && let Value::String(name_vec) = &*nc.borrow()
+                {
+                    let name = crate::unicode::utf16_to_utf8(name_vec);
+                    actual_callback_val = Value::Function(name);
                 }
             }
 
             for i in (0..current_len).rev() {
                 let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                let call_args = vec![element, Value::Number(i as f64), Value::Object(object.clone())];
+                let call_args = vec![element, Value::Number(i as f64), Value::Object(*object)];
                 let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 if res.to_truthy() {
                     return Ok(Value::Number(i as f64));
@@ -4612,9 +4550,9 @@ fn flatten_single_value<'gc>(
     match value {
         Value::Object(obj) => {
             // Check if it's an array-like object
-            let is_arr = { is_array(mc, &obj) };
+            let is_arr = { is_array(mc, obj) };
             if is_arr {
-                flatten_array(mc, &obj, result, depth - 1)?;
+                flatten_array(mc, obj, result, depth - 1)?;
             } else {
                 result.push(Value::Object(*obj));
             }
@@ -4627,7 +4565,7 @@ fn flatten_single_value<'gc>(
 }
 
 /// Check if an object is an Array
-pub(crate) fn is_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
+pub(crate) fn is_array<'gc>(_mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
     if let Some(val) = get_own_property(obj, "__is_array")
         && let Value::Boolean(b) = *val.borrow()
     {
@@ -4636,7 +4574,7 @@ pub(crate) fn is_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc
     false
 }
 
-pub(crate) fn get_array_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
+pub(crate) fn get_array_length<'gc>(_mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
     object_get_length(obj)
 }
 
@@ -4675,10 +4613,9 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     }
 
     // Set prototype
-    let mut root_env_opt = Some(env.clone());
-    while let Some(r) = root_env_opt.clone() {
-        let proto_opt = r.borrow().prototype.clone();
-        if let Some(proto_rc) = proto_opt {
+    let mut root_env_opt = Some(*env);
+    while let Some(r) = root_env_opt {
+        if let Some(proto_rc) = r.borrow().prototype {
             root_env_opt = Some(proto_rc);
         } else {
             break;
@@ -4705,7 +4642,7 @@ pub(crate) fn create_array_iterator<'gc>(
     let iterator = new_js_object_data(mc);
 
     // Store array
-    object_set_key_value(mc, &iterator, "__iterator_array__", &Value::Object(object.clone()))?;
+    object_set_key_value(mc, &iterator, "__iterator_array__", &Value::Object(object))?;
     // Store index
     object_set_key_value(mc, &iterator, "__iterator_index__", &Value::Number(0.0))?;
     // Store kind
@@ -4743,7 +4680,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     // Get array
     let arr_val = object_get_key_value(iterator, "__iterator_array__").ok_or(EvalError::Js(raise_eval_error!("Iterator has no array")))?;
     let arr_ptr = if let Value::Object(o) = &*arr_val.borrow() {
-        o.clone()
+        *o
     } else if matches!(&*arr_val.borrow(), Value::Undefined) {
         let result_obj = new_js_object_data(mc);
         object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;

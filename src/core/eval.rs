@@ -3853,21 +3853,7 @@ fn eval_res<'gc>(
                     }
                     ObjectDestructuringElement::ComputedProperty { key: key_expr, .. } => {
                         let key_val = evaluate_expr(mc, env, key_expr)?;
-                        let prop_key = match key_val {
-                            Value::Symbol(sd) => crate::core::PropertyKey::Symbol(sd),
-                            Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
-                            Value::Number(n) => crate::core::PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                            Value::Object(_) => {
-                                let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
-                                match prim {
-                                    Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
-                                    Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
-                                    Value::Number(n) => crate::core::PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                                    other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
-                                }
-                            }
-                            other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
-                        };
+                        let prop_key = key_val.to_property_key(mc, env)?;
                         excluded_names.push(prop_key.clone());
                         computed_keys[i] = Some(prop_key);
                     }
@@ -4065,21 +4051,7 @@ fn eval_res<'gc>(
                     }
                     ObjectDestructuringElement::ComputedProperty { key: key_expr, .. } => {
                         let key_val = evaluate_expr(mc, env, key_expr)?;
-                        let prop_key = match key_val {
-                            Value::Symbol(sd) => crate::core::PropertyKey::Symbol(sd),
-                            Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
-                            Value::Number(n) => crate::core::PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                            Value::Object(_) => {
-                                let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
-                                match prim {
-                                    Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
-                                    Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
-                                    Value::Number(n) => crate::core::PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
-                                    other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
-                                }
-                            }
-                            other => crate::core::PropertyKey::String(crate::core::value_to_string(&other)),
-                        };
+                        let prop_key = key_val.to_property_key(mc, env)?;
                         excluded_names.push(prop_key.clone());
                         computed_keys[i] = Some(prop_key);
                     }

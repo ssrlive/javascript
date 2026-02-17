@@ -140,56 +140,55 @@ pub(crate) fn string_constructor<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // String() constructor
-    if args.len() == 1 {
-        let arg_val = args[0].clone();
-        match arg_val {
-            Value::Number(n) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n))))),
-            Value::String(s) => Ok(Value::String(s.clone())),
-            Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-            Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
-            Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
-            Value::Object(obj) => {
-                // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
-                let prim = to_primitive(mc, &Value::Object(obj), "string", env)?;
-                match prim {
-                    Value::String(s) => Ok(Value::String(s)),
-                    Value::Number(n) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n))))),
-                    Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-                    Value::Symbol(sd) => match sd.description() {
-                        Some(d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({d})")))),
-                        None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
-                    },
-                    _ => Ok(Value::String(utf8_to_utf16("[object Object]"))),
-                }
+    if args.len() != 1 {
+        return Ok(Value::String(Vec::new())); // String() with no args returns empty string
+    }
+    let arg_val = args.first().unwrap();
+    match arg_val {
+        Value::Number(n) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n))))),
+        Value::String(s) => Ok(Value::String(s.clone())),
+        Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+        Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
+        Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
+        Value::Object(_) => {
+            // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
+            let prim = to_primitive(mc, arg_val, "string", env)?;
+            match &prim {
+                Value::String(s) => Ok(Value::String(s.clone())),
+                Value::Number(_) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&prim)))),
+                Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                Value::Symbol(sd) => match sd.description() {
+                    Some(d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({d})")))),
+                    None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
+                },
+                _ => Ok(Value::String(utf8_to_utf16("[object Object]"))),
             }
-            Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
-            Value::Closure(_) => Ok(Value::String(utf8_to_utf16("[Function]"))),
-            Value::AsyncClosure(_) => Ok(Value::String(utf8_to_utf16("[AsyncFunction]"))),
-            Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
-            Value::Getter(..) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
-            Value::Setter(..) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
-            Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[property]"))),
-            Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
-            Value::Symbol(symbol_data) => {
-                let desc = symbol_data.description().unwrap_or("");
-                Ok(Value::String(utf8_to_utf16(&format!("Symbol({desc})"))))
-            }
-            Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.to_string()))),
-            Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
-            Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
-            Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
-            Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
-            Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
-            Value::Generator(_) | Value::AsyncGenerator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
-            Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
-            Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
-            Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
-            Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
-            Value::Uninitialized => Ok(Value::String(utf8_to_utf16("undefined"))),
-            Value::PrivateName(n, _) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
         }
-    } else {
-        Ok(Value::String(Vec::new())) // String() with no args returns empty string
+        Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
+        Value::Closure(_) => Ok(Value::String(utf8_to_utf16("[Function]"))),
+        Value::AsyncClosure(_) => Ok(Value::String(utf8_to_utf16("[AsyncFunction]"))),
+        Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
+        Value::Getter(..) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
+        Value::Setter(..) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
+        Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[property]"))),
+        Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
+        Value::Symbol(symbol_data) => {
+            let desc = symbol_data.description().unwrap_or("");
+            Ok(Value::String(utf8_to_utf16(&format!("Symbol({desc})"))))
+        }
+        Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.to_string()))),
+        Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
+        Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
+        Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
+        Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
+        Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
+        Value::Generator(_) | Value::AsyncGenerator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
+        Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
+        Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
+        Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
+        Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
+        Value::Uninitialized => Ok(Value::String(utf8_to_utf16("undefined"))),
+        Value::PrivateName(n, _) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
     }
 }
 

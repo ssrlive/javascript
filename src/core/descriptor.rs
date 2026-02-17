@@ -78,29 +78,17 @@ impl<'gc> PropertyDescriptor<'gc> {
     pub fn from_object(obj: &JSObjectDataPtr<'gc>) -> Result<Self, JSError> {
         // `object_get_key_value` traverses own+prototype chain; descriptor parsing
         // should read own properties, but inherited values are accepted here.
-        let value = object_get_key_value(obj, "value").map(|vptr| (*vptr.borrow()).clone());
+        let value = object_get_key_value(obj, "value").map(|vptr| vptr.borrow().normalize_slot());
 
-        let writable = if let Some(wptr) = object_get_key_value(obj, "writable") {
-            if let Value::Boolean(b) = &*wptr.borrow() { Some(*b) } else { None }
-        } else {
-            None
-        };
+        let writable = object_get_key_value(obj, "writable").map(|wptr| wptr.borrow().normalize_slot().to_truthy());
 
-        let get = object_get_key_value(obj, "get").map(|gptr| (*gptr.borrow()).clone());
+        let get = object_get_key_value(obj, "get").map(|gptr| gptr.borrow().normalize_slot());
 
-        let set = object_get_key_value(obj, "set").map(|sptr| (*sptr.borrow()).clone());
+        let set = object_get_key_value(obj, "set").map(|sptr| sptr.borrow().normalize_slot());
 
-        let enumerable = if let Some(eptr) = object_get_key_value(obj, "enumerable") {
-            if let Value::Boolean(b) = &*eptr.borrow() { Some(*b) } else { None }
-        } else {
-            None
-        };
+        let enumerable = object_get_key_value(obj, "enumerable").map(|eptr| eptr.borrow().normalize_slot().to_truthy());
 
-        let configurable = if let Some(cptr) = object_get_key_value(obj, "configurable") {
-            if let Value::Boolean(b) = &*cptr.borrow() { Some(*b) } else { None }
-        } else {
-            None
-        };
+        let configurable = object_get_key_value(obj, "configurable").map(|cptr| cptr.borrow().normalize_slot().to_truthy());
 
         Ok(PropertyDescriptor {
             value,

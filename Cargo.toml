@@ -20,7 +20,7 @@ std = []
 [dependencies]
 chrono = { version = "0.4.43", features = ["serde"] }
 crossbeam-channel = "0.5.15"
-gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "40c2710" }
+gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae" }
 indexmap = "2.13.0"
 log = "0.4.29"
 num-bigint = "0.4.6"
@@ -30,16 +30,16 @@ serde_json = "1.0.149"
 thiserror = "2.0.18"
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "0.2.180", optional = true }
+libc = { version = "0.2.182", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", optional = true, features = ["Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
 
 [dev-dependencies]
-clap = { version = "4.5.54", features = ["derive", "cargo"] }
-criterion = { version = "0.8.1", features = ["html_reports"] }
+clap = { version = "4.5.59", features = ["derive", "cargo"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 ctor = "0.6.3"
-env_logger = { version = "0.11.8" }
+env_logger = { version = "0.11.9" }
 rustyline = "17.0.2"
 
 [[example]]

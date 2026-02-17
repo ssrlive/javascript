@@ -188,6 +188,59 @@ pub fn handle_reflect_method<'gc>(
             let arguments_list = if args.len() > 1 { args[1].clone() } else { Value::Undefined };
             let new_target = if args.len() > 2 { args[2].clone() } else { target.clone() };
 
+            let is_constructor_value = |v: &Value<'gc>| -> bool {
+                match v {
+                    Value::Object(obj) => {
+                        if obj.borrow().class_def.is_some()
+                            || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
+                            || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
+                        {
+                            return true;
+                        }
+
+                        if let Some(cl_ptr) = obj.borrow().get_closure() {
+                            let closure_is_arrow = match &*cl_ptr.borrow() {
+                                Value::Closure(cl) | Value::AsyncClosure(cl) => cl.is_arrow,
+                                _ => false,
+                            };
+                            if closure_is_arrow {
+                                return false;
+                            }
+
+                            // Constructor-ness is not determined by the *value* of `.prototype`,
+                            // but ordinary constructor functions typically have an own `prototype`
+                            // property. This allows cases where `.prototype` is reassigned to a
+                            // primitive while preserving constructor behavior.
+                            if crate::core::object_get_key_value(obj, "prototype").is_none() {
+                                return false;
+                            }
+
+                            if obj.borrow().get_home_object().is_some() {
+                                return true;
+                            }
+                            return true;
+                        }
+
+                        false
+                    }
+                    Value::Closure(cl) | Value::AsyncClosure(cl) => !cl.is_arrow,
+                    Value::Function(name) => {
+                        matches!(
+                            name.as_str(),
+                            "Date" | "Array" | "RegExp" | "Object" | "Number" | "Boolean" | "String" | "GeneratorFunction"
+                        )
+                    }
+                    _ => false,
+                }
+            };
+
+            if !is_constructor_value(&target) {
+                return Err(raise_type_error!("Reflect.construct target is not a constructor").into());
+            }
+            if !is_constructor_value(&new_target) {
+                return Err(raise_type_error!("Reflect.construct newTarget is not a constructor").into());
+            }
+
             // Build argument list from array-like arguments_list
             let mut arg_values: Vec<Value> = Vec::new();
             match arguments_list {
@@ -295,6 +348,78 @@ pub fn handle_reflect_method<'gc>(
                             return Ok(Value::Boolean(false));
                         }
 
+                        if crate::js_array::is_array(mc, &obj)
+                            && let PropertyKey::String(s) = &prop_key
+                            && s == "length"
+                        {
+                            if requested.get.is_some() || requested.set.is_some() {
+                                return Ok(Value::Boolean(false));
+                            }
+
+                            let to_number_with_hint = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
+                                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                                crate::core::to_number(&prim)
+                            };
+
+                            let old_len = get_array_length(mc, &obj).unwrap_or(0);
+                            let to_uint32 = |num: f64| -> u32 {
+                                if !num.is_finite() || num == 0.0 || num.is_nan() {
+                                    return 0;
+                                }
+                                let int = num.signum() * num.abs().floor();
+                                let two32 = 4294967296.0_f64;
+                                let mut int_mod = int % two32;
+                                if int_mod < 0.0 {
+                                    int_mod += two32;
+                                }
+                                int_mod as u32
+                            };
+
+                            let mut computed_new_len: Option<usize> = None;
+                            if let Some(v) = requested.value.clone() {
+                                let n1 = match to_number_with_hint(&v) {
+                                    Ok(n) => n,
+                                    Err(_) => return Ok(Value::Boolean(false)),
+                                };
+                                let uint32_len = to_uint32(n1);
+                                let number_len = match to_number_with_hint(&v) {
+                                    Ok(n) => n,
+                                    Err(_) => return Ok(Value::Boolean(false)),
+                                };
+
+                                if (uint32_len as f64) != number_len {
+                                    return Ok(Value::Boolean(false));
+                                }
+                                computed_new_len = Some(uint32_len as usize);
+                            }
+
+                            if requested.configurable == Some(true) || requested.enumerable == Some(true) {
+                                return Ok(Value::Boolean(false));
+                            }
+
+                            let length_writable = obj.borrow().is_writable("length");
+                            if requested.writable == Some(true) && !length_writable {
+                                return Ok(Value::Boolean(false));
+                            }
+
+                            if let Some(new_len) = computed_new_len {
+                                if !length_writable && new_len != old_len {
+                                    return Ok(Value::Boolean(false));
+                                }
+                                if set_array_length(mc, &obj, new_len).is_err() {
+                                    return Ok(Value::Boolean(false));
+                                }
+                            }
+
+                            if requested.writable == Some(false) {
+                                obj.borrow_mut(mc).set_non_writable("length");
+                            } else if requested.writable == Some(true) {
+                                obj.borrow_mut(mc).set_writable("length");
+                            }
+
+                            return Ok(Value::Boolean(true));
+                        }
+
                         match crate::js_object::define_property_internal(mc, &obj, &prop_key, attr_obj) {
                             Ok(()) => Ok(Value::Boolean(true)),
                             Err(_e) => Ok(Value::Boolean(false)),
@@ -342,11 +467,7 @@ pub fn handle_reflect_method<'gc>(
                     if let PropertyKey::String(s) = &prop_key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
                     }
-                    if let Some(value_rc) = object_get_key_value(&obj, &prop_key) {
-                        Ok(value_rc.borrow().clone())
-                    } else {
-                        Ok(Value::Undefined)
-                    }
+                    crate::core::get_property_with_accessors(mc, env, &obj, &prop_key)
                 }
                 _ => Err(raise_type_error!("Reflect.get target must be an object").into()),
             }
@@ -511,11 +632,21 @@ pub fn handle_reflect_method<'gc>(
             let target = args[0].clone();
             let property_key = args[1].clone();
             let value = if args.len() > 2 { args[2].clone() } else { Value::Undefined };
-            let _receiver = if args.len() > 3 { args[3].clone() } else { target.clone() };
+            let receiver = if args.len() > 3 { args[3].clone() } else { target.clone() };
 
             match target {
                 Value::Object(obj) => {
                     let prop_key = to_property_key(mc, env, property_key)?;
+
+                    if let Value::Object(receiver_obj) = &receiver
+                        && let Some(proxy_cell) = crate::core::get_own_property(receiver_obj, "__proxy__")
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        let _ = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &prop_key)?;
+                        let defined = crate::js_proxy::proxy_define_data_property(mc, proxy, &prop_key, &value)?;
+                        return Ok(Value::Boolean(defined));
+                    }
+
                     let is_module_namespace = {
                         let b = obj.borrow();
                         b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())

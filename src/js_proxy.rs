@@ -1,11 +1,11 @@
-use crate::core::{ClosureData, Expr, JSProxy, Statement, StatementKind, prepare_closure_call_env};
+use crate::core::{ClosureData, Expr, JSProxy, Statement, StatementKind};
 use crate::core::{Gc, MutationContext, new_gc_cell_ptr};
 use crate::env_set;
 use crate::unicode::utf16_to_utf8;
 use crate::{
     core::{
-        EvalError, JSObjectDataPtr, PropertyKey, Value, evaluate_statements, extract_closure_from_value, new_js_object_data,
-        object_get_key_value, object_set_key_value,
+        EvalError, JSObjectDataPtr, PropertyKey, Value, evaluate_call_dispatch, new_js_object_data, object_get_key_value,
+        object_set_key_value,
     },
     error::JSError,
     unicode::utf8_to_utf16,
@@ -132,20 +132,15 @@ pub(crate) fn apply_proxy_trap<'gc>(
             other => other.clone(),
         };
 
-        // Accept either a direct `Value::Closure` or a function-object that
-        // stores the executable closure in the internal closure slot.
-        if let Some((params, body, captured_env)) = extract_closure_from_value(&trap) {
-            // Create execution environment for the trap and bind parameters
-            let trap_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params), &args, None)?;
-
-            // Evaluate the body
-            return evaluate_statements(mc, &trap_env, &body);
-        } else if matches!(trap, Value::Function(_)) {
-            // For now, we don't handle built-in functions as traps
-            // Fall through to default
-        } else {
-            // Not a callable trap, fall through to default
+        // Per spec, undefined/null trap means "not present" and should use default behavior.
+        if matches!(trap, Value::Undefined | Value::Null) {
+            return default_fn();
         }
+
+        // If trap property exists it must be callable; invoke via normal call dispatch
+        // so return semantics and `this` binding are correct.
+        let handler_this = Value::Object(*handler_obj);
+        return evaluate_call_dispatch(mc, handler_obj, &trap, Some(&handler_this), &args);
     }
 
     // No trap or trap not callable, use default behavior
@@ -303,22 +298,31 @@ pub(crate) fn proxy_set_property<'gc>(
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
-    let result = apply_proxy_trap(
-        mc,
-        proxy,
-        "set",
-        vec![(*proxy.target).clone(), property_key_to_value(key), value.clone()],
-        || {
-            // Default behavior: set property on target
-            match &*proxy.target {
-                Value::Object(obj) => {
-                    object_set_key_value(mc, obj, key, value)?;
-                    Ok(Value::Boolean(true))
-                }
-                _ => Ok(Value::Boolean(false)), // Non-objects can't have properties set
+    proxy_set_property_with_receiver(mc, proxy, key, value, None)
+}
+
+pub(crate) fn proxy_set_property_with_receiver<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
+    key: &PropertyKey<'gc>,
+    value: &Value<'gc>,
+    receiver: Option<&Value<'gc>>,
+) -> Result<bool, EvalError<'gc>> {
+    let mut trap_args = vec![(*proxy.target).clone(), property_key_to_value(key), value.clone()];
+    if let Some(r) = receiver {
+        trap_args.push(r.clone());
+    }
+
+    let result = apply_proxy_trap(mc, proxy, "set", trap_args, || {
+        // Default behavior: set property on target
+        match &*proxy.target {
+            Value::Object(obj) => {
+                object_set_key_value(mc, obj, key, value)?;
+                Ok(Value::Boolean(true))
             }
-        },
-    )?;
+            _ => Ok(Value::Boolean(false)), // Non-objects can't have properties set
+        }
+    })?;
 
     match result {
         Value::Boolean(b) => Ok(b),

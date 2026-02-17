@@ -169,8 +169,11 @@ pub fn handle_global_function<'gc>(
                 if let Value::Object(wrapper_obj) = revoke_val {
                     // Get the stored __proxy__ property on the wrapper
                     if let Some(proxy_prop) = object_get_key_value(&wrapper_obj, "__proxy__") {
-                        let proxy_val = proxy_prop.borrow().clone();
-                        if let Value::Proxy(p) = proxy_val {
+                        let old_proxy = {
+                            let borrowed = proxy_prop.borrow();
+                            if let Value::Proxy(p) = &*borrowed { Some(*p) } else { None }
+                        };
+                        if let Some(p) = old_proxy {
                             // Create a new proxy with revoked=true and same target/handler
                             let new_proxy = Gc::new(
                                 mc,
@@ -180,7 +183,7 @@ pub fn handle_global_function<'gc>(
                                     revoked: true,
                                 },
                             );
-                            *proxy_prop.borrow_mut(mc) = Value::Proxy(new_proxy);
+                            let _ = object_set_key_value(mc, &wrapper_obj, "__proxy__", &Value::Proxy(new_proxy));
                         }
                     }
                 }
@@ -297,8 +300,49 @@ pub fn handle_global_function<'gc>(
                 let receiver_val = args[0].clone();
                 let evaluated_args = args[1..].to_vec();
                 if let Value::Function(func_name) = &this_val {
+                    if (func_name == "Object.prototype.hasOwnProperty" || func_name == "Object.prototype.propertyIsEnumerable")
+                        && let Value::Function(target_name) = &receiver_val
+                    {
+                        if evaluated_args.len() != 1 {
+                            return Err(raise_eval_error!("Object.prototype helper requires one argument").into());
+                        }
+                        let key = crate::core::value_to_string(&evaluated_args[0]);
+                        let is_builtin_prop = key == "length" || key == "name";
+                        if func_name == "Object.prototype.hasOwnProperty" {
+                            if is_builtin_prop {
+                                if crate::core::consume_pending_function_delete_hasown_check() {
+                                    return Ok(Value::Boolean(false));
+                                }
+                                let marker = format!("__fn_deleted::{}::{}", target_name, key);
+                                let mut deleted = crate::core::is_deleted_builtin_function_virtual_prop(target_name, key.as_str())
+                                    || crate::core::env_get(env, marker.as_str())
+                                        .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+                                        .unwrap_or(false);
+                                if !deleted
+                                    && let Some(global_this_rc) = crate::core::env_get(env, "globalThis")
+                                    && let Value::Object(global_obj) = &*global_this_rc.borrow()
+                                    && let Some(v) = crate::core::object_get_key_value(global_obj, marker.as_str())
+                                {
+                                    deleted = matches!(*v.borrow(), Value::Boolean(true));
+                                }
+                                return Ok(Value::Boolean(!deleted));
+                            }
+                            return Ok(Value::Boolean(false));
+                        }
+                        let _ = target_name;
+                        return Ok(Value::Boolean(false));
+                    }
+
                     let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
                     return handle_global_function(mc, func_name, &evaluated_args, &call_env);
+                }
+                if let Value::Object(obj) = &this_val
+                    && let Some(cl_prop) = obj.borrow().get_closure()
+                {
+                    let cl_val = cl_prop.borrow().clone();
+                    if let Value::Closure(cl) = cl_val {
+                        return crate::core::call_closure(mc, &cl, Some(&receiver_val), &evaluated_args, env, Some(*obj));
+                    }
                 }
                 if let Value::Object(obj) = &this_val
                     && let Some(native_ctor_rc) = crate::core::object_get_key_value(obj, "__native_ctor")
@@ -478,28 +522,33 @@ pub fn handle_global_function<'gc>(
             let method = name.trim_start_matches("Array.prototype.");
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
-                match this_val {
-                    Value::Object(obj) => {
-                        return crate::js_array::handle_array_instance_method(mc, &obj, method, args, env);
+                let receiver_obj = match this_val {
+                    Value::Object(obj) => obj,
+                    Value::Undefined | Value::Null => {
+                        return Err(raise_type_error!("Array.prototype method called on null or undefined").into());
                     }
-                    Value::String(s) => {
-                        let str_obj = crate::core::new_js_object_data(mc);
-                        object_set_key_value(mc, &str_obj, "__value__", &Value::String(s.clone()))?;
-                        object_set_key_value(mc, &str_obj, "length", &Value::Number(crate::unicode::utf16_len(&s) as f64))?;
-                        let mut i = 0;
-                        while let Some(c) = crate::unicode::utf16_char_at(&s, i) {
-                            let char_str = crate::unicode::utf16_to_utf8(&[c]);
-                            object_set_key_value(mc, &str_obj, i, &Value::String(crate::unicode::utf8_to_utf16(&char_str)))?;
-                            i += 1;
+                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&this_val), env)? {
+                        Value::Object(obj) => obj,
+                        _ => {
+                            return Err(raise_type_error!("Array.prototype method called on incompatible receiver").into());
                         }
-                        return crate::js_array::handle_array_instance_method(mc, &str_obj, method, args, env);
-                    }
-                    _ => {
-                        return Err(raise_type_error!("Array.prototype method called on incompatible receiver").into());
-                    }
-                }
+                    },
+                };
+                return crate::js_array::handle_array_instance_method(mc, &receiver_obj, method, args, env);
             }
             Err(raise_type_error!("Array.prototype method called without this").into())
+        }
+
+        name if name.starts_with("Number.prototype.") => {
+            let method = name.trim_start_matches("Number.prototype.");
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if matches!(this_val, Value::Undefined | Value::Null) {
+                    return Err(raise_type_error!("Number.prototype method called on null or undefined").into());
+                }
+                return Ok(crate::js_number::handle_number_prototype_method(Some(&this_val), method, args)?);
+            }
+            Err(raise_type_error!("Number.prototype method called without this").into())
         }
 
         "IteratorSelf" => {
@@ -2281,6 +2330,43 @@ fn handle_object_has_own_property<'gc>(
         let this_val = this_rc.borrow().clone();
         match this_val {
             Value::Object(obj) => {
+                let key_str_opt = match &key_val {
+                    Value::String(s) => Some(utf16_to_utf8(s)),
+                    Value::Number(n) => Some(crate::core::value_to_string(&Value::Number(*n))),
+                    Value::BigInt(b) => Some(b.to_string()),
+                    Value::Boolean(b) => Some(b.to_string()),
+                    Value::Undefined => Some("undefined".to_string()),
+                    _ => None,
+                };
+                if let Some(key_str) = &key_str_opt
+                    && (key_str == "length" || key_str == "name")
+                    && let Some(cl_ptr) = obj.borrow().get_closure()
+                {
+                    if crate::core::consume_pending_function_delete_hasown_check() {
+                        return Ok(Value::Boolean(false));
+                    }
+                    let func_name_opt: Option<String> = match &*cl_ptr.borrow() {
+                        Value::Function(func_name) => Some(func_name.clone()),
+                        Value::Closure(cl) | Value::AsyncClosure(cl) => cl.native_target.clone(),
+                        _ => None,
+                    };
+                    if let Some(func_name) = func_name_opt {
+                        let marker = format!("__fn_deleted::{}::{}", func_name, key_str);
+                        let mut deleted = crate::core::is_deleted_builtin_function_virtual_prop(func_name.as_str(), key_str.as_str())
+                            || crate::core::env_get(env, marker.as_str())
+                                .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+                                .unwrap_or(false);
+                        if !deleted
+                            && let Some(global_this_rc) = crate::core::env_get(env, "globalThis")
+                            && let Value::Object(global_obj) = &*global_this_rc.borrow()
+                            && let Some(v) = crate::core::object_get_key_value(global_obj, marker.as_str())
+                        {
+                            deleted = matches!(*v.borrow(), Value::Boolean(true));
+                        }
+                        return Ok(Value::Boolean(!deleted));
+                    }
+                }
+
                 let ns_export_meta =
                     get_own_property(&obj, PropertyKey::Private("__ns_export_names".to_string(), 1)).and_then(|v| match &*v.borrow() {
                         Value::Object(meta) => Some(*meta),
@@ -2313,6 +2399,47 @@ fn handle_object_has_own_property<'gc>(
                 }
                 let exists = has_own_property_value(&obj, &key_val);
                 Ok(Value::Boolean(exists))
+            }
+            Value::Function(func_name) => {
+                let key_str = match key_val {
+                    Value::String(ss) => utf16_to_utf8(&ss),
+                    Value::Number(n) => crate::core::value_to_string(&Value::Number(n)),
+                    Value::BigInt(b) => b.to_string(),
+                    Value::Boolean(b) => b.to_string(),
+                    Value::Undefined => "undefined".to_string(),
+                    Value::Symbol(_) => return Ok(Value::Boolean(false)),
+                    other => crate::core::value_to_string(&other),
+                };
+                let is_deleted = |prop: &str| {
+                    let marker = format!("__fn_deleted::{}::{}", func_name, prop);
+                    if crate::core::is_deleted_builtin_function_virtual_prop(func_name.as_str(), prop) {
+                        return true;
+                    }
+                    if let Some(v) = crate::core::env_get(env, marker.as_str()) {
+                        return matches!(*v.borrow(), Value::Boolean(true));
+                    }
+                    if let Some(global_this_rc) = crate::core::env_get(env, "globalThis")
+                        && let Value::Object(global_obj) = &*global_this_rc.borrow()
+                        && let Some(v) = crate::core::object_get_key_value(global_obj, marker.as_str())
+                    {
+                        return matches!(*v.borrow(), Value::Boolean(true));
+                    }
+                    false
+                };
+                if key_str == "length" {
+                    if crate::core::consume_pending_function_delete_hasown_check() {
+                        return Ok(Value::Boolean(false));
+                    }
+                    return Ok(Value::Boolean(!is_deleted("length")));
+                }
+                if key_str == "name" {
+                    if crate::core::consume_pending_function_delete_hasown_check() {
+                        return Ok(Value::Boolean(false));
+                    }
+                    let short_name = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                    return Ok(Value::Boolean(!short_name.is_empty() && !is_deleted("name")));
+                }
+                Ok(Value::Boolean(false))
             }
             Value::String(s) => {
                 // boxed string has 'length' and indexed properties
@@ -2390,6 +2517,21 @@ fn handle_object_property_is_enumerable<'gc>(
             // Check own property and enumerability
             if crate::core::get_own_property(&obj, &key).is_some() {
                 return Ok(Value::Boolean(obj.borrow().is_enumerable(&key)));
+            }
+            Ok(Value::Boolean(false))
+        }
+        Value::Function(_func_name) => {
+            let key_str = match key_val {
+                Value::String(ss) => utf16_to_utf8(&ss),
+                Value::Number(n) => crate::core::value_to_string(&Value::Number(n)),
+                Value::BigInt(b) => b.to_string(),
+                Value::Boolean(b) => b.to_string(),
+                Value::Undefined => "undefined".to_string(),
+                Value::Symbol(_) => return Ok(Value::Boolean(false)),
+                other => crate::core::value_to_string(&other),
+            };
+            if key_str == "length" || key_str == "name" {
+                return Ok(Value::Boolean(false));
             }
             Ok(Value::Boolean(false))
         }

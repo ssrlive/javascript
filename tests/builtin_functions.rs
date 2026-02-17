@@ -267,21 +267,21 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_array_push() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.length";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.length";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 2.0);
     }
 
     #[test]
     fn test_array_pop() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.pop()";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.pop()";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 2.0);
     }
 
     #[test]
     fn test_array_join() {
-        let script = "let arr = Array(); let arr2 = arr.push('a'); let arr3 = arr2.push('b'); arr3.join('-')";
+        let script = "let arr = Array(); let arr2 = arr.push('a'); let arr3 = arr.push('b'); arr.join('-')";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         let inner: String = serde_json::from_str(&result).unwrap();
         assert_eq!(inner, "a-b");
@@ -391,28 +391,28 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_array_for_each() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.forEach(function(x) { return x; })";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.forEach(function(x) { return x; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "undefined");
     }
 
     #[test]
     fn test_array_map() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let mapped = arr3.map(function(x) { return x * 2; }); mapped.length";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let mapped = arr.map(function(x) { return x * 2; }); mapped.length";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 2.0);
     }
 
     #[test]
     fn test_array_filter() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let filtered = arr3.filter(function(x) { return x > 1; }); filtered.length";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let filtered = arr.filter(function(x) { return x > 1; }); filtered.length";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 1.0);
     }
 
     #[test]
     fn test_array_reduce() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.reduce(function(acc, x) { return acc + x; }, 0)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); arr.reduce(function(acc, x) { return acc + x; }, 0)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 6.0);
     }
@@ -531,7 +531,7 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_array_map_values() {
-        let script = "let arr = Array(); let a2 = arr.push(1); let a3 = a2.push(2); let mapped = a3.map(function(x) { return x * 2; }); mapped.join(',')";
+        let script = "let arr = Array(); let a2 = arr.push(1); let a3 = arr.push(2); let mapped = arr.map(function(x) { return x * 2; }); mapped.join(',')";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         let inner = serde_json::from_str::<String>(&result).unwrap_or(result.clone());
         assert_eq!(inner, "2,4");
@@ -650,107 +650,107 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_array_find() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.find(function(x) { return x > 2; })";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); arr.find(function(x) { return x > 2; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "3");
 
         // Test find with no match
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.find(function(x) { return x > 5; })";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.find(function(x) { return x > 5; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "undefined");
     }
 
     #[test]
     fn test_array_find_index() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.findIndex(function(x) { return x > 2; })";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); arr.findIndex(function(x) { return x > 2; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "2");
 
         // Test findIndex with no match
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.findIndex(function(x) { return x > 5; })";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.findIndex(function(x) { return x > 5; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "-1");
     }
 
     #[test]
     fn test_array_some() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.some(function(x) { return x > 2; })";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); arr.some(function(x) { return x > 2; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
 
         // Test some with no match
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.some(function(x) { return x > 5; })";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.some(function(x) { return x > 5; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "false");
     }
 
     #[test]
     fn test_array_every() {
-        let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr2.push(4); let arr4 = arr3.push(6); arr4.every(function(x) { return x > 1; })";
+        let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr.push(4); let arr4 = arr.push(6); arr.every(function(x) { return x > 1; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
 
         // Test every with some elements not matching
-        let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr2.push(1); let arr4 = arr3.push(6); arr4.every(function(x) { return x > 1; })";
+        let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr.push(1); let arr4 = arr.push(6); arr.every(function(x) { return x > 1; })";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "false");
     }
 
     #[test]
     fn test_array_concat() {
-        let script = "let arr1 = Array(); let arr2 = arr1.push(1); let arr3 = arr2.push(2); let arr4 = Array(); let arr5 = arr4.push(3); let arr6 = arr5.push(4); let result = arr3.concat(arr6); result.length";
+        let script = "let arr1 = Array(); let arr2 = arr1.push(1); let arr3 = arr1.push(2); let arr4 = Array(); let arr5 = arr4.push(3); let arr6 = arr4.push(4); let result = arr1.concat(arr4); result.length";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 4.0);
 
         // Test concat with non-array values
-        let script = "let arr1 = Array(); let arr2 = arr1.push(1); let result = arr2.concat(2, 3); result.length";
+        let script = "let arr1 = Array(); let arr2 = arr1.push(1); let result = arr1.concat(2, 3); result.length";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 3.0);
     }
 
     #[test]
     fn test_array_index_of() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.indexOf(2)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); arr.indexOf(2)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 1.0);
 
         // Test indexOf with element not found
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.indexOf(5)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.indexOf(5)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), -1.0);
 
         // Test indexOf with fromIndex
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(2); arr4.indexOf(2, 2)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(2); arr.indexOf(2, 2)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result.parse::<f64>().unwrap(), 2.0);
     }
 
     #[test]
     fn test_array_includes() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.includes(2)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); arr.includes(2)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
 
         // Test includes with element not found
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.includes(5)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.includes(5)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "false");
 
         // Test includes with fromIndex
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(2); arr4.includes(2, 2)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(2); arr.includes(2, 2)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
     #[test]
     fn test_array_sort() {
-        let script = "let arr = Array(); let arr2 = arr.push(3); let arr3 = arr2.push(1); let arr4 = arr3.push(2); let sorted = arr4.sort(); sorted.join(',')";
+        let script = "let arr = Array(); let arr2 = arr.push(3); let arr3 = arr.push(1); let arr4 = arr.push(2); let sorted = arr.sort(); sorted.join(',')";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         let inner = serde_json::from_str::<String>(&result).unwrap_or(result.clone());
         assert_eq!(inner, "1,2,3");
 
         // Test sort with custom compare function
-        let script = "let arr = Array(); let arr2 = arr.push(3); let arr3 = arr2.push(1); let arr4 = arr3.push(2); let sorted = arr4.sort(function(a, b) { return b - a; }); sorted.join(',')";
+        let script = "let arr = Array(); let arr2 = arr.push(3); let arr3 = arr.push(1); let arr4 = arr.push(2); let sorted = arr.sort(function(a, b) { return b - a; }); sorted.join(',')";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         let inner = serde_json::from_str::<String>(&result).unwrap_or(result.clone());
         assert_eq!(inner, "3,2,1");
@@ -758,7 +758,7 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_array_reverse() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let reversed = arr4.reverse(); reversed.join(',')";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); let reversed = arr.reverse(); reversed.join(',')";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         let inner = serde_json::from_str::<String>(&result).unwrap_or(result.clone());
         assert_eq!(inner, "3,2,1");
@@ -805,36 +805,36 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_array_fill() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(4); let filled = arr5.fill(9, 1, 3); filled.join(',')";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); let arr5 = arr.push(4); let filled = arr.fill(9, 1, 3); filled.join(',')";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"1,9,9,4\"");
 
         // Test fill entire array
-        let script2 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let filled = arr4.fill(0); filled.join(',')";
+        let script2 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); let filled = arr.fill(0); filled.join(',')";
         let result2 = evaluate_script(script2, None::<&std::path::Path>).unwrap();
         assert_eq!(result2, "\"0,0,0\"");
     }
 
     #[test]
     fn test_array_last_index_of() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(2); let arr6 = arr5.push(1); arr6.lastIndexOf(2)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); let arr5 = arr.push(2); let arr6 = arr.push(1); arr.lastIndexOf(2)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "3");
 
         // Test element not found
-        let script2 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.lastIndexOf(4)";
+        let script2 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); arr.lastIndexOf(4)";
         let result2 = evaluate_script(script2, None::<&std::path::Path>).unwrap();
         assert_eq!(result2, "-1");
 
         // Test with fromIndex
-        let script3 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(2); arr5.lastIndexOf(2, 2)";
+        let script3 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); let arr5 = arr.push(2); arr.lastIndexOf(2, 2)";
         let result3 = evaluate_script(script3, None::<&std::path::Path>).unwrap();
         assert_eq!(result3, "1");
     }
 
     #[test]
     fn test_array_to_string() {
-        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.toString()";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); let arr4 = arr.push(3); arr.toString()";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         let inner = serde_json::from_str::<String>(&result).unwrap_or(result.clone());
         assert_eq!(inner, "1,2,3");

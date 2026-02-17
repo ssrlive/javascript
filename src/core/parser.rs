@@ -4175,9 +4175,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             tokens.get(*index + 1).map(|t| &t.token)
                         );
                         let is_getter =
-                            if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get") {
-                                if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_))
-                                    || tokens[*index + 1].token.as_identifier_string().is_some()
+                            if tokens.len() > *index + 1 && tokens[*index].token.as_identifier_string().as_deref() == Some("get") {
+                                if matches!(
+                                    tokens[*index + 1].token,
+                                    Token::Identifier(_) | Token::StringLit(_) | Token::Number(_) | Token::BigInt(_)
+                                ) || tokens[*index + 1].token.as_identifier_string().is_some()
                                 {
                                     tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
                                 } else if matches!(tokens[*index + 1].token, Token::LBracket) {
@@ -4210,9 +4212,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             };
 
                         let is_setter =
-                            if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set") {
-                                if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_))
-                                    || tokens[*index + 1].token.as_identifier_string().is_some()
+                            if tokens.len() > *index + 1 && tokens[*index].token.as_identifier_string().as_deref() == Some("set") {
+                                if matches!(
+                                    tokens[*index + 1].token,
+                                    Token::Identifier(_) | Token::StringLit(_) | Token::Number(_) | Token::BigInt(_)
+                                ) || tokens[*index + 1].token.as_identifier_string().is_some()
                                 {
                                     tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
                                 } else if matches!(tokens[*index + 1].token, Token::LBracket) {
@@ -4425,6 +4429,75 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             // property names. Token::as_identifier_string maps those tokens to
                             // their identifier string when appropriate.
                             if let Some(id) = tok.as_identifier_string() {
+                                if !is_getter
+                                    && !is_setter
+                                    && tokens.len() > *index + 1
+                                    && matches!(tokens[*index + 1].token, Token::LParen)
+                                {
+                                    // Concise method where the name token was not Token::Identifier
+                                    // (e.g. keyword-like IdentifierName such as `get`/`set`).
+                                    *index += 1; // consume name token
+                                    *index += 1; // consume (
+                                    let params = parse_parameters(tokens, index)?;
+                                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                        return Err(raise_parse_error_at!(tokens.get(*index)));
+                                    }
+                                    *index += 1; // consume {
+                                    let body = parse_statements(tokens, index)?;
+                                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
+                                        return Err(raise_parse_error_at!(tokens.get(*index)));
+                                    }
+                                    *index += 1; // consume }
+                                    if is_generator {
+                                        if is_async_member {
+                                            properties.push((
+                                                Expr::StringLit(crate::unicode::utf8_to_utf16(&id)),
+                                                Expr::AsyncGeneratorFunction(None, params, body),
+                                                false,
+                                                false,
+                                            ));
+                                        } else {
+                                            properties.push((
+                                                Expr::StringLit(crate::unicode::utf8_to_utf16(&id)),
+                                                Expr::GeneratorFunction(None, params, body),
+                                                false,
+                                                false,
+                                            ));
+                                        }
+                                    } else if is_async_member {
+                                        properties.push((
+                                            Expr::StringLit(crate::unicode::utf8_to_utf16(&id)),
+                                            Expr::AsyncFunction(None, params, body),
+                                            false,
+                                            false,
+                                        ));
+                                    } else {
+                                        properties.push((
+                                            Expr::StringLit(crate::unicode::utf8_to_utf16(&id)),
+                                            Expr::Function(None, params, body),
+                                            false,
+                                            false,
+                                        ));
+                                    }
+
+                                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon)
+                                    {
+                                        *index += 1;
+                                    }
+                                    if *index >= tokens.len() {
+                                        return Err(raise_parse_error_at!(tokens.get(*index)));
+                                    }
+                                    if matches!(tokens[*index].token, Token::RBrace) {
+                                        *index += 1;
+                                        break;
+                                    }
+                                    if matches!(tokens[*index].token, Token::Comma) {
+                                        *index += 1;
+                                        continue;
+                                    }
+                                    continue;
+                                }
+
                                 // Treat identifier-like tokens (including contextual keywords
                                 // such as `await`) as shorthand candidates for property
                                 // shorthand parsing (e.g. `{ await }`).

@@ -2,23 +2,25 @@
 
 use crate::core::{MutationContext, object_get_length, object_set_length};
 use crate::{
-    core::{EvalError, JSObjectDataPtr, PropertyKey, env_set, evaluate_call_dispatch, new_js_object_data},
+    core::{EvalError, JSObjectDataPtr, PropertyKey, env_get, env_set, evaluate_call_dispatch, new_js_object_data},
     error::JSError,
-    raise_eval_error, raise_range_error,
+    raise_eval_error, raise_range_error, raise_type_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
 
 use crate::core::{
-    Expr, Value, evaluate_expr, evaluate_statements, get_own_property, object_get_key_value, object_set_key_value, value_to_sort_string,
-    values_equal,
+    ClosureData, Expr, Gc, GcCell, Value, evaluate_expr, evaluate_statements, get_own_property, new_gc_cell_ptr, object_get_key_value,
+    object_set_key_value, value_to_sort_string, values_equal,
 };
 
 pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let array_ctor = new_js_object_data(mc);
     object_set_key_value(mc, &array_ctor, "__is_constructor", &Value::Boolean(true))?;
     object_set_key_value(mc, &array_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Array")))?;
+    let array_ctor = new_js_object_data(mc);
+    object_set_key_value(mc, &array_ctor, "__is_constructor", &Value::Boolean(true))?;
+    object_set_key_value(mc, &array_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Array")))?;
 
-    // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
         && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
@@ -34,22 +36,51 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         array_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
+    object_set_key_value(mc, &array_proto, "__is_array", &Value::Boolean(true))?;
+    array_proto.borrow_mut(mc).set_non_enumerable("__is_array");
+
     object_set_key_value(mc, &array_ctor, "prototype", &Value::Object(array_proto))?;
+    array_ctor.borrow_mut(mc).set_non_writable("prototype");
+    array_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    array_ctor.borrow_mut(mc).set_non_configurable("prototype");
     object_set_key_value(mc, &array_proto, "constructor", &Value::Object(array_ctor))?;
-    // Make constructor non-enumerable
     array_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    // Register static methods
-    object_set_key_value(mc, &array_ctor, "isArray", &Value::Function("Array.isArray".to_string()))?;
-    object_set_key_value(mc, &array_ctor, "from", &Value::Function("Array.from".to_string()))?;
-    object_set_key_value(mc, &array_ctor, "of", &Value::Function("Array.of".to_string()))?;
+    for (method, method_length) in [("isArray", 1.0_f64), ("from", 1.0_f64), ("of", 0.0_f64)] {
+        let func_obj = new_js_object_data(mc);
 
-    // Register instance methods
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            func_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+
+        let closure = ClosureData {
+            env: Some(*env),
+            native_target: Some(format!("Array.{method}")),
+            enforce_strictness_inheritance: true,
+            ..ClosureData::default()
+        };
+        func_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, closure)))));
+
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method)), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &func_obj, "name", &name_desc)?;
+
+        let length_desc = crate::core::create_descriptor_object(mc, &Value::Number(method_length), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &func_obj, "length", &length_desc)?;
+
+        object_set_key_value(mc, &array_ctor, method, &Value::Object(func_obj))?;
+        array_ctor.borrow_mut(mc).set_non_enumerable(method);
+    }
+
     let methods = vec![
         "at",
         "push",
         "pop",
-        "length",
         "join",
         "slice",
         "splice",
@@ -58,27 +89,27 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         "concat",
         "reverse",
         "sort",
+        "flat",
+        "flatMap",
         "includes",
         "indexOf",
         "lastIndexOf",
         "forEach",
         "map",
-        "filter",
-        "reduce",
-        "reduceRight",
-        "some",
         "every",
+        "some",
+        "filter",
         "find",
         "findIndex",
         "findLast",
         "findLastIndex",
-        "flat",
-        "flatMap",
+        "reduce",
+        "reduceRight",
         "fill",
         "copyWithin",
-        "entries",
         "keys",
         "values",
+        "entries",
         "toString",
         "toLocaleString",
     ];
@@ -86,34 +117,61 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     for method in methods {
         let val = Value::Function(format!("Array.prototype.{method}"));
         object_set_key_value(mc, &array_proto, method, &val)?;
-
-        // Methods on prototypes should be non-enumerable so for..in doesn't list them
         array_proto.borrow_mut(mc).set_non_enumerable(method);
     }
 
-    // Register Symbol.iterator on Array.prototype (alias to Array.prototype.values)
-    if let Some(sym_val) = object_get_key_value(env, "Symbol") {
-        if let Value::Object(sym_ctor) = &*sym_val.borrow() {
-            if let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator") {
-                if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
-                    let val = Value::Function("Array.prototype.values".to_string());
-                    object_set_key_value(mc, &array_proto, iter_sym, &val)?;
-                    array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(iter_sym.clone()));
-                }
+    object_set_key_value(mc, &array_proto, "length", &Value::Number(0.0))?;
+    array_proto.borrow_mut(mc).set_non_enumerable("length");
+    array_proto.borrow_mut(mc).set_non_configurable("length");
+
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+    {
+        if let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator")
+            && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+        {
+            let val = Value::Function("Array.prototype.values".to_string());
+            object_set_key_value(mc, &array_proto, iter_sym, &val)?;
+            array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(iter_sym.clone()));
+        }
+
+        if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
+            && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+        {
+            object_set_key_value(mc, &array_proto, tag_sym, &Value::String(utf8_to_utf16("Array")))?;
+            array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(tag_sym.clone()));
+        }
+
+        if let Some(unscopables_sym_val) = object_get_key_value(sym_ctor, "unscopables")
+            && let Value::Symbol(unscopables_sym) = &*unscopables_sym_val.borrow()
+        {
+            let unscopables_obj = new_js_object_data(mc);
+            unscopables_obj.borrow_mut(mc).prototype = None;
+
+            for name in [
+                "copyWithin",
+                "entries",
+                "fill",
+                "find",
+                "findIndex",
+                "flat",
+                "flatMap",
+                "includes",
+                "keys",
+                "values",
+            ] {
+                object_set_key_value(mc, &unscopables_obj, name, &Value::Boolean(true))?;
             }
 
-            // Symbol.toStringTag default for Array.prototype
-            if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag") {
-                if let Value::Symbol(tag_sym) = &*tag_sym_val.borrow() {
-                    object_set_key_value(mc, &array_proto, tag_sym, &Value::String(utf8_to_utf16("Array")))?;
-                    array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(tag_sym.clone()));
-                }
-            }
+            let unscopables_desc = crate::core::create_descriptor_object(mc, &Value::Object(unscopables_obj), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &array_proto, PropertyKey::Symbol(unscopables_sym.clone()), &unscopables_desc)?;
         }
     }
 
-    // Set Array.length = 1 (callable arity) so typeof Array.length === "number" per tests
-    let arr_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, false)?;
+    let arr_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Array")), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &array_ctor, "name", &arr_name_desc)?;
+
+    let arr_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
     crate::js_object::define_property_internal(mc, &array_ctor, "length", &arr_len_desc)?;
 
     env_set(mc, env, "Array", &Value::Object(array_ctor))?;
@@ -124,338 +182,498 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
 pub(crate) fn handle_array_static_method<'gc>(
     mc: &MutationContext<'gc>,
     method: &str,
+    this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    let mut effective_this = if let Some(tv) = this_val {
+        Some(tv.clone())
+    } else if let Some(tv_rc) = crate::core::env_get(env, "this") {
+        Some(tv_rc.borrow().clone())
+    } else {
+        None
+    };
+
+    if matches!(method, "from" | "of")
+        && let Some(Value::Object(this_obj)) = effective_this.as_ref()
+        && let Some(cl_ptr) = this_obj.borrow().get_closure()
+    {
+        let native_name = match &*cl_ptr.borrow() {
+            Value::Closure(cl) | Value::AsyncClosure(cl) => cl.native_target.clone(),
+            _ => None,
+        };
+
+        if matches!(native_name.as_deref(), Some("Array.from") | Some("Array.of"))
+            && let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
+        {
+            effective_this = Some(array_ctor_rc.borrow().clone());
+        }
+    }
+
+    let create_with_ctor_or_array = |len_arg: Option<usize>| -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+        if let Some(tv) = effective_this.as_ref()
+            && !matches!(tv, Value::Undefined | Value::Null)
+        {
+            let maybe_constructor_object = || -> Option<JSObjectDataPtr<'gc>> {
+                match tv {
+                    Value::Object(obj) => Some(*obj),
+                    Value::Function(name) => {
+                        if let Some(resolved_rc) = crate::core::env_get(env, name)
+                            && let Value::Object(resolved_obj) = &*resolved_rc.borrow()
+                        {
+                            Some(*resolved_obj)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            };
+
+            let ensure_constructor_prototype = |out_obj: JSObjectDataPtr<'gc>| -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+                if let Some(ctor_obj) = maybe_constructor_object()
+                    && let Some(proto_val) = object_get_key_value(&ctor_obj, "prototype")
+                {
+                    let proto_candidate = match &*proto_val.borrow() {
+                        Value::Object(p) => Some(*p),
+                        Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                            Value::Object(p) => Some(*p),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+
+                    if let Some(proto_obj) = proto_candidate {
+                        let should_update = out_obj
+                            .borrow()
+                            .prototype
+                            .map(|p| !crate::core::Gc::ptr_eq(p, proto_obj))
+                            .unwrap_or(true);
+                        if should_update {
+                            out_obj.borrow_mut(mc).prototype = Some(proto_obj);
+                            let _ = object_set_key_value(mc, &out_obj, "__proto__", &Value::Object(proto_obj));
+                        }
+                    }
+                }
+
+                Ok(out_obj)
+            };
+
+            let ensure_array_prototype = |out_obj: JSObjectDataPtr<'gc>| -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+                if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
+                    && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
+                    && let Some(array_proto_rc) = object_get_key_value(array_ctor_obj, "prototype")
+                {
+                    let array_proto_candidate = match &*array_proto_rc.borrow() {
+                        Value::Object(p) => Some(*p),
+                        Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                            Value::Object(p) => Some(*p),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+
+                    if let Some(array_proto) = array_proto_candidate {
+                        let should_update = out_obj
+                            .borrow()
+                            .prototype
+                            .map(|p| !crate::core::Gc::ptr_eq(p, array_proto))
+                            .unwrap_or(true);
+                        if should_update {
+                            out_obj.borrow_mut(mc).prototype = Some(array_proto);
+                            let _ = object_set_key_value(mc, &out_obj, "__proto__", &Value::Object(array_proto));
+                        }
+                    }
+                }
+                Ok(out_obj)
+            };
+
+            let ctor_args = if let Some(len) = len_arg {
+                vec![Value::Number(len as f64)]
+            } else {
+                vec![]
+            };
+
+            let attempt = match tv {
+                Value::Function(name) if name == "Array" => crate::js_array::handle_array_constructor(mc, &ctor_args, env),
+                Value::Function(name) if name == "Object" => crate::js_class::handle_object_constructor(mc, &ctor_args, env),
+                Value::Function(name) => {
+                    if let Some(resolved) = crate::core::env_get(env, name) {
+                        let resolved_val = resolved.borrow().clone();
+                        crate::js_class::evaluate_new(mc, env, &resolved_val, &ctor_args, None)
+                    } else {
+                        crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None)
+                    }
+                }
+                Value::Object(obj) if object_get_key_value(obj, "__native_ctor").is_some() => {
+                    if let Some(native_ctor) = object_get_key_value(obj, "__native_ctor")
+                        && let Value::String(name_u16) = &*native_ctor.borrow()
+                    {
+                        let native_name = utf16_to_utf8(name_u16);
+                        if native_name == "Array" {
+                            crate::js_array::handle_array_constructor(mc, &ctor_args, env)
+                        } else if native_name == "Object" {
+                            crate::js_class::handle_object_constructor(mc, &ctor_args, env)
+                        } else {
+                            crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None)
+                        }
+                    } else {
+                        crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None)
+                    }
+                }
+                _ => crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None),
+            };
+
+            match attempt {
+                Ok(Value::Object(out_obj)) => {
+                    let out_obj = ensure_constructor_prototype(out_obj)?;
+                    return Ok(out_obj);
+                }
+                Ok(_) => return Err(raise_type_error!("Array static constructor must return an object").into()),
+                Err(err) => {
+                    let is_not_ctor = match &err {
+                        EvalError::Js(js_err) => {
+                            let msg = js_err.message();
+                            msg.contains("Not a constructor") || msg.contains("Constructor is not callable")
+                        }
+                        _ => false,
+                    };
+                    if !is_not_ctor {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        let fallback_len = len_arg.unwrap_or(0) as f64;
+        if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
+            && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
+            && let Ok(Value::Object(out_obj)) =
+                crate::js_class::evaluate_new(mc, env, &Value::Object(*array_ctor_obj), &[Value::Number(fallback_len)], None)
+        {
+            return Ok(out_obj);
+        }
+
+        let out = create_array(mc, env).map_err(EvalError::from)?;
+        if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
+            && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
+            && let Some(array_proto_rc) = object_get_key_value(array_ctor_obj, "prototype")
+        {
+            let array_proto_candidate = match &*array_proto_rc.borrow() {
+                Value::Object(p) => Some(*p),
+                Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                    Value::Object(p) => Some(*p),
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(array_proto) = array_proto_candidate {
+                let should_update = out
+                    .borrow()
+                    .prototype
+                    .map(|p| !crate::core::Gc::ptr_eq(p, array_proto))
+                    .unwrap_or(true);
+                if should_update {
+                    out.borrow_mut(mc).prototype = Some(array_proto);
+                    let _ = object_set_key_value(mc, &out, "__proto__", &Value::Object(array_proto));
+                }
+            }
+        }
+        Ok(out)
+    };
+
+    let create_data_property_or_throw = |target: &JSObjectDataPtr<'gc>, key: usize, value: &Value<'gc>| -> Result<(), EvalError<'gc>> {
+        if let Some(proxy_cell) = crate::core::get_own_property(target, "__proxy__")
+            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+        {
+            let prop_key = PropertyKey::from(key.to_string());
+            let ok = crate::js_proxy::proxy_define_data_property(mc, proxy, &prop_key, value)?;
+            if !ok {
+                return Err(raise_type_error!("Cannot define property").into());
+            }
+            return Ok(());
+        }
+
+        let desc = crate::core::create_descriptor_object(mc, value, true, true, true)?;
+        crate::js_object::define_property_internal(mc, target, key.to_string(), &desc)?;
+        Ok(())
+    };
+
+    let set_length_with_set_semantics = |target: &JSObjectDataPtr<'gc>, len: usize| -> Result<(), EvalError<'gc>> {
+        if let Some(proxy_cell) = crate::core::get_own_property(target, "__proxy__")
+            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+        {
+            let prop_key = PropertyKey::from("length");
+            let ok = crate::js_proxy::proxy_set_property(mc, proxy, &prop_key, &Value::Number(len as f64))?;
+            if !ok {
+                return Err(raise_type_error!("Cannot set property 'length'").into());
+            }
+            return Ok(());
+        }
+
+        let key = PropertyKey::from("length");
+        let mut owner = Some(*target);
+
+        while let Some(obj) = owner {
+            if let Some(prop) = crate::core::get_own_property(&obj, &key) {
+                match &*prop.borrow() {
+                    Value::Property {
+                        value: _,
+                        getter: _,
+                        setter: Some(setter_fn),
+                    } => {
+                        let setter_args = vec![Value::Number(len as f64)];
+                        let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*target)), &setter_args)?;
+                        return Ok(());
+                    }
+                    Value::Property {
+                        value: _,
+                        getter: _,
+                        setter: None,
+                    } => {
+                        if !obj.borrow().is_writable(&key) {
+                            return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                        }
+                        object_set_key_value(mc, target, "length", &Value::Number(len as f64))?;
+                        return Ok(());
+                    }
+                    _ => {
+                        if !obj.borrow().is_writable(&key) {
+                            return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                        }
+                        object_set_key_value(mc, target, "length", &Value::Number(len as f64))?;
+                        return Ok(());
+                    }
+                }
+            }
+            owner = obj.borrow().prototype;
+        }
+
+        object_set_key_value(mc, target, "length", &Value::Number(len as f64))?;
+        Ok(())
+    };
+
     match method {
         "isArray" => {
-            if args.len() != 1 {
-                return Err(raise_eval_error!("Array.isArray requires exactly one argument").into());
-            }
-            // let arg = evaluate_expr(mc, env, &args[0])?;
-            let arg = args[0].clone();
-            let is_array = match arg {
-                Value::Object(object) => is_array(mc, &object),
+            let arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let is_array_value = match arg {
+                Value::Object(object) => {
+                    let mut current = object;
+                    loop {
+                        if let Some(proxy_cell) = crate::core::get_own_property(&current, "__proxy__")
+                            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                        {
+                            if proxy.revoked {
+                                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+                            }
+                            if let Value::Object(target_obj) = &*proxy.target {
+                                current = *target_obj;
+                                continue;
+                            }
+                            break false;
+                        }
+                        break is_array(mc, &current);
+                    }
+                }
                 _ => false,
             };
-            Ok(Value::Boolean(is_array))
+            Ok(Value::Boolean(is_array_value))
         }
         "from" => {
-            // Array.from(iterable, mapFn?, thisArg?)
-            if args.is_empty() {
-                return Err(raise_eval_error!("Array.from requires at least one argument").into());
+            let items = args.first().cloned().unwrap_or(Value::Undefined);
+            if matches!(items, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Array.from requires an array-like or iterable object").into());
             }
 
-            // let iterable = evaluate_expr(mc, env, &args[0])?;
-            // let map_fn = if args.len() > 1 {
-            //     Some(evaluate_expr(mc, env, &args[1])?)
-            // } else {
-            //     None
-            // };
+            let map_fn = args.get(1).cloned();
+            let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
-            let iterable = args[0].clone();
-            let map_fn = if args.len() > 1 { Some(args[1].clone()) } else { None };
-
-            let mut result = Vec::new();
-
-            // Handle different types of iterables
-            match iterable {
-                Value::Set(set) => {
-                    // Handle Set iteration
-                    for val in &set.borrow().values {
-                        if let Some(ref fn_val) = map_fn {
-                            let call_args = vec![val.clone(), val.clone()];
-                            let mapped = match fn_val {
-                                Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
-                                Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
-                                _ => return Err(raise_eval_error!("Array.from map function must be a function").into()),
-                            };
-                            result.push(mapped);
-                        } else {
-                            result.push(val.clone());
+            let mapper = if let Some(fn_val) = map_fn {
+                if matches!(fn_val, Value::Undefined) {
+                    None
+                } else {
+                    let callable = match &fn_val {
+                        Value::Closure(_)
+                        | Value::AsyncClosure(_)
+                        | Value::Function(_)
+                        | Value::GeneratorFunction(_, _)
+                        | Value::AsyncGeneratorFunction(_, _) => true,
+                        Value::Object(obj) => {
+                            obj.borrow().get_closure().is_some()
+                                || object_get_key_value(obj, "__native_ctor").is_some()
+                                || object_get_key_value(obj, "__bound_target").is_some()
                         }
+                        _ => false,
+                    };
+                    if !callable {
+                        return Err(raise_type_error!("Array.from map function must be callable").into());
+                    }
+                    Some(fn_val)
+                }
+            } else {
+                None
+            };
+
+            let mut result: Vec<Value<'gc>> = Vec::new();
+            let mut used_iterator_or_string = false;
+
+            let mut map_value = |idx: usize, value: Value<'gc>| -> Result<Value<'gc>, EvalError<'gc>> {
+                if let Some(fn_val) = &mapper {
+                    let mut actual_fn = fn_val.clone();
+                    if let Value::Object(obj) = fn_val {
+                        if let Some(prop) = obj.borrow().get_closure() {
+                            actual_fn = prop.borrow().clone();
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                            && let Value::String(name_vec) = &*nc.borrow()
+                        {
+                            actual_fn = Value::Function(utf16_to_utf8(name_vec));
+                        }
+                    }
+                    let call_args = vec![value, Value::Number(idx as f64)];
+                    evaluate_call_dispatch(mc, env, &actual_fn, Some(&this_arg), &call_args)
+                } else {
+                    Ok(value)
+                }
+            };
+
+            match items.clone() {
+                Value::String(s) => {
+                    used_iterator_or_string = true;
+                    for (idx, ch) in s.into_iter().enumerate() {
+                        result.push(map_value(idx, Value::String(vec![ch]))?);
                     }
                 }
                 Value::Object(object) => {
-                    // Support generic iterables via Symbol.iterator: call the iterator method and consume next() until done
-                    if let Some(sym_ctor) = object_get_key_value(env, "Symbol") {
-                        if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
-                            if let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator") {
-                                if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
-                                    // Support accessors: use accessor-aware property read which may call getter
-                                    let iter_fn_val_res = crate::core::get_property_with_accessors(mc, env, &object, iter_sym)?;
-                                    // If there is no iterator method (undefined), fall back to array-like handling
-                                    if !matches!(iter_fn_val_res, Value::Undefined) {
-                                        // Call iterator method on the object to get an iterator
-                                        let iterator = match iter_fn_val_res {
-                                            Value::Function(name) => {
-                                                let call_env = crate::js_class::prepare_call_env_with_this(
-                                                    mc,
-                                                    Some(env),
-                                                    Some(&Value::Object(object)),
-                                                    None,
-                                                    &[],
-                                                    None,
-                                                    Some(env),
-                                                    None,
-                                                )?;
-                                                crate::core::evaluate_call_dispatch(
-                                                    mc,
-                                                    &call_env,
-                                                    &Value::Function(name.clone()),
-                                                    Some(&Value::Object(object)),
-                                                    &[],
-                                                )?
-                                            }
-                                            Value::Closure(cl) => {
-                                                crate::core::call_closure(mc, &*cl, Some(&Value::Object(object)), &[], env, None)?
-                                            }
-                                            Value::Object(o) => {
-                                                if let Some(cl_ptr) = o.borrow().get_closure() {
-                                                    match &*cl_ptr.borrow() {
-                                                        Value::Closure(cl) => {
-                                                            crate::core::call_closure(mc, &*cl, Some(&Value::Object(o)), &[], env, None)?
-                                                        }
-                                                        Value::Function(name) => {
-                                                            let call_env = crate::js_class::prepare_call_env_with_this(
-                                                                mc,
-                                                                Some(env),
-                                                                Some(&Value::Object(o)),
-                                                                None,
-                                                                &[],
-                                                                None,
-                                                                Some(env),
-                                                                None,
-                                                            )?;
-                                                            evaluate_call_dispatch(
-                                                                mc,
-                                                                &call_env,
-                                                                &Value::Function(name.clone()),
-                                                                Some(&Value::Object(o)),
-                                                                &[],
-                                                            )?
-                                                        }
-                                                        _ => {
-                                                            return Err(raise_eval_error!("Array.from iterable is not iterable").into());
-                                                        }
-                                                    }
-                                                } else {
-                                                    return Err(raise_eval_error!("Array.from iterable is not iterable").into());
-                                                }
-                                            }
-                                            _ => return Err(raise_eval_error!("Array.from iterable is not iterable").into()),
-                                        };
-
-                                        // Consume iterator by repeatedly calling its next() method
-                                        match iterator {
-                                            Value::Object(iter_obj) => {
-                                                let mut idx = 0usize;
-                                                loop {
-                                                    if let Some(next_val) = object_get_key_value(&iter_obj, "next") {
-                                                        let next_fn = next_val.borrow().clone();
-
-                                                        let res = match &next_fn {
-                                                            Value::Function(name) => {
-                                                                let call_env = crate::js_class::prepare_call_env_with_this(
-                                                                    mc,
-                                                                    Some(env),
-                                                                    Some(&Value::Object(iter_obj)),
-                                                                    None,
-                                                                    &[],
-                                                                    None,
-                                                                    Some(env),
-                                                                    None,
-                                                                )?;
-                                                                evaluate_call_dispatch(
-                                                                    mc,
-                                                                    &call_env,
-                                                                    &Value::Function(name.clone()),
-                                                                    Some(&Value::Object(iter_obj)),
-                                                                    &[],
-                                                                )?
-                                                            }
-                                                            Value::Closure(cl) => crate::core::call_closure(
-                                                                mc,
-                                                                &*cl,
-                                                                Some(&Value::Object(iter_obj)),
-                                                                &[],
-                                                                env,
-                                                                None,
-                                                            )?,
-                                                            Value::Object(o) => {
-                                                                if let Some(cl_ptr) = o.borrow().get_closure() {
-                                                                    match &*cl_ptr.borrow() {
-                                                                        Value::Closure(cl) => crate::core::call_closure(
-                                                                            mc,
-                                                                            &*cl,
-                                                                            Some(&Value::Object(*o)),
-                                                                            &[],
-                                                                            env,
-                                                                            None,
-                                                                        )?,
-                                                                        Value::Function(name) => {
-                                                                            let call_env = crate::js_class::prepare_call_env_with_this(
-                                                                                mc,
-                                                                                Some(env),
-                                                                                Some(&Value::Object(*o)),
-                                                                                None,
-                                                                                &[],
-                                                                                None,
-                                                                                Some(env),
-                                                                                None,
-                                                                            )?;
-                                                                            evaluate_call_dispatch(
-                                                                                mc,
-                                                                                &call_env,
-                                                                                &Value::Function(name.clone()),
-                                                                                Some(&Value::Object(*o)),
-                                                                                &[],
-                                                                            )?
-                                                                        }
-                                                                        _ => {
-                                                                            return Err(
-                                                                                raise_eval_error!("Iterator.next is not callable").into()
-                                                                            );
-                                                                        }
-                                                                    }
-                                                                } else {
-                                                                    return Err(raise_eval_error!("Iterator.next is not callable").into());
-                                                                }
-                                                            }
-                                                            _ => {
-                                                                return Err(raise_eval_error!("Iterator.next is not callable").into());
-                                                            }
-                                                        };
-
-                                                        if let Value::Object(res_obj) = res {
-                                                            // Use accessor-aware reads for 'done' and 'value' per spec
-                                                            // so that getters on the iterator result may throw.
-                                                            let done_val =
-                                                                crate::core::get_property_with_accessors(mc, env, &res_obj, "done")?;
-                                                            let done = matches!(done_val, Value::Boolean(b) if b);
-
-                                                            if done {
-                                                                break;
-                                                            }
-
-                                                            let value =
-                                                                crate::core::get_property_with_accessors(mc, env, &res_obj, "value")?;
-
-                                                            if let Some(ref fn_val) = map_fn {
-                                                                // Support closures or function names for map function
-                                                                let actual_fn = if let Value::Object(obj) = fn_val {
-                                                                    if let Some(prop) = obj.borrow().get_closure() {
-                                                                        prop.borrow().clone()
-                                                                    } else {
-                                                                        fn_val.clone()
-                                                                    }
-                                                                } else {
-                                                                    fn_val.clone()
-                                                                };
-
-                                                                let call_args = vec![value, Value::Number(idx as f64)];
-                                                                let mapped = match &actual_fn {
-                                                                    Value::Closure(cl) => {
-                                                                        crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?
-                                                                    }
-                                                                    Value::Function(name) => crate::js_function::handle_global_function(
-                                                                        mc, name, &call_args, env,
-                                                                    )?,
-                                                                    _ => {
-                                                                        return Err(raise_eval_error!(
-                                                                            "Array.from map function must be a function"
-                                                                        )
-                                                                        .into());
-                                                                    }
-                                                                };
-                                                                result.push(mapped);
-                                                            } else {
-                                                                result.push(value);
-                                                            }
-
-                                                            idx += 1;
-                                                            continue;
-                                                        } else {
-                                                            return Err(raise_eval_error!("Iterator.next did not return an object").into());
-                                                        }
-                                                    } else {
-                                                        return Err(raise_eval_error!("Iterator has no next method").into());
-                                                    }
-                                                }
-                                            }
-                                            _ => return Err(raise_eval_error!("Iterator call did not return an object").into()),
-                                        }
-
-                                        let new_array = create_array(mc, env)?;
-                                        set_array_length(mc, &new_array, result.len())?;
-                                        for (i, val) in result.iter().enumerate() {
-                                            object_set_key_value(mc, &new_array, i, val)?;
-                                        }
-                                        return Ok(Value::Object(new_array));
-                                    }
+                    let mut used_iterator = false;
+                    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                        && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
+                        && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+                    {
+                        let iter_fn = crate::core::get_property_with_accessors(mc, env, &object, iter_sym)?;
+                        if !matches!(iter_fn, Value::Undefined) {
+                            let out = create_with_ctor_or_array(None)?;
+                            used_iterator = true;
+                            let close_iterator = |iter_obj: &JSObjectDataPtr<'gc>| {
+                                if let Ok(return_fn) = crate::core::get_property_with_accessors(mc, env, iter_obj, "return")
+                                    && !matches!(return_fn, Value::Undefined | Value::Null)
+                                {
+                                    let _ = evaluate_call_dispatch(mc, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
                                 }
+                            };
+
+                            let iterator = evaluate_call_dispatch(mc, env, &iter_fn, Some(&Value::Object(object)), &[])?;
+                            let iter_obj = match iterator {
+                                Value::Object(o) => o,
+                                _ => return Err(raise_type_error!("Array.from iterator must return an object").into()),
+                            };
+
+                            let mut idx = 0usize;
+                            loop {
+                                let next_fn = match crate::core::get_property_with_accessors(mc, env, &iter_obj, "next") {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                let next_res = match evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                let next_obj = match next_res {
+                                    Value::Object(o) => o,
+                                    _ => {
+                                        close_iterator(&iter_obj);
+                                        return Err(raise_type_error!("Iterator.next must return an object").into());
+                                    }
+                                };
+                                let done_val = match crate::core::get_property_with_accessors(mc, env, &next_obj, "done") {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                if done_val.to_truthy() {
+                                    break;
+                                }
+                                let value = match crate::core::get_property_with_accessors(mc, env, &next_obj, "value") {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                let mapped = match map_value(idx, value) {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                if let Err(err) = create_data_property_or_throw(&out, idx, &mapped) {
+                                    close_iterator(&iter_obj);
+                                    return Err(err);
+                                }
+                                idx += 1;
                             }
+
+                            set_length_with_set_semantics(&out, idx)?;
+                            return Ok(Value::Object(out));
                         }
                     }
 
-                    if let Some(len) = get_array_length(mc, &object) {
+                    if !used_iterator {
+                        let len_val = crate::core::get_property_with_accessors(mc, env, &object, "length")?;
+                        let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                        let len_num = crate::core::to_number(&len_prim)?;
+                        let max_len = 9007199254740991.0_f64;
+                        let len = if len_num.is_nan() || len_num <= 0.0 {
+                            0usize
+                        } else if !len_num.is_finite() {
+                            max_len as usize
+                        } else {
+                            len_num.floor().min(max_len) as usize
+                        };
+
                         for i in 0..len {
-                            let element = crate::core::get_property_with_accessors(mc, env, &object, i)?;
-
-                            if let Some(ref fn_val) = map_fn {
-                                // Support closures or function names for map function
-                                let actual_fn = if let Value::Object(obj) = fn_val {
-                                    if let Some(prop) = obj.borrow().get_closure() {
-                                        prop.borrow().clone()
-                                    } else {
-                                        fn_val.clone()
-                                    }
-                                } else {
-                                    fn_val.clone()
-                                };
-
-                                let call_args = vec![element, Value::Number(i as f64)];
-                                let mapped = match &actual_fn {
-                                    Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
-                                    Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
-                                    _ => return Err(raise_eval_error!("Array.from map function must be a function").into()),
-                                };
-                                result.push(mapped);
-                            } else {
-                                result.push(element);
-                            }
+                            let element = crate::core::get_property_with_accessors(mc, env, &object, i.to_string())?;
+                            result.push(map_value(i, element)?);
                         }
                     } else {
-                        return Err(raise_eval_error!("Array.from iterable must be array-like").into());
+                        used_iterator_or_string = true;
                     }
                 }
-                _ => {
-                    return Err(raise_eval_error!("Array.from iterable must be array-like").into());
-                }
+                _ => return Err(raise_type_error!("Array.from requires an array-like or iterable object").into()),
             }
 
-            let new_array = create_array(mc, env)?;
-            set_array_length(mc, &new_array, result.len())?;
+            let out = if used_iterator_or_string {
+                create_with_ctor_or_array(None)?
+            } else {
+                create_with_ctor_or_array(Some(result.len()))?
+            };
             for (i, val) in result.iter().enumerate() {
-                object_set_key_value(mc, &new_array, i, val)?;
+                create_data_property_or_throw(&out, i, val)?;
             }
-            Ok(Value::Object(new_array))
+            set_length_with_set_semantics(&out, result.len())?;
+            Ok(Value::Object(out))
         }
         "of" => {
-            // Array.of(...elements)
-            let new_array = create_array(mc, env)?;
+            let out = create_with_ctor_or_array(Some(args.len()))?;
             for (i, arg) in args.iter().enumerate() {
-                // let val = evaluate_expr(mc, env, arg)?;
-                object_set_key_value(mc, &new_array, i, arg)?;
+                create_data_property_or_throw(&out, i, arg)?;
             }
-            set_array_length(mc, &new_array, args.len())?;
-            Ok(Value::Object(new_array))
+            set_length_with_set_semantics(&out, args.len())?;
+            Ok(Value::Object(out))
         }
         _ => Err(raise_eval_error!(format!("Array.{method} is not implemented")).into()),
     }
 }
-
-/// Handle Array constructor calls
 pub(crate) fn handle_array_constructor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
@@ -520,648 +738,1889 @@ pub(crate) fn handle_array_instance_method<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "at" => {
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let mut len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
+            if len > isize::MAX as usize {
+                len = isize::MAX as usize;
+            }
+
             let index = if !args.is_empty() {
-                // match evaluate_expr(mc, env, &args[0])? {
-                match args[0].clone() {
-                    Value::Number(n) => n as i64,
-                    _ => 0,
+                let idx_prim = crate::core::to_primitive(mc, &args[0], "number", env)?;
+                let idx_num = crate::core::to_number(&idx_prim)?;
+                if idx_num.is_nan() || idx_num == 0.0 {
+                    0isize
+                } else if idx_num.is_infinite() {
+                    if idx_num.is_sign_negative() { isize::MIN } else { isize::MAX }
+                } else {
+                    idx_num.trunc() as isize
                 }
             } else {
-                0
+                0isize
             };
 
-            let len = get_array_length(mc, object).unwrap_or(0) as i64;
-            let k = if index >= 0 { index } else { len + index };
+            let k = if index >= 0 { index } else { (len as isize).saturating_add(index) };
 
-            if k < 0 || k >= len {
+            if k < 0 || (k as usize) >= len {
                 Ok(Value::Undefined)
             } else {
-                let val_opt = object_get_key_value(object, k.to_string());
-                Ok(val_opt.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
+                Ok(crate::core::get_property_with_accessors(mc, env, object, k as usize)?)
             }
         }
         "push" => {
-            if !args.is_empty() {
-                // Try to mutate the original object in the environment when possible
-                // so that push is chainable (returns the array) and mutations persist.
-                // Evaluate all args and append them.
-                // First determine current length from the local object
-                let mut current_len = get_array_length(mc, object).unwrap_or(0);
-
-                // Helper closure to push a value into a map
-                fn push_into_map<'gc>(
-                    mc: &MutationContext<'gc>,
-                    map: &JSObjectDataPtr<'gc>,
-                    val: &Value<'gc>,
-                    current_len: &mut usize,
-                ) -> Result<(), JSError> {
-                    object_set_key_value(mc, map, *current_len, &val)?;
-                    *current_len += 1;
-                    Ok(())
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let max_len = 9007199254740991.0_f64;
+            let is_array_receiver = is_array(mc, object);
+            let length_is_non_writable = || -> Result<bool, EvalError<'gc>> {
+                let desc = crate::js_object::handle_object_method(
+                    mc,
+                    "getOwnPropertyDescriptor",
+                    &[Value::Object(object.clone()), Value::String(utf8_to_utf16("length"))],
+                    env,
+                )?;
+                if let Value::Object(desc_obj) = desc {
+                    let writable = crate::core::get_property_with_accessors(mc, env, &desc_obj, "writable")?;
+                    if matches!(writable, Value::Boolean(false)) {
+                        return Ok(true);
+                    }
                 }
+                Ok(false)
+            };
 
-                // Fallback: mutate the local object copy
-                for arg in args {
-                    push_into_map(mc, object, arg, &mut current_len)?;
-                }
-                set_array_length(mc, object, current_len)?;
-                // Return the array object (chainable)
-                Ok(Value::Object(object.clone()))
-            } else {
-                Err(raise_eval_error!("Array.push expects at least one argument").into())
+            if !object.borrow().is_writable("length") || length_is_non_writable()? {
+                return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
             }
+
+            let mut current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                max_len as usize
+            } else {
+                len_num.floor().min(max_len) as usize
+            };
+
+            if (current_len as f64) + (args.len() as f64) > max_len {
+                return Err(raise_type_error!("Invalid array length").into());
+            }
+
+            for arg in args {
+                let key = current_len.to_string();
+                if crate::core::get_own_property(object, key.as_str()).is_some() && !object.borrow().is_writable(key.as_str()) {
+                    return Err(raise_type_error!("Cannot assign to read only property").into());
+                }
+                let mut handled_by_setter = false;
+                let mut cur_proto = object.borrow().prototype;
+                while let Some(proto) = cur_proto {
+                    if let Some(prop) = crate::core::get_own_property(&proto, key.as_str()) {
+                        match &*prop.borrow() {
+                            Value::Property {
+                                setter: Some(setter_fn), ..
+                            } => {
+                                let setter_args = vec![arg.clone()];
+                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                                handled_by_setter = true;
+                            }
+                            Value::Property {
+                                setter: None,
+                                getter: Some(_),
+                                value: None,
+                            } => {
+                                return Err(raise_type_error!("Cannot set property without setter").into());
+                            }
+                            _ => {}
+                        }
+                        break;
+                    }
+                    cur_proto = proto.borrow().prototype;
+                }
+
+                if !handled_by_setter && object_set_key_value(mc, object, current_len, arg).is_err() {
+                    return Err(raise_type_error!("Cannot set array element").into());
+                }
+                current_len += 1;
+            }
+
+            if !object.borrow().is_writable("length") || length_is_non_writable()? {
+                return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+            }
+
+            if is_array_receiver {
+                if current_len > u32::MAX as usize {
+                    return Err(raise_range_error!("Invalid array length").into());
+                }
+                if set_array_length(mc, object, current_len).is_err() {
+                    return Err(raise_type_error!("Cannot set length").into());
+                }
+            } else if object_set_key_value(mc, object, "length", &Value::Number(current_len as f64)).is_err() {
+                return Err(raise_type_error!("Cannot set length").into());
+            }
+
+            Ok(Value::Number(current_len as f64))
         }
         "pop" => {
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-            if current_len > 0 {
-                let last_idx = (current_len - 1).to_string();
-                let val = object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(last_idx));
-                set_array_length(mc, object, current_len - 1)?;
-                Ok(val.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let max_len = 9007199254740991.0_f64;
+            let is_array_receiver = is_array(mc, object);
+            let length_is_non_writable = || -> Result<bool, EvalError<'gc>> {
+                let desc = crate::js_object::handle_object_method(
+                    mc,
+                    "getOwnPropertyDescriptor",
+                    &[Value::Object(object.clone()), Value::String(utf8_to_utf16("length"))],
+                    env,
+                )?;
+                if let Value::Object(desc_obj) = desc {
+                    let writable = crate::core::get_property_with_accessors(mc, env, &desc_obj, "writable")?;
+                    if matches!(writable, Value::Boolean(false)) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
+
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                max_len as usize
             } else {
-                Ok(Value::Undefined)
+                len_num.floor().min(max_len) as usize
+            };
+
+            if current_len == 0 {
+                if !object.borrow().is_writable("length") || length_is_non_writable()? {
+                    return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                }
+                if is_array_receiver {
+                    if set_array_length(mc, object, 0).is_err() {
+                        return Err(raise_type_error!("Cannot set length").into());
+                    }
+                } else if object_set_key_value(mc, object, "length", &Value::Number(0.0)).is_err() {
+                    return Err(raise_type_error!("Cannot set length").into());
+                }
+                return Ok(Value::Undefined);
             }
+
+            let new_len = current_len - 1;
+            let index_key = new_len.to_string();
+            let element = crate::core::get_property_with_accessors(mc, env, object, new_len)?;
+
+            if crate::core::get_own_property(object, index_key.as_str()).is_some() {
+                if !object.borrow().is_configurable(index_key.as_str()) {
+                    return Err(raise_type_error!("Cannot delete non-configurable property").into());
+                }
+                object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(index_key.clone()));
+            }
+
+            if !object.borrow().is_writable("length") || length_is_non_writable()? {
+                return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+            }
+
+            if is_array_receiver {
+                if set_array_length(mc, object, new_len).is_err() {
+                    return Err(raise_type_error!("Cannot set length").into());
+                }
+            } else if object_set_key_value(mc, object, "length", &Value::Number(new_len as f64)).is_err() {
+                return Err(raise_type_error!("Cannot set length").into());
+            }
+
+            Ok(element)
         }
         "length" => {
             let length = Value::Number(get_array_length(mc, object).unwrap_or(0) as f64);
             Ok(length)
         }
         "join" => {
-            let separator = if !args.is_empty() {
-                // match evaluate_expr(mc, env, &args[0])? {
-                match args[0].clone() {
-                    Value::String(s) => utf16_to_utf8(&s),
-                    Value::Number(n) => n.to_string(),
-                    _ => ",".to_string(),
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let current_len = if let Some(ta) = typed_array_ptr {
+                if ta.length_tracking {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if buf_len <= ta.byte_offset {
+                        0
+                    } else {
+                        (buf_len - ta.byte_offset) / ta.element_size()
+                    }
+                } else {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if buf_len < needed { 0 } else { ta.length }
+                }
+            } else {
+                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_num = crate::core::to_number(&len_prim)?;
+                let max_len = 9007199254740991.0_f64;
+                if len_num.is_nan() || len_num <= 0.0 {
+                    0usize
+                } else if !len_num.is_finite() {
+                    max_len as usize
+                } else {
+                    len_num.floor().min(max_len) as usize
+                }
+            };
+
+            let separator = if let Some(sep_val) = args.first() {
+                if matches!(sep_val, Value::Undefined) {
+                    ",".to_string()
+                } else {
+                    let prim = crate::core::to_primitive(mc, sep_val, "string", env)?;
+                    if matches!(prim, Value::Symbol(_)) {
+                        return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                    }
+                    crate::core::value_to_string(&prim)
                 }
             } else {
                 ",".to_string()
             };
 
-            let current_len = get_array_length(mc, object).unwrap_or(0);
+            if current_len == 0 {
+                return Ok(Value::String(utf8_to_utf16("")));
+            }
 
             let mut result = String::new();
             for i in 0..current_len {
                 if i > 0 {
                     result.push_str(&separator);
                 }
-                if let Some(val) = object_get_key_value(object, i) {
-                    match &*val.borrow() {
-                        Value::Undefined | Value::Null => {} // push nothing for null and undefined
-                        Value::String(s) => result.push_str(&utf16_to_utf8(s)),
-                        Value::Number(n) => result.push_str(&n.to_string()),
-                        Value::Boolean(b) => result.push_str(&b.to_string()),
-                        Value::BigInt(b) => result.push_str(&format!("{}n", b)),
-                        _ => result.push_str("[object Object]"),
+                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                match element {
+                    Value::Undefined | Value::Null => {}
+                    _ => {
+                        let prim = crate::core::to_primitive(mc, &element, "string", env)?;
+                        if matches!(prim, Value::Symbol(_)) {
+                            return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                        }
+                        result.push_str(&crate::core::value_to_string(&prim));
                     }
                 }
             }
             Ok(Value::String(utf8_to_utf16(&result)))
         }
         "slice" => {
-            let start = if !args.is_empty() {
-                // match evaluate_expr(mc, env, &args[0])? {
-                match args[0].clone() {
-                    Value::Number(n) => n as isize,
-                    _ => 0isize,
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
                 }
             } else {
-                0isize
+                None
             };
 
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-
-            let end = if args.len() >= 2 {
-                // match evaluate_expr(mc, env, &args[1])? {
-                match args[1].clone() {
-                    Value::Number(n) => n as isize,
-                    _ => current_len as isize,
+            let current_len = if let Some(ta) = typed_array_ptr {
+                if ta.length_tracking {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if buf_len <= ta.byte_offset {
+                        0
+                    } else {
+                        (buf_len - ta.byte_offset) / ta.element_size()
+                    }
+                } else {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if buf_len < needed { 0 } else { ta.length }
                 }
             } else {
-                current_len as isize
+                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_num = crate::core::to_number(&len_prim)?;
+                let max_len = 9007199254740991.0_f64;
+                if len_num.is_nan() || len_num <= 0.0 {
+                    0usize
+                } else if !len_num.is_finite() {
+                    max_len as usize
+                } else {
+                    len_num.floor().min(max_len) as usize
+                }
             };
 
-            let len = current_len as isize;
-            let start = if start < 0 { len + start } else { start };
-            let end = if end < 0 { len + end } else { end };
+            let receiver_is_array = if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                    if proxy.revoked {
+                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+                    }
+                    if let Value::Object(target_obj) = &*proxy.target {
+                        is_array(mc, target_obj)
+                    } else {
+                        false
+                    }
+                } else {
+                    is_array(mc, object)
+                }
+            } else {
+                is_array(mc, object)
+            };
 
-            let start = start.max(0).min(len) as usize;
-            let end = end.max(0).min(len) as usize;
-
-            let new_array = create_array(mc, env)?;
-            let mut idx = 0;
-            for i in start..end {
-                if let Some(val) = object_get_key_value(object, i) {
-                    object_set_key_value(mc, &new_array, idx, &*val.borrow())?;
-                    idx += 1;
+            if receiver_is_array {
+                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor")?;
+                if !matches!(ctor_val, Value::Undefined) {
+                    let ctor_is_constructor = match &ctor_val {
+                        Value::Object(obj) => {
+                            obj.borrow().class_def.is_some()
+                                || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
+                                || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
+                                || obj.borrow().get_closure().is_some()
+                        }
+                        _ => false,
+                    };
+                    if !ctor_is_constructor {
+                        return Err(raise_type_error!("Array species constructor is not a constructor").into());
+                    }
                 }
             }
-            set_array_length(mc, &new_array, idx)?;
+
+            let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
+                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                if matches!(prim, Value::Symbol(_)) {
+                    return Err(raise_type_error!("Cannot convert a Symbol value to a number").into());
+                }
+                let num = crate::core::to_number(&prim)?;
+                if num.is_nan() || num == 0.0 {
+                    Ok(0.0)
+                } else if num.is_infinite() {
+                    Ok(num)
+                } else {
+                    Ok(num.trunc())
+                }
+            };
+
+            let relative_start = if let Some(start_arg) = args.first() {
+                to_integer_or_infinity(start_arg)?
+            } else {
+                0.0
+            };
+            let len_i = current_len as i128;
+            let start_i = if relative_start == f64::NEG_INFINITY {
+                0_i128
+            } else if relative_start == f64::INFINITY {
+                len_i
+            } else {
+                let rel = relative_start as i128;
+                if rel < 0 { (len_i + rel).max(0) } else { rel.min(len_i) }
+            };
+
+            let relative_end = if let Some(end_arg) = args.get(1) {
+                if matches!(end_arg, Value::Undefined) {
+                    len_i as f64
+                } else {
+                    to_integer_or_infinity(end_arg)?
+                }
+            } else {
+                len_i as f64
+            };
+            let end_i = if relative_end == f64::NEG_INFINITY {
+                0_i128
+            } else if relative_end == f64::INFINITY {
+                len_i
+            } else {
+                let rel = relative_end as i128;
+                if rel < 0 { (len_i + rel).max(0) } else { rel.min(len_i) }
+            };
+
+            let start = start_i as usize;
+            let end = end_i as usize;
+
+            let count = end.saturating_sub(start);
+            if count > u32::MAX as usize {
+                return Err(raise_range_error!("Invalid array length").into());
+            }
+
+            let new_array = create_array(mc, env)?;
+            let mut n = 0usize;
+            let mut k = start;
+            while k < end {
+                let has_property = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    k < effective_len
+                } else {
+                    if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                        if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                            crate::js_proxy::proxy_has_property(mc, proxy, k.to_string())?
+                        } else {
+                            object_get_key_value(object, k.to_string()).is_some()
+                        }
+                    } else {
+                        object_get_key_value(object, k.to_string()).is_some()
+                    }
+                };
+
+                if has_property {
+                    let val = crate::core::get_property_with_accessors(mc, env, object, k.to_string())?;
+                    object_set_key_value(mc, &new_array, n, &val)?;
+                }
+
+                n += 1;
+                k += 1;
+            }
+
+            set_array_length(mc, &new_array, count)?;
             Ok(Value::Object(new_array))
         }
         "forEach" => {
-            if !args.is_empty() {
-                // Evaluate the callback expression
-                // let callback_val = evaluate_expr(mc, env, &args[0])?;
-                let callback_val = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
-
-                for i in 0..current_len {
-                    if let Some(val_rc) = object_get_key_value(object, i) {
-                        let val = val_rc.borrow().clone();
-                        let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
-
-                        let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback_val.clone()
-                            }
-                        } else {
-                            callback_val.clone()
-                        };
-
-                        match &actual_func {
-                            Value::Closure(cl) => {
-                                crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?;
-                            }
-                            Value::Function(name) => {
-                                crate::js_function::handle_global_function(mc, name, &call_args, env)?;
-                            }
-                            _ => return Err(raise_eval_error!("Array.forEach callback must be a function").into()),
-                        }
-                    }
-                }
-                Ok(Value::Undefined)
-            } else {
-                Err(raise_eval_error!("Array.forEach expects at least one argument").into())
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
             }
-        }
-        "map" => {
-            if !args.is_empty() {
-                // let callback_val = evaluate_expr(mc, env, &args[0])?;
-                let callback_val = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
 
-                let new_array = create_array(mc, env)?;
-                set_array_length(mc, &new_array, current_len)?;
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-                for i in 0..current_len {
-                    if let Some(val_rc) = object_get_key_value(object, i) {
-                        let val = val_rc.borrow().clone();
-                        let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
-                        // Support inline closures wrapped as objects with internal closure like forEach does.
-                        // Also, constructors are represented as objects; if a constructor object
-                        // is passed (has a __native_ctor string), treat it as a global function
-                        // with that name so it can be called.
-                        let mut actual_callback_val = callback_val.clone();
-                        if let Value::Object(obj) = &callback_val {
-                            // Closure wrapper
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                actual_callback_val = prop.borrow().clone();
-                            } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
-                                if let Value::String(name_vec) = &*nc.borrow() {
-                                    let name = crate::unicode::utf16_to_utf8(name_vec);
-                                    actual_callback_val = Value::Function(name);
-                                }
-                            }
-                        }
-
-                        let res = match &actual_callback_val {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
-                            _ => return Err(raise_eval_error!("Array.map callback must be a function").into()),
-                        };
-                        object_set_key_value(mc, &new_array, i, &res)?;
-                    }
-                }
-                Ok(Value::Object(new_array))
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
             } else {
-                Err(raise_eval_error!("Array.map expects at least one argument").into())
-            }
-        }
-        "filter" => {
-            if !args.is_empty() {
-                // let callback_val = evaluate_expr(mc, env, &args[0])?;
-                let callback_val = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
+                len_num.floor() as usize
+            };
 
-                let new_array = create_array(mc, env)?;
-                let mut idx = 0;
-                for i in 0..current_len {
-                    if let Some(val) = object_get_key_value(object, i) {
-                        // Support inline closures wrapped as objects with internal closure like forEach does.
-                        let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback_val.clone()
-                            }
-                        } else {
-                            callback_val.clone()
-                        };
-
-                        let element_val = val.borrow().clone();
-                        let call_args = vec![element_val.clone(), Value::Number(i as f64), Value::Object(object.clone())];
-
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
-                            _ => return Err(raise_eval_error!("Array.filter expects a function").into()),
-                        };
-
-                        if res.to_truthy() {
-                            object_set_key_value(mc, &new_array, idx, &element_val)?;
-                            idx += 1;
-                        }
-                    }
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
                 }
-                set_array_length(mc, &new_array, idx)?;
-                Ok(Value::Object(new_array))
-            } else {
-                Err(raise_eval_error!("Array.filter expects at least one argument").into())
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.forEach callback must be a function").into());
             }
-        }
-        "reduce" => {
-            if !args.is_empty() {
-                // let callback_val = evaluate_expr(mc, env, &args[0])?;
-                // let initial_value = if args.len() >= 2 {
-                //     Some(evaluate_expr(mc, env, &args[1])?)
-                // } else {
-                //     None
-                // };
 
-                let callback_val = args[0].clone();
-                let initial_value = if args.len() >= 2 { Some(args[1].clone()) } else { None };
-
-                let current_len = get_array_length(mc, object).unwrap_or(0);
-
-                if current_len == 0 && initial_value.is_none() {
-                    return Err(raise_eval_error!("Array.reduce called on empty array with no initial value").into());
-                }
-
-                let mut accumulator: Value = if let Some(ref val) = initial_value {
-                    val.clone()
-                } else if let Some(val) = object_get_key_value(object, "0") {
-                    val.borrow().clone()
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
                 } else {
-                    Value::Undefined
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut actual_callback_val = callback_val.clone();
+            if let Value::Object(obj) = &callback_val {
+                if let Some(prop) = obj.borrow().get_closure() {
+                    actual_callback_val = prop.borrow().clone();
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                    if let Value::String(name_vec) = &*nc.borrow() {
+                        let name = crate::unicode::utf16_to_utf8(name_vec);
+                        actual_callback_val = Value::Function(name);
+                    }
+                }
+            }
+
+            for i in 0..current_len {
+                let has_property = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    i < effective_len
+                } else {
+                    object_get_key_value(object, i).is_some()
                 };
 
-                let start_idx = if initial_value.is_some() { 0 } else { 1 };
-                for i in start_idx..current_len {
-                    if let Some(val) = object_get_key_value(object, i) {
-                        // Support inline closures wrapped as objects with internal closure.
-                        let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback_val.clone()
-                            }
-                        } else {
-                            callback_val.clone()
-                        };
+                if has_property {
+                    let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
+                    evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                }
+            }
 
-                        let args = vec![
-                            accumulator.clone(),
-                            val.borrow().clone(),
-                            Value::Number(i as f64),
-                            Value::Object(object.clone()),
-                        ];
+            Ok(Value::Undefined)
+        }
+        "map" => {
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
 
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(raise_eval_error!("Array.reduce expects a function").into()),
-                        };
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
 
-                        accumulator = res;
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.map callback must be a function").into());
+            }
+
+            if current_len > u32::MAX as usize {
+                return Err(raise_range_error!("Invalid array length").into());
+            }
+
+            // ArraySpeciesCreate pre-checks for Array receivers.
+            // This intentionally implements the subset required by current Test262 map failures:
+            // - revoked proxy receiver should throw TypeError before constructor access
+            // - abrupt completion while reading `constructor` should propagate
+            // - primitive/non-undefined constructor on arrays should throw TypeError
+            let receiver_is_array = if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                    if proxy.revoked {
+                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+                    }
+                    if let Value::Object(target_obj) = &*proxy.target {
+                        is_array(mc, target_obj)
+                    } else {
+                        false
+                    }
+                } else {
+                    is_array(mc, object)
+                }
+            } else {
+                is_array(mc, object)
+            };
+
+            if receiver_is_array {
+                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor")?;
+                if !matches!(ctor_val, Value::Undefined) {
+                    let ctor_is_constructor = match &ctor_val {
+                        Value::Object(obj) => {
+                            obj.borrow().class_def.is_some()
+                                || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
+                                || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
+                                || obj.borrow().get_closure().is_some()
+                        }
+                        _ => false,
+                    };
+                    if !ctor_is_constructor {
+                        return Err(raise_type_error!("Array species constructor is not a constructor").into());
                     }
                 }
-                Ok(accumulator)
-            } else {
-                Err(raise_eval_error!("Array.reduce expects at least one argument").into())
             }
+
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let new_array = create_array(mc, env)?;
+            set_array_length(mc, &new_array, current_len)?;
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            for i in 0..current_len {
+                let has_property = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    i < effective_len
+                } else {
+                    object_get_key_value(object, i).is_some()
+                };
+
+                if has_property {
+                    let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
+
+                    let mut actual_callback_val = callback_val.clone();
+                    if let Value::Object(obj) = &callback_val {
+                        if let Some(prop) = obj.borrow().get_closure() {
+                            actual_callback_val = prop.borrow().clone();
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                            if let Value::String(name_vec) = &*nc.borrow() {
+                                let name = crate::unicode::utf16_to_utf8(name_vec);
+                                actual_callback_val = Value::Function(name);
+                            }
+                        }
+                    }
+
+                    let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    object_set_key_value(mc, &new_array, i, &res)?;
+                }
+            }
+
+            Ok(Value::Object(new_array))
+        }
+        "filter" => {
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
+
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
+
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.filter callback must be a function").into());
+            }
+
+            if current_len > u32::MAX as usize {
+                return Err(raise_range_error!("Invalid array length").into());
+            }
+
+            let receiver_is_array = if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                    if proxy.revoked {
+                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+                    }
+                    if let Value::Object(target_obj) = &*proxy.target {
+                        is_array(mc, target_obj)
+                    } else {
+                        false
+                    }
+                } else {
+                    is_array(mc, object)
+                }
+            } else {
+                is_array(mc, object)
+            };
+
+            if receiver_is_array {
+                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor")?;
+                if !matches!(ctor_val, Value::Undefined) {
+                    let ctor_is_constructor = match &ctor_val {
+                        Value::Object(obj) => {
+                            obj.borrow().class_def.is_some()
+                                || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
+                                || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
+                                || obj.borrow().get_closure().is_some()
+                        }
+                        _ => false,
+                    };
+                    if !ctor_is_constructor {
+                        return Err(raise_type_error!("Array species constructor is not a constructor").into());
+                    }
+                }
+            }
+
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let new_array = create_array(mc, env)?;
+            let mut idx = 0usize;
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            for i in 0..current_len {
+                let has_property = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    i < effective_len
+                } else {
+                    object_get_key_value(object, i).is_some()
+                };
+
+                if has_property {
+                    let element_val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let call_args = vec![element_val.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+
+                    let mut actual_callback_val = callback_val.clone();
+                    if let Value::Object(obj) = &callback_val {
+                        if let Some(prop) = obj.borrow().get_closure() {
+                            actual_callback_val = prop.borrow().clone();
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                            if let Value::String(name_vec) = &*nc.borrow() {
+                                let name = crate::unicode::utf16_to_utf8(name_vec);
+                                actual_callback_val = Value::Function(name);
+                            }
+                        }
+                    }
+
+                    let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    if res.to_truthy() {
+                        object_set_key_value(mc, &new_array, idx, &element_val)?;
+                        idx += 1;
+                    }
+                }
+            }
+
+            set_array_length(mc, &new_array, idx)?;
+            Ok(Value::Object(new_array))
+        }
+        "reduce" => {
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
+
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let initial_value = if args.len() >= 2 { Some(args[1].clone()) } else { None };
+
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
+
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.reduce callback must be a function").into());
+            }
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let has_property_at = |index: usize| -> bool {
+                if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    index < effective_len
+                } else {
+                    let key = index.to_string();
+                    let mut cur = Some(object.clone());
+                    while let Some(cur_obj) = cur {
+                        if crate::core::get_own_property(&cur_obj, key.as_str()).is_some() {
+                            return true;
+                        }
+                        cur = cur_obj.borrow().prototype;
+                    }
+                    false
+                }
+            };
+
+            if current_len == 0 && initial_value.is_none() {
+                return Err(raise_type_error!("Array.reduce called on empty array with no initial value").into());
+            }
+
+            let mut k = 0usize;
+            let mut accumulator: Value = if let Some(val) = initial_value {
+                val
+            } else {
+                let mut found = false;
+                let mut acc = Value::Undefined;
+                while k < current_len {
+                    if has_property_at(k) {
+                        acc = crate::core::get_property_with_accessors(mc, env, object, k)?;
+                        found = true;
+                        k += 1;
+                        break;
+                    }
+                    k += 1;
+                }
+                if !found {
+                    return Err(raise_type_error!("Array.reduce called on empty array with no initial value").into());
+                }
+                acc
+            };
+
+            let mut actual_callback_val = callback_val.clone();
+            if let Value::Object(obj) = &callback_val {
+                if let Some(prop) = obj.borrow().get_closure() {
+                    actual_callback_val = prop.borrow().clone();
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                    if let Value::String(name_vec) = &*nc.borrow() {
+                        let name = crate::unicode::utf16_to_utf8(name_vec);
+                        actual_callback_val = Value::Function(name);
+                    }
+                }
+            }
+
+            while k < current_len {
+                if has_property_at(k) {
+                    let k_value = crate::core::get_property_with_accessors(mc, env, object, k)?;
+                    let call_args = vec![accumulator.clone(), k_value, Value::Number(k as f64), Value::Object(object.clone())];
+                    accumulator = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&Value::Undefined), &call_args)?;
+                }
+                k += 1;
+            }
+
+            Ok(accumulator)
         }
         "reduceRight" => {
-            if !args.is_empty() {
-                // let callback_val = evaluate_expr(mc, env, &args[0])?;
-                // let initial_value = if args.len() >= 2 {
-                //     Some(evaluate_expr(mc, env, &args[1])?)
-                // } else {
-                //     None
-                // };
-
-                let callback_val = args[0].clone();
-                let initial_value = if args.len() >= 2 { Some(args[1].clone()) } else { None };
-
-                let current_len = get_array_length(mc, object).unwrap_or(0);
-
-                if current_len == 0 && initial_value.is_none() {
-                    return Err(raise_eval_error!("Array.reduceRight called on empty array with no initial value").into());
-                }
-
-                let mut accumulator: Value;
-                let mut start_idx_rev = 0; // How many items to skip from the end
-
-                if let Some(ref val) = initial_value {
-                    accumulator = val.clone();
-                    start_idx_rev = 0;
-                } else {
-                    // Find the last present element
-                    let mut found = false;
-                    accumulator = Value::Undefined; // Placeholder
-                    for i in (0..current_len).rev() {
-                        if let Some(val) = object_get_key_value(object, i) {
-                            accumulator = val.borrow().clone();
-                            start_idx_rev = current_len - i;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        return Err(raise_eval_error!("Array.reduceRight called on empty array with no initial value").into());
-                    }
-                }
-
-                // Iterate backwards
-                // If we found an initial value at index `last_idx`, we start loop from `last_idx - 1`.
-                // `start_idx_rev` is `current_len - last_idx`.
-                // So we want to iterate from `current_len - 1 - start_idx_rev` down to 0?
-                // No, if initial value was provided, start_idx_rev is 0. We iterate from `current_len - 1` down to 0.
-                // If initial value was from array at `last_idx`, we want to start from `last_idx - 1`.
-                // `last_idx` was `current_len - start_idx_rev`.
-                // So we start from `current_len - start_idx_rev - 1`.
-
-                let start_loop = current_len.saturating_sub(start_idx_rev);
-
-                for i in (0..start_loop).rev() {
-                    if let Some(val) = object_get_key_value(object, i) {
-                        // Support inline closures wrapped as objects with internal closure.
-                        let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback_val.clone()
-                            }
-                        } else {
-                            callback_val.clone()
-                        };
-
-                        let args = vec![
-                            accumulator.clone(),
-                            val.borrow().clone(),
-                            Value::Number(i as f64),
-                            Value::Object(object.clone()),
-                        ];
-
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(raise_eval_error!("Array.reduceRight expects a function").into()),
-                        };
-
-                        accumulator = res;
-                    }
-                }
-                Ok(accumulator)
-            } else {
-                Err(raise_eval_error!("Array.reduceRight expects at least one argument").into())
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
             }
+
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let initial_value = if args.len() >= 2 { Some(args[1].clone()) } else { None };
+
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
+
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.reduceRight callback must be a function").into());
+            }
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let has_property_at = |index: usize| -> bool {
+                if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    index < effective_len
+                } else {
+                    object_get_key_value(object, index).is_some()
+                }
+            };
+
+            if current_len == 0 && initial_value.is_none() {
+                return Err(raise_type_error!("Array.reduceRight called on empty array with no initial value").into());
+            }
+            if current_len == 0 {
+                return Ok(initial_value.unwrap());
+            }
+
+            let mut k = current_len.saturating_sub(1);
+            let mut accumulator: Value = if let Some(val) = initial_value {
+                val
+            } else {
+                let mut found = false;
+                let mut acc = Value::Undefined;
+                loop {
+                    if has_property_at(k) {
+                        acc = crate::core::get_property_with_accessors(mc, env, object, k)?;
+                        found = true;
+                        break;
+                    }
+                    if k == 0 {
+                        break;
+                    }
+                    k -= 1;
+                }
+                if !found {
+                    return Err(raise_type_error!("Array.reduceRight called on empty array with no initial value").into());
+                }
+                if k == 0 {
+                    return Ok(acc);
+                }
+                k -= 1;
+                acc
+            };
+
+            let mut actual_callback_val = callback_val.clone();
+            if let Value::Object(obj) = &callback_val {
+                if let Some(prop) = obj.borrow().get_closure() {
+                    actual_callback_val = prop.borrow().clone();
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                    if let Value::String(name_vec) = &*nc.borrow() {
+                        let name = crate::unicode::utf16_to_utf8(name_vec);
+                        actual_callback_val = Value::Function(name);
+                    }
+                }
+            }
+
+            loop {
+                if has_property_at(k) {
+                    let k_value = crate::core::get_property_with_accessors(mc, env, object, k)?;
+                    let call_args = vec![accumulator.clone(), k_value, Value::Number(k as f64), Value::Object(object.clone())];
+                    accumulator = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&Value::Undefined), &call_args)?;
+                }
+
+                if k == 0 {
+                    break;
+                }
+                k -= 1;
+            }
+
+            Ok(accumulator)
         }
         "find" => {
-            if !args.is_empty() {
-                let callback = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
 
-                for i in 0..current_len {
-                    if let Some(value) = object_get_key_value(object, i) {
-                        // Support inline closures wrapped as objects with internal closure.
-                        let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback.clone()
-                            }
-                        } else {
-                            callback.clone()
-                        };
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-                        let element = value.borrow().clone();
-                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
 
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(raise_eval_error!("Array.find expects a function").into()),
-                        };
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.find callback must be a function").into());
+            }
 
-                        if res.to_truthy() {
-                            return Ok(element);
-                        }
+            let mut actual_callback_val = callback_val.clone();
+            if let Value::Object(obj) = &callback_val {
+                if let Some(prop) = obj.borrow().get_closure() {
+                    actual_callback_val = prop.borrow().clone();
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                    if let Value::String(name_vec) = &*nc.borrow() {
+                        let name = crate::unicode::utf16_to_utf8(name_vec);
+                        actual_callback_val = Value::Function(name);
                     }
                 }
-                Ok(Value::Undefined)
-            } else {
-                Err(raise_eval_error!("Array.find expects at least one argument").into())
             }
+
+            for i in 0..current_len {
+                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let call_args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+                let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                if res.to_truthy() {
+                    return Ok(element);
+                }
+            }
+
+            Ok(Value::Undefined)
         }
         "findIndex" => {
-            if !args.is_empty() {
-                let callback = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
 
-                for i in 0..current_len {
-                    if let Some(value) = object_get_key_value(object, i) {
-                        let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback.clone()
-                            }
-                        } else {
-                            callback.clone()
-                        };
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-                        let element = value.borrow().clone();
-                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
 
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(raise_eval_error!("Array.findIndex expects a function").into()),
-                        };
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.findIndex callback must be a function").into());
+            }
 
-                        if res.to_truthy() {
-                            return Ok(Value::Number(i as f64));
-                        }
+            let mut actual_callback_val = callback_val.clone();
+            if let Value::Object(obj) = &callback_val {
+                if let Some(prop) = obj.borrow().get_closure() {
+                    actual_callback_val = prop.borrow().clone();
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                    if let Value::String(name_vec) = &*nc.borrow() {
+                        let name = crate::unicode::utf16_to_utf8(name_vec);
+                        actual_callback_val = Value::Function(name);
                     }
                 }
-                Ok(Value::Number(-1.0))
-            } else {
-                Err(raise_eval_error!("Array.findIndex expects at least one argument").into())
             }
-        }
-        "some" => {
-            if !args.is_empty() {
-                let callback = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
 
-                for i in 0..current_len {
-                    if let Some(value) = object_get_key_value(object, i) {
-                        let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback.clone()
-                            }
-                        } else {
-                            callback.clone()
-                        };
-
-                        let element = value.borrow().clone();
-                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
-
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(raise_eval_error!("Array.some expects a function").into()),
-                        };
-
-                        if res.to_truthy() {
-                            return Ok(Value::Boolean(true));
-                        }
-                    }
-                }
-                Ok(Value::Boolean(false))
-            } else {
-                Err(raise_eval_error!("Array.some expects at least one argument").into())
-            }
-        }
-        "every" => {
-            if !args.is_empty() {
-                let callback = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
-
-                for i in 0..current_len {
-                    if let Some(value) = object_get_key_value(object, i) {
-                        let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback.clone()
-                            }
-                        } else {
-                            callback.clone()
-                        };
-
-                        let element = value.borrow().clone();
-                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
-
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(raise_eval_error!("Array.every expects a function").into()),
-                        };
-
-                        if !res.to_truthy() {
-                            return Ok(Value::Boolean(false));
-                        }
-                    }
-                }
-                Ok(Value::Boolean(true))
-            } else {
-                Err(raise_eval_error!("Array.every expects at least one argument").into())
-            }
-        }
-        "concat" => {
-            let result = create_array(mc, env)?;
-
-            // First, copy all elements from current array
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-
-            let mut new_index = 0;
             for i in 0..current_len {
-                if let Some(val) = object_get_key_value(object, i) {
-                    object_set_key_value(mc, &result, new_index, &*val.borrow())?;
-                    new_index += 1;
-                }
-            }
-
-            // Then, append all arguments
-            for arg in args {
-                let arg_val = arg.clone();
-                match arg_val {
-                    Value::Object(arg_obj) => {
-                        // If argument is an array-like object, copy its elements
-                        let arg_len = get_array_length(mc, &arg_obj).unwrap_or(0);
-                        for i in 0..arg_len {
-                            if let Some(val) = object_get_key_value(&arg_obj, i) {
-                                object_set_key_value(mc, &result, new_index, &*val.borrow())?;
-                                new_index += 1;
-                            }
-                        }
-                    }
-                    _ => {
-                        // If argument is not an array, append it directly
-                        object_set_key_value(mc, &result, new_index, &arg_val)?;
-                        new_index += 1;
-                    }
-                }
-            }
-
-            set_array_length(mc, &result, new_index)?;
-            Ok(Value::Object(result))
-        }
-        "indexOf" => {
-            if args.is_empty() {
-                return Err(raise_eval_error!("Array.indexOf expects at least one argument").into());
-            }
-
-            let search_element = args[0].clone();
-            let from_index = if args.len() > 1 {
-                match args[1].clone() {
-                    Value::Number(n) => n as isize,
-                    _ => 0isize,
-                }
-            } else {
-                0isize
-            };
-
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-
-            let start = if from_index < 0 {
-                (current_len as isize + from_index).max(0) as usize
-            } else {
-                from_index as usize
-            };
-
-            for i in start..current_len {
-                if let Some(val) = object_get_key_value(object, i)
-                    && values_equal(mc, &val.borrow(), &search_element)
-                {
+                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let call_args = vec![element, Value::Number(i as f64), Value::Object(object.clone())];
+                let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                if res.to_truthy() {
                     return Ok(Value::Number(i as f64));
                 }
             }
 
             Ok(Value::Number(-1.0))
         }
-        "includes" => {
-            if args.is_empty() {
-                return Err(raise_eval_error!("Array.includes expects at least one argument").into());
+        "some" => {
+            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
+
+            let callback_callable = match &callback {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.some callback must be a function").into());
             }
 
-            let search_element = args[0].clone();
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            for i in 0..current_len {
+                let has_property = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    i < effective_len
+                } else {
+                    object_get_key_value(object, i).is_some()
+                };
+
+                if has_property {
+                    let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let call_args = vec![element, Value::Number(i as f64), Value::Object(object.clone())];
+
+                    let mut actual_callback_val = callback.clone();
+                    if let Value::Object(obj) = &callback {
+                        if let Some(prop) = obj.borrow().get_closure() {
+                            actual_callback_val = prop.borrow().clone();
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                            if let Value::String(name_vec) = &*nc.borrow() {
+                                let name = crate::unicode::utf16_to_utf8(name_vec);
+                                actual_callback_val = Value::Function(name);
+                            }
+                        }
+                    }
+
+                    let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    if res.to_truthy() {
+                        return Ok(Value::Boolean(true));
+                    }
+                }
+            }
+
+            Ok(Value::Boolean(false))
+        }
+        "every" => {
+            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
+
+            let callback_callable = match &callback {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.every callback must be a function").into());
+            }
+
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            for i in 0..current_len {
+                let has_property = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    i < effective_len
+                } else {
+                    object_get_key_value(object, i).is_some()
+                };
+
+                if has_property {
+                    let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let call_args = vec![element, Value::Number(i as f64), Value::Object(object.clone())];
+
+                    let mut actual_callback_val = callback.clone();
+                    if let Value::Object(obj) = &callback {
+                        if let Some(prop) = obj.borrow().get_closure() {
+                            actual_callback_val = prop.borrow().clone();
+                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                            if let Value::String(name_vec) = &*nc.borrow() {
+                                let name = crate::unicode::utf16_to_utf8(name_vec);
+                                actual_callback_val = Value::Function(name);
+                            }
+                        }
+                    }
+
+                    let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    if !res.to_truthy() {
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+            }
+
+            Ok(Value::Boolean(true))
+        }
+        "concat" => {
+            let is_constructor_value = |v: &Value<'gc>| -> bool {
+                match v {
+                    Value::Object(obj) => {
+                        obj.borrow().class_def.is_some()
+                            || object_get_key_value(obj, "__is_constructor").is_some()
+                            || object_get_key_value(obj, "__native_ctor").is_some()
+                            || obj.borrow().get_closure().is_some()
+                    }
+                    Value::Function(name) => matches!(
+                        name.as_str(),
+                        "Date" | "Array" | "RegExp" | "Object" | "Number" | "Boolean" | "String" | "GeneratorFunction"
+                    ),
+                    Value::Closure(cl) | Value::AsyncClosure(cl) => !cl.is_arrow,
+                    _ => false,
+                }
+            };
+
+            let is_array_or_throw = |obj: &JSObjectDataPtr<'gc>| -> Result<bool, EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    if proxy.revoked {
+                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+                    }
+                    if let Value::Object(target_obj) = &*proxy.target {
+                        return Ok(is_array(mc, target_obj));
+                    }
+                }
+                Ok(is_array(mc, obj))
+            };
+
+            let length_of_array_like = |obj: &JSObjectDataPtr<'gc>| -> Result<usize, EvalError<'gc>> {
+                let len_val = crate::core::get_property_with_accessors(mc, env, obj, "length")?;
+                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_num = crate::core::to_number(&len_prim)?;
+                let max_len = 9007199254740991.0_f64;
+                let len = if len_num.is_nan() || len_num <= 0.0 {
+                    0usize
+                } else if !len_num.is_finite() {
+                    max_len as usize
+                } else {
+                    len_num.floor().min(max_len) as usize
+                };
+                Ok(len)
+            };
+
+            let array_species_create = |receiver: &JSObjectDataPtr<'gc>| -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+                if !is_array_or_throw(receiver)? {
+                    return create_array(mc, env).map_err(EvalError::from);
+                }
+
+                let ctor_val = crate::core::get_property_with_accessors(mc, env, receiver, "constructor")?;
+                if matches!(ctor_val, Value::Undefined) {
+                    return create_array(mc, env).map_err(EvalError::from);
+                }
+
+                if !matches!(ctor_val, Value::Object(_)) {
+                    return Err(raise_type_error!("Array species constructor is not a constructor").into());
+                }
+
+                let mut ctor_candidate = ctor_val.clone();
+                if let Value::Object(ctor_obj) = &ctor_val
+                    && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                    && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
+                    && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+                {
+                    let species = crate::core::get_property_with_accessors(mc, env, ctor_obj, *species_sym)?;
+                    if !matches!(species, Value::Undefined | Value::Null) {
+                        ctor_candidate = species;
+                    } else {
+                        return create_array(mc, env).map_err(EvalError::from);
+                    }
+                }
+
+                if matches!(ctor_candidate, Value::Undefined | Value::Null) {
+                    return create_array(mc, env).map_err(EvalError::from);
+                }
+
+                if !is_constructor_value(&ctor_candidate) {
+                    return Err(raise_type_error!("Array species constructor is not a constructor").into());
+                }
+
+                let constructed = crate::js_class::evaluate_new(mc, env, &ctor_candidate, &[Value::Number(0.0)], None)?;
+                match constructed {
+                    Value::Object(obj) => Ok(obj),
+                    _ => Err(raise_type_error!("Array species constructor must return an object").into()),
+                }
+            };
+
+            let is_concat_spreadable = |value: &Value<'gc>| -> Result<bool, EvalError<'gc>> {
+                let Value::Object(obj) = value else {
+                    return Ok(false);
+                };
+
+                if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                    && let Some(sym_val) = object_get_key_value(sym_obj, "isConcatSpreadable")
+                    && let Value::Symbol(spread_sym) = &*sym_val.borrow()
+                {
+                    let spreadable_val = crate::core::get_property_with_accessors(mc, env, obj, *spread_sym)?;
+                    if !matches!(spreadable_val, Value::Undefined) {
+                        return Ok(spreadable_val.to_truthy());
+                    }
+                }
+
+                is_array_or_throw(obj)
+            };
+
+            let out = array_species_create(object)?;
+            let mut n = 0usize;
+            let mut items: Vec<Value<'gc>> = Vec::with_capacity(args.len() + 1);
+            items.push(Value::Object(*object));
+            items.extend(args.iter().cloned());
+
+            for item in items {
+                if is_concat_spreadable(&item)? {
+                    let Value::Object(src_obj) = item else {
+                        continue;
+                    };
+                    let src_len = length_of_array_like(&src_obj)?;
+                    for k in 0..src_len {
+                        let has_property = object_get_key_value(&src_obj, k.to_string()).is_some();
+                        if has_property {
+                            let sub = crate::core::get_property_with_accessors(mc, env, &src_obj, k.to_string())?;
+                            object_set_key_value(mc, &out, n, &sub)?;
+                        }
+                        n += 1;
+                    }
+                } else {
+                    object_set_key_value(mc, &out, n, &item)?;
+                    n += 1;
+                }
+            }
+
+            set_array_length(mc, &out, n)?;
+            Ok(Value::Object(out))
+        }
+        "indexOf" => {
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let current_len = if let Some(ta) = typed_array_ptr {
+                if ta.length_tracking {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if buf_len <= ta.byte_offset {
+                        0
+                    } else {
+                        (buf_len - ta.byte_offset) / ta.element_size()
+                    }
+                } else {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if buf_len < needed { 0 } else { ta.length }
+                }
+            } else {
+                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_num = crate::core::to_number(&len_prim)?;
+                if len_num.is_nan() || len_num <= 0.0 {
+                    0usize
+                } else if !len_num.is_finite() {
+                    if len_num.is_sign_negative() { 0usize } else { usize::MAX }
+                } else {
+                    len_num.floor() as usize
+                }
+            };
+
+            if current_len == 0 {
+                return Ok(Value::Number(-1.0));
+            }
+
+            let search_element = args.first().cloned().unwrap_or(Value::Undefined);
             let from_index = if args.len() > 1 {
-                match args[1].clone() {
-                    Value::Number(n) => n as isize,
-                    _ => 0isize,
+                let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                let n = crate::core::to_number(&prim)?;
+                if n.is_nan() || n == 0.0 {
+                    0isize
+                } else if n.is_infinite() {
+                    if n.is_sign_negative() { isize::MIN } else { isize::MAX }
+                } else {
+                    n.trunc() as isize
                 }
             } else {
                 0isize
             };
 
-            let current_len = get_array_length(mc, object).unwrap_or(0);
+            let start = if from_index < 0 {
+                (current_len as isize + from_index).max(0) as usize
+            } else {
+                from_index as usize
+            };
+
+            let is_typed_array_receiver = typed_array_ptr.is_some();
+
+            if let Some(ta) = typed_array_ptr {
+                let number_search = if let Value::Number(n) = &search_element { Some(*n) } else { None };
+                let bigint_search = if let Value::BigInt(b) = &search_element {
+                    Some((**b).clone())
+                } else {
+                    None
+                };
+
+                let effective_len = if ta.length_tracking {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if buf_len <= ta.byte_offset {
+                        0
+                    } else {
+                        (buf_len - ta.byte_offset) / ta.element_size()
+                    }
+                } else {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if buf_len < needed { 0 } else { ta.length }
+                };
+
+                let end = current_len.min(effective_len);
+                if start >= end {
+                    return Ok(Value::Number(-1.0));
+                }
+
+                match ta.kind {
+                    crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => {
+                        let Some(search_bi) = bigint_search else {
+                            return Ok(Value::Number(-1.0));
+                        };
+                        let size = 8usize;
+                        let base = ta.byte_offset;
+                        let buffer = ta.buffer.borrow();
+                        let data = buffer.data.lock().unwrap();
+                        for i in start..end {
+                            let byte_offset = base + i * size;
+                            if byte_offset + size > data.len() {
+                                break;
+                            }
+                            let bytes = &data[byte_offset..byte_offset + size];
+                            let cur_bi = if matches!(ta.kind, crate::core::TypedArrayKind::BigInt64) {
+                                let mut b = [0u8; 8];
+                                b.copy_from_slice(bytes);
+                                num_bigint::BigInt::from(i64::from_le_bytes(b))
+                            } else {
+                                let mut b = [0u8; 8];
+                                b.copy_from_slice(bytes);
+                                num_bigint::BigInt::from(u64::from_le_bytes(b))
+                            };
+                            if cur_bi == search_bi {
+                                return Ok(Value::Number(i as f64));
+                            }
+                        }
+                    }
+                    _ => {
+                        let Some(search_n) = number_search else {
+                            return Ok(Value::Number(-1.0));
+                        };
+                        if search_n.is_nan() {
+                            return Ok(Value::Number(-1.0));
+                        }
+
+                        let base = ta.byte_offset;
+                        let buffer = ta.buffer.borrow();
+                        let data = buffer.data.lock().unwrap();
+                        match ta.kind {
+                            crate::core::TypedArrayKind::Int8 => {
+                                for i in start..end {
+                                    let byte_offset = base + i;
+                                    if byte_offset >= data.len() {
+                                        break;
+                                    }
+                                    if (data[byte_offset] as i8 as f64) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
+                            crate::core::TypedArrayKind::Uint8 | crate::core::TypedArrayKind::Uint8Clamped => {
+                                for i in start..end {
+                                    let byte_offset = base + i;
+                                    if byte_offset >= data.len() {
+                                        break;
+                                    }
+                                    if (data[byte_offset] as f64) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
+                            crate::core::TypedArrayKind::Int16 => {
+                                for i in start..end {
+                                    let byte_offset = base + i * 2;
+                                    if byte_offset + 2 > data.len() {
+                                        break;
+                                    }
+                                    let mut b = [0u8; 2];
+                                    b.copy_from_slice(&data[byte_offset..byte_offset + 2]);
+                                    if (i16::from_le_bytes(b) as f64) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
+                            crate::core::TypedArrayKind::Uint16 => {
+                                for i in start..end {
+                                    let byte_offset = base + i * 2;
+                                    if byte_offset + 2 > data.len() {
+                                        break;
+                                    }
+                                    let mut b = [0u8; 2];
+                                    b.copy_from_slice(&data[byte_offset..byte_offset + 2]);
+                                    if (u16::from_le_bytes(b) as f64) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
+                            crate::core::TypedArrayKind::Int32 => {
+                                for i in start..end {
+                                    let byte_offset = base + i * 4;
+                                    if byte_offset + 4 > data.len() {
+                                        break;
+                                    }
+                                    let mut b = [0u8; 4];
+                                    b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                                    if (i32::from_le_bytes(b) as f64) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
+                            crate::core::TypedArrayKind::Uint32 => {
+                                for i in start..end {
+                                    let byte_offset = base + i * 4;
+                                    if byte_offset + 4 > data.len() {
+                                        break;
+                                    }
+                                    let mut b = [0u8; 4];
+                                    b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                                    if (u32::from_le_bytes(b) as f64) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
+                            crate::core::TypedArrayKind::Float32 => {
+                                for i in start..end {
+                                    let byte_offset = base + i * 4;
+                                    if byte_offset + 4 > data.len() {
+                                        break;
+                                    }
+                                    let mut b = [0u8; 4];
+                                    b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                                    if (f32::from_le_bytes(b) as f64) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
+                            crate::core::TypedArrayKind::Float64 => {
+                                for i in start..end {
+                                    let byte_offset = base + i * 8;
+                                    if byte_offset + 8 > data.len() {
+                                        break;
+                                    }
+                                    let mut b = [0u8; 8];
+                                    b.copy_from_slice(&data[byte_offset..byte_offset + 8]);
+                                    if f64::from_le_bytes(b) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
+                            crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => unreachable!(),
+                        }
+                    }
+                }
+
+                return Ok(Value::Number(-1.0));
+            }
+
+            let can_use_sparse_fast_path = if !is_typed_array_receiver && is_array(mc, object) {
+                let mut proto_has_numeric_key = false;
+                let mut cur_proto = object.borrow().prototype;
+                while let Some(proto) = cur_proto {
+                    let has_numeric = {
+                        let p = proto.borrow();
+                        p.properties.keys().any(|k| match k {
+                            PropertyKey::String(s) => s.parse::<usize>().ok().map(|idx| idx.to_string() == *s).unwrap_or(false),
+                            _ => false,
+                        })
+                    };
+                    if has_numeric {
+                        proto_has_numeric_key = true;
+                        break;
+                    }
+                    cur_proto = proto.borrow().prototype;
+                }
+                !proto_has_numeric_key
+            } else {
+                false
+            };
+
+            if can_use_sparse_fast_path {
+                let (mut indices, only_plain_data_elements): (Vec<usize>, bool) = {
+                    let o = object.borrow();
+                    let mut idxs = Vec::new();
+                    let mut plain_only = true;
+                    for (k, v) in &o.properties {
+                        if let PropertyKey::String(s) = k
+                            && let Ok(idx) = s.parse::<usize>()
+                            && idx.to_string() == *s
+                            && idx >= start
+                            && idx < current_len
+                        {
+                            if matches!(&*v.borrow(), Value::Property { .. }) {
+                                plain_only = false;
+                                break;
+                            }
+                            idxs.push(idx);
+                        }
+                    }
+                    (idxs, plain_only)
+                };
+
+                if !only_plain_data_elements {
+                    // Fallback to full spec-like scan when accessor/descriptor-backed elements are present.
+                } else {
+                    indices.sort_unstable();
+
+                    for i in indices {
+                        let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                        let is_match = match (&element, &search_element) {
+                            (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
+                            _ => values_equal(mc, &element, &search_element),
+                        };
+                        if is_match {
+                            return Ok(Value::Number(i as f64));
+                        }
+                    }
+
+                    return Ok(Value::Number(-1.0));
+                }
+            }
+
+            for i in start..current_len {
+                // indexOf skips holes, so first check property presence (including prototype chain).
+                let has_property = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    i < effective_len
+                } else {
+                    object_get_key_value(object, i).is_some()
+                };
+
+                if has_property {
+                    let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let is_match = match (&element, &search_element) {
+                        (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
+                        _ => values_equal(mc, &element, &search_element),
+                    };
+                    if is_match {
+                        return Ok(Value::Number(i as f64));
+                    }
+                }
+            }
+
+            Ok(Value::Number(-1.0))
+        }
+        "includes" => {
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                if len_num.is_sign_negative() { 0usize } else { usize::MAX }
+            } else {
+                len_num.floor() as usize
+            };
+
+            if current_len == 0 {
+                return Ok(Value::Boolean(false));
+            }
+
+            let search_element = args.first().cloned().unwrap_or(Value::Undefined);
+            let from_index = if args.len() > 1 {
+                let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                let n = crate::core::to_number(&prim)?;
+                if n.is_nan() || n == 0.0 {
+                    0isize
+                } else if n.is_infinite() {
+                    if n.is_sign_negative() { isize::MIN } else { isize::MAX }
+                } else {
+                    n.trunc() as isize
+                }
+            } else {
+                0isize
+            };
 
             let start = if from_index < 0 {
                 (current_len as isize + from_index).max(0) as usize
@@ -1170,9 +2629,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             for i in start..current_len {
-                if let Some(val) = object_get_key_value(object, i)
-                    && values_equal(mc, &val.borrow(), &search_element)
-                {
+                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                if values_equal(mc, &element, &search_element) {
                     return Ok(Value::Boolean(true));
                 }
             }
@@ -1180,344 +2638,1537 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Boolean(false))
         }
         "sort" => {
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-
-            // Extract array elements for sorting
-            // Note: This implementation uses O(n) extra space for simplicity.
-            // For better memory efficiency with large arrays, an in-place sort
-            // could be implemented, but it would be more complex with the current
-            // object storage model.
-            let mut elements: Vec<(String, Value<'gc>)> = Vec::new();
-            for i in 0..current_len {
-                if let Some(val) = object_get_key_value(object, i) {
-                    elements.push((i.to_string(), val.borrow().clone()));
+            let compare_fn = args.first().cloned().unwrap_or(Value::Undefined);
+            let has_compare_fn = !matches!(compare_fn, Value::Undefined);
+            if has_compare_fn {
+                let callable = match &compare_fn {
+                    Value::Closure(_)
+                    | Value::AsyncClosure(_)
+                    | Value::Function(_)
+                    | Value::GeneratorFunction(_, _)
+                    | Value::AsyncGeneratorFunction(_, _) => true,
+                    Value::Object(obj) => {
+                        obj.borrow().get_closure().is_some()
+                            || object_get_key_value(obj, "__native_ctor").is_some()
+                            || object_get_key_value(obj, "__bound_target").is_some()
+                    }
+                    _ => false,
+                };
+                if !callable {
+                    return Err(raise_type_error!("The comparison function must be either a function or undefined").into());
                 }
             }
 
-            // Sort elements
-            if args.is_empty() {
-                // Default sort (string comparison)
-                elements.sort_by(|a, b| {
-                    let a_str = value_to_sort_string(&a.1);
-                    let b_str = value_to_sort_string(&b.1);
-                    a_str.cmp(&b_str)
-                });
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let max_len = 9007199254740991.0_f64;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                max_len as usize
             } else {
-                // Custom sort with compare function
-                let compare_fn = args[0].clone();
-                // Support closures wrapped in objects or bare closures/functions
-                let actual_fn = if let Value::Object(obj) = &compare_fn {
-                    if let Some(prop) = obj.borrow().get_closure() {
-                        prop.borrow().clone()
+                len_num.floor().min(max_len) as usize
+            };
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // SortIndexedProperties with holes skipped: collect existing elements first
+            // (Get is observable and must run before writing back sorted results).
+            let mut items: Vec<Value<'gc>> = Vec::new();
+            for i in 0..current_len {
+                let has_property = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
                     } else {
-                        compare_fn.clone()
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    i < effective_len
+                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        crate::js_proxy::proxy_has_property(mc, proxy, i.to_string())?
+                    } else {
+                        object_get_key_value(object, i.to_string()).is_some()
                     }
                 } else {
-                    compare_fn.clone()
+                    object_get_key_value(object, i.to_string()).is_some()
                 };
 
-                elements.sort_by(|a, b| {
-                    let args = vec![a.1.clone(), b.1.clone()];
-                    match &actual_fn {
-                        Value::Closure(cl) => match crate::core::call_closure(mc, &*cl, None, &args, env, None) {
-                            Ok(Value::Number(n)) => {
-                                if n < 0.0 {
-                                    std::cmp::Ordering::Less
-                                } else if n > 0.0 {
-                                    std::cmp::Ordering::Greater
-                                } else {
-                                    std::cmp::Ordering::Equal
-                                }
-                            }
-                            _ => std::cmp::Ordering::Equal,
-                        },
-                        Value::Function(name) => match crate::js_function::handle_global_function(mc, name, &args, env) {
-                            Ok(Value::Number(n)) => {
-                                if n < 0.0 {
-                                    std::cmp::Ordering::Less
-                                } else if n > 0.0 {
-                                    std::cmp::Ordering::Greater
-                                } else {
-                                    std::cmp::Ordering::Equal
-                                }
-                            }
-                            _ => std::cmp::Ordering::Equal,
-                        },
-                        _ => std::cmp::Ordering::Equal,
-                    }
-                });
+                if has_property {
+                    let v = crate::core::get_property_with_accessors(mc, env, object, i.to_string())?;
+                    items.push(v);
+                }
             }
 
-            // Update the array with sorted elements
-            for (new_index, (_old_key, value)) in elements.iter().enumerate() {
-                object_set_key_value(mc, object, new_index, &value)?;
+            let compare_items = |a: &Value<'gc>, b: &Value<'gc>| -> Result<std::cmp::Ordering, EvalError<'gc>> {
+                // Undefined always sorts to the end for default/normal compare behavior.
+                match (a, b) {
+                    (Value::Undefined, Value::Undefined) => return Ok(std::cmp::Ordering::Equal),
+                    (Value::Undefined, _) => return Ok(std::cmp::Ordering::Greater),
+                    (_, Value::Undefined) => return Ok(std::cmp::Ordering::Less),
+                    _ => {}
+                }
+
+                if has_compare_fn {
+                    let compare_args = vec![a.clone(), b.clone()];
+                    let this_arg = Value::Undefined;
+                    let result = evaluate_call_dispatch(mc, env, &compare_fn, Some(&this_arg), &compare_args)?;
+                    let num_prim = crate::core::to_primitive(mc, &result, "number", env)?;
+                    let num = crate::core::to_number(&num_prim)?;
+                    if num.is_nan() || num == 0.0 {
+                        Ok(std::cmp::Ordering::Equal)
+                    } else if num < 0.0 {
+                        Ok(std::cmp::Ordering::Less)
+                    } else {
+                        Ok(std::cmp::Ordering::Greater)
+                    }
+                } else {
+                    let a_prim = crate::core::to_primitive(mc, a, "string", env)?;
+                    let b_prim = crate::core::to_primitive(mc, b, "string", env)?;
+                    if matches!(a_prim, Value::Symbol(_)) || matches!(b_prim, Value::Symbol(_)) {
+                        return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                    }
+                    let a_str = crate::core::value_to_string(&a_prim);
+                    let b_str = crate::core::value_to_string(&b_prim);
+                    Ok(a_str.cmp(&b_str))
+                }
+            };
+
+            // Stable insertion sort with fallible comparator.
+            let mut i = 1usize;
+            while i < items.len() {
+                let mut j = i;
+                while j > 0 {
+                    let ord = compare_items(&items[j - 1], &items[j])?;
+                    if ord == std::cmp::Ordering::Greater {
+                        items.swap(j - 1, j);
+                        j -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+
+            let set_index_or_throw = |index: usize, value: &Value<'gc>| -> Result<(), EvalError<'gc>> {
+                let key = index.to_string();
+
+                if let Some(own) = crate::core::get_own_property(object, key.as_str()) {
+                    match &*own.borrow() {
+                        Value::Getter(..) => {
+                            return Err(raise_type_error!("Cannot set property without setter").into());
+                        }
+                        Value::Property {
+                            setter: Some(setter_fn), ..
+                        } => {
+                            let setter_args = vec![value.clone()];
+                            let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                            return Ok(());
+                        }
+                        Value::Property {
+                            setter: None,
+                            getter: Some(_),
+                            ..
+                        } => {
+                            return Err(raise_type_error!("Cannot set property without setter").into());
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut handled_by_setter = false;
+                let mut cur_proto = object.borrow().prototype;
+                while let Some(proto) = cur_proto {
+                    if let Some(prop) = crate::core::get_own_property(&proto, key.as_str()) {
+                        match &*prop.borrow() {
+                            Value::Getter(..) => {
+                                return Err(raise_type_error!("Cannot set property without setter").into());
+                            }
+                            Value::Property {
+                                setter: Some(setter_fn), ..
+                            } => {
+                                let setter_args = vec![value.clone()];
+                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                                handled_by_setter = true;
+                            }
+                            Value::Property {
+                                setter: None,
+                                getter: Some(_),
+                                ..
+                            } => {
+                                return Err(raise_type_error!("Cannot set property without setter").into());
+                            }
+                            _ => {}
+                        }
+                        break;
+                    }
+                    cur_proto = proto.borrow().prototype;
+                }
+
+                if !handled_by_setter && object_set_key_value(mc, object, index, value).is_err() {
+                    return Err(raise_type_error!("Cannot set array element").into());
+                }
+
+                Ok(())
+            };
+
+            for (idx, value) in items.iter().enumerate() {
+                set_index_or_throw(idx, value)?;
+            }
+
+            // Remove remaining own indexed properties in [itemCount, len).
+            let mut idx = items.len();
+            while idx < current_len {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        let key_prop = PropertyKey::from(idx.to_string());
+                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                        if !deleted {
+                            return Err(raise_type_error!("Cannot delete target property").into());
+                        }
+                    } else if crate::core::get_own_property(object, idx).is_some() {
+                        let key_prop = PropertyKey::from(idx.to_string());
+                        if !object.borrow().is_configurable(key_prop.clone()) {
+                            return Err(raise_type_error!("Cannot delete target property").into());
+                        }
+                        object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                    }
+                } else if crate::core::get_own_property(object, idx).is_some() {
+                    let key_prop = PropertyKey::from(idx.to_string());
+                    if !object.borrow().is_configurable(key_prop.clone()) {
+                        return Err(raise_type_error!("Cannot delete target property").into());
+                    }
+                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                }
+                idx += 1;
             }
 
             Ok(Value::Object(object.clone()))
         }
         "reverse" => {
-            let current_len = get_array_length(mc, object).unwrap_or(0);
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let max_len = 9007199254740991.0_f64;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                max_len as usize
+            } else {
+                len_num.floor().min(max_len) as usize
+            };
 
-            // Reverse elements in place
-            let mut left = 0;
-            let mut right = current_len.saturating_sub(1);
-
-            while left < right {
-                let left_key = left.to_string();
-                let right_key = right.to_string();
-
-                let left_val = object_get_key_value(object, &left_key).map(|v| v.borrow().clone());
-                let right_val = object_get_key_value(object, &right_key).map(|v| v.borrow().clone());
-
-                if let Some(val) = right_val {
-                    object_set_key_value(mc, object, left_key, &val)?;
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
                 } else {
-                    object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(left_key));
+                    None
+                }
+            } else {
+                None
+            };
+
+            let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
+                if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+                    Ok(index < effective_len)
+                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
+                    } else {
+                        Ok(object_get_key_value(object, index.to_string()).is_some())
+                    }
+                } else {
+                    Ok(object_get_key_value(object, index.to_string()).is_some())
+                }
+            };
+
+            let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        let key_prop = PropertyKey::from(index.to_string());
+                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                        if !deleted {
+                            return Err(raise_type_error!("Cannot delete target property").into());
+                        }
+                        return Ok(());
+                    }
                 }
 
-                if let Some(val) = left_val {
-                    object_set_key_value(mc, object, right_key, &val)?;
-                } else {
-                    object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(right_key));
+                if crate::core::get_own_property(object, index).is_some() {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    if !object.borrow().is_configurable(key_prop.clone()) {
+                        return Err(raise_type_error!("Cannot delete target property").into());
+                    }
+                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                }
+                Ok(())
+            };
+
+            let set_property_or_throw = |index: usize, value: &Value<'gc>| -> Result<(), EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        let key_prop = PropertyKey::from(index.to_string());
+                        let ok = crate::js_proxy::proxy_set_property_with_receiver(
+                            mc,
+                            proxy,
+                            &key_prop,
+                            value,
+                            Some(&Value::Object(object.clone())),
+                        )?;
+                        if !ok {
+                            return Err(raise_type_error!("Cannot set target property").into());
+                        }
+                        return Ok(());
+                    }
                 }
 
-                left += 1;
-                right -= 1;
+                object_set_key_value(mc, object, index, value)?;
+                Ok(())
+            };
+
+            let middle = current_len / 2;
+            for lower in 0..middle {
+                let upper = current_len - lower - 1;
+
+                let lower_exists = has_property_at(lower)?;
+                let lower_value = if lower_exists {
+                    Some(crate::core::get_property_with_accessors(mc, env, object, lower.to_string())?)
+                } else {
+                    None
+                };
+
+                let upper_exists = has_property_at(upper)?;
+                let upper_value = if upper_exists {
+                    Some(crate::core::get_property_with_accessors(mc, env, object, upper.to_string())?)
+                } else {
+                    None
+                };
+
+                if lower_exists && upper_exists {
+                    set_property_or_throw(lower, &upper_value.unwrap_or(Value::Undefined))?;
+                    set_property_or_throw(upper, &lower_value.unwrap_or(Value::Undefined))?;
+                } else if !lower_exists && upper_exists {
+                    set_property_or_throw(lower, &upper_value.unwrap_or(Value::Undefined))?;
+                    delete_property_or_throw(upper)?;
+                } else if lower_exists && !upper_exists {
+                    delete_property_or_throw(lower)?;
+                    set_property_or_throw(upper, &lower_value.unwrap_or(Value::Undefined))?;
+                }
             }
 
             Ok(Value::Object(object.clone()))
         }
         "splice" => {
-            // array.splice(start, deleteCount, ...items)
-            let current_len = get_array_length(mc, object).unwrap_or(0);
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
 
-            let start = if !args.is_empty() {
-                match args[0].clone() {
-                    Value::Number(n) => {
-                        let mut idx = n as isize;
-                        if idx < 0 {
-                            idx += current_len as isize;
-                        }
-                        idx.max(0).min(current_len as isize) as usize
+            let is_constructor_value = |v: &Value<'gc>| -> bool {
+                match v {
+                    Value::Object(obj) => {
+                        obj.borrow().class_def.is_some()
+                            || object_get_key_value(obj, "__is_constructor").is_some()
+                            || object_get_key_value(obj, "__native_ctor").is_some()
+                            || obj.borrow().get_closure().is_some()
                     }
-                    _ => 0,
+                    Value::Function(name) => matches!(
+                        name.as_str(),
+                        "Date" | "Array" | "RegExp" | "Object" | "Number" | "Boolean" | "String" | "GeneratorFunction"
+                    ),
+                    Value::Closure(cl) | Value::AsyncClosure(cl) => !cl.is_arrow,
+                    _ => false,
                 }
-            } else {
-                0
             };
 
-            let delete_count = if args.len() >= 2 {
-                match args[1].clone() {
-                    Value::Number(n) => n as usize,
-                    _ => 0,
-                }
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let max_len = 9007199254740991.0_f64;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                max_len as usize
             } else {
-                current_len
+                len_num.floor().min(max_len) as usize
             };
 
-            // Collect elements to be deleted
-            let mut deleted_elements = Vec::new();
-            for i in start..(start + delete_count).min(current_len) {
-                if let Some(val) = object_get_key_value(object, i) {
-                    deleted_elements.push(val.borrow().clone());
-                }
-            }
-
-            // Create new array for deleted elements
-            let deleted_array = create_array(mc, env)?;
-            for (i, val) in deleted_elements.iter().enumerate() {
-                object_set_key_value(mc, &deleted_array, i, &val)?;
-            }
-            set_array_length(mc, &deleted_array, deleted_elements.len())?;
-
-            // Collect tail elements (elements that need to be shifted)
-            // We must collect them before we start writing new items to avoid overwriting them
-            let mut tail_elements = Vec::new();
-            let shift_start = start + delete_count;
-            for i in shift_start..current_len {
-                let val_opt = object_get_key_value(object, i);
-                tail_elements.push(val_opt.map(|v| v.borrow().clone()));
-            }
-
-            // Insert new items at start position
-            let mut write_idx = start;
-            for item in args.iter().skip(2) {
-                object_set_key_value(mc, object, write_idx, &item)?;
-                write_idx += 1;
-            }
-
-            // Write tail elements back
-            for val_opt in tail_elements {
-                if let Some(val) = val_opt {
-                    object_set_key_value(mc, object, write_idx, &val)?;
+            let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
+                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                let num = crate::core::to_number(&prim)?;
+                if num.is_nan() || num == 0.0 {
+                    Ok(0.0)
+                } else if num.is_infinite() {
+                    Ok(num)
                 } else {
-                    // If the element was a hole (or missing), ensure the destination is also a hole
-                    object
-                        .borrow_mut(mc)
-                        .properties
-                        .shift_remove(&PropertyKey::from(write_idx.to_string()));
+                    Ok(num.trunc())
                 }
-                write_idx += 1;
+            };
+
+            let len_i = current_len as i128;
+            let relative_start = if let Some(start_arg) = args.first() {
+                to_integer_or_infinity(start_arg)?
+            } else {
+                0.0
+            };
+            let actual_start_i = if relative_start == f64::NEG_INFINITY {
+                0_i128
+            } else if relative_start < 0.0 {
+                (len_i + relative_start as i128).max(0)
+            } else {
+                (relative_start as i128).min(len_i)
+            };
+            let actual_start = actual_start_i as usize;
+
+            let insert_count = args.len().saturating_sub(2);
+            let actual_delete_count = if args.is_empty() {
+                0
+            } else if args.len() == 1 {
+                current_len.saturating_sub(actual_start)
+            } else {
+                let dc = to_integer_or_infinity(&args[1])?;
+                let dc_i = if dc == f64::NEG_INFINITY {
+                    0_i128
+                } else if dc == f64::INFINITY {
+                    (current_len - actual_start) as i128
+                } else {
+                    (dc as i128).max(0)
+                };
+                dc_i.min((current_len - actual_start) as i128) as usize
+            };
+
+            let array_species_create = |delete_count: usize| -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+                if !is_array(mc, object) {
+                    if delete_count > u32::MAX as usize {
+                        return Err(raise_range_error!("Invalid array length").into());
+                    }
+                    let out = create_array(mc, env).map_err(EvalError::from)?;
+                    set_array_length(mc, &out, delete_count).map_err(EvalError::from)?;
+                    return Ok(out);
+                }
+
+                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor")?;
+                if matches!(ctor_val, Value::Undefined) {
+                    let out = create_array(mc, env).map_err(EvalError::from)?;
+                    set_array_length(mc, &out, delete_count).map_err(EvalError::from)?;
+                    return Ok(out);
+                }
+
+                if !matches!(ctor_val, Value::Object(_)) {
+                    return Err(raise_type_error!("Array species constructor is not a constructor").into());
+                }
+
+                let mut ctor_candidate = ctor_val.clone();
+                if let Value::Object(ctor_obj) = &ctor_val
+                    && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                    && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
+                    && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+                {
+                    let species = crate::core::get_property_with_accessors(mc, env, ctor_obj, *species_sym)?;
+                    if !matches!(species, Value::Undefined | Value::Null) {
+                        ctor_candidate = species;
+                    } else {
+                        let out = create_array(mc, env).map_err(EvalError::from)?;
+                        set_array_length(mc, &out, delete_count).map_err(EvalError::from)?;
+                        return Ok(out);
+                    }
+                }
+
+                if matches!(ctor_candidate, Value::Undefined | Value::Null) {
+                    let out = create_array(mc, env).map_err(EvalError::from)?;
+                    set_array_length(mc, &out, delete_count).map_err(EvalError::from)?;
+                    return Ok(out);
+                }
+
+                if !is_constructor_value(&ctor_candidate) {
+                    return Err(raise_type_error!("Array species constructor is not a constructor").into());
+                }
+
+                let constructed = crate::js_class::evaluate_new(mc, env, &ctor_candidate, &[Value::Number(delete_count as f64)], None)?;
+
+                match constructed {
+                    Value::Object(obj) => Ok(obj),
+                    _ => Err(raise_type_error!("Array species constructor must return an object").into()),
+                }
+            };
+
+            let set_length_or_throw = |new_len: usize| -> Result<(), EvalError<'gc>> {
+                let invoke_length_setter = |setter_val: &Value<'gc>| -> Result<(), EvalError<'gc>> {
+                    let arg = Value::Number(new_len as f64);
+                    match setter_val {
+                        Value::Setter(params, body, captured_env, home_opt) => {
+                            let call_env = crate::core::prepare_function_call_env_with_home(
+                                mc,
+                                Some(captured_env),
+                                Some(&Value::Object(object.clone())),
+                                Some(params),
+                                std::slice::from_ref(&arg),
+                                None,
+                                Some(env),
+                                home_opt.clone(),
+                            )?;
+                            let _ = crate::core::evaluate_statements(mc, &call_env, body)?;
+                            Ok(())
+                        }
+                        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::Object(_) => {
+                            let _ = evaluate_call_dispatch(
+                                mc,
+                                env,
+                                setter_val,
+                                Some(&Value::Object(object.clone())),
+                                std::slice::from_ref(&arg),
+                            )?;
+                            Ok(())
+                        }
+                        _ => Err(raise_type_error!("Cannot assign to read only property 'length'").into()),
+                    }
+                };
+
+                if let Some(own) = crate::core::get_own_property(object, "length") {
+                    let own_val = own.borrow().clone();
+                    match &own_val {
+                        Value::Setter(..) => {
+                            invoke_length_setter(&own_val)?;
+                            return Ok(());
+                        }
+                        Value::Getter(..) => {
+                            return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                        }
+                        Value::Property {
+                            setter: Some(setter_fn),
+                            getter: _,
+                            value,
+                        } if value.is_none() => {
+                            invoke_length_setter(setter_fn)?;
+                            return Ok(());
+                        }
+                        Value::Property {
+                            setter: None,
+                            getter: Some(_),
+                            value,
+                        } if value.is_none() => {
+                            return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                        }
+                        _ => {}
+                    }
+                } else {
+                    let mut cur_proto = object.borrow().prototype;
+                    while let Some(proto) = cur_proto {
+                        if let Some(prop) = crate::core::get_own_property(&proto, "length") {
+                            let prop_val = prop.borrow().clone();
+                            match &prop_val {
+                                Value::Setter(..) => {
+                                    invoke_length_setter(&prop_val)?;
+                                    return Ok(());
+                                }
+                                Value::Getter(..) => {
+                                    return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                                }
+                                Value::Property {
+                                    setter: Some(setter_fn),
+                                    getter: _,
+                                    value,
+                                } if value.is_none() => {
+                                    invoke_length_setter(setter_fn)?;
+                                    return Ok(());
+                                }
+                                Value::Property {
+                                    setter: None,
+                                    getter: Some(_),
+                                    value,
+                                } if value.is_none() => {
+                                    return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                                }
+                                _ => {}
+                            }
+                            break;
+                        }
+                        cur_proto = proto.borrow().prototype;
+                    }
+                }
+
+                if !object.borrow().is_writable("length") {
+                    return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                }
+
+                if is_array(mc, object) {
+                    if new_len > u32::MAX as usize {
+                        return Err(raise_range_error!("Invalid array length").into());
+                    }
+                    set_array_length(mc, object, new_len).map_err(EvalError::from)?;
+                } else if object_set_key_value(mc, object, "length", &Value::Number(new_len as f64)).is_err() {
+                    return Err(raise_type_error!("Cannot set length").into());
+                }
+
+                Ok(())
+            };
+
+            let new_len = current_len - actual_delete_count + insert_count;
+            if (new_len as f64) > max_len {
+                return Err(raise_type_error!("Invalid array length").into());
             }
 
-            // If the array shrank, remove the remaining properties at the end
-            for i in write_idx..current_len {
-                object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(i.to_string()));
+            let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
+                    } else {
+                        Ok(object_get_key_value(object, index.to_string()).is_some())
+                    }
+                } else {
+                    Ok(object_get_key_value(object, index.to_string()).is_some())
+                }
+            };
+
+            let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        let key_prop = PropertyKey::from(index.to_string());
+                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                        if !deleted {
+                            return Err(raise_type_error!("Cannot delete target property").into());
+                        }
+                        return Ok(());
+                    }
+                }
+
+                if crate::core::get_own_property(object, index).is_some() {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    if !object.borrow().is_configurable(key_prop.clone()) {
+                        return Err(raise_type_error!("Cannot delete target property").into());
+                    }
+                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                }
+                Ok(())
+            };
+
+            let deleted_array = array_species_create(actual_delete_count)?;
+            for k in 0..actual_delete_count {
+                let from = actual_start + k;
+                if has_property_at(from)? {
+                    let from_val = crate::core::get_property_with_accessors(mc, env, object, from.to_string())?;
+                    object_set_key_value(mc, &deleted_array, k, &from_val)?;
+                }
+            }
+            if is_array(mc, &deleted_array) {
+                set_array_length(mc, &deleted_array, actual_delete_count)?;
+            } else {
+                object_set_key_value(mc, &deleted_array, "length", &Value::Number(actual_delete_count as f64))?;
             }
 
-            // Update length
-            set_array_length(mc, object, write_idx)?;
+            if insert_count < actual_delete_count {
+                let mut k = actual_start;
+                while k < (current_len - actual_delete_count) {
+                    let from = k + actual_delete_count;
+                    let to = k + insert_count;
+                    if has_property_at(from)? {
+                        let from_val = crate::core::get_property_with_accessors(mc, env, object, from.to_string())?;
+                        object_set_key_value(mc, object, to, &from_val)?;
+                    } else {
+                        delete_property_or_throw(to)?;
+                    }
+                    k += 1;
+                }
+
+                let mut k = current_len;
+                while k > (current_len - actual_delete_count + insert_count) {
+                    delete_property_or_throw(k - 1)?;
+                    k -= 1;
+                }
+            } else if insert_count > actual_delete_count {
+                let mut k = current_len - actual_delete_count;
+                while k > actual_start {
+                    let from = k + actual_delete_count - 1;
+                    let to = k + insert_count - 1;
+                    if has_property_at(from)? {
+                        let from_val = crate::core::get_property_with_accessors(mc, env, object, from.to_string())?;
+                        object_set_key_value(mc, object, to, &from_val)?;
+                    } else {
+                        delete_property_or_throw(to)?;
+                    }
+                    k -= 1;
+                }
+            }
+
+            let mut item_index = actual_start;
+            for item in args.iter().skip(2) {
+                object_set_key_value(mc, object, item_index, item)?;
+                item_index += 1;
+            }
+
+            set_length_or_throw(new_len)?;
 
             Ok(Value::Object(deleted_array))
         }
         "shift" => {
-            let current_len = get_array_length(mc, object).unwrap_or(0);
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let max_len = 9007199254740991.0_f64;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                max_len as usize
+            } else {
+                len_num.floor().min(max_len) as usize
+            };
 
-            if current_len > 0 {
-                // Get the first element
-                // Fallback: mutate the local object copy
-                let first_element = object_get_key_value(object, "0").map(|v| v.borrow().clone());
-                for i in 1..current_len {
-                    let val_rc_opt = object_get_key_value(object, i);
-                    if let Some(val_rc) = val_rc_opt {
-                        object_set_key_value(mc, object, i - 1, &*val_rc.borrow())?;
-                    } else {
-                        object
-                            .borrow_mut(mc)
-                            .properties
-                            .shift_remove(&PropertyKey::from((i - 1).to_string()));
+            let length_is_non_writable = || -> Result<bool, EvalError<'gc>> {
+                let desc = crate::js_object::handle_object_method(
+                    mc,
+                    "getOwnPropertyDescriptor",
+                    &[Value::Object(object.clone()), Value::String(utf8_to_utf16("length"))],
+                    env,
+                )?;
+                if let Value::Object(desc_obj) = desc {
+                    let writable = crate::core::get_property_with_accessors(mc, env, &desc_obj, "writable")?;
+                    if matches!(writable, Value::Boolean(false)) {
+                        return Ok(true);
                     }
                 }
-                object
-                    .borrow_mut(mc)
-                    .properties
-                    .shift_remove(&PropertyKey::from((current_len - 1).to_string()));
-                set_array_length(mc, object, current_len - 1)?;
-                Ok(first_element.unwrap_or(Value::Undefined))
+                Ok(false)
+            };
+
+            let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
+                    } else {
+                        Ok(object_get_key_value(object, index.to_string()).is_some())
+                    }
+                } else {
+                    Ok(object_get_key_value(object, index.to_string()).is_some())
+                }
+            };
+
+            let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        let key_prop = PropertyKey::from(index.to_string());
+                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                        if !deleted {
+                            return Err(raise_type_error!("Cannot delete target property").into());
+                        }
+                        return Ok(());
+                    }
+                }
+
+                if crate::core::get_own_property(object, index).is_some() {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    if !object.borrow().is_configurable(key_prop.clone()) {
+                        return Err(raise_type_error!("Cannot delete target property").into());
+                    }
+                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                }
+                Ok(())
+            };
+
+            let first = if current_len > 0 {
+                crate::core::get_property_with_accessors(mc, env, object, 0)?
             } else {
-                Ok(Value::Undefined)
+                Value::Undefined
+            };
+
+            if current_len > 0 {
+                for k in 1..current_len {
+                    let from = k;
+                    let to = k - 1;
+                    if has_property_at(from)? {
+                        let from_val = crate::core::get_property_with_accessors(mc, env, object, from)?;
+                        object_set_key_value(mc, object, to, &from_val)?;
+                    } else {
+                        delete_property_or_throw(to)?;
+                    }
+                }
+                delete_property_or_throw(current_len - 1)?;
             }
+
+            if !object.borrow().is_writable("length") || length_is_non_writable()? {
+                return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+            }
+
+            let new_len = current_len.saturating_sub(1);
+            if is_array(mc, object) {
+                if set_array_length(mc, object, new_len).is_err() {
+                    return Err(raise_type_error!("Cannot set length").into());
+                }
+            } else if object_set_key_value(mc, object, "length", &Value::Number(new_len as f64)).is_err() {
+                return Err(raise_type_error!("Cannot set length").into());
+            }
+
+            Ok(first)
         }
         "unshift" => {
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-            if args.is_empty() {
+            if !is_array(mc, object)
+                && let Some(wrapped) = object_get_key_value(object, "__value__")
+                && matches!(*wrapped.borrow(), Value::String(_))
+            {
+                return Err(raise_type_error!("Cannot assign to read only property").into());
+            }
+
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let max_len = 9007199254740991.0_f64;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                max_len as usize
+            } else {
+                len_num.floor().min(max_len) as usize
+            };
+
+            let length_is_non_writable = || -> Result<bool, EvalError<'gc>> {
+                let desc = crate::js_object::handle_object_method(
+                    mc,
+                    "getOwnPropertyDescriptor",
+                    &[Value::Object(object.clone()), Value::String(utf8_to_utf16("length"))],
+                    env,
+                )?;
+                if let Value::Object(desc_obj) = desc {
+                    let writable = crate::core::get_property_with_accessors(mc, env, &desc_obj, "writable")?;
+                    if matches!(writable, Value::Boolean(false)) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
+
+            let arg_count = args.len();
+            if arg_count == 0 {
+                if !object.borrow().is_writable("length") || length_is_non_writable()? {
+                    return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+                }
+                if is_array(mc, object) {
+                    if current_len > u32::MAX as usize {
+                        return Err(raise_range_error!("Invalid array length").into());
+                    }
+                    if set_array_length(mc, object, current_len).is_err() {
+                        return Err(raise_type_error!("Cannot set length").into());
+                    }
+                } else if object_set_key_value(mc, object, "length", &Value::Number(current_len as f64)).is_err() {
+                    return Err(raise_type_error!("Cannot set length").into());
+                }
                 return Ok(Value::Number(current_len as f64));
             }
 
-            // Fallback: mutate local copy (shift right by number of new elements)
-            for i in (0..current_len).rev() {
-                let dest = (i + args.len()).to_string();
-                let val_rc_opt = object_get_key_value(object, i);
-                if let Some(val_rc) = val_rc_opt {
-                    object_set_key_value(mc, object, dest, &*val_rc.borrow())?;
+            if (current_len as f64) + (arg_count as f64) > max_len {
+                return Err(raise_type_error!("Invalid array length").into());
+            }
+
+            if !object.borrow().is_writable("length") || length_is_non_writable()? {
+                return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+            }
+
+            let set_index_or_throw = |index: usize, value: &Value<'gc>| -> Result<(), EvalError<'gc>> {
+                let key = index.to_string();
+
+                if let Some(own) = crate::core::get_own_property(object, key.as_str()) {
+                    match &*own.borrow() {
+                        Value::Getter(..) => {
+                            return Err(raise_type_error!("Cannot set property without setter").into());
+                        }
+                        Value::Property {
+                            setter: Some(setter_fn), ..
+                        } => {
+                            let setter_args = vec![value.clone()];
+                            let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                            return Ok(());
+                        }
+                        Value::Property {
+                            setter: None,
+                            getter: Some(_),
+                            ..
+                        } => {
+                            return Err(raise_type_error!("Cannot set property without setter").into());
+                        }
+                        _ => {
+                            if !object.borrow().is_writable(key.as_str()) {
+                                return Err(raise_type_error!("Cannot assign to read only property").into());
+                            }
+                        }
+                    }
+                }
+
+                let mut handled_by_setter = false;
+                let mut cur_proto = object.borrow().prototype;
+                while let Some(proto) = cur_proto {
+                    if let Some(prop) = crate::core::get_own_property(&proto, key.as_str()) {
+                        match &*prop.borrow() {
+                            Value::Getter(..) => {
+                                return Err(raise_type_error!("Cannot set property without setter").into());
+                            }
+                            Value::Property {
+                                setter: Some(setter_fn), ..
+                            } => {
+                                let setter_args = vec![value.clone()];
+                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                                handled_by_setter = true;
+                            }
+                            Value::Property {
+                                setter: None,
+                                getter: Some(_),
+                                ..
+                            } => {
+                                return Err(raise_type_error!("Cannot set property without setter").into());
+                            }
+                            _ => {}
+                        }
+                        break;
+                    }
+                    cur_proto = proto.borrow().prototype;
+                }
+
+                if !handled_by_setter && object_set_key_value(mc, object, index, value).is_err() {
+                    return Err(raise_type_error!("Cannot set array element").into());
+                }
+
+                Ok(())
+            };
+
+            let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
+                    } else {
+                        Ok(object_get_key_value(object, index.to_string()).is_some())
+                    }
                 } else {
-                    object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(dest));
+                    Ok(object_get_key_value(object, index.to_string()).is_some())
+                }
+            };
+
+            let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        let key_prop = PropertyKey::from(index.to_string());
+                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                        if !deleted {
+                            return Err(raise_type_error!("Cannot delete target property").into());
+                        }
+                        return Ok(());
+                    }
+                }
+
+                if crate::core::get_own_property(object, index).is_some() {
+                    let key_prop = PropertyKey::from(index.to_string());
+                    if !object.borrow().is_configurable(key_prop.clone()) {
+                        return Err(raise_type_error!("Cannot delete target property").into());
+                    }
+                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                }
+                Ok(())
+            };
+
+            if current_len > 0 {
+                let mut k = current_len;
+                while k > 0 {
+                    let from = k - 1;
+                    let to = from + arg_count;
+                    if has_property_at(from)? {
+                        let from_val = crate::core::get_property_with_accessors(mc, env, object, from)?;
+                        set_index_or_throw(to, &from_val)?;
+                    } else {
+                        delete_property_or_throw(to)?;
+                    }
+                    k -= 1;
                 }
             }
-            for (i, arg) in args.iter().enumerate() {
-                object_set_key_value(mc, object, i, &arg)?;
+
+            for (j, arg) in args.iter().enumerate() {
+                set_index_or_throw(j, arg)?;
             }
-            let new_len = current_len + args.len();
-            set_array_length(mc, object, new_len)?;
+
+            if !object.borrow().is_writable("length") || length_is_non_writable()? {
+                return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
+            }
+
+            let new_len = current_len + arg_count;
+            if is_array(mc, object) {
+                if new_len > u32::MAX as usize {
+                    return Err(raise_range_error!("Invalid array length").into());
+                }
+                if set_array_length(mc, object, new_len).is_err() {
+                    return Err(raise_type_error!("Cannot set length").into());
+                }
+            } else if object_set_key_value(mc, object, "length", &Value::Number(new_len as f64)).is_err() {
+                return Err(raise_type_error!("Cannot set length").into());
+            }
+
             Ok(Value::Number(new_len as f64))
         }
         "fill" => {
-            if args.is_empty() {
-                return Ok(Value::Object(object.clone()));
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
             }
 
-            let fill_value = args[0].clone();
+            let fill_value = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-
-            let start = if args.len() >= 2 {
-                match args[1].clone() {
-                    Value::Number(n) => {
-                        let mut idx = n as isize;
-                        if idx < 0 {
-                            idx += current_len as isize;
-                        }
-                        idx.max(0) as usize
-                    }
-                    _ => 0,
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
                 }
             } else {
-                0
+                None
             };
 
-            let end = if args.len() >= 3 {
-                match args[2].clone() {
-                    Value::Number(n) => {
-                        let mut idx = n as isize;
-                        if idx < 0 {
-                            idx += current_len as isize;
-                        }
-                        idx.max(0) as usize
+            let current_len = if let Some(ta) = typed_array_ptr {
+                if ta.length_tracking {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if buf_len <= ta.byte_offset {
+                        0
+                    } else {
+                        (buf_len - ta.byte_offset) / ta.element_size()
                     }
-                    _ => current_len,
+                } else {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if buf_len < needed { 0 } else { ta.length }
                 }
             } else {
-                current_len
+                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_num = crate::core::to_number(&len_prim)?;
+                if len_num.is_nan() || len_num <= 0.0 {
+                    0usize
+                } else if !len_num.is_finite() {
+                    usize::MAX
+                } else {
+                    len_num.floor() as usize
+                }
             };
 
-            for i in start..end.min(current_len) {
-                object_set_key_value(mc, object, i, &fill_value)?;
+            let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
+                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                let num = crate::core::to_number(&prim)?;
+                if num.is_nan() || num == 0.0 {
+                    Ok(0.0)
+                } else if num.is_infinite() {
+                    Ok(num)
+                } else {
+                    Ok(num.trunc())
+                }
+            };
+
+            let relative_start = if let Some(start_arg) = args.get(1) {
+                to_integer_or_infinity(start_arg)?
+            } else {
+                0.0
+            };
+
+            let len_f = current_len as f64;
+            let start = if relative_start == f64::NEG_INFINITY {
+                0usize
+            } else if relative_start < 0.0 {
+                (len_f + relative_start).max(0.0).min(len_f) as usize
+            } else {
+                relative_start.min(len_f) as usize
+            };
+
+            let relative_end = if let Some(end_arg) = args.get(2) {
+                if matches!(end_arg, Value::Undefined) {
+                    len_f
+                } else {
+                    to_integer_or_infinity(end_arg)?
+                }
+            } else {
+                len_f
+            };
+
+            let end = if relative_end == f64::NEG_INFINITY {
+                0usize
+            } else if relative_end < 0.0 {
+                (len_f + relative_end).max(0.0).min(len_f) as usize
+            } else {
+                relative_end.min(len_f) as usize
+            };
+
+            let mut k = start;
+            while k < end {
+                if let Some(ta) = typed_array_ptr {
+                    let _ = crate::core::to_primitive(mc, &fill_value, "number", env)?;
+
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
+                    };
+
+                    if k >= effective_len {
+                        break;
+                    }
+                }
+
+                if let Some(existing_prop) = crate::core::get_own_property(object, k)
+                    && let Value::Property {
+                        value: _,
+                        getter: _,
+                        setter: Some(setter_fn),
+                    } = &*existing_prop.borrow()
+                {
+                    let setter_args = vec![fill_value.clone()];
+                    let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                    k += 1;
+                    continue;
+                }
+
+                object_set_key_value(mc, object, k, &fill_value)?;
+                k += 1;
             }
 
             Ok(Value::Object(object.clone()))
         }
         "lastIndexOf" => {
-            if args.is_empty() {
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let search_element = args.first().cloned().unwrap_or(Value::Undefined);
+
+            let current_len = if let Some(ta) = typed_array_ptr {
+                if ta.length_tracking {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if buf_len <= ta.byte_offset {
+                        0
+                    } else {
+                        (buf_len - ta.byte_offset) / ta.element_size()
+                    }
+                } else {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if buf_len < needed { 0 } else { ta.length }
+                }
+            } else {
+                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_num = crate::core::to_number(&len_prim)?;
+                if len_num.is_nan() || len_num <= 0.0 {
+                    0usize
+                } else if !len_num.is_finite() {
+                    if len_num.is_sign_negative() { 0usize } else { usize::MAX }
+                } else {
+                    len_num.floor() as usize
+                }
+            };
+
+            if current_len == 0 {
                 return Ok(Value::Number(-1.0));
             }
 
-            let search_element = args[0].clone();
-
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-
-            let from_index = if args.len() >= 2 {
-                match args[1].clone() {
-                    Value::Number(n) => {
-                        let mut idx = n as isize;
-                        if idx < 0 {
-                            idx += current_len as isize;
-                        }
-                        (idx as usize).min(current_len.saturating_sub(1))
-                    }
-                    _ => current_len.saturating_sub(1),
+            let from_index = if args.len() > 1 {
+                let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                let n = crate::core::to_number(&prim)?;
+                if n.is_nan() || n == 0.0 {
+                    0isize
+                } else if n.is_infinite() {
+                    if n.is_sign_negative() { isize::MIN } else { isize::MAX }
+                } else {
+                    n.trunc() as isize
                 }
             } else {
-                current_len.saturating_sub(1)
+                current_len.saturating_sub(1) as isize
             };
 
-            // Search from from_index backwards
-            for i in (0..=from_index).rev() {
-                if let Some(val) = object_get_key_value(object, i)
-                    && values_equal(mc, &val.borrow(), &search_element)
-                {
-                    return Ok(Value::Number(i as f64));
+            let mut k = if from_index == isize::MAX {
+                current_len.saturating_sub(1) as isize
+            } else if from_index >= 0 {
+                std::cmp::min(from_index as usize, current_len.saturating_sub(1)) as isize
+            } else {
+                current_len as isize + from_index
+            };
+
+            if k < 0 {
+                return Ok(Value::Number(-1.0));
+            }
+
+            if let Some(ta) = typed_array_ptr {
+                let number_search = if let Value::Number(n) = &search_element { Some(*n) } else { None };
+                let bigint_search = if let Value::BigInt(b) = &search_element {
+                    Some((**b).clone())
+                } else {
+                    None
+                };
+
+                let effective_len = if ta.length_tracking {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if buf_len <= ta.byte_offset {
+                        0
+                    } else {
+                        (buf_len - ta.byte_offset) / ta.element_size()
+                    }
+                } else {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if buf_len < needed { 0 } else { ta.length }
+                };
+
+                if effective_len == 0 {
+                    return Ok(Value::Number(-1.0));
                 }
+
+                let start = std::cmp::min(k as usize, current_len.saturating_sub(1));
+                if start >= effective_len {
+                    if effective_len == 0 {
+                        return Ok(Value::Number(-1.0));
+                    }
+                }
+                let mut idx = std::cmp::min(start, effective_len.saturating_sub(1));
+
+                match ta.kind {
+                    crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => {
+                        let Some(search_bi) = bigint_search else {
+                            return Ok(Value::Number(-1.0));
+                        };
+                        let size = 8usize;
+                        let base = ta.byte_offset;
+                        let buffer = ta.buffer.borrow();
+                        let data = buffer.data.lock().unwrap();
+                        loop {
+                            let byte_offset = base + idx * size;
+                            if byte_offset + size > data.len() {
+                                if idx == 0 {
+                                    break;
+                                }
+                                idx -= 1;
+                                continue;
+                            }
+                            let bytes = &data[byte_offset..byte_offset + size];
+                            let cur_bi = if matches!(ta.kind, crate::core::TypedArrayKind::BigInt64) {
+                                let mut b = [0u8; 8];
+                                b.copy_from_slice(bytes);
+                                num_bigint::BigInt::from(i64::from_le_bytes(b))
+                            } else {
+                                let mut b = [0u8; 8];
+                                b.copy_from_slice(bytes);
+                                num_bigint::BigInt::from(u64::from_le_bytes(b))
+                            };
+                            if cur_bi == search_bi {
+                                return Ok(Value::Number(idx as f64));
+                            }
+                            if idx == 0 {
+                                break;
+                            }
+                            idx -= 1;
+                        }
+                    }
+                    _ => {
+                        let Some(search_n) = number_search else {
+                            return Ok(Value::Number(-1.0));
+                        };
+                        if search_n.is_nan() {
+                            return Ok(Value::Number(-1.0));
+                        }
+
+                        let base = ta.byte_offset;
+                        let buffer = ta.buffer.borrow();
+                        let data = buffer.data.lock().unwrap();
+                        loop {
+                            let matches = match ta.kind {
+                                crate::core::TypedArrayKind::Int8 => {
+                                    let byte_offset = base + idx;
+                                    byte_offset < data.len() && (data[byte_offset] as i8 as f64) == search_n
+                                }
+                                crate::core::TypedArrayKind::Uint8 | crate::core::TypedArrayKind::Uint8Clamped => {
+                                    let byte_offset = base + idx;
+                                    byte_offset < data.len() && (data[byte_offset] as f64) == search_n
+                                }
+                                crate::core::TypedArrayKind::Int16 => {
+                                    let byte_offset = base + idx * 2;
+                                    if byte_offset + 2 > data.len() {
+                                        false
+                                    } else {
+                                        let mut b = [0u8; 2];
+                                        b.copy_from_slice(&data[byte_offset..byte_offset + 2]);
+                                        (i16::from_le_bytes(b) as f64) == search_n
+                                    }
+                                }
+                                crate::core::TypedArrayKind::Uint16 => {
+                                    let byte_offset = base + idx * 2;
+                                    if byte_offset + 2 > data.len() {
+                                        false
+                                    } else {
+                                        let mut b = [0u8; 2];
+                                        b.copy_from_slice(&data[byte_offset..byte_offset + 2]);
+                                        (u16::from_le_bytes(b) as f64) == search_n
+                                    }
+                                }
+                                crate::core::TypedArrayKind::Int32 => {
+                                    let byte_offset = base + idx * 4;
+                                    if byte_offset + 4 > data.len() {
+                                        false
+                                    } else {
+                                        let mut b = [0u8; 4];
+                                        b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                                        (i32::from_le_bytes(b) as f64) == search_n
+                                    }
+                                }
+                                crate::core::TypedArrayKind::Uint32 => {
+                                    let byte_offset = base + idx * 4;
+                                    if byte_offset + 4 > data.len() {
+                                        false
+                                    } else {
+                                        let mut b = [0u8; 4];
+                                        b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                                        (u32::from_le_bytes(b) as f64) == search_n
+                                    }
+                                }
+                                crate::core::TypedArrayKind::Float32 => {
+                                    let byte_offset = base + idx * 4;
+                                    if byte_offset + 4 > data.len() {
+                                        false
+                                    } else {
+                                        let mut b = [0u8; 4];
+                                        b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                                        (f32::from_le_bytes(b) as f64) == search_n
+                                    }
+                                }
+                                crate::core::TypedArrayKind::Float64 => {
+                                    let byte_offset = base + idx * 8;
+                                    if byte_offset + 8 > data.len() {
+                                        false
+                                    } else {
+                                        let mut b = [0u8; 8];
+                                        b.copy_from_slice(&data[byte_offset..byte_offset + 8]);
+                                        f64::from_le_bytes(b) == search_n
+                                    }
+                                }
+                                crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => unreachable!(),
+                            };
+
+                            if matches {
+                                return Ok(Value::Number(idx as f64));
+                            }
+                            if idx == 0 {
+                                break;
+                            }
+                            idx -= 1;
+                        }
+                    }
+                }
+
+                return Ok(Value::Number(-1.0));
+            }
+
+            let can_use_sparse_fast_path = if is_array(mc, object) {
+                let mut proto_has_numeric_key = false;
+                let mut cur_proto = object.borrow().prototype;
+                while let Some(proto) = cur_proto {
+                    let has_numeric = {
+                        let p = proto.borrow();
+                        p.properties.keys().any(|key| match key {
+                            PropertyKey::String(s) => s.parse::<usize>().ok().map(|idx| idx.to_string() == *s).unwrap_or(false),
+                            _ => false,
+                        })
+                    };
+                    if has_numeric {
+                        proto_has_numeric_key = true;
+                        break;
+                    }
+                    cur_proto = proto.borrow().prototype;
+                }
+                !proto_has_numeric_key
+            } else {
+                false
+            };
+
+            if can_use_sparse_fast_path {
+                let start = k as usize;
+                let (mut indices, only_plain_data_elements): (Vec<usize>, bool) = {
+                    let o = object.borrow();
+                    let mut idxs = Vec::new();
+                    let mut plain_only = true;
+                    for (prop_key, value) in &o.properties {
+                        if let PropertyKey::String(s) = prop_key
+                            && let Ok(idx) = s.parse::<usize>()
+                            && idx.to_string() == *s
+                            && idx <= start
+                            && idx < current_len
+                        {
+                            if matches!(&*value.borrow(), Value::Property { .. }) {
+                                plain_only = false;
+                                break;
+                            }
+                            idxs.push(idx);
+                        }
+                    }
+                    (idxs, plain_only)
+                };
+
+                if only_plain_data_elements {
+                    indices.sort_unstable();
+                    for idx in indices.into_iter().rev() {
+                        let element = crate::core::get_property_with_accessors(mc, env, object, idx)?;
+                        let is_match = match (&element, &search_element) {
+                            (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
+                            _ => values_equal(mc, &element, &search_element),
+                        };
+                        if is_match {
+                            return Ok(Value::Number(idx as f64));
+                        }
+                    }
+                    return Ok(Value::Number(-1.0));
+                }
+            }
+
+            while k >= 0 {
+                let idx = k as usize;
+                let has_property = object_get_key_value(object, idx).is_some();
+                if has_property {
+                    let element = crate::core::get_property_with_accessors(mc, env, object, idx)?;
+                    let is_match = match (&element, &search_element) {
+                        (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
+                        _ => values_equal(mc, &element, &search_element),
+                    };
+                    if is_match {
+                        return Ok(Value::Number(idx as f64));
+                    }
+                }
+                k -= 1;
             }
 
             Ok(Value::Number(-1.0))
         }
         "toString" => {
-            // Array.prototype.toString() is equivalent to join(",")
-            let current_len = get_array_length(mc, object).unwrap_or(0);
+            let join_method = crate::core::get_property_with_accessors(mc, env, object, "join")?;
+            let join_callable = match &join_method {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+
+            if join_callable {
+                let this_arg = Value::Object(object.clone());
+                return evaluate_call_dispatch(mc, env, &join_method, Some(&this_arg), &[]);
+            }
+
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
+
+            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
+                && let Value::Symbol(s) = &*tag_sym.borrow()
+            {
+                let _ = crate::core::get_property_with_accessors(mc, env, object, s.clone())?;
+            }
+
+            Ok(crate::core::handle_object_prototype_to_string(
+                mc,
+                &Value::Object(object.clone()),
+                env,
+            ))
+        }
+        "toLocaleString" => {
+            let length_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let current_len = match length_val {
+                Value::Number(n) if n.is_finite() && n > 0.0 => n.floor() as usize,
+                _ => 0,
+            };
+
+            let get_primitive_locale_method = |value: &Value<'gc>| -> Option<Value<'gc>> {
+                let ctor_name = match value {
+                    Value::Boolean(_) => "Boolean",
+                    Value::Number(_) => "Number",
+                    Value::String(_) => "String",
+                    Value::BigInt(_) => "BigInt",
+                    Value::Symbol(_) => "Symbol",
+                    _ => return None,
+                };
+                if let Some(ctor_rc) = env_get(env, ctor_name)
+                    && let Value::Object(ctor) = &*ctor_rc.borrow()
+                    && let Some(proto_rc) = object_get_key_value(ctor, "prototype")
+                    && let Value::Object(proto) = &*proto_rc.borrow()
+                    && let Ok(method) = crate::core::get_property_with_accessors(mc, env, proto, "toLocaleString")
+                {
+                    return Some(method);
+                }
+                None
+            };
 
             let mut result = String::new();
             for i in 0..current_len {
                 if i > 0 {
                     result.push(',');
                 }
-                if let Some(val) = object_get_key_value(object, i) {
-                    match &*val.borrow() {
-                        Value::Undefined | Value::Null => {} // push nothing for null and undefined
-                        Value::String(s) => result.push_str(&utf16_to_utf8(s)),
-                        Value::Number(n) => result.push_str(&n.to_string()),
-                        Value::Boolean(b) => result.push_str(&b.to_string()),
-                        Value::BigInt(b) => result.push_str(&format!("{}n", b)),
-                        _ => result.push_str("[object Object]"),
+                let key = i.to_string();
+                let element = crate::core::get_property_with_accessors(mc, env, object, key.as_str())?;
+                match element {
+                    Value::Undefined | Value::Null => {}
+                    other => {
+                        let method = if let Value::Object(o) = &other {
+                            crate::core::get_property_with_accessors(mc, env, o, "toLocaleString")?
+                        } else if let Some(m) = get_primitive_locale_method(&other) {
+                            m
+                        } else {
+                            Value::Undefined
+                        };
+
+                        if !matches!(method, Value::Function(_) | Value::Closure(_) | Value::Object(_)) {
+                            return Err(raise_type_error!("Array.prototype.toLocaleString element method is not callable").into());
+                        }
+
+                        let locale_str = evaluate_call_dispatch(mc, env, &method, Some(&other), &[])?;
+                        result.push_str(&value_to_sort_string(&locale_str));
                     }
                 }
             }
@@ -1585,69 +4236,191 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(new_array))
         }
         "copyWithin" => {
-            let current_len = get_array_length(mc, object).unwrap_or(0);
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
+
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let current_len = if let Some(ta) = typed_array_ptr {
+                if ta.length_tracking {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if buf_len <= ta.byte_offset {
+                        0usize
+                    } else {
+                        (buf_len - ta.byte_offset) / ta.element_size()
+                    }
+                } else {
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if buf_len < needed { 0usize } else { ta.length }
+                }
+            } else {
+                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_num = crate::core::to_number(&len_prim)?;
+                let max_len = 9007199254740991.0_f64;
+                if len_num.is_nan() || len_num <= 0.0 {
+                    0usize
+                } else if !len_num.is_finite() {
+                    max_len as usize
+                } else {
+                    len_num.floor().min(max_len) as usize
+                }
+            };
 
             if args.is_empty() {
                 return Ok(Value::Object(object.clone()));
             }
 
-            let target = match args[0].clone() {
-                Value::Number(n) => {
-                    let mut idx = n as isize;
-                    if idx < 0 {
-                        idx += current_len as isize;
-                    }
-                    idx.max(0) as usize
+            let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
+                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                let num = crate::core::to_number(&prim)?;
+                if num.is_nan() || num == 0.0 {
+                    Ok(0.0)
+                } else if num.is_infinite() {
+                    Ok(num)
+                } else {
+                    Ok(num.trunc())
                 }
-                _ => 0,
             };
 
-            let start = if args.len() >= 2 {
-                match args[1].clone() {
-                    Value::Number(n) => {
-                        let mut idx = n as isize;
-                        if idx < 0 {
-                            idx += current_len as isize;
-                        }
-                        idx.max(0) as usize
-                    }
-                    _ => 0,
+            let len_i = current_len as i128;
+            let relative_target = to_integer_or_infinity(&args[0])?;
+            let to = if relative_target == f64::NEG_INFINITY {
+                0_i128
+            } else if relative_target < 0.0 {
+                (len_i + relative_target as i128).max(0)
+            } else {
+                (relative_target as i128).min(len_i)
+            };
+
+            let relative_start = if let Some(start_arg) = args.get(1) {
+                to_integer_or_infinity(start_arg)?
+            } else {
+                0.0
+            };
+            let from = if relative_start == f64::NEG_INFINITY {
+                0_i128
+            } else if relative_start < 0.0 {
+                (len_i + relative_start as i128).max(0)
+            } else {
+                (relative_start as i128).min(len_i)
+            };
+
+            let relative_end = if let Some(end_arg) = args.get(2) {
+                if matches!(end_arg, Value::Undefined) {
+                    len_i as f64
+                } else {
+                    to_integer_or_infinity(end_arg)?
                 }
             } else {
-                0
+                len_i as f64
             };
-
-            let end = if args.len() >= 3 {
-                match args[2].clone() {
-                    Value::Number(n) => {
-                        let mut idx = n as isize;
-                        if idx < 0 {
-                            idx += current_len as isize;
-                        }
-                        idx.max(0) as usize
-                    }
-                    _ => current_len,
-                }
+            let final_i = if relative_end == f64::NEG_INFINITY {
+                0_i128
+            } else if relative_end < 0.0 {
+                (len_i + relative_end as i128).max(0)
             } else {
-                current_len
+                (relative_end as i128).min(len_i)
             };
 
-            if target >= current_len || start >= end {
+            let mut count = (final_i - from).max(0).min((len_i - to).max(0));
+            if count <= 0 {
                 return Ok(Value::Object(object.clone()));
             }
 
-            let mut temp_values = Vec::new();
-            for i in start..end.min(current_len) {
-                if let Some(val) = object_get_key_value(object, i) {
-                    temp_values.push(val.borrow().clone());
-                }
-            }
+            let mut from_idx = from;
+            let mut to_idx = to;
+            let direction: i128 = if from_idx < to_idx && to_idx < from_idx + count {
+                from_idx += count - 1;
+                to_idx += count - 1;
+                -1
+            } else {
+                1
+            };
 
-            for (i, val) in temp_values.iter().enumerate() {
-                let dest_idx = target + i;
-                if dest_idx < current_len {
-                    object_set_key_value(mc, object, dest_idx, &val)?;
+            while count > 0 {
+                let from_key = from_idx as usize;
+                let to_key = to_idx as usize;
+
+                let has_from = if let Some(ta) = typed_array_ptr {
+                    let effective_len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        if buf_len <= ta.byte_offset {
+                            0usize
+                        } else {
+                            (buf_len - ta.byte_offset) / ta.element_size()
+                        }
+                    } else {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0usize } else { ta.length }
+                    };
+                    from_key < effective_len
+                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        crate::js_proxy::proxy_has_property(mc, proxy, from_key.to_string())?
+                    } else {
+                        object_get_key_value(object, from_key.to_string()).is_some()
+                    }
+                } else {
+                    object_get_key_value(object, from_key.to_string()).is_some()
+                };
+
+                if has_from {
+                    let from_val = crate::core::get_property_with_accessors(mc, env, object, from_key.to_string())?;
+
+                    if let Some(existing_prop) = crate::core::get_own_property(object, to_key)
+                        && let Value::Property {
+                            value: _,
+                            getter: _,
+                            setter: Some(setter_fn),
+                        } = &*existing_prop.borrow()
+                    {
+                        let setter_args = vec![from_val];
+                        let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(object.clone())), &setter_args)?;
+                    } else {
+                        object_set_key_value(mc, object, to_key, &from_val)?;
+                    }
+                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                    if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                        let to_key_prop = PropertyKey::from(to_key.to_string());
+                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &to_key_prop)?;
+                        if !deleted {
+                            return Err(raise_type_error!("Cannot delete target property").into());
+                        }
+                    } else if object.borrow().non_configurable.contains(&PropertyKey::from(to_key.to_string())) {
+                        return Err(raise_type_error!("Cannot delete target property").into());
+                    } else {
+                        let _ = object
+                            .borrow_mut(mc)
+                            .properties
+                            .shift_remove(&PropertyKey::from(to_key.to_string()));
+                    }
+                } else if object.borrow().non_configurable.contains(&PropertyKey::from(to_key.to_string())) {
+                    return Err(raise_type_error!("Cannot delete target property").into());
+                } else {
+                    let _ = object
+                        .borrow_mut(mc)
+                        .properties
+                        .shift_remove(&PropertyKey::from(to_key.to_string()));
                 }
+
+                from_idx += direction;
+                to_idx += direction;
+                count -= 1;
             }
 
             Ok(Value::Object(object.clone()))
@@ -1671,78 +4444,138 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(create_array_iterator(mc, env, object.clone(), "entries")?)
         }
         "findLast" => {
-            if !args.is_empty() {
-                let callback = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
 
-                // Search from the end
-                for i in (0..current_len).rev() {
-                    if let Some(value) = object_get_key_value(object, i) {
-                        let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback.clone()
-                            }
-                        } else {
-                            callback.clone()
-                        };
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-                        let element = value.borrow().clone();
-                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
 
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(raise_eval_error!("Array.findLast expects a function").into()),
-                        };
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.findLast callback must be a function").into());
+            }
 
-                        if res.to_truthy() {
-                            return Ok(element);
-                        }
+            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+                if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+                    Some(*ta)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut actual_callback_val = callback_val.clone();
+            if let Value::Object(obj) = &callback_val {
+                if let Some(prop) = obj.borrow().get_closure() {
+                    actual_callback_val = prop.borrow().clone();
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                    if let Value::String(name_vec) = &*nc.borrow() {
+                        let name = crate::unicode::utf16_to_utf8(name_vec);
+                        actual_callback_val = Value::Function(name);
                     }
                 }
-                Ok(Value::Undefined)
-            } else {
-                Err(raise_eval_error!("Array.findLast expects at least one argument").into())
             }
+
+            for i in (0..current_len).rev() {
+                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let call_args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+                let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                if res.to_truthy() {
+                    return Ok(element);
+                }
+            }
+
+            Ok(Value::Undefined)
         }
         "findLastIndex" => {
-            if !args.is_empty() {
-                let callback = args[0].clone();
-                let current_len = get_array_length(mc, object).unwrap_or(0);
+            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                && proxy.revoked
+            {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
 
-                // Search from the end
-                for i in (0..current_len).rev() {
-                    if let Some(value) = object_get_key_value(object, i) {
-                        let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = obj.borrow().get_closure() {
-                                prop.borrow().clone()
-                            } else {
-                                callback.clone()
-                            }
-                        } else {
-                            callback.clone()
-                        };
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-                        let element = value.borrow().clone();
-                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            let current_len = if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            };
 
-                        let res = match &actual_func {
-                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
-                            Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                            _ => return Err(raise_eval_error!("Array.findLastIndex expects a function").into()),
-                        };
+            let callback_callable = match &callback_val {
+                Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::Function(_)
+                | Value::GeneratorFunction(_, _)
+                | Value::AsyncGeneratorFunction(_, _) => true,
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || object_get_key_value(obj, "__native_ctor").is_some()
+                        || object_get_key_value(obj, "__bound_target").is_some()
+                }
+                _ => false,
+            };
+            if !callback_callable {
+                return Err(raise_type_error!("Array.findLastIndex callback must be a function").into());
+            }
 
-                        if res.to_truthy() {
-                            return Ok(Value::Number(i as f64));
-                        }
+            let mut actual_callback_val = callback_val.clone();
+            if let Value::Object(obj) = &callback_val {
+                if let Some(prop) = obj.borrow().get_closure() {
+                    actual_callback_val = prop.borrow().clone();
+                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                    if let Value::String(name_vec) = &*nc.borrow() {
+                        let name = crate::unicode::utf16_to_utf8(name_vec);
+                        actual_callback_val = Value::Function(name);
                     }
                 }
-                Ok(Value::Number(-1.0))
-            } else {
-                Err(raise_eval_error!("Array.findLastIndex expects at least one argument").into())
             }
+
+            for i in (0..current_len).rev() {
+                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let call_args = vec![element, Value::Number(i as f64), Value::Object(object.clone())];
+                let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                if res.to_truthy() {
+                    return Ok(Value::Number(i as f64));
+                }
+            }
+
+            Ok(Value::Number(-1.0))
         }
         _ => Err(raise_eval_error!(format!("Array.{method} not found")).into()),
     }
@@ -1821,6 +4654,26 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     arr.borrow_mut(mc).set_non_enumerable("length");
     arr.borrow_mut(mc).set_non_configurable("length");
 
+    if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
+        && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
+        && let Some(array_proto_rc) = object_get_key_value(array_ctor_obj, "prototype")
+    {
+        let array_proto_candidate = match &*array_proto_rc.borrow() {
+            Value::Object(p) => Some(*p),
+            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                Value::Object(p) => Some(*p),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        if let Some(array_proto) = array_proto_candidate {
+            arr.borrow_mut(mc).prototype = Some(array_proto);
+            let _ = object_set_key_value(mc, &arr, "__proto__", &Value::Object(array_proto));
+            return Ok(arr);
+        }
+    }
+
     // Set prototype
     let mut root_env_opt = Some(env.clone());
     while let Some(r) = root_env_opt.clone() {
@@ -1891,6 +4744,11 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     let arr_val = object_get_key_value(iterator, "__iterator_array__").ok_or(EvalError::Js(raise_eval_error!("Iterator has no array")))?;
     let arr_ptr = if let Value::Object(o) = &*arr_val.borrow() {
         o.clone()
+    } else if matches!(&*arr_val.borrow(), Value::Undefined) {
+        let result_obj = new_js_object_data(mc);
+        object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
+        object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+        return Ok(Value::Object(result_obj));
     } else {
         return Err(raise_eval_error!("Iterator array is invalid").into());
     };
@@ -1912,9 +4770,53 @@ pub(crate) fn handle_array_iterator_next<'gc>(
         return Err(raise_eval_error!("Iterator kind is invalid").into());
     };
 
-    let length = get_array_length(mc, &arr_ptr).unwrap_or(0);
+    let length = if let Some(ta_cell) = object_get_key_value(&arr_ptr, "__typedarray") {
+        if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+            if ta.length_tracking {
+                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                if ta.byte_offset > 0 && buf_len < ta.byte_offset {
+                    return Err(raise_type_error!("Cannot perform operation on an out-of-bounds TypedArray").into());
+                }
+                if buf_len <= ta.byte_offset {
+                    0
+                } else {
+                    (buf_len - ta.byte_offset) / ta.element_size()
+                }
+            } else {
+                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                let needed = ta.byte_offset + ta.length * ta.element_size();
+                if buf_len < needed {
+                    return Err(raise_type_error!("Cannot perform operation on an out-of-bounds TypedArray").into());
+                }
+                ta.length
+            }
+        } else {
+            let len_val = crate::core::get_property_with_accessors(mc, env, &arr_ptr, "length")?;
+            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_num = crate::core::to_number(&len_prim)?;
+            if len_num.is_nan() || len_num <= 0.0 {
+                0usize
+            } else if !len_num.is_finite() {
+                usize::MAX
+            } else {
+                len_num.floor() as usize
+            }
+        }
+    } else {
+        let len_val = crate::core::get_property_with_accessors(mc, env, &arr_ptr, "length")?;
+        let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+        let len_num = crate::core::to_number(&len_prim)?;
+        if len_num.is_nan() || len_num <= 0.0 {
+            0usize
+        } else if !len_num.is_finite() {
+            usize::MAX
+        } else {
+            len_num.floor() as usize
+        }
+    };
 
     if index >= length {
+        object_set_key_value(mc, iterator, "__iterator_array__", &Value::Undefined)?;
         let result_obj = new_js_object_data(mc);
         object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
         object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;

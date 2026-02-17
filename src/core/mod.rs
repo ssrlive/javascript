@@ -79,8 +79,8 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     // Initialize Reflect object with full (implemented) methods
     crate::js_reflect::initialize_reflect(mc, env)?;
 
-    initialize_math(mc, env)?;
     initialize_symbol(mc, env)?;
+    initialize_math(mc, env)?;
     initialize_string(mc, env)?;
     initialize_array(mc, env)?;
     crate::js_function::initialize_function(mc, env)?;

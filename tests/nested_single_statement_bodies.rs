@@ -239,8 +239,15 @@ fn test_deep_try_for_do_while_combo() {
         t5();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"N0|ONE|N2|FIN\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"N0|ONE|N2|FIN\"");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -456,8 +463,15 @@ fn test_labeled_try_in_switch_with_outer_label_break() {
         s5();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"X,F,AFTER\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"X,F,AFTER\"");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -523,8 +537,15 @@ fn test_switch_try_fallthrough_array_nextline_asi() {
         s6();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"A,F,B,X0\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"A,F,B,X0\"");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

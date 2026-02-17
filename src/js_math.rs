@@ -1,6 +1,7 @@
 use crate::core::MutationContext;
-use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_set_key_value};
+use crate::core::{JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::error::JSError;
+use crate::unicode::utf8_to_utf16;
 
 /// Create the Math object with all mathematical constants and functions
 pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
@@ -71,6 +72,15 @@ pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
     object_set_key_value(mc, &math_obj, "cbrt", &Value::Function("Math.cbrt".to_string()))?;
     object_set_key_value(mc, &math_obj, "hypot", &Value::Function("Math.hypot".to_string()))?;
     object_set_key_value(mc, &math_obj, "sign", &Value::Function("Math.sign".to_string()))?;
+
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_val.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        object_set_key_value(mc, &math_obj, tag_sym, &Value::String(utf8_to_utf16("Math")))?;
+        math_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+    }
 
     env_set(mc, env, "Math", &Value::Object(math_obj))?;
     Ok(())

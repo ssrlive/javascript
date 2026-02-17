@@ -11,9 +11,14 @@ pub fn initialize_json<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
     object_set_key_value(mc, &json_obj, "parse", &Value::Function("JSON.parse".to_string()))?;
     object_set_key_value(mc, &json_obj, "stringify", &Value::Function("JSON.stringify".to_string()))?;
 
-    // JSON object usually has [Symbol.toStringTag] = "JSON"
-    // object_set_key_value(mc, &json_obj, "Symbol.toStringTag", &Value::String(utf8_to_utf16("JSON")))?;
-    // We can skip that for now if not strictly required, or add it if Symbol is supported.
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_val.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        object_set_key_value(mc, &json_obj, tag_sym, &Value::String(utf8_to_utf16("JSON")))?;
+        json_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+    }
 
     env_set(mc, env, "JSON", &Value::Object(json_obj))?;
     Ok(())
@@ -124,7 +129,8 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: &Value<'gc>)
                 for i in 0..len {
                     let val_opt = get_own_property(obj, i);
                     if let Some(val_rc) = &val_opt {
-                        if let Some(json_val) = js_value_to_json_value(mc, &val_rc.borrow()) {
+                        let normalized = json_source_value(&val_rc.borrow());
+                        if let Some(json_val) = js_value_to_json_value(mc, &normalized) {
                             arr.push(json_val);
                         } else {
                             // Undefined, Function, Symbol in array -> null
@@ -146,7 +152,7 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: &Value<'gc>)
                     if let PropertyKey::String(s) = &key
                         && s != "length"
                         && let Some(val_rc) = object_get_key_value(obj, &key)
-                        && let Some(json_val) = js_value_to_json_value(mc, &val_rc.borrow())
+                        && let Some(json_val) = js_value_to_json_value(mc, &json_source_value(&val_rc.borrow()))
                     {
                         map.insert(s.clone(), json_val);
                     }
@@ -161,6 +167,14 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: &Value<'gc>)
 // Minimal JSON stringifier that respects JS property ordering defined by ordinary_own_property_keys.
 fn js_value_to_json_string<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>) -> Option<String> {
     inner(mc, v, 0)
+}
+
+fn json_source_value<'gc>(val: &Value<'gc>) -> Value<'gc> {
+    match val {
+        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+        Value::Property { value: None, .. } => Value::Undefined,
+        other => other.clone(),
+    }
 }
 
 fn escape_json_str(s: &str) -> String {
@@ -205,7 +219,8 @@ fn inner<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>, depth: usize) -> Option
                 let mut parts = Vec::with_capacity(len);
                 for i in 0..len {
                     if let Some(val_rc) = get_own_property(obj, i) {
-                        if let Some(item_str) = inner(mc, &val_rc.borrow(), depth + 1) {
+                        let normalized = json_source_value(&val_rc.borrow());
+                        if let Some(item_str) = inner(mc, &normalized, depth + 1) {
                             parts.push(item_str);
                         } else {
                             parts.push("null".to_string());
@@ -227,7 +242,8 @@ fn inner<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>, depth: usize) -> Option
                             continue;
                         }
                         if let Some(val_rc) = object_get_key_value(obj, &key) {
-                            if let Some(val_str) = inner(mc, &val_rc.borrow(), depth + 1) {
+                            let normalized = json_source_value(&val_rc.borrow());
+                            if let Some(val_str) = inner(mc, &normalized, depth + 1) {
                                 parts.push(format!("\"{}\":{}", escape_json_str(s), val_str));
                             } else {
                                 // skip undefined/functions or deep/cyclic values

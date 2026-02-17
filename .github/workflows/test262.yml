@@ -37,6 +37,7 @@ jobs:
           - id: 24
           - id: 25
           - id: 26
+          - id: 27
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -53,7 +54,7 @@ jobs:
 
       - name: Build JavaScript engine
         run: |
-          cargo build --all-features --example js
+          cargo build --all-features --release --example js
 
       - name: Run test262 subset ${{ matrix.id }}
         if: ${{ !cancelled() }}
@@ -172,6 +173,10 @@ jobs:
             26)
               TITLE='"language/statements/class/gen-method" - "language/statements/class/(filesonly)"'
               FOCUS='language/statements/class/gen-method,language/statements/class/gen-method-static,language/statements/class/method,language/statements/class/method-static,language/statements/class/name-binding,language/statements/class/strict-mode,language/statements/class/subclass,language/statements/class/subclass-builtins,language/statements/class/super,language/statements/class/syntax,"language/statements/class/(filesonly)"'
+              ;;
+            27)
+              TITLE='"built-ins/Array"'
+              FOCUS='built-ins/Array'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

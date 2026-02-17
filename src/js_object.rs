@@ -55,6 +55,7 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 
     for method in static_methods {
         object_set_key_value(mc, &object_ctor, method, &Value::Function(format!("Object.{method}")))?;
+        object_ctor.borrow_mut(mc).set_non_enumerable(method);
     }
 
     // 4. Register prototype methods
@@ -76,6 +77,56 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     }
 
     Ok(())
+}
+
+fn to_object_for_object_static<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    value: &Value<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    match value {
+        Value::Object(obj) => Ok(*obj),
+        Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+        Value::String(s) => {
+            let obj = new_js_object_data(mc);
+            object_set_key_value(mc, &obj, "length", &Value::Number(s.len() as f64))?;
+            obj.borrow_mut(mc).set_non_enumerable("length");
+            for (i, cu) in s.iter().enumerate() {
+                object_set_key_value(mc, &obj, i, &Value::String(vec![*cu]))?;
+            }
+            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String");
+            Ok(obj)
+        }
+        Value::Number(n) => {
+            let obj = new_js_object_data(mc);
+            let _ = n;
+            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number");
+            Ok(obj)
+        }
+        Value::Boolean(b) => {
+            let obj = new_js_object_data(mc);
+            let _ = b;
+            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean");
+            Ok(obj)
+        }
+        Value::BigInt(h) => {
+            let obj = new_js_object_data(mc);
+            let _ = h;
+            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
+            Ok(obj)
+        }
+        Value::Symbol(sd) => {
+            let obj = new_js_object_data(mc);
+            let _ = sd;
+            let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
+            Ok(obj)
+        }
+        other => {
+            let obj = new_js_object_data(mc);
+            let _ = other;
+            Ok(obj)
+        }
+    }
 }
 
 pub fn define_properties<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, props: &Value<'gc>) -> Result<(), EvalError<'gc>> {
@@ -220,25 +271,62 @@ pub(crate) fn define_property_internal<'gc>(
         }
     }
 
+    let existing_own_value = get_own_property(target_obj, prop_key).map(|v| v.borrow().clone());
+
+    let is_data_descriptor = pd.value.is_some() || pd.writable.is_some();
+    let is_accessor_descriptor = pd.get.is_some() || pd.set.is_some();
+
     let mut getter_opt: Option<Box<Value>> = None;
-    if pd.get.is_some()
-        && let Some(get_val) = pd.get.clone()
-        && !matches!(get_val, Value::Undefined)
-    {
-        getter_opt = Some(Box::new(get_val));
+    if !is_data_descriptor {
+        if pd.get.is_some() {
+            if let Some(get_val) = pd.get.clone()
+                && !matches!(get_val, Value::Undefined)
+            {
+                getter_opt = Some(Box::new(get_val));
+            }
+        } else if let Some(existing) = &existing_own_value {
+            match existing {
+                Value::Property { getter: Some(g), .. } => getter_opt = Some(g.clone()),
+                Value::Getter(..) => {}
+                _ => {}
+            }
+        }
     }
 
     let mut setter_opt: Option<Box<Value>> = None;
-    if pd.set.is_some()
-        && let Some(set_val) = pd.set.clone()
-        && !matches!(set_val, Value::Undefined)
-    {
-        setter_opt = Some(Box::new(set_val));
+    if !is_data_descriptor {
+        if pd.set.is_some() {
+            if let Some(set_val) = pd.set.clone()
+                && !matches!(set_val, Value::Undefined)
+            {
+                setter_opt = Some(Box::new(set_val));
+            }
+        } else if let Some(existing) = &existing_own_value {
+            match existing {
+                Value::Property { setter: Some(s), .. } => setter_opt = Some(s.clone()),
+                Value::Setter(..) => {}
+                _ => {}
+            }
+        }
     }
+
+    let value_cell = if is_accessor_descriptor {
+        None
+    } else if let Some(v) = pd.value.clone() {
+        Some(new_gc_cell_ptr(mc, v))
+    } else if let Some(existing) = &existing_own_value {
+        match existing {
+            Value::Property { value, .. } => *value,
+            Value::Getter(..) | Value::Setter(..) => None,
+            other => Some(new_gc_cell_ptr(mc, other.clone())),
+        }
+    } else {
+        None
+    };
 
     // Create property descriptor value
     let prop_descriptor = Value::Property {
-        value: pd.value.clone().map(|v| new_gc_cell_ptr(mc, v)),
+        value: value_cell,
         getter: getter_opt,
         setter: setter_opt,
     };
@@ -367,6 +455,11 @@ pub(crate) fn define_property_internal<'gc>(
         }
     }
 
+    // On existing non-configurable data properties, writable may transition true -> false.
+    if existed && !is_configurable && pd.writable == Some(false) {
+        target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
+    }
+
     // DEBUG: print non_writable/non_enumerable state before final set
     log::debug!(
         "define_property_internal: post-flag state for obj_ptr={:p} key={:?} non_writable_contains={} non_writable_list={:?} non_enumerable_contains={} non_enumerable_list={:?}",
@@ -404,43 +497,41 @@ pub fn handle_object_method<'gc>(
             if args.len() > 1 {
                 return Err(raise_type_error!("Object.keys accepts only one argument"));
             }
-            match args[0] {
-                Value::Object(obj) => {
-                    let mut keys = Vec::new();
-                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
-                    for key in ordered {
-                        if !obj.borrow().is_enumerable(&key) {
-                            continue;
-                        }
-                        if let PropertyKey::String(s) = key {
-                            let is_module_namespace = {
-                                let b = obj.borrow();
-                                b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
-                            };
-                            if is_module_namespace {
-                                let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
-                            }
-                            // Only include string keys (array indices and others). Skip 'length' because it's non-enumerable
-                            keys.push(Value::String(utf8_to_utf16(&s)));
-                        }
-                    }
-                    // Create a proper Array for keys
-                    let result_obj = crate::js_array::create_array(mc, env)?;
-                    let len = keys.len();
-                    for (i, key) in keys.into_iter().enumerate() {
-                        object_set_key_value(mc, &result_obj, i, &key)?;
-                    }
-                    set_array_length(mc, &result_obj, len)?;
-                    Ok(Value::Object(result_obj))
+            let obj = to_object_for_object_static(mc, env, &args[0])?;
+            let mut keys = Vec::new();
+            let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+            for key in ordered {
+                let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
+                } else {
+                    obj.borrow().is_enumerable(&key)
+                };
+                if !is_enumerable {
+                    continue;
                 }
-                Value::Undefined => Err(raise_type_error!("Object.keys called on undefined")),
-                _ => {
-                    // For primitive values, return empty array (like in JS)
-                    let result_obj = crate::js_array::create_array(mc, env)?;
-                    set_array_length(mc, &result_obj, 0)?;
-                    Ok(Value::Object(result_obj))
+                if let PropertyKey::String(s) = key {
+                    if s == "__proto__" {
+                        continue;
+                    }
+                    let is_module_namespace = {
+                        let b = obj.borrow();
+                        b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                    };
+                    if is_module_namespace {
+                        let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                    }
+                    keys.push(Value::String(utf8_to_utf16(&s)));
                 }
             }
+            let result_obj = crate::js_array::create_array(mc, env)?;
+            let len = keys.len();
+            for (i, key) in keys.into_iter().enumerate() {
+                object_set_key_value(mc, &result_obj, i, &key)?;
+            }
+            set_array_length(mc, &result_obj, len)?;
+            Ok(Value::Object(result_obj))
         }
         "values" => {
             if args.is_empty() {
@@ -449,47 +540,85 @@ pub fn handle_object_method<'gc>(
             if args.len() > 1 {
                 return Err(raise_type_error!("Object.values accepts only one argument"));
             }
-            match args[0] {
-                Value::Object(obj) => {
-                    let mut values = Vec::new();
-                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
-                    for key in ordered {
-                        if !obj.borrow().is_enumerable(&key) {
-                            continue;
-                        }
-                        if let PropertyKey::String(_s) = &key {
-                            if let PropertyKey::String(s) = &key {
-                                let is_module_namespace = {
-                                    let b = obj.borrow();
-                                    b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
-                                };
-                                if is_module_namespace {
-                                    let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
-                                }
-                            }
-                            // Only include string keys (array indices and others); 'length' is non-enumerable so won't appear
-                            if let Some(v_rc) = object_get_key_value(&obj, &key) {
-                                values.push(v_rc.borrow().clone());
-                            }
-                        }
-                    }
-                    // Create a proper Array for values
-                    let result_obj = crate::js_array::create_array(mc, env)?;
-                    let len = values.len();
-                    for (i, value) in values.into_iter().enumerate() {
-                        object_set_key_value(mc, &result_obj, i, &value)?;
-                    }
-                    set_array_length(mc, &result_obj, len)?;
-                    Ok(Value::Object(result_obj))
+            let obj = to_object_for_object_static(mc, env, &args[0])?;
+            let mut values = Vec::new();
+            let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+            for key in ordered {
+                let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
+                } else {
+                    obj.borrow().is_enumerable(&key)
+                };
+                if !is_enumerable {
+                    continue;
                 }
-                Value::Undefined => Err(raise_type_error!("Object.values called on undefined")),
-                _ => {
-                    // For primitive values, return empty array (like in JS)
-                    let result_obj = crate::js_array::create_array(mc, env)?;
-                    set_array_length(mc, &result_obj, 0)?;
-                    Ok(Value::Object(result_obj))
+                if let PropertyKey::String(s) = &key {
+                    if s == "__proto__" {
+                        continue;
+                    }
+                    let is_module_namespace = {
+                        let b = obj.borrow();
+                        b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                    };
+                    if is_module_namespace {
+                        let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                    }
+                    let value = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                    values.push(value);
                 }
             }
+            let result_obj = crate::js_array::create_array(mc, env)?;
+            let len = values.len();
+            for (i, value) in values.into_iter().enumerate() {
+                object_set_key_value(mc, &result_obj, i, &value)?;
+            }
+            set_array_length(mc, &result_obj, len)?;
+            Ok(Value::Object(result_obj))
+        }
+        "entries" => {
+            if args.is_empty() {
+                return Err(raise_type_error!("Object.entries requires at least one argument"));
+            }
+            if args.len() > 1 {
+                return Err(raise_type_error!("Object.entries accepts only one argument"));
+            }
+
+            let obj = to_object_for_object_static(mc, env, &args[0])?;
+            let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+            let result_obj = crate::js_array::create_array(mc, env)?;
+            let mut out_index = 0usize;
+
+            for key in ordered {
+                let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
+                } else {
+                    obj.borrow().is_enumerable(&key)
+                };
+                if !is_enumerable {
+                    continue;
+                }
+
+                if let PropertyKey::String(s) = key {
+                    if s == "__proto__" {
+                        continue;
+                    }
+                    let value = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                    let pair = crate::js_array::create_array(mc, env)?;
+                    object_set_key_value(mc, &pair, 0, &Value::String(utf8_to_utf16(&s)))?;
+                    object_set_key_value(mc, &pair, 1, &value)?;
+                    set_array_length(mc, &pair, 2)?;
+
+                    object_set_key_value(mc, &result_obj, out_index, &Value::Object(pair))?;
+                    out_index += 1;
+                }
+            }
+
+            set_array_length(mc, &result_obj, out_index)?;
+            Ok(Value::Object(result_obj))
         }
         "hasOwn" => {
             if args.len() != 2 {
@@ -613,7 +742,8 @@ pub fn handle_object_method<'gc>(
                     obj.borrow_mut(mc).prevent_extensions();
                     Ok(Value::Object(*obj))
                 }
-                _ => Err(raise_type_error!("Object.preventExtensions called on non-object")),
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                other => Ok(other.clone()),
             }
         }
         "seal" => {
@@ -631,7 +761,8 @@ pub fn handle_object_method<'gc>(
                     obj.borrow_mut(mc).prevent_extensions();
                     Ok(Value::Object(*obj))
                 }
-                _ => Err(raise_type_error!("Object.seal called on non-object")),
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                other => Ok(other.clone()),
             }
         }
         "isSealed" => {
@@ -716,7 +847,8 @@ pub fn handle_object_method<'gc>(
                     obj.borrow_mut(mc).prevent_extensions();
                     Ok(Value::Object(*obj))
                 }
-                _ => Err(raise_type_error!("Object.freeze called on non-object")),
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                other => Ok(other.clone()),
             }
         }
         "isFrozen" => {
@@ -934,59 +1066,46 @@ pub fn handle_object_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_type_error!("Object.getOwnPropertySymbols requires exactly one argument"));
             }
-            match args[0] {
-                Value::Object(obj) => {
-                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
-                    let result_obj = crate::js_array::create_array(mc, env)?;
-                    let mut idx = 0;
-                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
-                    for key in ordered {
-                        if let PropertyKey::Symbol(sym) = key {
-                            object_set_key_value(mc, &result_obj, idx, &Value::Symbol(sym))?;
-                            idx += 1;
-                        }
-                    }
-                    set_array_length(mc, &result_obj, idx)?;
-                    Ok(Value::Object(result_obj))
+            let obj = to_object_for_object_static(mc, env, &args[0])?;
+            crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
+            let result_obj = crate::js_array::create_array(mc, env)?;
+            let mut idx = 0;
+            let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+            for key in ordered {
+                if let PropertyKey::Symbol(sym) = key {
+                    object_set_key_value(mc, &result_obj, idx, &Value::Symbol(sym))?;
+                    idx += 1;
                 }
-                _ => Err(raise_type_error!("Object.getOwnPropertySymbols called on non-object")),
             }
+            set_array_length(mc, &result_obj, idx)?;
+            Ok(Value::Object(result_obj))
         }
         "getOwnPropertyNames" => {
             if args.len() != 1 {
                 return Err(raise_type_error!("Object.getOwnPropertyNames requires exactly one argument"));
             }
-            match args[0] {
-                Value::Object(obj) => {
-                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
-                    let result_obj = crate::js_array::create_array(mc, env)?;
-                    let mut idx = 0;
-                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
-                    for key in ordered {
-                        if let PropertyKey::String(s) = key {
-                            if s == "__is_array" {
-                                continue;
-                            }
-                            object_set_key_value(mc, &result_obj, idx, &Value::String(utf8_to_utf16(&s)))?;
-                            idx += 1;
-                        }
+            let obj = to_object_for_object_static(mc, env, &args[0])?;
+            crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
+            let result_obj = crate::js_array::create_array(mc, env)?;
+            let mut idx = 0;
+            let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+            for key in ordered {
+                if let PropertyKey::String(s) = key {
+                    if s == "__is_array" || s == "__proto__" {
+                        continue;
                     }
-                    set_array_length(mc, &result_obj, idx)?;
-                    Ok(Value::Object(result_obj))
+                    object_set_key_value(mc, &result_obj, idx, &Value::String(utf8_to_utf16(&s)))?;
+                    idx += 1;
                 }
-                _ => Err(raise_type_error!("Object.getOwnPropertyNames called on non-object")),
             }
+            set_array_length(mc, &result_obj, idx)?;
+            Ok(Value::Object(result_obj))
         }
         "getOwnPropertyDescriptor" => {
             if args.len() < 2 {
                 return Err(raise_type_error!("Object.getOwnPropertyDescriptor requires at least two arguments"));
             }
             let obj_val = args[0].clone();
-            let obj = match obj_val {
-                Value::Object(o) => o,
-                _ => return Err(raise_type_error!("Object.getOwnPropertyDescriptor called on non-object")),
-            };
-
             let prop_val = args[1].clone();
             let key = match prop_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
@@ -1002,6 +1121,99 @@ pub fn handle_object_method<'gc>(
                     }
                 }
                 val => PropertyKey::String(value_to_string(&val)),
+            };
+
+            let obj = match obj_val {
+                Value::Object(o) => o,
+                Value::Function(func_name) => {
+                    let PropertyKey::String(prop_name) = key else {
+                        return Ok(Value::Undefined);
+                    };
+
+                    let marker = format!("__fn_deleted::{}::{}", func_name, prop_name);
+                    let deleted_in_env = crate::core::is_deleted_builtin_function_virtual_prop(func_name.as_str(), prop_name.as_str())
+                        || crate::core::env_get(env, marker.as_str())
+                            .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+                            .unwrap_or(false);
+                    let deleted_in_global = if let Some(global_this_rc) = crate::core::env_get(env, "globalThis")
+                        && let Value::Object(global_obj) = &*global_this_rc.borrow()
+                        && let Some(v) = crate::core::object_get_key_value(global_obj, marker.as_str())
+                    {
+                        matches!(*v.borrow(), Value::Boolean(true))
+                    } else {
+                        false
+                    };
+                    if deleted_in_env || deleted_in_global {
+                        return Ok(Value::Undefined);
+                    }
+
+                    let desc_obj = if prop_name == "length" {
+                        let len = match func_name.as_str() {
+                            "Array.prototype.push"
+                            | "Array.prototype.indexOf"
+                            | "Array.prototype.lastIndexOf"
+                            | "Array.prototype.concat"
+                            | "Array.prototype.forEach"
+                            | "Array.prototype.map"
+                            | "Array.prototype.filter"
+                            | "Array.prototype.some"
+                            | "Array.prototype.every"
+                            | "Array.prototype.find"
+                            | "Array.prototype.findIndex"
+                            | "Array.prototype.findLast"
+                            | "Array.prototype.findLastIndex"
+                            | "Array.prototype.reduce"
+                            | "Array.prototype.reduceRight"
+                            | "Array.prototype.fill"
+                            | "Array.prototype.includes"
+                            | "Array.prototype.join"
+                            | "Array.prototype.unshift"
+                            | "Object.entries"
+                            | "Object.freeze"
+                            | "Object.fromEntries"
+                            | "Object.getOwnPropertyDescriptors"
+                            | "Object.getOwnPropertyNames"
+                            | "Object.getOwnPropertySymbols"
+                            | "Object.getPrototypeOf"
+                            | "Object.isExtensible"
+                            | "Object.isFrozen"
+                            | "Object.isSealed"
+                            | "Object.keys"
+                            | "Object.preventExtensions"
+                            | "Object.seal"
+                            | "Object.values"
+                            | "Object.prototype.hasOwnProperty"
+                            | "Object.prototype.isPrototypeOf"
+                            | "Object.prototype.propertyIsEnumerable"
+                            | "Object.prototype.__lookupGetter__"
+                            | "Object.prototype.__lookupSetter__"
+                            | "Array.prototype.sort" => 1.0,
+                            "Array.prototype.slice"
+                            | "Array.prototype.splice"
+                            | "Array.prototype.copyWithin"
+                            | "Object.assign"
+                            | "Object.create"
+                            | "Object.defineProperties"
+                            | "Object.getOwnPropertyDescriptor"
+                            | "Object.groupBy"
+                            | "Object.hasOwn"
+                            | "Object.is"
+                            | "Object.setPrototypeOf" => 2.0,
+                            "Object.defineProperty" => 3.0,
+                            _ => 0.0,
+                        };
+                        crate::core::create_descriptor_object(mc, &Value::Number(len), false, false, true)?
+                    } else if prop_name == "name" {
+                        let short_name = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                        crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(short_name)), false, false, true)?
+                    } else {
+                        return Ok(Value::Undefined);
+                    };
+
+                    crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                    return Ok(Value::Object(desc_obj));
+                }
+                _ => to_object_for_object_static(mc, env, &obj_val)?,
             };
 
             if let PropertyKey::String(s) = &key {
@@ -1043,34 +1255,28 @@ pub fn handle_object_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_type_error!("Object.getOwnPropertyDescriptors requires exactly one argument"));
             }
-            let obj_val = args[0].clone();
-            match obj_val {
-                Value::Object(ref obj) => {
-                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, obj, None)?;
-                    let result_obj = new_js_object_data(mc);
+            let obj = to_object_for_object_static(mc, env, &args[0])?;
+            crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
+            let result_obj = new_js_object_data(mc);
 
-                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
-                    for key in &ordered {
-                        if let Some(pd) = crate::core::build_property_descriptor(mc, obj, key) {
-                            let desc_obj = pd.to_object(mc)?; // Put descriptor onto result using the original key (string or symbol)
-                            match key {
-                                PropertyKey::String(s) => {
-                                    object_set_key_value(mc, &result_obj, s, &Value::Object(desc_obj))?;
-                                }
-                                PropertyKey::Symbol(sym_rc) => {
-                                    // Push symbol-keyed property on returned object with the same symbol key
-                                    let property_key = PropertyKey::Symbol(*sym_rc);
-                                    object_set_key_value(mc, &result_obj, &property_key, &Value::Object(desc_obj))?;
-                                }
-                                PropertyKey::Private(..) => {}
-                            }
+            let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+            for key in &ordered {
+                if let Some(pd) = crate::core::build_property_descriptor(mc, &obj, key) {
+                    let desc_obj = pd.to_object(mc)?;
+                    match key {
+                        PropertyKey::String(s) => {
+                            object_set_key_value(mc, &result_obj, s, &Value::Object(desc_obj))?;
                         }
+                        PropertyKey::Symbol(sym_rc) => {
+                            let property_key = PropertyKey::Symbol(*sym_rc);
+                            object_set_key_value(mc, &result_obj, &property_key, &Value::Object(desc_obj))?;
+                        }
+                        PropertyKey::Private(..) => {}
                     }
-
-                    Ok(Value::Object(result_obj))
                 }
-                _ => Err(raise_type_error!("Object.getOwnPropertyDescriptors called on non-object")),
             }
+
+            Ok(Value::Object(result_obj))
         }
         "assign" => {
             if args.is_empty() {
@@ -1185,6 +1391,77 @@ pub fn handle_object_method<'gc>(
 
             let pd = PropertyDescriptor::from_object(&desc_obj)?;
             crate::core::validate_descriptor_for_define(mc, &pd)?;
+
+            if is_array(mc, &target_obj)
+                && let PropertyKey::String(s) = &prop_key
+                && s == "length"
+            {
+                if pd.get.is_some() || pd.set.is_some() {
+                    return Err(raise_type_error!("Cannot redefine array length property as accessor"));
+                }
+
+                let to_number_with_hint = |value: &Value<'gc>| -> Result<f64, JSError> {
+                    let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                    crate::core::to_number(&prim).map_err(Into::into)
+                };
+
+                let old_len = get_array_length(mc, &target_obj).unwrap_or(0);
+
+                let to_uint32 = |num: f64| -> u32 {
+                    if !num.is_finite() || num == 0.0 || num.is_nan() {
+                        return 0;
+                    }
+                    let int = num.signum() * num.abs().floor();
+                    let two32 = 4294967296.0_f64;
+                    let mut int_mod = int % two32;
+                    if int_mod < 0.0 {
+                        int_mod += two32;
+                    }
+                    int_mod as u32
+                };
+
+                let mut computed_new_len: Option<usize> = None;
+                if let Some(v) = pd.value.clone() {
+                    let uint32_len = to_uint32(to_number_with_hint(&v)?);
+                    let number_len = to_number_with_hint(&v)?;
+
+                    if (uint32_len as f64) != number_len {
+                        return Err(raise_range_error!("Invalid array length"));
+                    }
+                    computed_new_len = Some(uint32_len as usize);
+                }
+
+                // Overflow check must happen before descriptor validation side conditions.
+                if let Some(new_len) = computed_new_len
+                    && new_len > u32::MAX as usize
+                {
+                    return Err(raise_range_error!("Invalid array length"));
+                }
+
+                if pd.configurable == Some(true) || pd.enumerable == Some(true) {
+                    return Err(raise_type_error!("Cannot redefine array length property"));
+                }
+
+                let length_writable = target_obj.borrow().is_writable("length");
+                if pd.writable == Some(true) && !length_writable {
+                    return Err(raise_type_error!("Cannot make non-writable property writable"));
+                }
+
+                if let Some(new_len) = computed_new_len {
+                    if !length_writable && new_len != old_len {
+                        return Err(raise_type_error!("Cannot assign to read only property 'length'"));
+                    }
+                    set_array_length(mc, &target_obj, new_len)?;
+                }
+
+                if pd.writable == Some(false) {
+                    target_obj.borrow_mut(mc).set_non_writable("length");
+                } else if pd.writable == Some(true) {
+                    target_obj.borrow_mut(mc).set_writable("length");
+                }
+
+                return Ok(Value::Object(target_obj));
+            }
 
             let is_module_namespace = {
                 let b = target_obj.borrow();
@@ -1402,6 +1679,16 @@ pub(crate) fn handle_to_string_method<'gc>(
             // If this object looks like a Date (has __timestamp), call Date.toString()
             if is_date_object(object) {
                 return crate::js_date::handle_date_method(mc, &Value::Object(*object), "toString", &[], env);
+            }
+
+            // Engine-internal function-like objects (constructors and callable wrappers)
+            // should be branded as Function for Object.prototype.toString.
+            if object.borrow().get_closure().is_some()
+                || object_get_key_value(object, "__native_ctor").is_some()
+                || object_get_key_value(object, "__is_constructor").is_some()
+                || object_get_key_value(object, "__bound_target").is_some()
+            {
+                return Ok(Value::String(utf8_to_utf16("[object Function]")));
             }
 
             // If this object looks like an array, join elements with comma (Array.prototype.toString overrides Object.prototype)
@@ -1722,6 +2009,34 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
                 return Err(raise_eval_error!("hasOwnProperty requires one argument").into());
             }
             let key_val = args[0].clone();
+            let key_str_opt = match &key_val {
+                Value::String(s) => Some(utf16_to_utf8(s)),
+                Value::Number(n) => Some(crate::core::value_to_string(&Value::Number(*n))),
+                Value::BigInt(b) => Some(b.to_string()),
+                Value::Boolean(b) => Some(b.to_string()),
+                Value::Undefined => Some("undefined".to_string()),
+                _ => None,
+            };
+            if let Some(key_str) = &key_str_opt
+                && (key_str == "length" || key_str == "name")
+            {
+                if crate::core::consume_pending_function_delete_hasown_check() {
+                    return Ok(Some(Value::Boolean(false)));
+                }
+                if let Some(cl_ptr) = object.borrow().get_closure() {
+                    let func_name_opt: Option<String> = match &*cl_ptr.borrow() {
+                        Value::Function(func_name) => Some(func_name.clone()),
+                        Value::Closure(cl) | Value::AsyncClosure(cl) => cl.native_target.clone(),
+                        _ => None,
+                    };
+                    if let Some(func_name) = func_name_opt {
+                        let deleted = crate::core::is_deleted_builtin_function_virtual_prop(func_name.as_str(), key_str.as_str());
+                        if deleted {
+                            return Ok(Some(Value::Boolean(false)));
+                        }
+                    }
+                }
+            }
             let ns_export_meta =
                 crate::core::get_own_property(object, PropertyKey::Private("__ns_export_names".to_string(), 1)).and_then(|v| {
                     match &*v.borrow() {

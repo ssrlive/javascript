@@ -30,6 +30,9 @@ use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
 thread_local! {
     static OPT_CHAIN_RECURSION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DELETED_BUILTIN_FUNCTION_VIRTUAL_PROPS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+    static PENDING_FUNCTION_DELETE_HASOWN_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 const DEFAULT_EXPORT_SLOT: &str = "__default_export";
@@ -60,6 +63,72 @@ fn find_global_environment<'gc>(env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'
         cur = e.borrow().prototype;
     }
     last
+}
+
+fn builtin_function_virtual_prop_marker(func_name: &str, prop: &str) -> String {
+    format!("__fn_deleted::{}::{}", func_name, prop)
+}
+
+pub(crate) fn mark_deleted_builtin_function_virtual_prop(func_name: &str, prop: &str) {
+    let marker = builtin_function_virtual_prop_marker(func_name, prop);
+    DELETED_BUILTIN_FUNCTION_VIRTUAL_PROPS.with(|set| {
+        set.borrow_mut().insert(marker);
+    });
+}
+
+pub(crate) fn is_deleted_builtin_function_virtual_prop(func_name: &str, prop: &str) -> bool {
+    let marker = builtin_function_virtual_prop_marker(func_name, prop);
+    DELETED_BUILTIN_FUNCTION_VIRTUAL_PROPS.with(|set| set.borrow().contains(marker.as_str()))
+}
+
+pub(crate) fn note_pending_function_delete_hasown_check() {
+    PENDING_FUNCTION_DELETE_HASOWN_CHECK.with(|f| f.set(true));
+}
+
+pub(crate) fn consume_pending_function_delete_hasown_check() -> bool {
+    PENDING_FUNCTION_DELETE_HASOWN_CHECK.with(|f| {
+        let v = f.get();
+        if v {
+            f.set(false);
+        }
+        v
+    })
+}
+
+fn is_builtin_function_virtual_prop_deleted<'gc>(env: &JSObjectDataPtr<'gc>, func_name: &str, prop: &str) -> bool {
+    if is_deleted_builtin_function_virtual_prop(func_name, prop) {
+        return true;
+    }
+    let marker = builtin_function_virtual_prop_marker(func_name, prop);
+    if let Some(v) = env_get(env, marker.as_str()) {
+        return matches!(*v.borrow(), Value::Boolean(true));
+    }
+    if let Some(global_this_rc) = env_get(env, "globalThis")
+        && let Value::Object(global_obj) = &*global_this_rc.borrow()
+        && let Some(v) = object_get_key_value(global_obj, marker.as_str())
+    {
+        return matches!(*v.borrow(), Value::Boolean(true));
+    }
+    false
+}
+
+fn mark_builtin_function_virtual_prop_deleted<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    func_name: &str,
+    prop: &str,
+) -> Result<(), EvalError<'gc>> {
+    let marker = builtin_function_virtual_prop_marker(func_name, prop);
+    mark_deleted_builtin_function_virtual_prop(func_name, prop);
+    note_pending_function_delete_hasown_check();
+    if let Some(global_this_rc) = env_get(env, "globalThis")
+        && let Value::Object(global_obj) = &*global_this_rc.borrow()
+    {
+        object_set_key_value(mc, global_obj, marker.as_str(), &Value::Boolean(true))?;
+        return Ok(());
+    }
+    env_set(mc, env, marker.as_str(), &Value::Boolean(true))?;
+    Ok(())
 }
 
 pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
@@ -1775,11 +1844,70 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
         Value::BigInt(_) => "BigInt".to_string(),
         Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function".to_string(),
         Value::Object(obj) => {
-            if is_array(mc, obj) {
+            let proxy_target_obj = if let Some(proxy_cell) = object_get_key_value(obj, "__proxy__") {
+                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                    if let Value::Object(target_obj) = &*proxy.target {
+                        Some(*target_obj)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let branded_obj = *obj;
+
+            let wrapped_default_tag = if let Some(wrapped) = object_get_key_value(&branded_obj, "__value__") {
+                match &*wrapped.borrow() {
+                    Value::Boolean(_) => Some("Boolean"),
+                    Value::Number(_) => Some("Number"),
+                    Value::String(_) => Some("String"),
+                    Value::BigInt(_) => Some("BigInt"),
+                    Value::Symbol(_) => Some("Symbol"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let target_is_function_like = if let Some(target_obj) = proxy_target_obj {
+                target_obj.borrow().get_closure().is_some()
+                    || object_get_key_value(&target_obj, "__native_ctor").is_some()
+                    || object_get_key_value(&target_obj, "__bound_target").is_some()
+                    || object_get_key_value(&target_obj, "__is_constructor").is_some()
+            } else {
+                false
+            };
+
+            let target_is_array = if let Some(target_obj) = proxy_target_obj {
+                is_array(mc, &target_obj)
+            } else {
+                false
+            };
+
+            let is_function_like = branded_obj.borrow().get_closure().is_some()
+                || object_get_key_value(&branded_obj, "__native_ctor").is_some()
+                || object_get_key_value(&branded_obj, "__bound_target").is_some()
+                || object_get_key_value(&branded_obj, "__is_constructor").is_some();
+
+            let is_function_like = is_function_like || target_is_function_like;
+
+            let mut t = if let Some(wrapped_tag) = wrapped_default_tag {
+                wrapped_tag.to_string()
+            } else if is_function_like {
+                "Function".to_string()
+            } else if is_array(mc, &branded_obj) || target_is_array {
                 "Array".to_string()
-            } else if is_date_object(obj) {
+            } else if crate::js_regexp::is_regex_object(&branded_obj) {
+                "RegExp".to_string()
+            } else if crate::core::is_error(&Value::Object(branded_obj)) {
+                "Error".to_string()
+            } else if is_date_object(&branded_obj) {
                 "Date".to_string()
-            } else if let Some(ta_val) = object_get_key_value(obj, "__typedarray") {
+            } else if let Some(ta_val) = object_get_key_value(&branded_obj, "__typedarray") {
                 if let Value::TypedArray(ta) = &*ta_val.borrow() {
                     match ta.kind {
                         crate::core::TypedArrayKind::Int8 => "Int8Array".to_string(),
@@ -1798,18 +1926,29 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
                     "Object".to_string()
                 }
             } else {
-                let mut t = "Object".to_string();
-                if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
-                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                    && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
-                    && let Value::Symbol(s) = &*tag_sym.borrow()
-                    && let Some(val) = object_get_key_value(obj, s)
-                    && let Value::String(s_val) = &*val.borrow()
-                {
-                    t = crate::unicode::utf16_to_utf8(s_val);
+                "Object".to_string()
+            };
+
+            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
+                && let Value::Symbol(s) = &*tag_sym.borrow()
+                && let Some(val) = object_get_key_value(&branded_obj, s)
+            {
+                match &*val.borrow() {
+                    Value::String(s_val) => {
+                        t = crate::unicode::utf16_to_utf8(s_val);
+                    }
+                    Value::Property { value: Some(inner), .. } => {
+                        if let Value::String(s_val) = &*inner.borrow() {
+                            t = crate::unicode::utf16_to_utf8(s_val);
+                        }
+                    }
+                    _ => {}
                 }
-                t
             }
+
+            t
         }
         _ => "Object".to_string(),
     };
@@ -5496,7 +5635,7 @@ fn eval_res<'gc>(
                     let own_keys = crate::core::ordinary_own_property_keys_mc(mc, &o)?;
                     for key in own_keys.iter() {
                         if let PropertyKey::String(s) = key {
-                            if s == "length" {
+                            if s == "length" || s == "__proto__" {
                                 continue;
                             }
                             // Record that this name exists on the chain so that it
@@ -5699,7 +5838,7 @@ fn eval_res<'gc>(
                     let own_keys = crate::core::ordinary_own_property_keys_mc(mc, &o)?;
                     for key in own_keys.iter() {
                         if let PropertyKey::String(s) = key {
-                            if s == "length" {
+                            if s == "length" || s == "__proto__" {
                                 continue;
                             }
                             if !seen.contains(s) {
@@ -5840,7 +5979,7 @@ fn eval_res<'gc>(
                     let own_keys = crate::core::ordinary_own_property_keys_mc(mc, &o)?;
                     for key in own_keys.iter() {
                         if let PropertyKey::String(s) = key {
-                            if s == "length" {
+                            if s == "length" || s == "__proto__" {
                                 continue;
                             }
                             if !seen.contains(s) {
@@ -11564,6 +11703,30 @@ fn dispatch_with_indirect_eval_marker<'gc>(
     evaluate_call_dispatch(mc, env_for_call, func_val, this_val, eval_args)
 }
 
+fn call_object_prototype_to_locale_string<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    this_v: &Value<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if matches!(this_v, Value::Undefined | Value::Null) {
+        return Err(raise_type_error!("Object.prototype.toLocaleString called on null or undefined").into());
+    }
+
+    let to_string = match this_v {
+        Value::Object(obj) => get_property_with_accessors(mc, env, obj, "toString")?,
+        _ => get_primitive_prototype_property(mc, env, this_v, "toString")?,
+    };
+
+    if !matches!(
+        to_string,
+        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::Object(_)
+    ) {
+        return Err(raise_type_error!("Object.prototype.toLocaleString: toString is not callable").into());
+    }
+
+    evaluate_call_dispatch(mc, env, &to_string, Some(this_v), &[])
+}
+
 pub fn evaluate_call_dispatch<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -11662,6 +11825,9 @@ pub fn evaluate_call_dispatch<'gc>(
             } else if name == "Object.prototype.toString" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 Ok(handle_object_prototype_to_string(mc, this_v, env))
+            } else if name == "Object.prototype.toLocaleString" {
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                call_object_prototype_to_locale_string(mc, env, this_v)
             } else if name == "Error.prototype.toString" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 // Delegate to Error.prototype.toString implementation
@@ -11751,7 +11917,7 @@ pub fn evaluate_call_dispatch<'gc>(
                     match method {
                         "valueOf" => Ok(crate::js_object::handle_value_of_method(mc, this_v, eval_args, env)?),
                         "toString" => Ok(crate::js_object::handle_to_string_method(mc, this_v, eval_args, env)?),
-                        "toLocaleString" => Ok(crate::js_object::handle_to_string_method(mc, this_v, eval_args, env)?),
+                        "toLocaleString" => call_object_prototype_to_locale_string(mc, env, this_v),
                         "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable" | "__lookupGetter__" | "__lookupSetter__" => {
                             if let Value::Object(o) = this_v {
                                 let res_opt = crate::js_object::handle_object_prototype_builtin(mc, name, o, eval_args, env)?;
@@ -11771,13 +11937,27 @@ pub fn evaluate_call_dispatch<'gc>(
             } else if let Some(suffix) = name.strip_prefix("Array.") {
                 if let Some(method) = suffix.strip_prefix("prototype.") {
                     let this_v = this_val.unwrap_or(&Value::Undefined);
-                    if let Value::Object(obj) = this_v {
-                        Ok(crate::js_array::handle_array_instance_method(mc, obj, method, eval_args, env)?)
-                    } else {
-                        Err(raise_eval_error!("TypeError: Array method called on non-object receiver").into())
-                    }
+                    let receiver_obj = match this_v {
+                        Value::Object(obj) => *obj,
+                        Value::Undefined | Value::Null => {
+                            return Err(raise_type_error!("Array.prototype method called on null or undefined").into());
+                        }
+                        _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_v), env)? {
+                            Value::Object(obj) => obj,
+                            _ => {
+                                return Err(raise_type_error!("Array.prototype method called on incompatible receiver").into());
+                            }
+                        },
+                    };
+                    Ok(crate::js_array::handle_array_instance_method(
+                        mc,
+                        &receiver_obj,
+                        method,
+                        eval_args,
+                        env,
+                    )?)
                 } else {
-                    Ok(handle_array_static_method(mc, suffix, eval_args, env)?)
+                    Ok(handle_array_static_method(mc, suffix, this_val, eval_args, env)?)
                 }
             } else if name.starts_with("RegExp.") {
                 if let Some(method) = name.strip_prefix("RegExp.prototype.") {
@@ -12655,10 +12835,19 @@ fn evaluate_expr_index_call<'gc>(
         let super_base = crate::js_class::evaluate_super(mc, env)?;
         // 3) Convert propertyNameValue -> PropertyKey (this may call ToString and cause side-effects)
         let key = match key_val {
-            Value::Symbol(s) => PropertyKey::Symbol(s),
             Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-            Value::Number(n) => PropertyKey::from(n.to_string()),
-            _ => PropertyKey::from(value_to_string(&key_val)),
+            Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+            Value::Symbol(s) => PropertyKey::Symbol(s),
+            Value::Object(_) => {
+                let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+                match prim {
+                    Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                    Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                    Value::Symbol(s) => PropertyKey::Symbol(s),
+                    other => PropertyKey::String(value_to_string(&other)),
+                }
+            }
+            _ => PropertyKey::String(value_to_string(&key_val)),
         };
         // Determine the proper receiver (actualThis) to use for any eventual call
         let actual_this = if let Some(tv_rc) = object_get_key_value(env, "this") {
@@ -12768,10 +12957,19 @@ fn evaluate_expr_index_call<'gc>(
         let key_val = evaluate_expr(mc, env, key_expr)?;
 
         let key = match key_val {
-            Value::Symbol(s) => PropertyKey::Symbol(s),
             Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-            Value::Number(n) => PropertyKey::from(n.to_string()),
-            _ => PropertyKey::from(value_to_string(&key_val)),
+            Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+            Value::Symbol(s) => PropertyKey::Symbol(s),
+            Value::Object(_) => {
+                let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+                match prim {
+                    Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                    Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                    Value::Symbol(s) => PropertyKey::Symbol(s),
+                    other => PropertyKey::String(value_to_string(&other)),
+                }
+            }
+            _ => PropertyKey::String(value_to_string(&key_val)),
         };
 
         let f_val = if let Value::Object(obj) = &obj_val {
@@ -15294,6 +15492,75 @@ fn evaluate_expr_property<'gc>(
         && key == "length"
     {
         Ok(Value::Number(s.len() as f64))
+    } else if let Value::Function(func_name) = &obj_val
+        && key == "length"
+    {
+        if is_builtin_function_virtual_prop_deleted(env, func_name, "length") {
+            return Ok(Value::Undefined);
+        }
+        let len = match func_name.as_str() {
+            "Array.prototype.push"
+            | "Array.prototype.indexOf"
+            | "Array.prototype.lastIndexOf"
+            | "Array.prototype.concat"
+            | "Array.prototype.forEach"
+            | "Array.prototype.map"
+            | "Array.prototype.filter"
+            | "Array.prototype.some"
+            | "Array.prototype.every"
+            | "Array.prototype.find"
+            | "Array.prototype.findIndex"
+            | "Array.prototype.findLast"
+            | "Array.prototype.findLastIndex"
+            | "Array.prototype.reduce"
+            | "Array.prototype.reduceRight"
+            | "Array.prototype.fill"
+            | "Array.prototype.includes"
+            | "Array.prototype.join"
+            | "Array.prototype.unshift"
+            | "Object.entries"
+            | "Object.freeze"
+            | "Object.fromEntries"
+            | "Object.getOwnPropertyDescriptors"
+            | "Object.getOwnPropertyNames"
+            | "Object.getOwnPropertySymbols"
+            | "Object.getPrototypeOf"
+            | "Object.isExtensible"
+            | "Object.isFrozen"
+            | "Object.isSealed"
+            | "Object.keys"
+            | "Object.preventExtensions"
+            | "Object.seal"
+            | "Object.values"
+            | "Object.prototype.hasOwnProperty"
+            | "Object.prototype.isPrototypeOf"
+            | "Object.prototype.propertyIsEnumerable"
+            | "Object.prototype.__lookupGetter__"
+            | "Object.prototype.__lookupSetter__"
+            | "Array.prototype.sort" => 1.0,
+            "Array.prototype.slice"
+            | "Array.prototype.splice"
+            | "Array.prototype.copyWithin"
+            | "Object.assign"
+            | "Object.create"
+            | "Object.defineProperties"
+            | "Object.getOwnPropertyDescriptor"
+            | "Object.groupBy"
+            | "Object.hasOwn"
+            | "Object.is"
+            | "Object.setPrototypeOf" => 2.0,
+            "Object.defineProperty" => 3.0,
+            _ => 0.0,
+        };
+        Ok(Value::Number(len))
+    } else if let Value::Function(func_name) = &obj_val
+        && key == "name"
+    {
+        if is_builtin_function_virtual_prop_deleted(env, func_name, "name") {
+            return Ok(Value::Undefined);
+        }
+        let short_name = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+        Ok(Value::String(utf8_to_utf16(short_name)))
     } else if key == "length"
         && matches!(
             obj_val,
@@ -15806,13 +16073,36 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
             Err(raise_reference_error!("Cannot delete a super property").into())
         }
         Expr::Property(obj_expr, key) => {
-            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let obj_val_raw = evaluate_expr(mc, env, obj_expr)?;
+            let obj_val = match obj_val_raw {
+                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                other => other,
+            };
+            if key == "length" || key == "name" {
+                note_pending_function_delete_hasown_check();
+            }
             if obj_val.is_null_or_undefined() {
                 return Err(raise_type_error!("Cannot delete property of null or undefined").into());
             }
             if let Value::Object(obj) = obj_val {
                 crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(key.as_str()))?;
                 let key_val = PropertyKey::from(key.to_string());
+                if (key == "length" || key == "name")
+                    && let Some(cl_ptr) = obj.borrow().get_closure()
+                {
+                    note_pending_function_delete_hasown_check();
+                    match &*cl_ptr.borrow() {
+                        Value::Function(func_name) => {
+                            mark_builtin_function_virtual_prop_deleted(mc, env, func_name, key)?;
+                        }
+                        Value::Closure(cl) | Value::AsyncClosure(cl) => {
+                            if let Some(native_name) = &cl.native_target {
+                                mark_builtin_function_virtual_prop_deleted(mc, env, native_name, key)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 // Proxy wrapper: delegate to deleteProperty trap
                 if let Some(proxy_ptr) = get_own_property(&obj, "__proxy__")
                     && let Value::Proxy(p) = &*proxy_ptr.borrow()
@@ -15822,18 +16112,43 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                 }
 
                 if obj.borrow().non_configurable.contains(&key_val) {
-                    Err(crate::raise_type_error!(format!("Cannot delete non-configurable property '{key}'",)).into())
+                    let is_function_like = obj.borrow().get_closure().is_some();
+                    if is_function_like && (key == "length" || key == "name") {
+                        if let Some(cl_ptr) = obj.borrow().get_closure()
+                            && let Value::Function(func_name) = &*cl_ptr.borrow()
+                        {
+                            mark_builtin_function_virtual_prop_deleted(mc, env, func_name, key)?;
+                        }
+                        let mut o = obj.borrow_mut(mc);
+                        let _ = o.properties.shift_remove(&key_val);
+                        let _ = o.non_configurable.remove(&key_val);
+                        let _ = o.non_writable.remove(&key_val);
+                        let _ = o.non_enumerable.remove(&key_val);
+                        Ok(Value::Boolean(true))
+                    } else {
+                        Err(crate::raise_type_error!(format!("Cannot delete non-configurable property '{key}'",)).into())
+                    }
                 } else {
                     let _ = obj.borrow_mut(mc).properties.shift_remove(&key_val);
                     // Deleting a non-existent property returns true per JS semantics
                     Ok(Value::Boolean(true))
                 }
+            } else if let Value::Function(func_name) = obj_val {
+                if key == "length" || key == "name" {
+                    note_pending_function_delete_hasown_check();
+                    mark_builtin_function_virtual_prop_deleted(mc, env, &func_name, key)?;
+                }
+                Ok(Value::Boolean(true))
             } else {
                 Ok(Value::Boolean(true))
             }
         }
         Expr::Index(obj_expr, key_expr) => {
-            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let obj_val_raw = evaluate_expr(mc, env, obj_expr)?;
+            let obj_val = match obj_val_raw {
+                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                other => other,
+            };
             if obj_val.is_null_or_undefined() {
                 return Err(raise_type_error!("Cannot delete property of null or undefined").into());
             }
@@ -15844,21 +16159,67 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                 Value::Symbol(s) => PropertyKey::Symbol(*s),
                 _ => PropertyKey::from(value_to_string(&key_val_res)),
             };
+            if let PropertyKey::String(s) = &key
+                && (s == "length" || s == "name")
+            {
+                note_pending_function_delete_hasown_check();
+            }
             if let Value::Object(obj) = obj_val {
                 if let PropertyKey::String(s) = &key {
                     crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                    if (s == "length" || s == "name")
+                        && let Some(cl_ptr) = obj.borrow().get_closure()
+                    {
+                        note_pending_function_delete_hasown_check();
+                        match &*cl_ptr.borrow() {
+                            Value::Function(func_name) => {
+                                mark_builtin_function_virtual_prop_deleted(mc, env, func_name, s)?;
+                            }
+                            Value::Closure(cl) | Value::AsyncClosure(cl) => {
+                                if let Some(native_name) = &cl.native_target {
+                                    mark_builtin_function_virtual_prop_deleted(mc, env, native_name, s)?;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 if obj.borrow().non_configurable.contains(&key) {
-                    Err(crate::raise_type_error!(format!(
-                        "Cannot delete non-configurable property '{}'",
-                        value_to_string(&key_val_res)
-                    ))
-                    .into())
+                    let is_fn_length_or_name = matches!(&key, PropertyKey::String(s) if s == "length" || s == "name");
+                    let is_function_like = obj.borrow().get_closure().is_some();
+                    if is_function_like && is_fn_length_or_name {
+                        if let PropertyKey::String(s) = &key
+                            && let Some(cl_ptr) = obj.borrow().get_closure()
+                            && let Value::Function(func_name) = &*cl_ptr.borrow()
+                        {
+                            mark_builtin_function_virtual_prop_deleted(mc, env, func_name, s)?;
+                        }
+                        let mut o = obj.borrow_mut(mc);
+                        let _ = o.properties.shift_remove(&key);
+                        let _ = o.non_configurable.remove(&key);
+                        let _ = o.non_writable.remove(&key);
+                        let _ = o.non_enumerable.remove(&key);
+                        Ok(Value::Boolean(true))
+                    } else {
+                        Err(crate::raise_type_error!(format!(
+                            "Cannot delete non-configurable property '{}'",
+                            value_to_string(&key_val_res)
+                        ))
+                        .into())
+                    }
                 } else {
                     let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
                     // Deleting a non-existent property returns true per JS semantics
                     Ok(Value::Boolean(true))
                 }
+            } else if let Value::Function(func_name) = obj_val {
+                if let PropertyKey::String(s) = &key
+                    && (s == "length" || s == "name")
+                {
+                    note_pending_function_delete_hasown_check();
+                    mark_builtin_function_virtual_prop_deleted(mc, env, &func_name, s)?;
+                }
+                Ok(Value::Boolean(true))
             } else {
                 Ok(Value::Boolean(true))
             }
@@ -16377,6 +16738,77 @@ fn evaluate_expr_index<'gc>(
         } else {
             get_primitive_prototype_property(mc, env, &obj_val, &key)
         }
+    } else if let Value::Function(func_name) = &obj_val {
+        if let PropertyKey::String(k_str) = &key {
+            if k_str == "length" {
+                if is_builtin_function_virtual_prop_deleted(env, func_name, "length") {
+                    return Ok(Value::Undefined);
+                }
+                let len = match func_name.as_str() {
+                    "Array.prototype.push"
+                    | "Array.prototype.indexOf"
+                    | "Array.prototype.lastIndexOf"
+                    | "Array.prototype.concat"
+                    | "Array.prototype.forEach"
+                    | "Array.prototype.map"
+                    | "Array.prototype.filter"
+                    | "Array.prototype.some"
+                    | "Array.prototype.every"
+                    | "Array.prototype.find"
+                    | "Array.prototype.findIndex"
+                    | "Array.prototype.findLast"
+                    | "Array.prototype.findLastIndex"
+                    | "Array.prototype.reduce"
+                    | "Array.prototype.reduceRight"
+                    | "Array.prototype.fill"
+                    | "Array.prototype.includes"
+                    | "Array.prototype.join"
+                    | "Array.prototype.unshift"
+                    | "Object.entries"
+                    | "Object.freeze"
+                    | "Object.fromEntries"
+                    | "Object.getOwnPropertyDescriptors"
+                    | "Object.getOwnPropertyNames"
+                    | "Object.getOwnPropertySymbols"
+                    | "Object.getPrototypeOf"
+                    | "Object.isExtensible"
+                    | "Object.isFrozen"
+                    | "Object.isSealed"
+                    | "Object.keys"
+                    | "Object.preventExtensions"
+                    | "Object.seal"
+                    | "Object.values"
+                    | "Object.prototype.hasOwnProperty"
+                    | "Object.prototype.isPrototypeOf"
+                    | "Object.prototype.propertyIsEnumerable"
+                    | "Object.prototype.__lookupGetter__"
+                    | "Object.prototype.__lookupSetter__"
+                    | "Array.prototype.sort" => 1.0,
+                    "Array.prototype.slice"
+                    | "Array.prototype.splice"
+                    | "Array.prototype.copyWithin"
+                    | "Object.assign"
+                    | "Object.create"
+                    | "Object.defineProperties"
+                    | "Object.getOwnPropertyDescriptor"
+                    | "Object.groupBy"
+                    | "Object.hasOwn"
+                    | "Object.is"
+                    | "Object.setPrototypeOf" => 2.0,
+                    "Object.defineProperty" => 3.0,
+                    _ => 0.0,
+                };
+                return Ok(Value::Number(len));
+            }
+            if k_str == "name" {
+                if is_builtin_function_virtual_prop_deleted(env, func_name, "name") {
+                    return Ok(Value::Undefined);
+                }
+                let short_name = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                return Ok(Value::String(utf8_to_utf16(short_name)));
+            }
+        }
+        get_primitive_prototype_property(mc, env, &obj_val, &key)
     } else {
         get_primitive_prototype_property(mc, env, &obj_val, &key)
     }
@@ -16703,7 +17135,9 @@ pub(crate) fn get_property_with_accessors<'gc>(
                     (buf_len - ta.byte_offset) / ta.element_size()
                 }
             } else {
-                ta.length
+                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                let needed = ta.byte_offset + ta.length * ta.element_size();
+                if buf_len < needed { 0 } else { ta.length }
             };
             if idx < cur_len {
                 log::trace!("get_property_with_accessors: typedarray idx {} cur_len {}", idx, cur_len);
@@ -16903,26 +17337,13 @@ fn set_property_with_accessors<'gc>(
             }
             return Ok(());
         }
-        match &val {
-            Value::Number(n) => {
-                if !n.is_finite() {
-                    return Err(raise_range_error!("Invalid array length").into());
-                }
-                if *n < 0.0 {
-                    return Err(raise_range_error!("Invalid array length").into());
-                }
-                if *n != n.trunc() {
-                    return Err(raise_range_error!("Invalid array length").into());
-                }
-                let new_len = *n as usize;
-                crate::core::object_set_length(mc, obj, new_len)?;
-                return Ok(());
-            }
-            _ => {
-                // In JS, setting length to non-number triggers ToUint32 conversion; for now, reject
-                return Err(raise_range_error!("Invalid array length").into());
-            }
+        let number_len = to_number_with_env(mc, _env, val)?;
+        let uint32_len = to_uint32_value_with_env(mc, _env, val)?;
+        if !number_len.is_finite() || number_len < 0.0 || (uint32_len as f64) != number_len {
+            return Err(raise_range_error!("Invalid array length").into());
         }
+        crate::core::object_set_length(mc, obj, uint32_len as usize)?;
+        return Ok(());
     }
 
     // If this object is a Proxy wrapper, delegate to its set trap
@@ -17204,6 +17625,55 @@ pub fn call_native_function<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    if name == "Object.prototype.toLocaleString" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        let v = call_object_prototype_to_locale_string(mc, env, this_v)?;
+        return Ok(Some(v));
+    }
+
+    if name == "Array.isArray" || name == "Array.from" || name == "Array.of" {
+        let method = name.trim_start_matches("Array.");
+        let v = crate::js_array::handle_array_static_method(mc, method, this_val, args, env)?;
+        return Ok(Some(v));
+    }
+
+    if name == "Array.prototype.indexOf"
+        || name == "Array.prototype.lastIndexOf"
+        || name == "Array.prototype.join"
+        || name == "Array.prototype.slice"
+        || name == "Array.prototype.forEach"
+        || name == "Array.prototype.map"
+        || name == "Array.prototype.every"
+        || name == "Array.prototype.some"
+        || name == "Array.prototype.filter"
+        || name == "Array.prototype.fill"
+        || name == "Array.prototype.copyWithin"
+        || name == "Array.prototype.find"
+        || name == "Array.prototype.findIndex"
+        || name == "Array.prototype.keys"
+        || name == "Array.prototype.values"
+        || name == "Array.prototype.entries"
+        || name == "Array.prototype.reduce"
+        || name == "Array.prototype.reduceRight"
+    {
+        let method = name.trim_start_matches("Array.prototype.");
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        let receiver_obj = match this_v {
+            Value::Object(obj) => *obj,
+            Value::Undefined | Value::Null => {
+                return Err(raise_type_error!("Array.prototype method called on null or undefined").into());
+            }
+            _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_v), env)? {
+                Value::Object(obj) => obj,
+                _ => {
+                    return Err(raise_type_error!("Array.prototype method called on incompatible receiver").into());
+                }
+            },
+        };
+        let v = crate::js_array::handle_array_instance_method(mc, &receiver_obj, method, args, env)?;
+        return Ok(Some(v));
+    }
+
     if name == "Object.create" {
         let proto = args.first().unwrap_or(&Value::Undefined);
         let new_obj = crate::core::new_js_object_data(mc);
@@ -19396,6 +19866,11 @@ fn evaluate_expr_new<'gc>(
                         if cl.is_arrow {
                             return Err(raise_type_error!("Not a constructor").into());
                         }
+                        if let Some(native_name) = &cl.native_target
+                            && (native_name == "Array.isArray" || native_name == "Array.from" || native_name == "Array.of")
+                        {
+                            return Err(raise_type_error!("Not a constructor").into());
+                        }
 
                         // 1. Create instance
                         let instance = crate::core::new_js_object_data(mc);
@@ -19554,6 +20029,14 @@ fn evaluate_expr_new<'gc>(
                         new_obj.borrow_mut(mc).set_non_enumerable("length");
                         new_obj.borrow_mut(mc).set_non_writable("length");
                         new_obj.borrow_mut(mc).set_non_configurable("length");
+
+                        if let Some(str_val) = object_get_key_value(&new_obj, "__value__")
+                            && let Value::String(s) = &*str_val.borrow()
+                        {
+                            for (idx, unit) in s.iter().enumerate() {
+                                object_set_key_value(mc, &new_obj, idx, &Value::String(vec![*unit]))?;
+                            }
+                        }
                         return Ok(Value::Object(new_obj));
                     } else if name_str == "Boolean" {
                         let val = match crate::js_boolean::boolean_constructor(&eval_args)? {
@@ -20070,7 +20553,7 @@ fn evaluate_expr_object<'gc>(
         }
 
         // Merge accessors if existing property is a getter or setter; otherwise set normally
-        if let Some(existing_ptr) = object_get_key_value(&obj, &key_v) {
+        if let Some(existing_ptr) = get_own_property(&obj, &key_v) {
             let existing = existing_ptr.borrow().clone();
             let mut new_val = val.clone();
             // If this is a concise method (not a plain property), propagate the object's

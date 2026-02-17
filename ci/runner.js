@@ -68,7 +68,10 @@ if (!fs.existsSync(REPO_DIR)){
 
 // Build engine
 console.log('Building engine example...');
-const buildRes = spawnSync('cargo', ['build', '--example', 'js', '--all-features'], {stdio:'inherit'});
+const USE_RELEASE = process.env.TEST262_RELEASE !== '0';
+const buildArgs = ['build', '--example', 'js', '--all-features'];
+if (USE_RELEASE) buildArgs.push('--release');
+const buildRes = spawnSync('cargo', buildArgs, {stdio:'inherit'});
 if (!buildRes || buildRes.status !== 0) {
   console.error('ERROR: Engine build failed. Aborting tests.');
   process.exit(buildRes && buildRes.status ? buildRes.status : 1);
@@ -76,9 +79,14 @@ if (!buildRes || buildRes.status !== 0) {
 
 // locate binary
 let BIN = '';
-if (fs.existsSync('target/debug/examples/js')) BIN = 'target/debug/examples/js';
-else if (fs.existsSync('target/debug/js')) BIN = 'target/debug/js';
-else BIN = '';
+if (USE_RELEASE) {
+  if (fs.existsSync('target/release/examples/js')) BIN = 'target/release/examples/js';
+  else if (fs.existsSync('target/release/js')) BIN = 'target/release/js';
+}
+if (!BIN) {
+  if (fs.existsSync('target/debug/examples/js')) BIN = 'target/debug/examples/js';
+  else if (fs.existsSync('target/debug/js')) BIN = 'target/debug/js';
+}
 console.log(`JS engine binary: ${BIN}`);
 
 // Build harness index
@@ -243,7 +251,8 @@ function detectFeature(feat){
     }
 
     const runArgs = probeIsModule ? ['--module', probeFile] : [probeFile];
-    const res = spawnSync(BIN, runArgs, {timeout:2000, encoding:'utf8'});
+    const probeTimeoutMs = Math.max(5000, Number(TIMEOUT_SECS || 0) * 1000);
+    const res = spawnSync(BIN, runArgs, {timeout: probeTimeoutMs, encoding:'utf8'});
     const out = (res && res.stdout) ? String(res.stdout) : '';
     if (out.includes('OK')) FEATURE_SUPPORTED[feat] = true; else FEATURE_SUPPORTED[feat] = false;
   } else {

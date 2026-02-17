@@ -428,6 +428,15 @@ pub fn create_arguments_object<'gc>(
         arguments_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
     }
 
+    if let Some(sym_ctor) = object_get_key_value(func_env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        object_set_key_value(mc, &arguments_obj, tag_sym, &Value::String(utf8_to_utf16("Arguments")))?;
+        arguments_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+    }
+
     // Set 'length' property
     object_set_key_value(mc, &arguments_obj, "length", &Value::Number(evaluated_args.len() as f64))?;
     arguments_obj.borrow_mut(mc).set_non_enumerable("length");
@@ -899,9 +908,27 @@ pub(crate) fn evaluate_new<'gc>(
     evaluated_args: &[Value<'gc>],
     new_target: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    if let Value::Object(obj) = constructor_val
+        && let Some(cl_ptr) = obj.borrow().get_closure()
+    {
+        let native_target = match &*cl_ptr.borrow() {
+            Value::Closure(cl) | Value::AsyncClosure(cl) => cl.native_target.clone(),
+            _ => None,
+        };
+        if let Some(name) = native_target
+            && (name == "Array.isArray" || name == "Array.from" || name == "Array.of")
+        {
+            return Err(raise_type_error!("Constructor is not callable").into());
+        }
+    }
+
     if let Value::Object(bound_obj) = constructor_val
         && let Some(bound_target_rc) = crate::core::get_own_property(bound_obj, "__bound_target")
     {
+        if crate::core::get_own_property(bound_obj, "__is_constructor").is_none() {
+            return Err(raise_type_error!("Constructor is not callable").into());
+        }
+
         let bound_target = bound_target_rc.borrow().clone();
         let bound_arg_len = crate::core::get_own_property(bound_obj, "__bound_arg_len")
             .and_then(|v| {
@@ -930,6 +957,16 @@ pub(crate) fn evaluate_new<'gc>(
 
     match constructor_val {
         Value::Object(class_obj) => {
+            let own_prototype_property = get_own_property(class_obj, "prototype");
+            let has_own_prototype_property = own_prototype_property.is_some();
+            let constructor_marked = class_obj.borrow().class_def.is_some()
+                || get_own_property(class_obj, "__is_constructor").is_some()
+                || get_own_property(class_obj, "__native_ctor").is_some();
+            let has_callable_shape = class_obj.borrow().get_closure().is_some() || get_own_property(class_obj, "__bound_target").is_some();
+            if has_callable_shape && !constructor_marked && !has_own_prototype_property {
+                return Err(raise_type_error!("Constructor is not callable").into());
+            }
+
             // Methods are not constructors. Some ordinary functions may still carry
             // a home object in this engine, so only reject when there is no valid
             // own `.prototype` object.
@@ -2098,6 +2135,12 @@ pub(crate) fn evaluate_new<'gc>(
                     return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, env);
                 }
                 _ => {
+                    if let Some(resolved_rc) = crate::core::env_get(env, func_name) {
+                        let resolved = resolved_rc.borrow().clone();
+                        if !matches!(&resolved, Value::Function(n) if n == func_name) {
+                            return evaluate_new(mc, env, &resolved, evaluated_args, new_target);
+                        }
+                    }
                     log::warn!("evaluate_new - constructor is not an object or closure: Function({func_name})",);
                 }
             }
@@ -4266,6 +4309,11 @@ pub(crate) fn handle_object_constructor<'gc>(
             object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
             let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(s.len() as f64), false, false, false)?;
             crate::js_object::define_property_internal(mc, &obj, "length", &len_desc)?;
+            for (idx, unit) in s.iter().enumerate() {
+                let ch_val = Value::String(vec![*unit]);
+                let idx_desc = crate::core::create_descriptor_object(mc, &ch_val, false, true, false)?;
+                crate::js_object::define_property_internal(mc, &obj, idx, &idx_desc)?;
+            }
             object_set_key_value(mc, &obj, "__value__", &Value::String(s))?;
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String")?;
             Ok(Value::Object(obj))

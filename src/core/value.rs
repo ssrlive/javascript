@@ -6,7 +6,7 @@ use crate::{
         ClassDefinition, DestructuringElement, EvalError, Expr, PropertyKey, Statement, VarDeclKind, call_closure, evaluate_call_dispatch,
         is_error,
     },
-    raise_type_error,
+    raise_range_error, raise_type_error,
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -1052,6 +1052,7 @@ pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value
             }
         }
         (Value::String(s1), Value::String(s2)) => s1 == s2,
+        (Value::BigInt(b1), Value::BigInt(b2)) => **b1 == **b2,
         (Value::Boolean(b1), Value::Boolean(b2)) => b1 == b2,
         (Value::Function(f1), Value::Function(f2)) => f1 == f2,
         (Value::Undefined, Value::Undefined) => true,
@@ -1225,6 +1226,96 @@ pub fn object_set_key_value<'gc>(
     val: &Value<'gc>,
 ) -> Result<(), JSError> {
     let key = key.into();
+
+    // Array exotic length assignment semantics for ordinary writes (e.g. `arr.length = ...`).
+    // Keep descriptor object writes (`Value::Property`) on `length` untouched so
+    // `Object.defineProperty` plumbing can store descriptor metadata directly.
+    if crate::js_array::is_array(mc, obj)
+        && matches!(key, PropertyKey::String(ref s) if s == "length")
+        && !matches!(val, Value::Property { .. })
+    {
+        let number_len = match val {
+            Value::Number(n) => *n,
+            Value::Boolean(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Value::Null => 0.0,
+            Value::Undefined | Value::Uninitialized => f64::NAN,
+            Value::String(s) => {
+                let raw = utf16_to_utf8(s);
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    0.0
+                } else {
+                    trimmed.parse::<f64>().unwrap_or(f64::NAN)
+                }
+            }
+            Value::BigInt(_) => return Err(raise_type_error!("Cannot convert a BigInt value to a number")),
+            Value::Symbol(_) => return Err(raise_type_error!("Cannot convert a Symbol value to a number")),
+            Value::Object(o) => {
+                let hydrate_prop = |v: &Value<'gc>| -> Value<'gc> {
+                    match v {
+                        Value::Property { value: Some(inner), .. } => inner.borrow().clone(),
+                        other => other.clone(),
+                    }
+                };
+
+                if let Some(inner) = object_get_key_value(o, "__value__") {
+                    let unwrapped = hydrate_prop(&inner.borrow());
+                    crate::core::eval::to_number(&unwrapped).map_err(|_| raise_type_error!("Cannot convert object to number"))?
+                } else {
+                    let call_env = o.borrow().definition_env.or(obj.borrow().definition_env).unwrap_or(*obj);
+
+                    let try_call_method = |name: &str| -> Result<Option<Value<'gc>>, JSError> {
+                        if let Some(method_cell) = object_get_key_value(o, name) {
+                            let method = hydrate_prop(&method_cell.borrow());
+                            let callable = matches!(
+                                method,
+                                Value::Function(_)
+                                    | Value::Closure(_)
+                                    | Value::AsyncClosure(_)
+                                    | Value::GeneratorFunction(_, _)
+                                    | Value::AsyncGeneratorFunction(_, _)
+                            ) || matches!(&method, Value::Object(fn_obj) if fn_obj.borrow().get_closure().is_some());
+
+                            if callable {
+                                let this_arg = Value::Object(*o);
+                                let res = evaluate_call_dispatch(mc, &call_env, &method, Some(&this_arg), &[])
+                                    .map_err(|_| raise_type_error!("Cannot convert object to number"))?;
+                                return Ok(Some(res));
+                            }
+                        }
+                        Ok(None)
+                    };
+
+                    if let Some(v) = try_call_method("valueOf")?
+                        && !matches!(v, Value::Object(_))
+                    {
+                        crate::core::eval::to_number(&v).map_err(|_| raise_type_error!("Cannot convert object to number"))?
+                    } else if let Some(v) = try_call_method("toString")?
+                        && !matches!(v, Value::Object(_))
+                    {
+                        crate::core::eval::to_number(&v).map_err(|_| raise_type_error!("Cannot convert object to number"))?
+                    } else {
+                        return Err(raise_type_error!("Cannot convert object to number"));
+                    }
+                }
+            }
+            _ => f64::NAN,
+        };
+
+        if !number_len.is_finite() || number_len < 0.0 || number_len.fract() != 0.0 || number_len > (u32::MAX as f64) {
+            return Err(raise_range_error!("Invalid array length"));
+        }
+
+        let new_len = number_len as usize;
+        object_set_length(mc, obj, new_len)?;
+        return Ok(());
+    }
 
     let (exists, is_extensible) = {
         let obj_ref = obj.borrow();
@@ -1440,11 +1531,17 @@ pub fn object_set_key_value<'gc>(
 
     // If obj is an array and we're setting a numeric index, update length accordingly
     if let PropertyKey::String(s) = &key
-        && let Ok(idx) = s.parse::<usize>()
+        && let Ok(idx_u64) = s.parse::<u64>()
+        && idx_u64 < 2_u64.pow(32) - 1
+        && idx_u64.to_string() == *s
         && crate::js_array::is_array(mc, obj)
     {
+        let idx = idx_u64 as usize;
         let current_len = object_get_length(obj).unwrap_or(0);
         if idx >= current_len {
+            if !obj.borrow().is_writable("length") {
+                return Err(raise_type_error!("Cannot assign to read only property 'length'"));
+            }
             // Set internal length to idx + 1
             object_set_length(mc, obj, idx + 1)?;
         }
@@ -1600,19 +1697,42 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 }
 
 pub fn object_get_length<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
-    if let Some(len_ptr) = object_get_key_value(obj, "length")
-        && let Value::Number(n) = &*len_ptr.borrow()
-    {
-        return Some(*n as usize);
+    if let Some(len_ptr) = object_get_key_value(obj, "length") {
+        let len_val = len_ptr.borrow();
+        match &*len_val {
+            Value::Number(n) => return Some(*n as usize),
+            Value::Property { value: Some(inner), .. } => {
+                if let Value::Number(n) = &*inner.borrow() {
+                    return Some(*n as usize);
+                }
+            }
+            _ => {}
+        }
     }
     None
 }
 
 pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
+    if crate::js_array::is_array(mc, obj) && length > u32::MAX as usize {
+        return Err(raise_range_error!("Invalid array length"));
+    }
+
     // When reducing array length, delete indexed properties >= new length
     if let Some(cur_len) = object_get_length(obj)
         && length < cur_len
     {
+        // Non-configurable indexed properties prevent length reduction.
+        for prop_key in obj.borrow().properties.keys() {
+            if let PropertyKey::String(s) = prop_key
+                && let Ok(idx) = s.parse::<usize>()
+                && idx >= length
+                && idx.to_string() == *s
+                && !obj.borrow().is_configurable(prop_key.clone())
+            {
+                return Err(raise_type_error!("Cannot delete non-configurable property"));
+            }
+        }
+
         // IMPORTANT: Do not iterate over the full numeric range (which can be huge).
         // Only delete indexed properties that actually exist.
         let keys_to_delete: Vec<PropertyKey<'gc>> = obj
@@ -1637,6 +1757,7 @@ pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'
             let _ = obj_mut.properties.shift_remove(&key);
         }
     }
-    object_set_key_value(mc, obj, "length", &Value::Number(length as f64))?;
+    let len_ptr = new_gc_cell_ptr(mc, Value::Number(length as f64));
+    obj.borrow_mut(mc).insert("length", len_ptr);
     Ok(())
 }

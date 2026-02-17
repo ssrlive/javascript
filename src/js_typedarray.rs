@@ -2221,7 +2221,9 @@ pub fn handle_typedarray_accessor<'gc>(
                             (buf_len - ta.byte_offset) / ta.element_size()
                         }
                     } else {
-                        ta.length
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
                     };
                     Ok(Value::Number((cur_len * ta.element_size()) as f64))
                 }
@@ -2235,7 +2237,9 @@ pub fn handle_typedarray_accessor<'gc>(
                             (buf_len - ta.byte_offset) / ta.element_size()
                         }
                     } else {
-                        ta.length
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if buf_len < needed { 0 } else { ta.length }
                     };
                     Ok(Value::Number(cur_len as f64))
                 }

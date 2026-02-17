@@ -1,4 +1,4 @@
-use crate::core::{Gc, MutationContext, get_property_with_accessors, js_error_to_value, new_gc_cell_ptr};
+use crate::core::{ClosureData, Gc, MutationContext, get_property_with_accessors, js_error_to_value, new_gc_cell_ptr};
 use crate::core::{JSObjectDataPtr, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::js_array::is_array;
 use crate::unicode::utf8_to_utf16;
@@ -17,14 +17,59 @@ use std::time::Duration;
 static WAITERS: LazyLock<Mutex<HashMap<(usize, usize), Vec<Arc<(Mutex<bool>, Condvar)>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Create an ArrayBuffer constructor object
-pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
-    // Set the constructor function
-    object_set_key_value(mc, &obj, "prototype", &Value::Object(make_arraybuffer_prototype(mc)?))?;
+    if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*proto_val.borrow()
+    {
+        obj.borrow_mut(mc).prototype = Some(*func_proto);
+    }
+
+    let proto = make_arraybuffer_prototype(mc, env, &obj)?;
+    object_set_key_value(mc, &obj, "prototype", &Value::Object(proto))?;
+    obj.borrow_mut(mc).set_non_writable("prototype");
+    obj.borrow_mut(mc).set_non_enumerable("prototype");
+    obj.borrow_mut(mc).set_non_configurable("prototype");
+
     object_set_key_value(mc, &obj, "name", &Value::String(utf8_to_utf16("ArrayBuffer")))?;
+    obj.borrow_mut(mc).set_non_writable("name");
+    obj.borrow_mut(mc).set_non_enumerable("name");
+    object_set_key_value(mc, &obj, "length", &Value::Number(1.0))?;
+    obj.borrow_mut(mc).set_non_writable("length");
+    obj.borrow_mut(mc).set_non_enumerable("length");
+
+    let is_view_fn = new_js_object_data(mc);
+    if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*proto_val.borrow()
+    {
+        is_view_fn.borrow_mut(mc).prototype = Some(*func_proto);
+    }
+    let closure = ClosureData {
+        env: Some(*env),
+        native_target: Some("ArrayBuffer.isView".to_string()),
+        enforce_strictness_inheritance: true,
+        ..ClosureData::default()
+    };
+    is_view_fn
+        .borrow_mut(mc)
+        .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, closure)))));
+    object_set_key_value(mc, &is_view_fn, "name", &Value::String(utf8_to_utf16("isView")))?;
+    is_view_fn.borrow_mut(mc).set_non_writable("name");
+    is_view_fn.borrow_mut(mc).set_non_enumerable("name");
+    object_set_key_value(mc, &is_view_fn, "length", &Value::Number(1.0))?;
+    is_view_fn.borrow_mut(mc).set_non_writable("length");
+    is_view_fn.borrow_mut(mc).set_non_enumerable("length");
+
+    object_set_key_value(mc, &obj, "isView", &Value::Object(is_view_fn))?;
+    obj.borrow_mut(mc).set_non_enumerable("isView");
 
     // Mark as ArrayBuffer constructor
+    object_set_key_value(mc, &obj, "__is_constructor", &Value::Boolean(true))?;
     object_set_key_value(mc, &obj, "__arraybuffer", &Value::Boolean(true))?;
     object_set_key_value(mc, &obj, "__native_ctor", &Value::String(utf8_to_utf16("ArrayBuffer")))?;
 
@@ -428,23 +473,55 @@ pub fn make_sharedarraybuffer_constructor<'gc>(mc: &MutationContext<'gc>) -> Res
 }
 
 /// Create the ArrayBuffer prototype
-pub fn make_arraybuffer_prototype<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_arraybuffer_prototype<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    ctor: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let proto = new_js_object_data(mc);
 
-    // Add methods to prototype
-    object_set_key_value(mc, &proto, "constructor", &Value::Function("ArrayBuffer".to_string()))?;
+    object_set_key_value(mc, &proto, "constructor", &Value::Object(*ctor))?;
+    proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // byteLength is an accessor property
-    let byte_len_getter = Value::Function("ArrayBuffer.prototype.byteLength".to_string());
+    let byte_len_getter = Value::Function("get byteLength".to_string());
     let byte_len_prop = Value::Property {
         value: None,
         getter: Some(Box::new(byte_len_getter)),
         setter: None,
     };
     object_set_key_value(mc, &proto, "byteLength", &byte_len_prop)?;
+    proto.borrow_mut(mc).set_non_enumerable("byteLength");
+
+    let max_byte_len_prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(Value::Function("get maxByteLength".to_string()))),
+        setter: None,
+    };
+    object_set_key_value(mc, &proto, "maxByteLength", &max_byte_len_prop)?;
+    proto.borrow_mut(mc).set_non_enumerable("maxByteLength");
+
+    let resizable_prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(Value::Function("get resizable".to_string()))),
+        setter: None,
+    };
+    object_set_key_value(mc, &proto, "resizable", &resizable_prop)?;
+    proto.borrow_mut(mc).set_non_enumerable("resizable");
 
     object_set_key_value(mc, &proto, "slice", &Value::Function("ArrayBuffer.prototype.slice".to_string()))?;
+    proto.borrow_mut(mc).set_non_enumerable("slice");
     object_set_key_value(mc, &proto, "resize", &Value::Function("ArrayBuffer.prototype.resize".to_string()))?;
+    proto.borrow_mut(mc).set_non_enumerable("resize");
+
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        let desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("ArrayBuffer")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &proto, PropertyKey::Symbol(*tag_sym), &desc)?;
+    }
 
     Ok(proto)
 }
@@ -841,18 +918,49 @@ fn make_typedarray_prototype<'gc>(
 pub fn handle_arraybuffer_constructor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    // ArrayBuffer(length)
-    if args.is_empty() {
-        return Err(raise_eval_error!("ArrayBuffer constructor requires a length argument"));
-    }
+    env: &JSObjectDataPtr<'gc>,
+    new_target: Option<&Value<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let to_index = |v: &Value<'gc>| -> Result<usize, EvalError<'gc>> {
+        let prim = if let Value::Object(_) = v {
+            crate::core::to_primitive(mc, v, "number", env)?
+        } else {
+            v.clone()
+        };
 
-    let length_val = args[0].clone();
-    let length = match length_val {
-        Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
-        _ => return Err(raise_eval_error!("ArrayBuffer length must be a non-negative integer")),
+        if matches!(prim, Value::Undefined) {
+            return Ok(0);
+        }
+        if matches!(prim, Value::Symbol(_) | Value::BigInt(_)) {
+            return Err(raise_type_error!("Cannot convert value to index").into());
+        }
+
+        let n = crate::core::to_number(&prim)?;
+        let integer_index = if n.is_nan() || n == 0.0 {
+            0.0
+        } else if !n.is_finite() {
+            n
+        } else {
+            n.trunc()
+        };
+
+        if integer_index < 0.0 {
+            return Err(raise_range_error!("ArrayBuffer length must be a non-negative integer").into());
+        }
+
+        let to_length = if !integer_index.is_finite() {
+            (1u64 << 53) as f64 - 1.0
+        } else {
+            integer_index.min((1u64 << 53) as f64 - 1.0)
+        };
+        if (integer_index - to_length).abs() > 0.0 {
+            return Err(raise_range_error!("ArrayBuffer length is too large").into());
+        }
+
+        Ok(integer_index as usize)
     };
+
+    let length = if let Some(v) = args.first() { to_index(v)? } else { 0 };
 
     // Parse optional options object for resizable buffers
     let mut max_byte_length: Option<usize> = None;
@@ -860,22 +968,71 @@ pub fn handle_arraybuffer_constructor<'gc>(
         let opts = args[1].clone();
         if let Value::Object(obj) = opts {
             // Look for maxByteLength property
-            if let Some(val) = object_get_key_value(&obj, "maxByteLength") {
-                match &*val.borrow() {
-                    Value::Number(n) if *n >= 0.0 && *n <= u32::MAX as f64 && n.fract() == 0.0 => {
-                        let max = *n as usize;
-                        if max < length {
-                            return Err(crate::raise_range_error!("maxByteLength must be >= length"));
-                        }
-                        max_byte_length = Some(max);
-                    }
-                    _ => return Err(crate::raise_range_error!("maxByteLength must be a non-negative integer")),
+            let max_val = crate::core::get_property_with_accessors(mc, env, &obj, "maxByteLength")?;
+            if !matches!(max_val, Value::Undefined) {
+                let max = to_index(&max_val)?;
+                if max < length {
+                    return Err(crate::raise_range_error!("maxByteLength must be >= length").into());
                 }
+                if max > (u32::MAX as usize) {
+                    return Err(crate::raise_range_error!("maxByteLength is too large").into());
+                }
+                max_byte_length = Some(max);
             }
         }
     }
 
-    // Create ArrayBuffer instance
+    // Create the ArrayBuffer object first (AllocateArrayBuffer ordering)
+    let obj = new_js_object_data(mc);
+
+    // Set prototype from NewTarget.prototype if object; otherwise fallback to ArrayBuffer.prototype
+    let mut proto_from_target: Option<JSObjectDataPtr<'gc>> = None;
+    if let Some(Value::Object(nt_obj)) = new_target {
+        let proto_val = crate::core::get_property_with_accessors(mc, env, nt_obj, "prototype")?;
+        if let Value::Object(proto_obj) = proto_val {
+            proto_from_target = Some(proto_obj);
+        } else if let Value::Object(origin_global) = crate::core::get_property_with_accessors(mc, env, nt_obj, "__origin_global")? {
+            let origin_ctor = crate::core::get_property_with_accessors(mc, env, &origin_global, "ArrayBuffer")?;
+            if let Value::Object(origin_ctor_obj) = origin_ctor {
+                let origin_proto = crate::core::get_property_with_accessors(mc, env, &origin_ctor_obj, "prototype")?;
+                if let Value::Object(origin_proto_obj) = origin_proto {
+                    proto_from_target = Some(origin_proto_obj);
+                }
+            }
+        }
+
+        if proto_from_target.is_none()
+            && let Some(cl_rc) = nt_obj.borrow().get_closure()
+            && let Value::Closure(cl) = &*cl_rc.borrow()
+            && let Some(nt_env) = cl.env
+            && let Some(ab_ctor_rc) = crate::core::env_get(&nt_env, "ArrayBuffer")
+            && let Value::Object(ab_ctor_obj) = &*ab_ctor_rc.borrow()
+            && let Some(ab_proto_rc) = object_get_key_value(ab_ctor_obj, "prototype")
+            && let Value::Object(ab_proto_obj) = &*ab_proto_rc.borrow()
+        {
+            proto_from_target = Some(*ab_proto_obj);
+        }
+    }
+
+    let proto = if let Some(p) = proto_from_target {
+        p
+    } else if let Some(ctor_val) = object_get_key_value(env, "ArrayBuffer")
+        && let Value::Object(ctor_obj) = &*ctor_val.borrow()
+        && let Some(p_val) = object_get_key_value(ctor_obj, "prototype")
+        && let Value::Object(p_obj) = &*p_val.borrow()
+    {
+        *p_obj
+    } else {
+        let fallback_ctor = new_js_object_data(mc);
+        make_arraybuffer_prototype(mc, env, &fallback_ctor)?
+    };
+    obj.borrow_mut(mc).prototype = Some(proto);
+
+    // Host guard against unsupported large allocation (after object/prototype creation)
+    if length > (u32::MAX as usize) {
+        return Err(raise_range_error!("ArrayBuffer length is too large").into());
+    }
+
     let buffer = new_gc_cell_ptr(
         mc,
         JSArrayBuffer {
@@ -884,16 +1041,23 @@ pub fn handle_arraybuffer_constructor<'gc>(
             ..JSArrayBuffer::default()
         },
     );
-
-    // Create the ArrayBuffer object
-    let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "__arraybuffer", &Value::ArrayBuffer(buffer))?;
 
-    // Set prototype
-    let proto = make_arraybuffer_prototype(mc)?;
-    obj.borrow_mut(mc).prototype = Some(proto);
-
     Ok(Value::Object(obj))
+}
+
+pub fn handle_arraybuffer_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
+    match method {
+        "isView" => {
+            if let Some(Value::Object(obj)) = args.first() {
+                let is_view = object_get_key_value(obj, "__typedarray").is_some() || object_get_key_value(obj, "__dataview").is_some();
+                Ok(Value::Boolean(is_view))
+            } else {
+                Ok(Value::Boolean(false))
+            }
+        }
+        _ => Ok(Value::Undefined),
+    }
 }
 
 /// Handle SharedArrayBuffer constructor calls (creates a shared buffer)
@@ -2097,13 +2261,45 @@ pub fn handle_arraybuffer_accessor<'gc>(
                     let len = (**ab).borrow().data.lock().unwrap().len();
                     Ok(Value::Number(len as f64))
                 } else {
-                    Err(raise_eval_error!(
+                    Err(raise_type_error!(
                         "Method ArrayBuffer.prototype.byteLength called on incompatible receiver"
                     ))
                 }
             } else {
-                Err(raise_eval_error!(
+                Err(raise_type_error!(
                     "Method ArrayBuffer.prototype.byteLength called on incompatible receiver"
+                ))
+            }
+        }
+        "maxByteLength" => {
+            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
+                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    let b = (**ab).borrow();
+                    let len = b.data.lock().unwrap().len();
+                    Ok(Value::Number(b.max_byte_length.unwrap_or(len) as f64))
+                } else {
+                    Err(raise_type_error!(
+                        "Method ArrayBuffer.prototype.maxByteLength called on incompatible receiver"
+                    ))
+                }
+            } else {
+                Err(raise_type_error!(
+                    "Method ArrayBuffer.prototype.maxByteLength called on incompatible receiver"
+                ))
+            }
+        }
+        "resizable" => {
+            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
+                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    Ok(Value::Boolean((**ab).borrow().max_byte_length.is_some()))
+                } else {
+                    Err(raise_type_error!(
+                        "Method ArrayBuffer.prototype.resizable called on incompatible receiver"
+                    ))
+                }
+            } else {
+                Err(raise_type_error!(
+                    "Method ArrayBuffer.prototype.resizable called on incompatible receiver"
                 ))
             }
         }
@@ -2113,6 +2309,7 @@ pub fn handle_arraybuffer_accessor<'gc>(
 
 pub fn handle_arraybuffer_method<'gc>(
     mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -2122,20 +2319,43 @@ pub fn handle_arraybuffer_method<'gc>(
             if let Some(ab_val) = object_get_key_value(object, "__arraybuffer")
                 && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
             {
+                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor").map_err(JSError::from)?;
+                if !matches!(ctor_val, Value::Undefined | Value::Object(_)) {
+                    return Err(raise_type_error!("constructor value is not an object"));
+                }
+
                 let data = (**ab).borrow().data.lock().unwrap().clone();
                 let len = data.len() as i64;
 
-                let to_index = |v: Option<&Value<'gc>>, default: i64| -> i64 {
+                let to_integer_or_infinity = |v: Option<&Value<'gc>>, default: i64| -> Result<i64, JSError> {
                     let raw = match v {
-                        Some(Value::Number(n)) => n.trunc() as i64,
-                        Some(Value::Undefined) | None => default,
-                        _ => default,
+                        None | Some(Value::Undefined) => default as f64,
+                        Some(Value::Object(_)) => {
+                            let prim = crate::core::to_primitive(mc, v.unwrap(), "number", env).map_err(JSError::from)?;
+                            crate::core::to_number(&prim).map_err(JSError::from)?
+                        }
+                        Some(other) => crate::core::to_number(other).map_err(JSError::from)?,
                     };
-                    if raw < 0 { (len + raw).max(0) } else { raw.min(len) }
+
+                    let int = if raw.is_nan() || raw == 0.0 {
+                        0
+                    } else if !raw.is_finite() {
+                        if raw.is_sign_negative() { i64::MIN } else { i64::MAX }
+                    } else {
+                        raw.trunc() as i64
+                    };
+                    Ok(int)
                 };
 
-                let start = to_index(args.first(), 0);
-                let end = to_index(args.get(1), len);
+                let start_raw = to_integer_or_infinity(args.first(), 0)?;
+                let end_raw = to_integer_or_infinity(args.get(1), len)?;
+
+                let start = if start_raw < 0 {
+                    (len + start_raw).max(0)
+                } else {
+                    start_raw.min(len)
+                };
+                let end = if end_raw < 0 { (len + end_raw).max(0) } else { end_raw.min(len) };
                 let final_end = end.max(start);
                 let start_usize = start as usize;
                 let end_usize = final_end as usize;
@@ -2155,46 +2375,72 @@ pub fn handle_arraybuffer_method<'gc>(
 
                 return Ok(Value::Object(new_obj));
             }
-            Err(raise_eval_error!(
+            Err(raise_type_error!(
                 "Method ArrayBuffer.prototype.slice called on incompatible receiver"
             ))
         }
         "resize" => {
             // Get the ArrayBuffer internal
             if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
-                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
-                    // Must be resizable
-                    if let Some(max) = (**ab).borrow().max_byte_length {
-                        if args.is_empty() {
-                            return Err(raise_range_error!("resize requires a new length"));
-                        }
-                        let new_len_val = args[0].clone();
-                        let new_len = match new_len_val {
-                            Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
-                            _ => return Err(raise_range_error!("new length must be a non-negative integer")),
-                        };
-                        if new_len > max {
-                            return Err(raise_range_error!("new length exceeds maximum"));
-                        }
-                        let ab_borrow = (**ab).borrow();
-                        let mut data = ab_borrow.data.lock().unwrap();
-                        let cur_len = data.len();
-                        if new_len > cur_len {
-                            data.resize(new_len, 0u8);
-                        } else if new_len < cur_len {
-                            data.truncate(new_len);
-                        }
-                        Ok(Value::Undefined)
-                    } else {
-                        Err(raise_type_error!("ArrayBuffer is not resizable"))
+                let ab = match &*ab_val.borrow() {
+                    Value::ArrayBuffer(ab) => *ab,
+                    _ => {
+                        return Err(raise_type_error!(
+                            "Method ArrayBuffer.prototype.resize called on incompatible receiver"
+                        ));
                     }
+                };
+
+                let max = { ab.borrow().max_byte_length };
+                if let Some(max) = max {
+                    if args.is_empty() {
+                        return Err(raise_type_error!("resize requires a new length"));
+                    }
+                    let new_len_val = args[0].clone();
+                    let prim = if let Value::Object(_) = &new_len_val {
+                        crate::core::to_primitive(mc, &new_len_val, "number", env).map_err(JSError::from)?
+                    } else {
+                        new_len_val
+                    };
+                    let n = crate::core::to_number(&prim).map_err(JSError::from)?;
+                    let integer = if n.is_nan() || n == 0.0 {
+                        0.0
+                    } else if !n.is_finite() {
+                        n
+                    } else {
+                        n.trunc()
+                    };
+
+                    // Detached check must happen after coercion (per test expectations)
+                    if ab.borrow().detached {
+                        return Err(raise_type_error!("ArrayBuffer is detached"));
+                    }
+
+                    if integer < 0.0 {
+                        return Err(raise_range_error!("new length must be a non-negative integer"));
+                    }
+                    if !integer.is_finite() || integer > (u32::MAX as f64) {
+                        return Err(raise_range_error!("new length exceeds maximum"));
+                    }
+
+                    let new_len = integer as usize;
+                    if new_len > max {
+                        return Err(raise_range_error!("new length exceeds maximum"));
+                    }
+                    let ab_borrow = ab.borrow();
+                    let mut data = ab_borrow.data.lock().unwrap();
+                    let cur_len = data.len();
+                    if new_len > cur_len {
+                        data.resize(new_len, 0u8);
+                    } else if new_len < cur_len {
+                        data.truncate(new_len);
+                    }
+                    Ok(Value::Undefined)
                 } else {
-                    Err(raise_eval_error!(
-                        "Method ArrayBuffer.prototype.resize called on incompatible receiver"
-                    ))
+                    Err(raise_type_error!("ArrayBuffer is not resizable"))
                 }
             } else {
-                Err(raise_eval_error!(
+                Err(raise_type_error!(
                     "Method ArrayBuffer.prototype.resize called on incompatible receiver"
                 ))
             }
@@ -2407,7 +2653,7 @@ pub fn handle_typedarray_method<'gc>(
 }
 
 pub fn initialize_typedarray<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let arraybuffer = make_arraybuffer_constructor(mc)?;
+    let arraybuffer = make_arraybuffer_constructor(mc, env)?;
     crate::core::env_set(mc, env, "ArrayBuffer", &Value::Object(arraybuffer))?;
 
     let dataview = make_dataview_constructor(mc)?;

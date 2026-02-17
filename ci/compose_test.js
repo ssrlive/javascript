@@ -110,6 +110,11 @@ function get262StubLines() {
     '    return (0, eval)(String(src));',
     '  };',
     '}',
+    'if (typeof $262.detachArrayBuffer !== "function" && typeof globalThis !== "undefined" && typeof globalThis.__detachArrayBuffer__ === "function") {',
+    '  $262.detachArrayBuffer = function(buffer) {',
+    '    return globalThis.__detachArrayBuffer__(buffer);',
+    '  };',
+    '}',
     'if (typeof $262.createRealm !== "function") {',
     '  $262.createRealm = function() {',
     '      // Delegate to runner-provided native hook when available.',
@@ -160,6 +165,9 @@ function get262StubLines() {
     '      g.Error = Error;',
     '      g.AggregateError = AggregateError;',
     '      g.Array = Array;',
+    '      g.ArrayBuffer = ArrayBuffer;',
+    '      g.SharedArrayBuffer = (typeof SharedArrayBuffer !== "undefined") ? SharedArrayBuffer : undefined;',
+    '      g.DataView = DataView;',
     '      g.Date = Date;',
     '      g.RegExp = RegExp;',
     '      g.Math = Math;',
@@ -243,8 +251,16 @@ function get262StubLines() {
   ];
 }
 
-function inject262Shim(outLines, testPath, meta) {
-  const need262Shim = references262(testPath) || hasFeature(meta, realmFeatureName);
+function inject262Shim(outLines, testPath, meta, prependFiles = []) {
+  let need262Shim = references262(testPath) || hasFeature(meta, realmFeatureName);
+  if (!need262Shim) {
+    for (const p of prependFiles) {
+      if (p && fs.existsSync(p) && references262(p)) {
+        need262Shim = true;
+        break;
+      }
+    }
+  }
   if (!need262Shim) return;
   if (!outLines.some(l => l.indexOf(realmMarker) !== -1)) {
     outLines.push(...get262StubLines());
@@ -380,7 +396,7 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push('');
 
   const meta = extractMeta(testPath);
-  inject262Shim(outLines, testPath, meta);
+  inject262Shim(outLines, testPath, meta, PREPEND_FILES);
 
   // Ensure dynamic import resolves relative to the original test file path,
   // not the composed file path. Only inject when the test actually

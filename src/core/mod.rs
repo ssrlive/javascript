@@ -145,6 +145,9 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     let val = Value::Function("__internal_allsettled_state_record_rejected_env".to_string());
     env_set(mc, env, "__internal_allsettled_state_record_rejected_env", &val)?;
 
+    let val = Value::Function("__detachArrayBuffer__".to_string());
+    env_set(mc, env, "__detachArrayBuffer__", &val)?;
+
     // Expose common global functions as callables
     env_set(mc, env, "parseInt", &Value::Function("parseInt".to_string()))?;
     env_set(mc, env, "parseFloat", &Value::Function("parseFloat".to_string()))?;

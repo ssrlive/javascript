@@ -1187,10 +1187,13 @@ pub fn handle_object_method<'gc>(
                             | "Object.prototype.propertyIsEnumerable"
                             | "Object.prototype.__lookupGetter__"
                             | "Object.prototype.__lookupSetter__"
+                            | "ArrayBuffer.isView"
+                            | "ArrayBuffer.prototype.resize"
                             | "Array.prototype.sort" => 1.0,
                             "Array.prototype.slice"
                             | "Array.prototype.splice"
                             | "Array.prototype.copyWithin"
+                            | "ArrayBuffer.prototype.slice"
                             | "Object.assign"
                             | "Object.create"
                             | "Object.defineProperties"

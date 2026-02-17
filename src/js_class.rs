@@ -1469,7 +1469,9 @@ pub(crate) fn evaluate_new<'gc>(
                     "Set" => return Ok(crate::js_set::handle_set_constructor(mc, evaluated_args, env)?),
                     "WeakMap" => return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, env)?),
                     "WeakSet" => return Ok(crate::js_weakset::handle_weakset_constructor(mc, evaluated_args, env)?),
-                    "ArrayBuffer" => return Ok(crate::js_typedarray::handle_arraybuffer_constructor(mc, evaluated_args, env)?),
+                    "ArrayBuffer" => {
+                        return crate::js_typedarray::handle_arraybuffer_constructor(mc, evaluated_args, env, new_target);
+                    }
                     "SharedArrayBuffer" => {
                         return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, evaluated_args, env)?);
                     }

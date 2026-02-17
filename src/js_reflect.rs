@@ -188,9 +188,19 @@ pub fn handle_reflect_method<'gc>(
             let arguments_list = if args.len() > 1 { args[1].clone() } else { Value::Undefined };
             let new_target = if args.len() > 2 { args[2].clone() } else { target.clone() };
 
-            let is_constructor_value = |v: &Value<'gc>| -> bool {
+            fn is_constructor_value<'gc>(v: &Value<'gc>) -> bool {
                 match v {
                     Value::Object(obj) => {
+                        if let Some(proxy_cell) = crate::core::object_get_key_value(obj, "__proxy__")
+                            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                        {
+                            return is_constructor_value(&proxy.target);
+                        }
+
+                        if let Some(bound_target) = crate::core::object_get_key_value(obj, "__bound_target") {
+                            return is_constructor_value(&bound_target.borrow());
+                        }
+
                         if obj.borrow().class_def.is_some()
                             || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
                             || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
@@ -232,7 +242,7 @@ pub fn handle_reflect_method<'gc>(
                     }
                     _ => false,
                 }
-            };
+            }
 
             if !is_constructor_value(&target) {
                 return Err(raise_type_error!("Reflect.construct target is not a constructor").into());

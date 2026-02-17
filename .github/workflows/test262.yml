@@ -38,6 +38,7 @@ jobs:
           - id: 25
           - id: 26
           - id: 27
+          - id: 28
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -177,6 +178,10 @@ jobs:
             27)
               TITLE='"built-ins/Array"'
               FOCUS='built-ins/Array'
+              ;;
+            28)
+              TITLE='"built-ins/AbstractModuleSource" - "built-ins/ArrayBuffer"'
+              FOCUS='built-ins/AbstractModuleSource,built-ins/AggregateError,built-ins/ArrayBuffer'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

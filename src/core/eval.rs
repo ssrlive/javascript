@@ -16783,10 +16783,13 @@ fn evaluate_expr_index<'gc>(
                     | "Object.prototype.propertyIsEnumerable"
                     | "Object.prototype.__lookupGetter__"
                     | "Object.prototype.__lookupSetter__"
+                    | "ArrayBuffer.isView"
+                    | "ArrayBuffer.prototype.resize"
                     | "Array.prototype.sort" => 1.0,
                     "Array.prototype.slice"
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
+                    | "ArrayBuffer.prototype.slice"
                     | "Object.assign"
                     | "Object.create"
                     | "Object.defineProperties"
@@ -17631,6 +17634,25 @@ pub fn call_native_function<'gc>(
         return Ok(Some(v));
     }
 
+    if name == "__detachArrayBuffer__" {
+        if let Some(Value::Object(obj)) = args.first()
+            && let Some(ab_val) = object_get_key_value(obj, "__arraybuffer")
+        {
+            let ab = match &*ab_val.borrow() {
+                Value::ArrayBuffer(ab) => *ab,
+                _ => return Err(raise_type_error!("detachArrayBuffer requires an ArrayBuffer object").into()),
+            };
+            {
+                let ab_ref = ab.borrow();
+                let mut data = ab_ref.data.lock().unwrap();
+                data.clear();
+            }
+            ab.borrow_mut(mc).detached = true;
+            return Ok(Some(Value::Undefined));
+        }
+        return Err(raise_type_error!("detachArrayBuffer requires an ArrayBuffer object").into());
+    }
+
     if name == "Array.isArray" || name == "Array.from" || name == "Array.of" {
         let method = name.trim_start_matches("Array.");
         let v = crate::js_array::handle_array_static_method(mc, method, this_val, args, env)?;
@@ -18135,21 +18157,49 @@ pub fn call_native_function<'gc>(
         }
     }
 
+    if name == "get byteLength" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_accessor(mc, obj, "byteLength")?));
+        }
+        return Err(raise_type_error!("Method ArrayBuffer.prototype.byteLength called on incompatible receiver").into());
+    }
+
+    if name == "get maxByteLength" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_accessor(mc, obj, "maxByteLength")?));
+        }
+        return Err(raise_type_error!("Method ArrayBuffer.prototype.maxByteLength called on incompatible receiver").into());
+    }
+
+    if name == "get resizable" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_accessor(mc, obj, "resizable")?));
+        }
+        return Err(raise_type_error!("Method ArrayBuffer.prototype.resizable called on incompatible receiver").into());
+    }
+
+    if name == "ArrayBuffer.isView" {
+        return Ok(Some(crate::js_typedarray::handle_arraybuffer_static_method("isView", args)?));
+    }
+
     if name == "ArrayBuffer.prototype.resize" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         if let Value::Object(obj) = this_v {
-            return Ok(Some(crate::js_typedarray::handle_arraybuffer_method(mc, obj, "resize", args)?));
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_method(mc, env, obj, "resize", args)?));
         } else {
-            return Err(raise_eval_error!("TypeError: ArrayBuffer.prototype.resize called on non-object").into());
+            return Err(raise_type_error!("ArrayBuffer.prototype.resize called on non-object").into());
         }
     }
 
     if name == "ArrayBuffer.prototype.slice" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         if let Value::Object(obj) = this_v {
-            return Ok(Some(crate::js_typedarray::handle_arraybuffer_method(mc, obj, "slice", args)?));
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_method(mc, env, obj, "slice", args)?));
         } else {
-            return Err(raise_eval_error!("TypeError: ArrayBuffer.prototype.slice called on non-object").into());
+            return Err(raise_type_error!("ArrayBuffer.prototype.slice called on non-object").into());
         }
     }
 
@@ -20085,7 +20135,7 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "Set" {
                         return Ok(crate::js_set::handle_set_constructor(mc, &eval_args, env)?);
                     } else if name_str == "ArrayBuffer" {
-                        return Ok(crate::js_typedarray::handle_arraybuffer_constructor(mc, &eval_args, env)?);
+                        return crate::js_typedarray::handle_arraybuffer_constructor(mc, &eval_args, env, None);
                     } else if name_str == "SharedArrayBuffer" {
                         return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, &eval_args, env)?);
                     } else if name_str == "DataView" {

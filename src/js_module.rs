@@ -1122,7 +1122,7 @@ pub fn make_module_namespace_object<'gc>(
         .properties
         .keys()
         .filter_map(|key| match key {
-            crate::core::PropertyKey::String(s) if !s.starts_with("__") => Some(s.clone()),
+            crate::core::PropertyKey::String(s) => Some(s.clone()),
             _ => None,
         })
         .collect();

@@ -26,12 +26,19 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 
     object_set_key_value(mc, &boolean_ctor, "prototype", &Value::Object(boolean_proto))?;
     object_set_key_value(mc, &boolean_proto, "constructor", &Value::Object(boolean_ctor))?;
+    boolean_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     let val = Value::Function("Boolean.prototype.toString".to_string());
     object_set_key_value(mc, &boolean_proto, "toString", &val)?;
+    boolean_proto.borrow_mut(mc).set_non_enumerable("toString");
 
     let val = Value::Function("Boolean.prototype.valueOf".to_string());
     object_set_key_value(mc, &boolean_proto, "valueOf", &val)?;
+    boolean_proto.borrow_mut(mc).set_non_enumerable("valueOf");
+
+    boolean_ctor.borrow_mut(mc).set_non_enumerable("__is_constructor");
+    boolean_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
+    boolean_ctor.borrow_mut(mc).set_non_enumerable("prototype");
 
     // Ensure the Boolean constructor object uses Function.prototype as its internal prototype
     // (Function may have already been initialized).
@@ -54,9 +61,8 @@ pub(crate) fn handle_boolean_constructor<'gc>(
         evaluated_args[0].to_truthy()
     };
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
-    object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
     object_set_key_value(mc, &obj, "__value__", &Value::Boolean(bool_val))?;
+    obj.borrow_mut(mc).set_non_enumerable("__value__");
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
     Ok(Value::Object(obj))
 }

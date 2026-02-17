@@ -92,6 +92,9 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
     object_set_key_value(mc, &date_ctor, "now", &Value::Function("Date.now".to_string()))?;
     object_set_key_value(mc, &date_ctor, "parse", &Value::Function("Date.parse".to_string()))?;
     object_set_key_value(mc, &date_ctor, "UTC", &Value::Function("Date.UTC".to_string()))?;
+    date_ctor.borrow_mut(mc).set_non_enumerable("now");
+    date_ctor.borrow_mut(mc).set_non_enumerable("parse");
+    date_ctor.borrow_mut(mc).set_non_enumerable("UTC");
     // Ensure Date constructor uses Function.prototype as its internal prototype (if present)
     if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &date_ctor, env, "Function") {
         log::warn!("Failed to set Date constructor's internal prototype from Function: {e:?}");
@@ -123,7 +126,9 @@ fn get_time_stamp_value(date_obj: &JSObjectDataPtr) -> Result<f64, JSError> {
 }
 
 fn set_time_stamp_value<'gc>(mc: &MutationContext<'gc>, date_obj: &JSObjectDataPtr<'gc>, timestamp: f64) -> Result<(), JSError> {
-    object_set_key_value(mc, date_obj, "__timestamp", &Value::Number(timestamp))
+    object_set_key_value(mc, date_obj, "__timestamp", &Value::Number(timestamp))?;
+    date_obj.borrow_mut(mc).set_non_enumerable("__timestamp");
+    Ok(())
 }
 
 /// Parse a date string into a timestamp (milliseconds since Unix epoch)
@@ -148,9 +153,13 @@ pub(crate) fn parse_date_string(date_str: &str) -> Option<f64> {
         "%Y-%m-%dT%H:%M:%S%.fZ", // ISO with milliseconds
         "%Y-%m-%dT%H:%M:%SZ",    // ISO without milliseconds
         "%Y-%m-%d %H:%M:%S",     // MySQL format
+        "%Y-%m-%d %H:%M",        // MySQL-like without seconds
         "%Y/%m/%d %H:%M:%S",     // Alternative format
+        "%Y/%m/%d %H:%M",        // Alternative format without seconds
         "%m/%d/%Y %H:%M:%S",     // US format
+        "%m/%d/%Y %H:%M",        // US format without seconds
         "%d/%m/%Y %H:%M:%S",     // European format
+        "%d/%m/%Y %H:%M",        // European format without seconds
         "%Y-%m-%d",              // Date only
         "%m/%d/%Y",              // US date only
         "%d/%m/%Y",              // European date only

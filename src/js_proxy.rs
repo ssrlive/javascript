@@ -159,10 +159,11 @@ pub(crate) fn proxy_own_keys<'gc>(
         // Default: collect own property keys from target (string and symbol keys)
         let mut keys: Vec<Value> = Vec::new();
         if let Value::Object(obj) = &*proxy.target {
-            for k in obj.borrow().properties.keys() {
+            let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
+            for k in ordered {
                 match k {
-                    crate::core::PropertyKey::String(s) => keys.push(Value::String(utf8_to_utf16(s))),
-                    crate::core::PropertyKey::Symbol(sd) => keys.push(Value::Symbol(*sd)),
+                    crate::core::PropertyKey::String(s) => keys.push(Value::String(utf8_to_utf16(&s))),
+                    crate::core::PropertyKey::Symbol(sd) => keys.push(Value::Symbol(sd)),
                     _ => {}
                 }
             }
@@ -214,11 +215,21 @@ pub(crate) fn proxy_get_property<'gc>(
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    let key_clone = key.clone();
     let result = apply_proxy_trap(mc, proxy, "get", vec![(*proxy.target).clone(), property_key_to_value(key)], || {
         // Default behavior: get property from target
+        // If the target is a proxy wrapper (Object with __proxy__), delegate to that proxy
         match &*proxy.target {
             Value::Object(obj) => {
-                let val_opt = object_get_key_value(obj, key);
+                if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                    && let Value::Proxy(inner_proxy) = &*proxy_cell.borrow()
+                {
+                    return match proxy_get_property(mc, inner_proxy, &key_clone)? {
+                        Some(v) => Ok(v),
+                        None => Ok(Value::Undefined),
+                    };
+                }
+                let val_opt = object_get_key_value(obj, &key_clone);
                 match val_opt {
                     Some(val_rc) => {
                         let unwrapped = match &*val_rc.borrow() {

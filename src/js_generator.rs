@@ -3927,6 +3927,17 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
             .set_non_enumerable(crate::core::PropertyKey::Symbol(*iter_sym));
     }
 
+    // Set Generator.prototype[@@toStringTag] = "Generator"
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        let desc_tag =
+            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16("Generator")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &gen_proto, *tag_sym, &desc_tag)?;
+    }
+
     // link prototype to constructor and expose on global env
     let desc = crate::core::create_descriptor_object(mc, &Value::Object(gen_proto), true, false, false)?;
     crate::js_object::define_property_internal(mc, &gen_ctor, "prototype", &desc)?;
@@ -4007,6 +4018,22 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
             Gc::as_ptr(gen_func_proto)
         );
     }
+    // Set GeneratorFunction.prototype[@@toStringTag] = "GeneratorFunction"
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        let desc_tag = crate::core::create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("GeneratorFunction")),
+            false,
+            false,
+            true,
+        )?;
+        crate::js_object::define_property_internal(mc, &gen_func_proto, *tag_sym, &desc_tag)?;
+    }
+
     // Link constructor on the constructor object (non-enumerable prototype property)
     let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_proto), true, false, false)?;
     crate::js_object::define_property_internal(mc, &gen_func_ctor, "prototype", &desc_ctor_proto)?;

@@ -7,9 +7,12 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 pub fn initialize_json<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let json_obj = new_js_object_data(mc);
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &json_obj, env, "Object");
 
     object_set_key_value(mc, &json_obj, "parse", &Value::Function("JSON.parse".to_string()))?;
     object_set_key_value(mc, &json_obj, "stringify", &Value::Function("JSON.stringify".to_string()))?;
+    json_obj.borrow_mut(mc).set_non_enumerable("parse");
+    json_obj.borrow_mut(mc).set_non_enumerable("stringify");
 
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_val.borrow()

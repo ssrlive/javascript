@@ -8,11 +8,10 @@ fn compare_proto_and_instanceof() -> Result<(), JSError> {
         const inst = (n instanceof Number) ? 'I' : 'N';
         protoEq + '|' + inst;
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>)?;
+    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
     assert_eq!(
         res, "\"EQ|I\"",
-        "Expected boxed Number to have Number prototype and be instanceof Number, got {}",
-        res
+        "Expected boxed Number to have Number prototype and be instanceof Number, got {res}",
     );
     Ok(())
 }

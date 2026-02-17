@@ -332,6 +332,18 @@ pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     bigint_proto.borrow_mut(mc).set_non_enumerable("valueOf");
     bigint_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
+    // Set BigInt.prototype[@@toStringTag] = "BigInt"
+    if let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor_val.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        object_set_key_value(mc, &bigint_proto, *tag_sym, &Value::String(utf8_to_utf16("BigInt")))?;
+        bigint_proto
+            .borrow_mut(mc)
+            .set_non_enumerable(crate::core::PropertyKey::Symbol(*tag_sym));
+    }
+
     env_set(mc, env, "BigInt", &Value::Object(bigint_ctor))?;
 
     Ok(())

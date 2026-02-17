@@ -4064,7 +4064,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let _ = crate::core::get_property_with_accessors(mc, env, object, *s)?;
             }
 
-            Ok(crate::core::handle_object_prototype_to_string(mc, &Value::Object(*object), env))
+            Ok(crate::core::handle_object_prototype_to_string(mc, &Value::Object(*object), env)?)
         }
         "toLocaleString" => {
             let length_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;

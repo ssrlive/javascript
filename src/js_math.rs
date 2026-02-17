@@ -6,34 +6,43 @@ use crate::unicode::utf8_to_utf16;
 /// Create the Math object with all mathematical constants and functions
 pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let math_obj = new_js_object_data(mc);
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &math_obj, env, "Object");
     object_set_key_value(mc, &math_obj, "PI", &Value::Number(std::f64::consts::PI))?;
+    math_obj.borrow_mut(mc).set_non_enumerable("PI");
     math_obj.borrow_mut(mc).set_non_configurable("PI");
     math_obj.borrow_mut(mc).set_non_writable("PI");
 
     object_set_key_value(mc, &math_obj, "E", &Value::Number(std::f64::consts::E))?;
+    math_obj.borrow_mut(mc).set_non_enumerable("E");
     math_obj.borrow_mut(mc).set_non_configurable("E");
     math_obj.borrow_mut(mc).set_non_writable("E");
 
     object_set_key_value(mc, &math_obj, "LN2", &Value::Number(std::f64::consts::LN_2))?;
+    math_obj.borrow_mut(mc).set_non_enumerable("LN2");
     math_obj.borrow_mut(mc).set_non_configurable("LN2");
     math_obj.borrow_mut(mc).set_non_writable("LN2");
 
     object_set_key_value(mc, &math_obj, "LN10", &Value::Number(std::f64::consts::LN_10))?;
+    math_obj.borrow_mut(mc).set_non_enumerable("LN10");
     math_obj.borrow_mut(mc).set_non_configurable("LN10");
     math_obj.borrow_mut(mc).set_non_writable("LN10");
 
     object_set_key_value(mc, &math_obj, "LOG2E", &Value::Number(std::f64::consts::LOG2_E))?;
+    math_obj.borrow_mut(mc).set_non_enumerable("LOG2E");
     math_obj.borrow_mut(mc).set_non_configurable("LOG2E");
     math_obj.borrow_mut(mc).set_non_writable("LOG2E");
 
     object_set_key_value(mc, &math_obj, "LOG10E", &Value::Number(std::f64::consts::LOG10_E))?;
+    math_obj.borrow_mut(mc).set_non_enumerable("LOG10E");
     math_obj.borrow_mut(mc).set_non_configurable("LOG10E");
     math_obj.borrow_mut(mc).set_non_writable("LOG10E");
 
     object_set_key_value(mc, &math_obj, "SQRT1_2", &Value::Number(std::f64::consts::FRAC_1_SQRT_2))?;
+    math_obj.borrow_mut(mc).set_non_enumerable("SQRT1_2");
     math_obj.borrow_mut(mc).set_non_configurable("SQRT1_2");
     math_obj.borrow_mut(mc).set_non_writable("SQRT1_2");
     object_set_key_value(mc, &math_obj, "SQRT2", &Value::Number(std::f64::consts::SQRT_2))?;
+    math_obj.borrow_mut(mc).set_non_enumerable("SQRT2");
     math_obj.borrow_mut(mc).set_non_configurable("SQRT2");
     math_obj.borrow_mut(mc).set_non_writable("SQRT2");
 
@@ -72,6 +81,15 @@ pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
     object_set_key_value(mc, &math_obj, "cbrt", &Value::Function("Math.cbrt".to_string()))?;
     object_set_key_value(mc, &math_obj, "hypot", &Value::Function("Math.hypot".to_string()))?;
     object_set_key_value(mc, &math_obj, "sign", &Value::Function("Math.sign".to_string()))?;
+
+    let method_keys = [
+        "floor", "ceil", "round", "abs", "sqrt", "pow", "sin", "cos", "tan", "random", "clz32", "imul", "max", "min", "asin", "acos",
+        "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "exp", "expm1", "log", "log10", "log1p", "log2", "fround",
+        "trunc", "cbrt", "hypot", "sign",
+    ];
+    for key in method_keys {
+        math_obj.borrow_mut(mc).set_non_enumerable(key);
+    }
 
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_val.borrow()

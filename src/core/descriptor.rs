@@ -170,9 +170,14 @@ pub(crate) fn build_property_descriptor<'gc>(
         let pd = match &*val_rc.borrow() {
             Value::Property { value, getter, setter } => {
                 let mut pd = PropertyDescriptor::default();
-                if let Some(v) = value {
+                let is_accessor_like = getter.is_some() || setter.is_some() || value.is_none();
+                if !is_accessor_like && let Some(v) = value {
                     pd.value = Some(v.borrow().clone());
                     pd.writable = Some(obj.borrow().is_writable(key));
+                }
+                if is_accessor_like {
+                    pd.get = Some(Value::Undefined);
+                    pd.set = Some(Value::Undefined);
                 }
                 if let Some(g) = getter {
                     match &*g.clone() {
@@ -303,7 +308,7 @@ pub(crate) fn build_property_descriptor<'gc>(
 
                 PropertyDescriptor::new_accessor(
                     Some(Value::Object(func_obj)),
-                    None,
+                    Some(Value::Undefined),
                     obj.borrow().is_enumerable(key),
                     obj.borrow().is_configurable(key),
                 )
@@ -346,7 +351,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                 let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
 
                 PropertyDescriptor::new_accessor(
-                    None,
+                    Some(Value::Undefined),
                     Some(Value::Object(func_obj)),
                     obj.borrow().is_enumerable(key),
                     obj.borrow().is_configurable(key),

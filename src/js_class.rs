@@ -4058,7 +4058,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                             let this_clone = actual_this.clone();
                             // Handle common built-in prototype methods directly
                             if fname == "Object.prototype.toString" {
-                                return Ok(crate::core::handle_object_prototype_to_string(mc, &this_clone, env));
+                                return Ok(crate::core::handle_object_prototype_to_string(mc, &this_clone, env)?);
                             }
                             if fname == "Object.prototype.valueOf" {
                                 // Use default object valueOf which returns object itself
@@ -4150,7 +4150,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                     }
                     Value::Function(func_name) => {
                         if func_name == "Object.prototype.toString" {
-                            return Ok(crate::core::handle_object_prototype_to_string(mc, &actual_this, env));
+                            return Ok(crate::core::handle_object_prototype_to_string(mc, &actual_this, env)?);
                         }
                         if func_name == "Object.prototype.valueOf" {
                             return Ok(actual_this.clone());
@@ -4291,24 +4291,20 @@ pub(crate) fn handle_object_constructor<'gc>(
         Value::Object(obj) => Ok(Value::Object(obj)),
         Value::Number(n) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "valueOf", &Value::Function("Number_valueOf".to_string()))?;
-            object_set_key_value(mc, &obj, "toString", &Value::Function("Number_toString".to_string()))?;
             object_set_key_value(mc, &obj, "__value__", &Value::Number(n))?;
+            obj.borrow_mut(mc).set_non_enumerable("__value__");
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number")?;
             Ok(Value::Object(obj))
         }
         Value::Boolean(b) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
-            object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
             object_set_key_value(mc, &obj, "__value__", &Value::Boolean(b))?;
+            obj.borrow_mut(mc).set_non_enumerable("__value__");
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
             Ok(Value::Object(obj))
         }
         Value::String(s) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "valueOf", &Value::Function("String_valueOf".to_string()))?;
-            object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
             let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(s.len() as f64), false, false, false)?;
             crate::js_object::define_property_internal(mc, &obj, "length", &len_desc)?;
             for (idx, unit) in s.iter().enumerate() {
@@ -4317,18 +4313,21 @@ pub(crate) fn handle_object_constructor<'gc>(
                 crate::js_object::define_property_internal(mc, &obj, idx, &idx_desc)?;
             }
             object_set_key_value(mc, &obj, "__value__", &Value::String(s))?;
+            obj.borrow_mut(mc).set_non_enumerable("__value__");
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String")?;
             Ok(Value::Object(obj))
         }
         Value::BigInt(h) => {
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "__value__", &Value::BigInt(h.clone()))?;
+            obj.borrow_mut(mc).set_non_enumerable("__value__");
             let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
             Ok(Value::Object(obj))
         }
         Value::Symbol(sd) => {
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "__value__", &Value::Symbol(sd))?;
+            obj.borrow_mut(mc).set_non_enumerable("__value__");
             if let Some(sym) = object_get_key_value(env, "Symbol")
                 && let Value::Object(ctor_obj) = &*sym.borrow()
                 && let Some(proto) = object_get_key_value(ctor_obj, "prototype")
@@ -4376,9 +4375,8 @@ pub(crate) fn handle_number_constructor<'gc>(
         }
     };
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Number_valueOf".to_string()))?;
-    object_set_key_value(mc, &obj, "toString", &Value::Function("Number_toString".to_string()))?;
     object_set_key_value(mc, &obj, "__value__", &Value::Number(num_val))?;
+    obj.borrow_mut(mc).set_non_enumerable("__value__");
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number")?;
     Ok(Value::Object(obj))
 }

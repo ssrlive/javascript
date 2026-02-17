@@ -104,6 +104,50 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     // Initialize async generator prototype/constructor
     crate::js_async_generator::initialize_async_generator(mc, env)?;
 
+    // Create AsyncFunction constructor/prototype so async function objects
+    // inherit @@toStringTag = "AsyncFunction" from a distinct prototype.
+    {
+        let async_func_ctor = new_js_object_data(mc);
+        let async_func_proto = new_js_object_data(mc);
+        // AsyncFunction.prototype inherits from Function.prototype
+        if let Some(func_ctor_val) = env_get(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            async_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
+            async_func_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        // Set @@toStringTag = "AsyncFunction" on AsyncFunction.prototype
+        if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+            && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+            && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+            && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+        {
+            let desc_tag = crate::core::create_descriptor_object(
+                mc,
+                &Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")),
+                false,
+                false,
+                true,
+            )?;
+            crate::js_object::define_property_internal(mc, &async_func_proto, *tag_sym, &desc_tag)?;
+        }
+        // Make AsyncFunction callable via __native_ctor so AsyncFunction("...") works
+        object_set_key_value(
+            mc,
+            &async_func_ctor,
+            "__native_ctor",
+            &Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")),
+        )?;
+        async_func_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
+        // Link constructor ↔ prototype
+        object_set_key_value(mc, &async_func_ctor, "prototype", &Value::Object(async_func_proto))?;
+        object_set_key_value(mc, &async_func_proto, "constructor", &Value::Object(async_func_ctor))?;
+        async_func_proto.borrow_mut(mc).set_non_enumerable("constructor");
+        env_set(mc, env, "AsyncFunction", &Value::Object(async_func_ctor))?;
+    }
+
     env_set(mc, env, "undefined", &Value::Undefined)?;
     // Make global 'undefined', 'NaN', and 'Infinity' non-writable and non-configurable per ECMAScript
     env.borrow_mut(mc).set_non_configurable("undefined");

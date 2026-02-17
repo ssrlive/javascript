@@ -274,6 +274,22 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
             .set_non_enumerable(PropertyKey::Symbol(*async_iter_sym));
     }
 
+    // Set AsyncGenerator.prototype[@@toStringTag] = "AsyncGenerator"
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        let desc_tag = crate::core::create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("AsyncGenerator")),
+            false,
+            false,
+            true,
+        )?;
+        crate::js_object::define_property_internal(mc, &async_gen_proto, *tag_sym, &desc_tag)?;
+    }
+
     // Link prototype to constructor and expose on global env
     // Set 'constructor' on prototype with proper attributes
     let desc_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_ctor), true, false, true)?;
@@ -316,6 +332,22 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
 
     let desc_fn_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_ctor), true, false, true)?;
     crate::js_object::define_property_internal(mc, &async_gen_func_proto, "constructor", &desc_fn_ctor)?;
+
+    // Set AsyncGeneratorFunction.prototype[@@toStringTag] = "AsyncGeneratorFunction"
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        let desc_tag = crate::core::create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("AsyncGeneratorFunction")),
+            false,
+            false,
+            true,
+        )?;
+        crate::js_object::define_property_internal(mc, &async_gen_func_proto, *tag_sym, &desc_tag)?;
+    }
 
     let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_proto), true, false, false)?;
     crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "prototype", &desc_ctor_proto)?;

@@ -84,6 +84,15 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let registry_obj = new_js_object_data(mc);
     object_set_key_value(mc, env, "__symbol_registry", &Value::Object(registry_obj))?;
 
+    // Set Symbol.prototype[@@toStringTag] = "Symbol"
+    // The toStringTag symbol was just created above and stored on symbol_ctor
+    if let Some(tag_sym_val) = object_get_key_value(&symbol_ctor, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        object_set_key_value(mc, &symbol_proto, *tag_sym, &Value::String(utf8_to_utf16("Symbol")))?;
+        symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+    }
+
     env_set(mc, env, "Symbol", &Value::Object(symbol_ctor))?;
 
     Ok(())

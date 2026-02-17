@@ -1634,7 +1634,18 @@ fn hoist_declarations<'gc>(
             } else if *is_async {
                 let func_obj = crate::core::new_js_object_data(mc);
 
-                if let Some(func_ctor_val) = env_get(env, "Function")
+                // Set __proto__ to AsyncFunction.prototype (or fall back to Function.prototype)
+                let mut async_proto_set = false;
+                if let Some(async_func_val) = env_get(env, "AsyncFunction")
+                    && let Value::Object(async_func_ctor) = &*async_func_val.borrow()
+                    && let Some(proto_val) = object_get_key_value(async_func_ctor, "prototype")
+                    && let Value::Object(proto) = &*proto_val.borrow()
+                {
+                    func_obj.borrow_mut(mc).prototype = Some(*proto);
+                    async_proto_set = true;
+                }
+                if !async_proto_set
+                    && let Some(func_ctor_val) = env_get(env, "Function")
                     && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
                     && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                     && let Value::Object(proto) = &*proto_val.borrow()
@@ -1834,29 +1845,127 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
     mc: &MutationContext<'gc>,
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
-) -> Value<'gc> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let primitive_tag_override =
+        |default_tag: &str, primitive: &Value<'gc>, non_string_fallback: Option<&str>| -> Result<String, EvalError<'gc>> {
+            let boxed = crate::js_class::handle_object_constructor(mc, std::slice::from_ref(primitive), env)?;
+            if let Value::Object(boxed_obj) = boxed
+                && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
+                && let Value::Symbol(s) = &*tag_sym.borrow()
+            {
+                let tag_val = get_property_with_accessors(mc, env, &boxed_obj, *s)?;
+                if let Value::String(s_val) = tag_val {
+                    return Ok(crate::unicode::utf16_to_utf8(&s_val));
+                }
+                if !matches!(tag_val, Value::Undefined)
+                    && let Some(fallback) = non_string_fallback
+                {
+                    return Ok(fallback.to_string());
+                }
+            }
+            Ok(default_tag.to_string())
+        };
+
     let tag = match val {
         Value::Undefined => "Undefined".to_string(),
         Value::Null => "Null".to_string(),
-        Value::String(_) => "String".to_string(),
-        Value::Number(_) => "Number".to_string(),
-        Value::Boolean(_) => "Boolean".to_string(),
-        Value::BigInt(_) => "BigInt".to_string(),
+        Value::String(_) => primitive_tag_override("String", val, None)?,
+        Value::Number(_) => primitive_tag_override("Number", val, None)?,
+        Value::Boolean(_) => primitive_tag_override("Boolean", val, None)?,
+        Value::BigInt(_) => primitive_tag_override("Object", val, None)?,
+        Value::Symbol(_) => primitive_tag_override("Object", val, None)?,
         Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function".to_string(),
-        Value::Object(obj) => {
-            let proxy_target_obj = if let Some(proxy_cell) = object_get_key_value(obj, "__proxy__") {
-                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                    if let Value::Object(target_obj) = &*proxy.target {
-                        Some(*target_obj)
+        Value::Proxy(proxy) => {
+            if proxy.revoked {
+                return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+            }
+
+            let mut t = match &*proxy.target {
+                Value::Object(target_obj) => {
+                    if is_array(mc, target_obj) {
+                        "Array".to_string()
                     } else {
-                        None
+                        let is_function_like = target_obj.borrow().get_closure().is_some()
+                            || object_get_key_value(target_obj, "__native_ctor").is_some()
+                            || object_get_key_value(target_obj, "__bound_target").is_some()
+                            || object_get_key_value(target_obj, "__is_constructor").is_some();
+                        if is_function_like {
+                            "Function".to_string()
+                        } else {
+                            "Object".to_string()
+                        }
                     }
+                }
+                Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function".to_string(),
+                Value::Proxy(_) => {
+                    if let Value::String(s) = handle_object_prototype_to_string(mc, &proxy.target, env)? {
+                        let full = crate::unicode::utf16_to_utf8(&s);
+                        full.trim_start_matches("[object ").trim_end_matches(']').to_string()
+                    } else {
+                        "Object".to_string()
+                    }
+                }
+                _ => "Object".to_string(),
+            };
+
+            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
+                && let Value::Symbol(s) = &*tag_sym.borrow()
+                && let Some(tag_val) = crate::js_proxy::proxy_get_property(mc, proxy, &PropertyKey::Symbol(*s))?
+                && let Value::String(s_val) = tag_val
+            {
+                t = crate::unicode::utf16_to_utf8(&s_val);
+            }
+
+            t
+        }
+        Value::Object(obj) => {
+            let wrapper_proxy = if let Some(proxy_cell) = object_get_key_value(obj, "__proxy__") {
+                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
+                    Some(*proxy)
                 } else {
                     None
                 }
             } else {
                 None
             };
+
+            let mut target_is_function_like = false;
+            let mut target_is_array = false;
+            if let Some(mut proxy) = wrapper_proxy {
+                loop {
+                    if proxy.revoked {
+                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
+                    }
+                    match &*proxy.target {
+                        Value::Object(target_obj) => {
+                            if let Some(next_proxy_cell) = object_get_key_value(target_obj, "__proxy__")
+                                && let Value::Proxy(next_proxy) = &*next_proxy_cell.borrow()
+                            {
+                                proxy = *next_proxy;
+                                continue;
+                            }
+                            target_is_array = is_array(mc, target_obj);
+                            target_is_function_like = target_obj.borrow().get_closure().is_some()
+                                || object_get_key_value(target_obj, "__native_ctor").is_some()
+                                || object_get_key_value(target_obj, "__bound_target").is_some()
+                                || object_get_key_value(target_obj, "__is_constructor").is_some();
+                            break;
+                        }
+                        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => {
+                            target_is_function_like = true;
+                            break;
+                        }
+                        Value::Proxy(next_proxy) => {
+                            proxy = *next_proxy;
+                        }
+                        _ => break,
+                    }
+                }
+            }
 
             let branded_obj = *obj;
 
@@ -1865,27 +1974,10 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
                     Value::Boolean(_) => Some("Boolean"),
                     Value::Number(_) => Some("Number"),
                     Value::String(_) => Some("String"),
-                    Value::BigInt(_) => Some("BigInt"),
-                    Value::Symbol(_) => Some("Symbol"),
                     _ => None,
                 }
             } else {
                 None
-            };
-
-            let target_is_function_like = if let Some(target_obj) = proxy_target_obj {
-                target_obj.borrow().get_closure().is_some()
-                    || object_get_key_value(&target_obj, "__native_ctor").is_some()
-                    || object_get_key_value(&target_obj, "__bound_target").is_some()
-                    || object_get_key_value(&target_obj, "__is_constructor").is_some()
-            } else {
-                false
-            };
-
-            let target_is_array = if let Some(target_obj) = proxy_target_obj {
-                is_array(mc, &target_obj)
-            } else {
-                false
             };
 
             let is_function_like = branded_obj.borrow().get_closure().is_some()
@@ -1929,22 +2021,32 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
                 "Object".to_string()
             };
 
-            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+            if let Some(proxy) = wrapper_proxy
+                && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                 && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
                 && let Value::Symbol(s) = &*tag_sym.borrow()
-                && let Some(val) = object_get_key_value(&branded_obj, s)
+                && let Some(tag_val) = crate::js_proxy::proxy_get_property(mc, &proxy, &PropertyKey::Symbol(*s))?
+                && let Value::String(s_val) = tag_val
             {
-                match &*val.borrow() {
-                    Value::String(s_val) => {
-                        t = crate::unicode::utf16_to_utf8(s_val);
-                    }
-                    Value::Property { value: Some(inner), .. } => {
-                        if let Value::String(s_val) = &*inner.borrow() {
-                            t = crate::unicode::utf16_to_utf8(s_val);
-                        }
-                    }
-                    _ => {}
+                t = crate::unicode::utf16_to_utf8(&s_val);
+                return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", t))));
+            }
+
+            // Only do the direct property lookup if this object is NOT a proxy wrapper.
+            // For proxy wrappers, proxy_get_property above already handled the
+            // @@toStringTag lookup via the proxy trap mechanism.  Re-reading
+            // get_property_with_accessors on the wrapper after the trap has run
+            // can fail if the proxy was revoked during the Get step (spec-allowed).
+            if wrapper_proxy.is_none()
+                && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
+                && let Value::Symbol(s) = &*tag_sym.borrow()
+            {
+                let val = get_property_with_accessors(mc, env, &branded_obj, *s)?;
+                if let Value::String(s_val) = val {
+                    t = crate::unicode::utf16_to_utf8(&s_val);
                 }
             }
 
@@ -1952,7 +2054,7 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
         }
         _ => "Object".to_string(),
     };
-    Value::String(utf8_to_utf16(&format!("[object {}]", tag)))
+    Ok(Value::String(utf8_to_utf16(&format!("[object {}]", tag))))
 }
 
 pub fn evaluate_statements_with_context<'gc>(
@@ -10713,7 +10815,7 @@ fn check_global_declarations<'gc>(env: &JSObjectDataPtr<'gc>, statements: &[Stat
 
             // If the existing property is an accessor, defining a data value would be incompatible
             let existing_is_accessor = match &*existing_rc.borrow() {
-                crate::core::Value::Property { getter, setter, .. } => getter.is_some() || setter.is_some(),
+                crate::core::Value::Property { value, getter, setter } => getter.is_some() || setter.is_some() || value.is_none(),
                 crate::core::Value::Getter(..) | crate::core::Value::Setter(..) => true,
                 _ => false,
             };
@@ -11796,10 +11898,205 @@ pub fn evaluate_call_dispatch<'gc>(
                 Ok(crate::js_typedarray::handle_typedarray_iterator_next(mc, this_v)?)
             } else if name == "Object.prototype.toString" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
-                Ok(handle_object_prototype_to_string(mc, this_v, env))
+                Ok(handle_object_prototype_to_string(mc, this_v, env)?)
             } else if name == "Object.prototype.toLocaleString" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 call_object_prototype_to_locale_string(mc, env, this_v)
+            } else if name == "Object.prototype.valueOf" {
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                let this_obj = match this_v {
+                    Value::Object(o) => *o,
+                    Value::Undefined => return Err(raise_type_error!("Cannot convert undefined to object").into()),
+                    Value::Null => return Err(raise_type_error!("Cannot convert null to object").into()),
+                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_v), env)? {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                    },
+                };
+                Ok(Value::Object(this_obj))
+            } else if name == "Object.prototype.isPrototypeOf" {
+                if eval_args.len() != 1 {
+                    return Err(raise_eval_error!("isPrototypeOf requires one argument").into());
+                }
+                if !matches!(eval_args[0], Value::Object(_) | Value::Proxy(_)) {
+                    return Ok(Value::Boolean(false));
+                }
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                let this_obj = match this_v {
+                    Value::Object(o) => *o,
+                    Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
+                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_v), env)? {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                    },
+                };
+                let target_val = eval_args[0].clone();
+
+                // Helper to get [[GetPrototypeOf]] result, handling proxy wrappers
+                let get_proto =
+                    |val: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
+                        if let Value::Object(obj) = val {
+                            if let Some(proxy_cell) = get_own_property(obj, "__proxy__")
+                                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                            {
+                                let proto_val =
+                                    crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
+                                        match &*proxy.target {
+                                            Value::Object(target_obj) => {
+                                                if let Some(p) = target_obj.borrow().prototype {
+                                                    Ok(Value::Object(p))
+                                                } else if let Some(pv) = object_get_key_value(target_obj, "__proto__")
+                                                    && let Value::Object(p) = &*pv.borrow()
+                                                {
+                                                    Ok(Value::Object(*p))
+                                                } else {
+                                                    Ok(Value::Null)
+                                                }
+                                            }
+                                            _ => Ok(Value::Null),
+                                        }
+                                    })?;
+                                return match proto_val {
+                                    Value::Object(p) => Ok(Some(p)),
+                                    Value::Null => Ok(None),
+                                    _ => Err(raise_type_error!("'getPrototypeOf' on proxy: trap returned neither object nor null").into()),
+                                };
+                            }
+                            return Ok(obj.borrow().prototype);
+                        }
+                        if let Value::Proxy(proxy) = val {
+                            let proto_val =
+                                crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
+                                    match &*proxy.target {
+                                        Value::Object(target_obj) => {
+                                            if let Some(p) = target_obj.borrow().prototype {
+                                                Ok(Value::Object(p))
+                                            } else {
+                                                Ok(Value::Null)
+                                            }
+                                        }
+                                        _ => Ok(Value::Null),
+                                    }
+                                })?;
+                            return match proto_val {
+                                Value::Object(p) => Ok(Some(p)),
+                                Value::Null => Ok(None),
+                                _ => Err(raise_type_error!("'getPrototypeOf' on proxy: trap returned neither object nor null").into()),
+                            };
+                        }
+                        Ok(None)
+                    };
+
+                let mut current = get_proto(&target_val)?;
+
+                while let Some(p) = current {
+                    if Gc::ptr_eq(p, this_obj) {
+                        return Ok(Value::Boolean(true));
+                    }
+                    current = get_proto(&Value::Object(p))?;
+                }
+                Ok(Value::Boolean(false))
+            } else if name == "Object.prototype.hasOwnProperty" {
+                if eval_args.len() != 1 {
+                    return Err(raise_eval_error!("hasOwnProperty requires one argument").into());
+                }
+                let key = eval_args[0].to_property_key(mc, env)?;
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                if let Value::Function(func_name) = this_v {
+                    if let PropertyKey::String(prop) = &key {
+                        if prop == "length" {
+                            return Ok(Value::Boolean(!is_builtin_function_virtual_prop_deleted(env, func_name, "length")));
+                        }
+                        if prop == "name" {
+                            let short_name = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                            let has_name = !short_name.is_empty() && !is_builtin_function_virtual_prop_deleted(env, func_name, "name");
+                            return Ok(Value::Boolean(has_name));
+                        }
+                    }
+                    return Ok(Value::Boolean(false));
+                }
+                let this_obj = match this_v {
+                    Value::Object(o) => *o,
+                    Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
+                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_v), env)? {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                    },
+                };
+                Ok(Value::Boolean(get_own_property(&this_obj, &key).is_some()))
+            } else if name == "Object.prototype.propertyIsEnumerable" {
+                if eval_args.len() != 1 {
+                    return Err(raise_eval_error!("propertyIsEnumerable requires one argument").into());
+                }
+                let key = eval_args[0].to_property_key(mc, env)?;
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                if let Value::Function(_func_name) = this_v {
+                    if let PropertyKey::String(prop) = &key
+                        && (prop == "length" || prop == "name")
+                    {
+                        return Ok(Value::Boolean(false));
+                    }
+                    return Ok(Value::Boolean(false));
+                }
+                let this_obj = match this_v {
+                    Value::Object(o) => *o,
+                    Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
+                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_v), env)? {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                    },
+                };
+                Ok(Value::Boolean(
+                    get_own_property(&this_obj, &key).is_some() && this_obj.borrow().is_enumerable(&key),
+                ))
+            } else if name == "Object.prototype.__lookupGetter__" {
+                let key_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                let key = key_val.to_property_key(mc, env)?;
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                let this_obj = match this_v {
+                    Value::Object(o) => *o,
+                    Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
+                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_v), env)? {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                    },
+                };
+                let mut cur = Some(this_obj);
+                while let Some(obj) = cur {
+                    if let Some(val_rc) = get_own_property(&obj, &key) {
+                        return match &*val_rc.borrow() {
+                            Value::Property { getter: Some(g), .. } => Ok((**g).clone()),
+                            Value::Getter(..) => Ok(val_rc.borrow().clone()),
+                            _ => Ok(Value::Undefined),
+                        };
+                    }
+                    cur = obj.borrow().prototype;
+                }
+                Ok(Value::Undefined)
+            } else if name == "Object.prototype.__lookupSetter__" {
+                let key_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                let key = key_val.to_property_key(mc, env)?;
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                let this_obj = match this_v {
+                    Value::Object(o) => *o,
+                    Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
+                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_v), env)? {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                    },
+                };
+                let mut cur = Some(this_obj);
+                while let Some(obj) = cur {
+                    if let Some(val_rc) = get_own_property(&obj, &key) {
+                        return match &*val_rc.borrow() {
+                            Value::Property { setter: Some(s), .. } => Ok((**s).clone()),
+                            Value::Setter(..) => Ok(val_rc.borrow().clone()),
+                            _ => Ok(Value::Undefined),
+                        };
+                    }
+                    cur = obj.borrow().prototype;
+                }
+                Ok(Value::Undefined)
             } else if name == "Error.prototype.toString" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 // Delegate to Error.prototype.toString implementation
@@ -11903,6 +12200,79 @@ pub fn evaluate_call_dispatch<'gc>(
                         }
                         _ => Err(raise_eval_error!(format!("Unknown Object function: {}", name)).into()),
                     }
+                } else if suffix == "assign" {
+                    if eval_args.is_empty() {
+                        return Err(raise_type_error!("Object.assign requires at least one argument").into());
+                    }
+
+                    let target_obj = match &eval_args[0] {
+                        Value::Object(o) => *o,
+                        Value::Undefined | Value::Null => {
+                            return Err(raise_type_error!("Cannot convert undefined or null to object").into());
+                        }
+                        other => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(other), env)? {
+                            Value::Object(o) => o,
+                            _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                        },
+                    };
+
+                    for src_expr in eval_args.iter().skip(1) {
+                        if matches!(src_expr, Value::Undefined | Value::Null) {
+                            continue;
+                        }
+
+                        let source_obj = match src_expr {
+                            Value::Object(o) => *o,
+                            other => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(other), env)? {
+                                Value::Object(o) => o,
+                                _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                            },
+                        };
+
+                        let ordered = if let Some(proxy_cell) = crate::core::get_own_property(&source_obj, "__proxy__")
+                            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                        {
+                            crate::js_proxy::proxy_own_keys(mc, proxy)?
+                        } else {
+                            crate::core::ordinary_own_property_keys_mc(mc, &source_obj)?
+                        };
+
+                        for key in ordered {
+                            if key == "__proto__".into() {
+                                continue;
+                            }
+
+                            let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&source_obj, "__proxy__")
+                                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                            {
+                                match crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)? {
+                                    Some(en) => en,
+                                    None => continue,
+                                }
+                            } else {
+                                if crate::core::get_own_property(&source_obj, &key).is_none() {
+                                    continue;
+                                }
+                                source_obj.borrow().is_enumerable(&key)
+                            };
+
+                            if !is_enumerable {
+                                continue;
+                            }
+
+                            let prop_value = crate::core::get_property_with_accessors(mc, env, &source_obj, &key)?;
+                            crate::core::set_property_with_accessors(
+                                mc,
+                                env,
+                                &target_obj,
+                                key,
+                                &prop_value,
+                                Some(&Value::Object(target_obj)),
+                            )?;
+                        }
+                    }
+
+                    Ok(Value::Object(target_obj))
                 } else {
                     Ok(crate::js_object::handle_object_method(mc, suffix, eval_args, env)?)
                 }
@@ -12190,6 +12560,8 @@ pub fn evaluate_call_dispatch<'gc>(
                             Ok(crate::js_function::handle_global_function(mc, "Function", eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("GeneratorFunction") {
                             Ok(crate::js_function::handle_global_function(mc, "GeneratorFunction", eval_args, env)?)
+                        } else if name == crate::unicode::utf8_to_utf16("AsyncFunction") {
+                            Ok(crate::js_function::handle_global_function(mc, "AsyncFunction", eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("AsyncGeneratorFunction") {
                             Ok(crate::js_function::handle_global_function(
                                 mc,
@@ -15161,11 +15533,22 @@ fn evaluate_expr_async_function<'gc>(
     body: &[Statement],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Async functions are represented as objects with an AsyncClosure stored
-    // in an internal closure slot. They inherit from Function.prototype.
+    // in an internal closure slot. They inherit from AsyncFunction.prototype
+    // when available, otherwise from Function.prototype.
     let func_obj = new_js_object_data(mc);
 
-    // Set __proto__ to Function.prototype
-    if let Some(func_ctor_val) = env_get(env, "Function")
+    // Set __proto__ to AsyncFunction.prototype (or fall back to Function.prototype)
+    let mut proto_set = false;
+    if let Some(async_func_val) = env_get(env, "AsyncFunction")
+        && let Value::Object(async_func_ctor) = &*async_func_val.borrow()
+        && let Some(proto_val) = object_get_key_value(async_func_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
+        proto_set = true;
+    }
+    if !proto_set
+        && let Some(func_ctor_val) = env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
@@ -16368,8 +16751,18 @@ fn evaluate_expr_async_arrow_function<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create an async arrow function object which captures the current `this` lexically
     let func_obj = crate::core::new_js_object_data(mc);
-    // Set __proto__ to Function.prototype
-    if let Some(func_ctor_val) = env_get(env, "Function")
+    // Set __proto__ to AsyncFunction.prototype (or fall back to Function.prototype)
+    let mut proto_set = false;
+    if let Some(async_func_val) = env_get(env, "AsyncFunction")
+        && let Value::Object(async_func_ctor) = &*async_func_val.borrow()
+        && let Some(proto_val) = object_get_key_value(async_func_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
+        proto_set = true;
+    }
+    if !proto_set
+        && let Some(func_ctor_val) = env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
@@ -17196,7 +17589,7 @@ pub(crate) fn get_property_with_accessors<'gc>(
     Ok(Value::Undefined)
 }
 
-fn set_property_with_accessors<'gc>(
+pub(crate) fn set_property_with_accessors<'gc>(
     mc: &MutationContext<'gc>,
     _env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
@@ -17261,29 +17654,88 @@ fn set_property_with_accessors<'gc>(
     if let PropertyKey::String(s) = key
         && s == "__proto__"
     {
+        if let Some(proxy_cell) = get_own_property(obj, "__proxy__")
+            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+        {
+            match val {
+                Value::Object(_) | Value::Null => {
+                    let trap_result =
+                        crate::js_proxy::apply_proxy_trap(mc, proxy, "setPrototypeOf", vec![(*proxy.target).clone(), val.clone()], || {
+                            match &*proxy.target {
+                                Value::Object(target_obj) => {
+                                    let proto_obj = match val {
+                                        Value::Object(p) => Some(*p),
+                                        Value::Null => None,
+                                        _ => None,
+                                    };
+
+                                    let current_proto = target_obj.borrow().prototype;
+                                    let same_proto = match (current_proto, proto_obj) {
+                                        (Some(cur), Some(next)) => Gc::ptr_eq(cur, next),
+                                        (None, None) => true,
+                                        _ => false,
+                                    };
+                                    if same_proto {
+                                        return Ok(Value::Boolean(true));
+                                    }
+                                    if !target_obj.borrow().is_extensible() {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                    if let Some(mut probe) = proto_obj {
+                                        loop {
+                                            if Gc::ptr_eq(probe, *target_obj) {
+                                                return Ok(Value::Boolean(false));
+                                            }
+                                            if let Some(next) = probe.borrow().prototype {
+                                                probe = next;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    target_obj.borrow_mut(mc).prototype = proto_obj;
+                                    Ok(Value::Boolean(true))
+                                }
+                                _ => Ok(Value::Boolean(false)),
+                            }
+                        })?;
+                    if !trap_result.to_truthy() {
+                        return Err(raise_type_error!("Cannot set prototype").into());
+                    }
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
+
         match &val {
             Value::Object(proto_obj) => {
-                log::warn!(
-                    "DBG __proto__ assignment: obj ptr={:p} -> new proto ptr={:p}",
-                    Gc::as_ptr(*obj),
-                    Gc::as_ptr(*proto_obj)
-                );
-                // If object is non-extensible and the new prototype differs, throw TypeError
+                let current_proto = obj.borrow().prototype;
+                let same_proto = match current_proto {
+                    Some(cur) => Gc::ptr_eq(cur, *proto_obj),
+                    None => false,
+                };
+                if same_proto {
+                    return Ok(());
+                }
                 if !obj.borrow().is_extensible() {
-                    let differs = match obj.borrow().prototype {
-                        Some(cur) => !Gc::ptr_eq(cur, *proto_obj),
-                        None => true,
-                    };
-                    if differs {
-                        return Err(raise_type_error!("Cannot change prototype of non-extensible object").into());
+                    return Err(raise_type_error!("Cannot change prototype of non-extensible object").into());
+                }
+                let mut probe = *proto_obj;
+                loop {
+                    if Gc::ptr_eq(probe, *obj) {
+                        return Err(raise_type_error!("Cannot set prototype").into());
+                    }
+                    if let Some(next) = probe.borrow().prototype {
+                        probe = next;
+                    } else {
+                        break;
                     }
                 }
-                // Update internal prototype pointer; do NOT create an own enumerable '__proto__' property
                 obj.borrow_mut(mc).prototype = Some(*proto_obj);
                 return Ok(());
             }
             Value::Null => {
-                log::warn!("DBG __proto__ assignment: obj ptr={:p} -> new proto NULL", Gc::as_ptr(*obj));
                 if !obj.borrow().is_extensible() && obj.borrow().prototype.is_some() {
                     return Err(raise_type_error!("Cannot change prototype of non-extensible object").into());
                 }
@@ -17291,8 +17743,7 @@ fn set_property_with_accessors<'gc>(
                 return Ok(());
             }
             _ => {
-                // For non-object/null, just set the property (do not change internal prototype)
-                object_set_key_value(mc, obj, key, val)?;
+                // For non-object/null, the legacy __proto__ setter is a no-op.
                 return Ok(());
             }
         }
@@ -17366,14 +17817,15 @@ fn set_property_with_accessors<'gc>(
             if let Some(inherited_ptr) = get_own_property(&proto_obj, key) {
                 let inherited = inherited_ptr.borrow().clone();
                 match inherited {
-                    Value::Property { setter, getter, .. } => {
+                    Value::Property { value, setter, getter } => {
+                        let is_accessor_like = getter.is_some() || setter.is_some() || value.is_none();
                         if let Some(s) = setter {
                             // Clone setter out to avoid holding a borrow on the inherited property
                             // cell while calling into the setter, which may mutate prototypes/receiver.
                             let s_clone = (*s).clone();
                             return call_setter(mc, &receiver_ptr, &s_clone, val);
                         }
-                        if getter.is_some() {
+                        if is_accessor_like {
                             return Err(raise_type_error!("Cannot set property which has only a getter").into());
                         }
                         if !proto_obj.borrow().is_writable(key) {
@@ -17465,7 +17917,8 @@ fn set_property_with_accessors<'gc>(
             let prop_ptr = object_get_key_value(&receiver_ptr, key).unwrap();
             let prop = prop_ptr.borrow().clone();
             match prop {
-                Value::Property { setter, getter, .. } => {
+                Value::Property { value, setter, getter } => {
+                    let is_accessor_like = getter.is_some() || setter.is_some() || value.is_none();
                     if let Some(s) = setter {
                         if let Value::Setter(_, _, _, home_opt) = &*s {
                             if let Some(home_ptr) = home_opt {
@@ -17491,7 +17944,7 @@ fn set_property_with_accessors<'gc>(
                         let s_clone = (*s).clone();
                         return call_setter(mc, &receiver_ptr, &s_clone, val);
                     }
-                    if getter.is_some() {
+                    if is_accessor_like {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
                     }
                     // If the existing property is non-writable, TypeError should be thrown
@@ -17533,14 +17986,15 @@ fn set_property_with_accessors<'gc>(
             let inherited_ptr = object_get_key_value(&proto_obj, key).unwrap();
             let inherited = inherited_ptr.borrow().clone();
             match inherited {
-                Value::Property { setter, getter, .. } => {
+                Value::Property { value, setter, getter } => {
+                    let is_accessor_like = getter.is_some() || setter.is_some() || value.is_none();
                     if let Some(s) = setter {
                         // Clone setter to drop any borrows into the property's storage
                         // before invoking the setter, which may mutate the receiver.
                         let s_clone = (*s).clone();
                         return call_setter(mc, &receiver_ptr, &s_clone, val);
                     }
-                    if getter.is_some() {
+                    if is_accessor_like {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
                     }
                     // Inherited data property on prototype: respect prototype's writability
@@ -17669,23 +18123,8 @@ pub fn call_native_function<'gc>(
     }
 
     if name == "Object.create" {
-        let proto = args.first().unwrap_or(&Value::Undefined);
-        let new_obj = crate::core::new_js_object_data(mc);
-        match proto {
-            Value::Object(obj) => {
-                new_obj.borrow_mut(mc).prototype = Some(*obj);
-            }
-            Value::Null => {
-                new_obj.borrow_mut(mc).prototype = None;
-            }
-            _ => return Err(raise_type_error!("Object prototype may only be an Object or null").into()),
-        }
-        if let Some(props) = args.get(1)
-            && !matches!(props, Value::Undefined)
-        {
-            crate::js_object::define_properties(mc, &new_obj, props)?;
-        }
-        return Ok(Some(Value::Object(new_obj)));
+        let v = crate::js_object::handle_object_method(mc, "create", args, env)?;
+        return Ok(Some(v));
     }
 
     // Special-case built-in iterator `next()` so iterator internal throws (EvalError::Throw)
@@ -18222,11 +18661,20 @@ pub(crate) fn call_accessor<'gc>(
             if let Some(res) = call_native_function(mc, name, Some(&Value::Object(*receiver)), &[], env)? {
                 Ok(res)
             } else {
-                // For certain well-known internal accessors, surface a TypeError (e.g., restricted 'caller'/'arguments')
-                if name.contains("restrictedThrow") {
-                    Err(raise_type_error!("Access to 'caller' or 'arguments' is restricted").into())
-                } else {
-                    Err(raise_type_error!(format!("Accessor function {name} not supported")).into())
+                // Fallback: try handle_global_function which dispatches accessors
+                // like "Object.prototype.get __proto__" via js_function.rs.
+                let call_env = crate::core::new_js_object_data(mc);
+                call_env.borrow_mut(mc).prototype = Some(*env);
+                env_set(mc, &call_env, "this", &Value::Object(*receiver))?;
+                match crate::js_function::handle_global_function(mc, name, &[], &call_env) {
+                    Ok(v) => Ok(v),
+                    Err(_) => {
+                        if name.contains("restrictedThrow") {
+                            Err(raise_type_error!("Access to 'caller' or 'arguments' is restricted").into())
+                        } else {
+                            Err(raise_type_error!(format!("Accessor function {name} not supported")).into())
+                        }
+                    }
                 }
             }
         }
@@ -18418,6 +18866,18 @@ fn call_setter_raw<'gc>(
                 bind_object_inner_for_letconst(mc, &params_env, inner_pattern, &binding_obj, false)?;
             }
             _ => {}
+        }
+    }
+
+    if params.len() > 1 {
+        for param in params.iter().skip(1) {
+            if let DestructuringElement::Variable(name, default_expr_opt) = param {
+                let mut arg_val = Value::Undefined;
+                if let Some(default_expr) = default_expr_opt {
+                    arg_val = evaluate_expr(mc, &params_env, default_expr)?;
+                }
+                crate::core::env_set(mc, &params_env, name, &arg_val)?;
+            }
         }
     }
 
@@ -20042,6 +20502,7 @@ fn evaluate_expr_new<'gc>(
                         let new_obj = crate::core::new_js_object_data(mc);
 
                         object_set_key_value(mc, &new_obj, "__value__", &Value::String(val.clone()))?;
+                        new_obj.borrow_mut(mc).set_non_enumerable("__value__");
 
                         if let Some(proto_val) = object_get_key_value(&obj, "prototype")
                             && let Value::Object(proto_obj) = &*proto_val.borrow()
@@ -20070,6 +20531,7 @@ fn evaluate_expr_new<'gc>(
                         };
                         let new_obj = crate::core::new_js_object_data(mc);
                         object_set_key_value(mc, &new_obj, "__value__", &Value::Boolean(val))?;
+                        new_obj.borrow_mut(mc).set_non_enumerable("__value__");
 
                         if let Some(proto_val) = object_get_key_value(&obj, "prototype")
                             && let Value::Object(proto_obj) = &*proto_val.borrow()
@@ -20085,6 +20547,7 @@ fn evaluate_expr_new<'gc>(
                         };
                         let new_obj = crate::core::new_js_object_data(mc);
                         object_set_key_value(mc, &new_obj, "__value__", &Value::Number(val))?;
+                        new_obj.borrow_mut(mc).set_non_enumerable("__value__");
 
                         if let Some(proto_val) = object_get_key_value(&obj, "prototype")
                             && let Value::Object(proto_obj) = &*proto_val.borrow()

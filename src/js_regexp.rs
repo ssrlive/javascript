@@ -219,6 +219,18 @@ fn create_regexp_object_from_parts<'gc>(
     object_set_key_value(mc, &regexp_obj, "__crlf", &Value::Boolean(crlf))?;
     object_set_key_value(mc, &regexp_obj, "__hasIndices", &Value::Boolean(has_indices))?;
     object_set_key_value(mc, &regexp_obj, "__unicodeSets", &Value::Boolean(unicode_sets))?;
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__regex");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__flags");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__global");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__ignoreCase");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__multiline");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__dotAll");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__unicode");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__sticky");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__swapGreed");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__crlf");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__hasIndices");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("__unicodeSets");
 
     object_set_key_value(mc, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
     regexp_obj.borrow_mut(mc).set_non_enumerable("lastIndex");
@@ -238,6 +250,15 @@ fn create_regexp_object_from_parts<'gc>(
     object_set_key_value(mc, &regexp_obj, "hasIndices", &Value::Boolean(has_indices))?;
     object_set_key_value(mc, &regexp_obj, "unicodeSets", &Value::Boolean(unicode_sets))?;
     object_set_key_value(mc, &regexp_obj, "flags", &Value::String(utf8_to_utf16(&flags)))?;
+    regexp_obj.borrow_mut(mc).set_non_enumerable("global");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("ignoreCase");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("multiline");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("dotAll");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("unicode");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("sticky");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("hasIndices");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("unicodeSets");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("flags");
 
     object_set_key_value(mc, &regexp_obj, "exec", &Value::Function("RegExp.prototype.exec".to_string()))?;
     object_set_key_value(mc, &regexp_obj, "test", &Value::Function("RegExp.prototype.test".to_string()))?;
@@ -247,6 +268,9 @@ fn create_regexp_object_from_parts<'gc>(
         "toString",
         &Value::Function("RegExp.prototype.toString".to_string()),
     )?;
+    regexp_obj.borrow_mut(mc).set_non_enumerable("exec");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("test");
+    regexp_obj.borrow_mut(mc).set_non_enumerable("toString");
 
     Ok(Value::Object(regexp_obj))
 }

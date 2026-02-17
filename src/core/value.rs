@@ -1415,7 +1415,8 @@ pub fn object_set_key_value<'gc>(
                 (buf_len - ta.byte_offset) / ta.element_size()
             }
         } else {
-            ta.length
+            let needed = ta.byte_offset + ta.length * ta.element_size();
+            if buf_len < needed { 0 } else { ta.length }
         };
         if idx < cur_len {
             // Perform typed-array write inline into the underlying buffer to avoid
@@ -1747,21 +1748,7 @@ pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'
     if let Some(cur_len) = object_get_length(obj)
         && length < cur_len
     {
-        // Non-configurable indexed properties prevent length reduction.
-        for prop_key in obj.borrow().properties.keys() {
-            if let PropertyKey::String(s) = prop_key
-                && let Ok(idx) = s.parse::<usize>()
-                && idx >= length
-                && idx.to_string() == *s
-                && !obj.borrow().is_configurable(prop_key.clone())
-            {
-                return Err(raise_type_error!("Cannot delete non-configurable property"));
-            }
-        }
-
-        // IMPORTANT: Do not iterate over the full numeric range (which can be huge).
-        // Only delete indexed properties that actually exist.
-        let keys_to_delete: Vec<PropertyKey<'gc>> = obj
+        let mut indices_to_delete: Vec<usize> = obj
             .borrow()
             .properties
             .keys()
@@ -1769,18 +1756,28 @@ pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'
                 PropertyKey::String(s) => {
                     if let Ok(idx) = s.parse::<usize>()
                         && idx >= length
+                        && idx.to_string() == *s
                     {
-                        return Some(PropertyKey::String(s.clone()));
+                        Some(idx)
+                    } else {
+                        None
                     }
-                    None
                 }
                 _ => None,
             })
             .collect();
 
-        let mut obj_mut = obj.borrow_mut(mc);
-        for key in keys_to_delete {
-            let _ = obj_mut.properties.shift_remove(&key);
+        indices_to_delete.sort_unstable_by(|a, b| b.cmp(a));
+
+        for idx in indices_to_delete {
+            let key = PropertyKey::String(idx.to_string());
+            if !obj.borrow().is_configurable(key.clone()) {
+                let fallback_len = idx.saturating_add(1);
+                let len_ptr = new_gc_cell_ptr(mc, Value::Number(fallback_len as f64));
+                obj.borrow_mut(mc).insert("length", len_ptr);
+                return Err(raise_type_error!("Cannot delete non-configurable property"));
+            }
+            let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
         }
     }
     let len_ptr = new_gc_cell_ptr(mc, Value::Number(length as f64));

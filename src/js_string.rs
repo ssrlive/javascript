@@ -72,13 +72,16 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         "fromCharCode",
         &Value::Function("String.fromCharCode".to_string()),
     )?;
+    string_ctor.borrow_mut(mc).set_non_enumerable("fromCharCode");
     object_set_key_value(
         mc,
         &string_ctor,
         "fromCodePoint",
         &Value::Function("String.fromCodePoint".to_string()),
     )?;
+    string_ctor.borrow_mut(mc).set_non_enumerable("fromCodePoint");
     object_set_key_value(mc, &string_ctor, "raw", &Value::Function("String.raw".to_string()))?;
+    string_ctor.borrow_mut(mc).set_non_enumerable("raw");
 
     // Register instance methods
     let methods = vec![

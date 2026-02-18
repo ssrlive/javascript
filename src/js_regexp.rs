@@ -29,6 +29,9 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     }
 
     object_set_key_value(mc, &regexp_ctor, "prototype", &Value::Object(regexp_proto))?;
+    regexp_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    regexp_ctor.borrow_mut(mc).set_non_writable("prototype");
+    regexp_ctor.borrow_mut(mc).set_non_configurable("prototype");
     object_set_key_value(mc, &regexp_proto, "constructor", &Value::Object(regexp_ctor))?;
 
     // Register instance methods
@@ -39,9 +42,40 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         object_set_key_value(mc, &regexp_proto, method, &val)?;
         regexp_proto.borrow_mut(mc).set_non_enumerable(method);
     }
+
+    // Register accessor properties on RegExp.prototype per spec
+    let accessor_props = vec![
+        "source",
+        "global",
+        "ignoreCase",
+        "multiline",
+        "dotAll",
+        "unicode",
+        "sticky",
+        "hasIndices",
+        "unicodeSets",
+        "flags",
+    ];
+    for prop_name in accessor_props {
+        let getter = Value::Function(format!("RegExp.prototype.get {prop_name}"));
+        let accessor = Value::Property {
+            value: None,
+            getter: Some(Box::new(getter)),
+            setter: None,
+        };
+        object_set_key_value(mc, &regexp_proto, prop_name, &accessor)?;
+        regexp_proto.borrow_mut(mc).set_non_enumerable(prop_name);
+    }
+
     regexp_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     env_set(mc, env, "RegExp", &Value::Object(regexp_ctor))?;
+
+    // Ensure RegExp constructor [[Prototype]] = Function.prototype
+    if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &regexp_ctor, env, "Function") {
+        log::warn!("Failed to set RegExp constructor's internal prototype from Function: {e:?}");
+    }
+
     Ok(())
 }
 
@@ -52,6 +86,52 @@ pub fn internal_get_regex_pattern(obj: &JSObjectDataPtr) -> Result<Vec<u16>, JSE
             _ => Err(raise_type_error!("Invalid regex pattern")),
         },
         None => Err(raise_type_error!("Invalid regex object")),
+    }
+}
+
+/// Handle RegExp.prototype getter accessors (source, global, ignoreCase, etc.)
+/// These read internal slots from the RegExp instance (`this`).
+pub(crate) fn handle_regexp_getter<'gc>(obj: &JSObjectDataPtr<'gc>, prop: &str) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    // Check if obj is actually a RegExp (has __regex internal slot)
+    let is_regexp = get_own_property(obj, "__regex").is_some();
+    if !is_regexp {
+        // Per spec, accessing these on non-RegExp returns undefined for some,
+        // throws TypeError for others. For RegExp.prototype itself, "flags" returns ""
+        // and "source" returns "(?:)".
+        return Ok(Some(Value::Undefined));
+    }
+    match prop {
+        "source" => {
+            if let Some(val) = get_own_property(obj, "__regex") {
+                Ok(Some(val.borrow().clone()))
+            } else {
+                Ok(Some(Value::String(utf8_to_utf16("(?:)"))))
+            }
+        }
+        "global" => Ok(Some(get_bool_slot(obj, "__global"))),
+        "ignoreCase" => Ok(Some(get_bool_slot(obj, "__ignoreCase"))),
+        "multiline" => Ok(Some(get_bool_slot(obj, "__multiline"))),
+        "dotAll" => Ok(Some(get_bool_slot(obj, "__dotAll"))),
+        "unicode" => Ok(Some(get_bool_slot(obj, "__unicode"))),
+        "sticky" => Ok(Some(get_bool_slot(obj, "__sticky"))),
+        "hasIndices" => Ok(Some(get_bool_slot(obj, "__hasIndices"))),
+        "unicodeSets" => Ok(Some(get_bool_slot(obj, "__unicodeSets"))),
+        "flags" => {
+            if let Some(val) = get_own_property(obj, "__flags") {
+                Ok(Some(val.borrow().clone()))
+            } else {
+                Ok(Some(Value::String(utf8_to_utf16(""))))
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn get_bool_slot<'gc>(obj: &JSObjectDataPtr<'gc>, slot: &str) -> Value<'gc> {
+    if let Some(val) = get_own_property(obj, slot) {
+        val.borrow().clone()
+    } else {
+        Value::Boolean(false)
     }
 }
 
@@ -236,41 +316,10 @@ fn create_regexp_object_from_parts<'gc>(
     regexp_obj.borrow_mut(mc).set_non_enumerable("lastIndex");
     regexp_obj.borrow_mut(mc).set_non_configurable("lastIndex");
 
-    object_set_key_value(mc, &regexp_obj, "source", &Value::String(pattern_u16))?;
-    regexp_obj.borrow_mut(mc).set_non_enumerable("source");
-    regexp_obj.borrow_mut(mc).set_non_configurable("source");
-    regexp_obj.borrow_mut(mc).set_non_writable("source");
-
-    object_set_key_value(mc, &regexp_obj, "global", &Value::Boolean(global))?;
-    object_set_key_value(mc, &regexp_obj, "ignoreCase", &Value::Boolean(ignore_case))?;
-    object_set_key_value(mc, &regexp_obj, "multiline", &Value::Boolean(multiline))?;
-    object_set_key_value(mc, &regexp_obj, "dotAll", &Value::Boolean(dot_matches_new_line))?;
-    object_set_key_value(mc, &regexp_obj, "unicode", &Value::Boolean(unicode))?;
-    object_set_key_value(mc, &regexp_obj, "sticky", &Value::Boolean(sticky))?;
-    object_set_key_value(mc, &regexp_obj, "hasIndices", &Value::Boolean(has_indices))?;
-    object_set_key_value(mc, &regexp_obj, "unicodeSets", &Value::Boolean(unicode_sets))?;
-    object_set_key_value(mc, &regexp_obj, "flags", &Value::String(utf8_to_utf16(&flags)))?;
-    regexp_obj.borrow_mut(mc).set_non_enumerable("global");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("ignoreCase");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("multiline");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("dotAll");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("unicode");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("sticky");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("hasIndices");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("unicodeSets");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("flags");
-
-    object_set_key_value(mc, &regexp_obj, "exec", &Value::Function("RegExp.prototype.exec".to_string()))?;
-    object_set_key_value(mc, &regexp_obj, "test", &Value::Function("RegExp.prototype.test".to_string()))?;
-    object_set_key_value(
-        mc,
-        &regexp_obj,
-        "toString",
-        &Value::Function("RegExp.prototype.toString".to_string()),
-    )?;
-    regexp_obj.borrow_mut(mc).set_non_enumerable("exec");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("test");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("toString");
+    // Per spec, source/global/flags/etc. are accessor properties on RegExp.prototype,
+    // not own data properties on instances. The prototype getters read internal slots
+    // (__regex, __global, __flags, etc.) from the instance via `this`.
+    // Do NOT set per-instance data properties for these.
 
     Ok(Value::Object(regexp_obj))
 }

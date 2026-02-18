@@ -1094,116 +1094,120 @@ pub(crate) fn evaluate_new<'gc>(
                                     object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
                                 }
                             }
-                            // Try multiple strategies to discover the constructor's realm:
-                            // 1. If the constructor object itself wraps a closure, use its
-                            //    closure.env.
-                            // 2. Walk the constructor/prototype chain and inspect any
-                            //    `constructor` property or prototype objects for a closure
-                            //    whose `env` points at the originating realm.
-                            let realm_env_opt = prototype_source_obj.and_then(|src_obj| {
-                                // 1) direct closure on the constructor object
-                                if let Some(cl_val_rc) = src_obj.borrow().get_closure() {
-                                    match &*cl_val_rc.borrow() {
-                                        Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
-                                        _ => {}
-                                    }
-                                }
-
-                                // 2) walk the constructor/prototype chain looking for a
-                                // closure on either a `constructor` property or on the
-                                // prototype objects themselves.
-                                let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(src_obj);
-                                while let Some(o) = cur {
-                                    // Check for a `constructor` property that may point to
-                                    // a function object with closure data.
-                                    if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
-                                        && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
-                                        && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
-                                    {
-                                        match &*c_cl_val_rc.borrow() {
+                            // Only fall back to closure-env realm discovery if __origin_global
+                            // did not already provide a prototype.
+                            if computed_proto.is_none() {
+                                // Try multiple strategies to discover the constructor's realm:
+                                // 1. If the constructor object itself wraps a closure, use its
+                                //    closure.env.
+                                // 2. Walk the constructor/prototype chain and inspect any
+                                //    `constructor` property or prototype objects for a closure
+                                //    whose `env` points at the originating realm.
+                                let realm_env_opt = prototype_source_obj.and_then(|src_obj| {
+                                    // 1) direct closure on the constructor object
+                                    if let Some(cl_val_rc) = src_obj.borrow().get_closure() {
+                                        match &*cl_val_rc.borrow() {
                                             Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
                                             _ => {}
                                         }
                                     }
 
-                                    // Advance up the prototype chain and continue searching.
-                                    cur = o.borrow().prototype;
-                                }
+                                    // 2) walk the constructor/prototype chain looking for a
+                                    // closure on either a `constructor` property or on the
+                                    // prototype objects themselves.
+                                    let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(src_obj);
+                                    while let Some(o) = cur {
+                                        // Check for a `constructor` property that may point to
+                                        // a function object with closure data.
+                                        if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
+                                            && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
+                                            && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
+                                        {
+                                            match &*c_cl_val_rc.borrow() {
+                                                Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
+                                                _ => {}
+                                            }
+                                        }
 
-                                None
-                            });
+                                        // Advance up the prototype chain and continue searching.
+                                        cur = o.borrow().prototype;
+                                    }
 
-                            // DIAG: report the computed realm_env_opt and extract its Object.prototype if present
-                            let obj_proto_opt = if let Some(re_env) = realm_env_opt {
-                                log::warn!("evaluate_new: computed realm_env_opt ptr={:p}", Gc::as_ptr(re_env));
-                                if let Some(obj_val) = crate::core::env_get(&re_env, "Object") {
-                                    log::warn!("evaluate_new: realm env Object binding = {:?}", obj_val.borrow());
-                                    if let Value::Object(obj_ctor) = &*obj_val.borrow() {
-                                        if let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype") {
-                                            match &*obj_proto_val.borrow() {
-                                                Value::Object(p) => {
-                                                    log::warn!("evaluate_new: realm Object.prototype ptr = {:p}", Gc::as_ptr(*p));
-                                                    Some(*p)
+                                    None
+                                });
+
+                                // DIAG: report the computed realm_env_opt and extract its Object.prototype if present
+                                let obj_proto_opt = if let Some(re_env) = realm_env_opt {
+                                    log::warn!("evaluate_new: computed realm_env_opt ptr={:p}", Gc::as_ptr(re_env));
+                                    if let Some(obj_val) = crate::core::env_get(&re_env, "Object") {
+                                        log::warn!("evaluate_new: realm env Object binding = {:?}", obj_val.borrow());
+                                        if let Value::Object(obj_ctor) = &*obj_val.borrow() {
+                                            if let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype") {
+                                                match &*obj_proto_val.borrow() {
+                                                    Value::Object(p) => {
+                                                        log::warn!("evaluate_new: realm Object.prototype ptr = {:p}", Gc::as_ptr(*p));
+                                                        Some(*p)
+                                                    }
+                                                    other => {
+                                                        log::warn!("evaluate_new: realm Object.prototype not object: {:?}", other);
+                                                        None
+                                                    }
                                                 }
-                                                other => {
-                                                    log::warn!("evaluate_new: realm Object.prototype not object: {:?}", other);
-                                                    None
-                                                }
+                                            } else {
+                                                log::warn!("evaluate_new: realm Object binding has no prototype property");
+                                                None
                                             }
                                         } else {
-                                            log::warn!("evaluate_new: realm Object binding has no prototype property");
                                             None
                                         }
                                     } else {
+                                        log::warn!("evaluate_new: computed realm_env_opt but no Object binding found in that env");
                                         None
                                     }
                                 } else {
-                                    log::warn!("evaluate_new: computed realm_env_opt but no Object binding found in that env");
                                     None
-                                }
-                            } else {
-                                None
-                            };
+                                };
 
-                            if let Some(obj_proto) = obj_proto_opt {
-                                // Defer assignment to final instance
-                                computed_proto = Some(obj_proto);
-                                instance.borrow_mut(mc).prototype = Some(obj_proto);
-                                object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
-                                log::debug!(
-                                    "evaluate_new: computed fallback realm prototype (deferred) -> proto={:p}",
-                                    Gc::as_ptr(obj_proto)
-                                );
-                            } else if let Some(src_obj) = prototype_source_obj {
-                                // As a final fallback, walk the prototype chain of the
-                                // prototype_source_obj to find the top-most prototype
-                                // (the object whose [[Prototype]] is null). That object
-                                // is the realm-specific Object.prototype intrinsic for
-                                // the realm which originally created `src_obj`.
-                                let mut cur = Some(src_obj);
-                                while let Some(o) = cur {
-                                    let next_ptr = o.borrow().prototype.map(Gc::as_ptr);
+                                if let Some(obj_proto) = obj_proto_opt {
+                                    // Defer assignment to final instance
+                                    computed_proto = Some(obj_proto);
+                                    instance.borrow_mut(mc).prototype = Some(obj_proto);
+                                    object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
                                     log::debug!(
-                                        "evaluate_new: walking prototype chain: at obj ptr={:p} proto={:?}",
-                                        Gc::as_ptr(o),
-                                        next_ptr
+                                        "evaluate_new: computed fallback realm prototype (deferred) -> proto={:p}",
+                                        Gc::as_ptr(obj_proto)
                                     );
-                                    if let Some(p) = o.borrow().prototype {
-                                        cur = Some(p);
-                                        continue;
-                                    } else {
-                                        // `o` is the top-most prototype (Object.prototype)
-                                        instance.borrow_mut(mc).prototype = Some(o);
-                                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(o))?;
-                                        log::warn!(
-                                            "evaluate_new: assigned fallback by walking prototype chain -> instance={:p} proto={:p}",
-                                            Gc::as_ptr(instance),
-                                            Gc::as_ptr(o)
+                                } else if let Some(src_obj) = prototype_source_obj {
+                                    // As a final fallback, walk the prototype chain of the
+                                    // prototype_source_obj to find the top-most prototype
+                                    // (the object whose [[Prototype]] is null). That object
+                                    // is the realm-specific Object.prototype intrinsic for
+                                    // the realm which originally created `src_obj`.
+                                    let mut cur = Some(src_obj);
+                                    while let Some(o) = cur {
+                                        let next_ptr = o.borrow().prototype.map(Gc::as_ptr);
+                                        log::debug!(
+                                            "evaluate_new: walking prototype chain: at obj ptr={:p} proto={:?}",
+                                            Gc::as_ptr(o),
+                                            next_ptr
                                         );
-                                        break;
+                                        if let Some(p) = o.borrow().prototype {
+                                            cur = Some(p);
+                                            continue;
+                                        } else {
+                                            // `o` is the top-most prototype (Object.prototype)
+                                            instance.borrow_mut(mc).prototype = Some(o);
+                                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(o))?;
+                                            log::warn!(
+                                                "evaluate_new: assigned fallback by walking prototype chain -> instance={:p} proto={:p}",
+                                                Gc::as_ptr(instance),
+                                                Gc::as_ptr(o)
+                                            );
+                                            break;
+                                        }
                                     }
                                 }
-                            }
+                            } // end if computed_proto.is_none() (closure-env realm fallback)
                         }
                     }
 
@@ -1394,7 +1398,61 @@ pub(crate) fn evaluate_new<'gc>(
                     "Array" => return crate::js_array::handle_array_constructor(mc, evaluated_args, env),
                     "Date" => return crate::js_date::handle_date_constructor(mc, evaluated_args, env),
                     "RegExp" => return crate::js_regexp::handle_regexp_constructor(mc, evaluated_args),
-                    "Object" => return handle_object_constructor(mc, evaluated_args, env),
+                    "Object" => {
+                        // Per spec: If NewTarget is neither undefined nor the active function (Object),
+                        // return OrdinaryCreateFromConstructor(NewTarget, "%ObjectPrototype%").
+                        // Check if new_target differs from the Object constructor itself.
+                        let is_subclass = if let Some(nt) = new_target {
+                            if let Value::Object(nt_obj) = nt {
+                                !Gc::ptr_eq(*nt_obj, *class_obj)
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        };
+                        if is_subclass {
+                            // NewTarget is not Object: create empty object with NewTarget.prototype
+                            let instance = new_js_object_data(mc);
+                            crate::core::set_internal_prototype_from_constructor(mc, &instance, env, "Object")?;
+                            if let Some(Value::Object(nt_obj)) = new_target
+                                && let Some(proto_val_rc) = object_get_key_value(nt_obj, "prototype")
+                            {
+                                let proto_val = match &*proto_val_rc.borrow() {
+                                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                    other => other.clone(),
+                                };
+                                if let Value::Object(proto_obj) = proto_val {
+                                    instance.borrow_mut(mc).prototype = Some(proto_obj);
+                                } else {
+                                    // C.prototype is not an Object (e.g., null).
+                                    // Per spec, fall back to GetFunctionRealm(C) to find
+                                    // the realm's Object.prototype intrinsic.
+                                    // Use __origin_global if available (set by realm emulation).
+                                    if let Some(origin_rc) = object_get_key_value(nt_obj, "__origin_global")
+                                        && let Value::Object(origin_global) = &*origin_rc.borrow()
+                                        && let Some(obj_ctor_rc) = object_get_key_value(origin_global, "Object")
+                                        && let Value::Object(obj_ctor) = &*obj_ctor_rc.borrow()
+                                        && let Some(obj_proto_rc) = object_get_key_value(obj_ctor, "prototype")
+                                    {
+                                        let realm_proto = match &*obj_proto_rc.borrow() {
+                                            Value::Object(p) => Some(*p),
+                                            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                                                Value::Object(p) => Some(*p),
+                                                _ => None,
+                                            },
+                                            _ => None,
+                                        };
+                                        if let Some(rp) = realm_proto {
+                                            instance.borrow_mut(mc).prototype = Some(rp);
+                                        }
+                                    }
+                                }
+                            }
+                            return Ok(Value::Object(instance));
+                        }
+                        return handle_object_constructor(mc, evaluated_args, env);
+                    }
                     "Number" => return handle_number_constructor(mc, evaluated_args, env),
                     "Boolean" => return handle_boolean_constructor(mc, evaluated_args, env),
                     "String" => {
@@ -1464,6 +1522,12 @@ pub(crate) fn evaluate_new<'gc>(
                     }
                     "GeneratorFunction" => {
                         return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, env);
+                    }
+                    "AsyncFunction" => {
+                        return crate::js_function::handle_global_function(mc, "AsyncFunction", evaluated_args, env);
+                    }
+                    "AsyncGeneratorFunction" => {
+                        return crate::js_function::handle_global_function(mc, "AsyncGeneratorFunction", evaluated_args, env);
                     }
                     "Map" => return Ok(crate::js_map::handle_map_constructor(mc, evaluated_args, env)?),
                     "Set" => return Ok(crate::js_set::handle_set_constructor(mc, evaluated_args, env)?),
@@ -1609,61 +1673,91 @@ pub(crate) fn evaluate_new<'gc>(
                         assigned_ptr
                     );
                 } else {
-                    // Fallback to the realm intrinsic Object.prototype for the prototype_source_obj's realm
-                    let realm_env_opt = prototype_source_obj.and_then(|src_obj| {
-                        // 1) direct closure on the constructor object
-                        if let Some(cl_val_rc) = src_obj.borrow().get_closure() {
-                            match &*cl_val_rc.borrow() {
-                                Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
-                                _ => {}
-                            }
-                        }
+                    // Fallback to the realm intrinsic Object.prototype for the
+                    // prototype_source_obj's realm.
 
-                        // 2) walk the constructor/prototype chain looking for a
-                        // closure on either a `constructor` property or on the
-                        // prototype objects themselves.
-                        let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(src_obj);
-                        while let Some(o) = cur {
-                            // Check for a `constructor` property that may point to
-                            // a function object with closure data.
-                            if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
-                                && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
-                                && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
-                            {
-                                match &*c_cl_val_rc.borrow() {
+                    // First try `__origin_global` — the realm shim sets this on
+                    // functions created by another realm's Function constructor.
+                    let mut found_via_origin = false;
+                    if let Some(src_obj) = prototype_source_obj
+                        && let Some(origin_val) = object_get_key_value(&src_obj, "__origin_global")
+                        && let Value::Object(origin_global) = &*origin_val.borrow()
+                        && let Some(obj_val) = object_get_key_value(origin_global, "Object")
+                        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+                    {
+                        let proto_opt: Option<JSObjectDataPtr<'_>> = match &*obj_proto_val.borrow() {
+                            Value::Object(p) => Some(*p),
+                            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                                Value::Object(p) => Some(*p),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(obj_proto) = proto_opt {
+                            instance.borrow_mut(mc).prototype = Some(obj_proto);
+                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
+                            found_via_origin = true;
+                        }
+                    }
+
+                    if !found_via_origin {
+                        // Fall back to discovering the realm via the closure env chain.
+                        let realm_env_opt = prototype_source_obj.and_then(|src_obj| {
+                            // 1) direct closure on the constructor object
+                            if let Some(cl_val_rc) = src_obj.borrow().get_closure() {
+                                match &*cl_val_rc.borrow() {
                                     Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
                                     _ => {}
                                 }
                             }
 
-                            // Advance up the prototype chain and continue searching.
-                            cur = o.borrow().prototype;
+                            // 2) walk the constructor/prototype chain looking for a
+                            // closure on either a `constructor` property or on the
+                            // prototype objects themselves.
+                            let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(src_obj);
+                            while let Some(o) = cur {
+                                // Check for a `constructor` property that may point to
+                                // a function object with closure data.
+                                if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
+                                    && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
+                                    && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
+                                {
+                                    match &*c_cl_val_rc.borrow() {
+                                        Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
+                                        _ => {}
+                                    }
+                                }
+
+                                // Advance up the prototype chain and continue searching.
+                                cur = o.borrow().prototype;
+                            }
+
+                            None
+                        });
+
+                        // DIAG: log what realm we found (if any)
+                        if let Some(re_env) = realm_env_opt {
+                            log::warn!("evaluate_new (class): found realm env ptr={:p}", Gc::as_ptr(re_env));
                         }
 
-                        None
-                    });
-
-                    // DIAG: log what realm we found (if any)
-                    if let Some(re_env) = realm_env_opt {
-                        log::warn!("evaluate_new (class): found realm env ptr={:p}", Gc::as_ptr(re_env));
-                    }
-
-                    if let Some(re_env) = realm_env_opt
-                        && let Some(obj_val) = crate::core::env_get(&re_env, "Object")
-                        && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                        && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
-                    {
-                        instance.borrow_mut(mc).prototype = Some(*obj_proto);
-                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(*obj_proto))?;
-                        let assigned_ptr = instance.borrow().prototype.map(Gc::as_ptr);
-                        log::warn!(
-                            "evaluate_new: assigned fallback realm prototype -> instance={:p} proto={:p}",
-                            Gc::as_ptr(instance),
-                            Gc::as_ptr(*obj_proto)
-                        );
-                        log::warn!("evaluate_new: after assignment instance.prototype ptr = {:?}", assigned_ptr);
-                    }
+                        if let Some(re_env) = realm_env_opt
+                            && let Some(obj_val) = crate::core::env_get(&re_env, "Object")
+                            && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                            && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+                            && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+                        {
+                            instance.borrow_mut(mc).prototype = Some(*obj_proto);
+                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(*obj_proto))?;
+                            let assigned_ptr = instance.borrow().prototype.map(Gc::as_ptr);
+                            log::warn!(
+                                "evaluate_new: assigned fallback realm prototype -> instance={:p} proto={:p}",
+                                Gc::as_ptr(instance),
+                                Gc::as_ptr(*obj_proto)
+                            );
+                            log::warn!("evaluate_new: after assignment instance.prototype ptr = {:?}", assigned_ptr);
+                        }
+                    } // end if !found_via_origin
                 }
 
                 // Set instance properties block removed - moved to constructor logic
@@ -2135,6 +2229,12 @@ pub(crate) fn evaluate_new<'gc>(
                 }
                 "GeneratorFunction" => {
                     return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, env);
+                }
+                "AsyncFunction" => {
+                    return crate::js_function::handle_global_function(mc, "AsyncFunction", evaluated_args, env);
+                }
+                "AsyncGeneratorFunction" => {
+                    return crate::js_function::handle_global_function(mc, "AsyncGeneratorFunction", evaluated_args, env);
                 }
                 _ => {
                     if let Some(resolved_rc) = crate::core::env_get(env, func_name) {

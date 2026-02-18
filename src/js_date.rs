@@ -28,6 +28,9 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
     }
 
     object_set_key_value(mc, &date_ctor, "prototype", &Value::Object(date_proto))?;
+    date_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    date_ctor.borrow_mut(mc).set_non_writable("prototype");
+    date_ctor.borrow_mut(mc).set_non_configurable("prototype");
     object_set_key_value(mc, &date_proto, "constructor", &Value::Object(date_ctor))?;
 
     // Instance methods

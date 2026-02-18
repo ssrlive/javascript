@@ -202,9 +202,18 @@ pub fn call_function_with_this<'gc>(
 
 /// Walk up to the global environment object (top of prototype chain)
 fn get_global_env<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'gc> {
-    // climb prototypes until none
+    // Climb prototypes until we find the global env.
+    // The global env is identified by having the "globalThis" property.
+    // We must NOT walk past it into Object.prototype or similar built-in prototypes.
     let mut global_env = *env;
     loop {
+        if global_env
+            .borrow()
+            .properties
+            .contains_key(&crate::core::PropertyKey::String("globalThis".to_string()))
+        {
+            break;
+        }
         let next = global_env.borrow().prototype;
         if let Some(parent) = next {
             global_env = parent;
@@ -228,6 +237,7 @@ fn ensure_promise_runtime<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     // create runtime object and set it
     let runtime = new_js_object_data(mc);
     object_set_key_value(mc, &global, "__promise_runtime", &Value::Object(runtime))?;
+    global.borrow_mut(mc).set_non_enumerable("__promise_runtime");
     Ok(runtime)
 }
 

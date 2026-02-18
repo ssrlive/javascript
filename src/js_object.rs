@@ -586,31 +586,32 @@ pub fn handle_object_method<'gc>(
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "keys" => {
             if args.is_empty() {
-                return Err(raise_type_error!("Object.keys requires at least one argument"));
+                return Err(raise_type_error!("Object.keys requires at least one argument").into());
             }
             if args.len() > 1 {
-                return Err(raise_type_error!("Object.keys accepts only one argument"));
+                return Err(raise_type_error!("Object.keys accepts only one argument").into());
             }
             let obj = to_object_for_object_static(mc, env, &args[0])?;
             let mut keys = Vec::new();
             let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
             for key in ordered {
-                let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
-                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
-                {
-                    crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
-                } else {
-                    obj.borrow().is_enumerable(&key)
-                };
-                if !is_enumerable {
-                    continue;
-                }
-                if let PropertyKey::String(s) = key {
+                // Per spec, Object.keys only processes string keys (not symbols)
+                if let PropertyKey::String(s) = &key {
                     if s == "__proto__" {
+                        continue;
+                    }
+                    let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
+                    } else {
+                        obj.borrow().is_enumerable(&key)
+                    };
+                    if !is_enumerable {
                         continue;
                     }
                     let is_module_namespace = {
@@ -620,7 +621,7 @@ pub fn handle_object_method<'gc>(
                     if is_module_namespace {
                         let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
                     }
-                    keys.push(Value::String(utf8_to_utf16(&s)));
+                    keys.push(Value::String(utf8_to_utf16(s)));
                 }
             }
             let result_obj = crate::js_array::create_array(mc, env)?;
@@ -633,10 +634,10 @@ pub fn handle_object_method<'gc>(
         }
         "values" => {
             if args.is_empty() {
-                return Err(raise_type_error!("Object.values requires at least one argument"));
+                return Err(raise_type_error!("Object.values requires at least one argument").into());
             }
             if args.len() > 1 {
-                return Err(raise_type_error!("Object.values accepts only one argument"));
+                return Err(raise_type_error!("Object.values accepts only one argument").into());
             }
             let obj = to_object_for_object_static(mc, env, &args[0])?;
             let mut values = Vec::new();
@@ -647,7 +648,13 @@ pub fn handle_object_method<'gc>(
                 {
                     crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
                 } else {
-                    obj.borrow().is_enumerable(&key)
+                    // Spec: Let desc be ? O.[[GetOwnProperty]](key). If desc is undefined, skip.
+                    // A previous getter invocation may have deleted this key.
+                    if !obj.borrow().properties.contains_key(&key) {
+                        false
+                    } else {
+                        obj.borrow().is_enumerable(&key)
+                    }
                 };
                 if !is_enumerable {
                     continue;
@@ -663,7 +670,17 @@ pub fn handle_object_method<'gc>(
                     if is_module_namespace {
                         let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
                     }
-                    let value = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                    // Use proxy get trap when object is a proxy
+                    let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                        Value::Proxy(p) => Some(*p),
+                        _ => None,
+                    });
+                    let value = if let Some(proxy) = proxy_opt {
+                        crate::js_proxy::proxy_get_property_with_receiver(mc, &proxy, &key, Some(Value::Object(obj)))?
+                            .unwrap_or(Value::Undefined)
+                    } else {
+                        crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?
+                    };
                     values.push(value);
                 }
             }
@@ -677,10 +694,10 @@ pub fn handle_object_method<'gc>(
         }
         "entries" => {
             if args.is_empty() {
-                return Err(raise_type_error!("Object.entries requires at least one argument"));
+                return Err(raise_type_error!("Object.entries requires at least one argument").into());
             }
             if args.len() > 1 {
-                return Err(raise_type_error!("Object.entries accepts only one argument"));
+                return Err(raise_type_error!("Object.entries accepts only one argument").into());
             }
 
             let obj = to_object_for_object_static(mc, env, &args[0])?;
@@ -694,19 +711,35 @@ pub fn handle_object_method<'gc>(
                 {
                     crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
                 } else {
-                    obj.borrow().is_enumerable(&key)
+                    // Spec: Let desc be ? O.[[GetOwnProperty]](key). If desc is undefined, skip.
+                    // A previous getter invocation may have deleted this key.
+                    if !obj.borrow().properties.contains_key(&key) {
+                        false
+                    } else {
+                        obj.borrow().is_enumerable(&key)
+                    }
                 };
                 if !is_enumerable {
                     continue;
                 }
 
-                if let PropertyKey::String(s) = key {
+                if let PropertyKey::String(s) = &key {
                     if s == "__proto__" {
                         continue;
                     }
-                    let value = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                    // Use proxy get trap when object is a proxy
+                    let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                        Value::Proxy(p) => Some(*p),
+                        _ => None,
+                    });
+                    let value = if let Some(proxy) = proxy_opt {
+                        crate::js_proxy::proxy_get_property_with_receiver(mc, &proxy, &key, Some(Value::Object(obj)))?
+                            .unwrap_or(Value::Undefined)
+                    } else {
+                        crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?
+                    };
                     let pair = crate::js_array::create_array(mc, env)?;
-                    object_set_key_value(mc, &pair, 0, &Value::String(utf8_to_utf16(&s)))?;
+                    object_set_key_value(mc, &pair, 0, &Value::String(utf8_to_utf16(s)))?;
                     object_set_key_value(mc, &pair, 1, &value)?;
                     set_array_length(mc, &pair, 2)?;
 
@@ -720,13 +753,13 @@ pub fn handle_object_method<'gc>(
         }
         "hasOwn" => {
             if args.len() != 2 {
-                return Err(raise_type_error!("Object.hasOwn requires exactly two arguments"));
+                return Err(raise_type_error!("Object.hasOwn requires exactly two arguments").into());
             }
             let obj_val = args[0].clone();
             let prop_val = args[1].clone();
 
             if matches!(obj_val, Value::Undefined | Value::Null) {
-                return Err(raise_type_error!("Cannot convert undefined or null to object"));
+                return Err(raise_type_error!("Cannot convert undefined or null to object").into());
             }
 
             let key = prop_val.to_property_key(mc, env)?;
@@ -758,7 +791,7 @@ pub fn handle_object_method<'gc>(
         }
         "getPrototypeOf" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.getPrototypeOf requires exactly one argument"));
+                return Err(raise_type_error!("Object.getPrototypeOf requires exactly one argument").into());
             }
             let obj_val = args[0].clone();
             match obj_val {
@@ -781,9 +814,7 @@ pub fn handle_object_method<'gc>(
                     })?;
                     match result {
                         Value::Object(_) | Value::Null => Ok(result),
-                        _ => Err(raise_type_error!(
-                            "'getPrototypeOf' on proxy: trap returned neither object nor null"
-                        )),
+                        _ => Err(raise_type_error!("'getPrototypeOf' on proxy: trap returned neither object nor null").into()),
                     }
                 }
                 Value::Object(obj) => {
@@ -814,9 +845,7 @@ pub fn handle_object_method<'gc>(
                             )?;
                         return match result {
                             Value::Object(_) | Value::Null => Ok(result),
-                            _ => Err(raise_type_error!(
-                                "'getPrototypeOf' on proxy: trap returned neither object nor null"
-                            )),
+                            _ => Err(raise_type_error!("'getPrototypeOf' on proxy: trap returned neither object nor null").into()),
                         };
                     }
                     if let Some(proto_rc) = obj.borrow().prototype {
@@ -865,47 +894,133 @@ pub fn handle_object_method<'gc>(
                         Ok(Value::Null)
                     }
                 }
-                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
-                _ => {
-                    // For primitives, we should ideally return the prototype of the wrapper.
-                    // For now, returning Null is a safe fallback if wrappers aren't fully supported.
-                    Ok(Value::Null)
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object").into()),
+                other => {
+                    // For primitives, return the prototype of the wrapper type per spec
+                    let wrapper_name = match other {
+                        Value::Number(_) => Some("Number"),
+                        Value::String(_) => Some("String"),
+                        Value::Boolean(_) => Some("Boolean"),
+                        Value::BigInt(_) => Some("BigInt"),
+                        Value::Symbol(_) => Some("Symbol"),
+                        _ => None,
+                    };
+                    if let Some(name) = wrapper_name
+                        && let Some(ctor_val) = crate::core::env_get(env, name)
+                        && let Value::Object(ctor_obj) = &*ctor_val.borrow()
+                        && let Some(proto_val) = crate::core::object_get_key_value(ctor_obj, "prototype")
+                        && let Value::Object(proto_obj) = &*proto_val.borrow()
+                    {
+                        Ok(Value::Object(*proto_obj))
+                    } else {
+                        Ok(Value::Null)
+                    }
                 }
             }
         }
         "isExtensible" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.isExtensible requires exactly one argument"));
+                return Err(raise_type_error!("Object.isExtensible requires exactly one argument").into());
             }
             let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(obj) => Ok(Value::Boolean(obj.borrow().is_extensible())),
-                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                // Built-in functions are extensible per spec
+                Value::Function(_)
+                | Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::GeneratorFunction(..)
+                | Value::AsyncGeneratorFunction(..) => Ok(Value::Boolean(true)),
                 _ => {
-                    // Primitives are considered wrapped objects; treat as extensible for now
-                    Ok(Value::Boolean(true))
+                    // ES6+: If Type(O) is not Object, return false
+                    Ok(Value::Boolean(false))
                 }
             }
         }
         "preventExtensions" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.preventExtensions requires exactly one argument"));
+                return Err(raise_type_error!("Object.preventExtensions requires exactly one argument").into());
             }
             match &args[0] {
                 Value::Object(obj) => {
+                    // Check if object is a proxy wrapper
+                    if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        let result =
+                            crate::js_proxy::apply_proxy_trap(mc, proxy, "preventExtensions", vec![(*proxy.target).clone()], || {
+                                // Default: prevent extensions on target
+                                if let Value::Object(target_obj) = &*proxy.target {
+                                    target_obj.borrow_mut(mc).prevent_extensions();
+                                }
+                                Ok(Value::Boolean(true))
+                            })?;
+                        let success = match &result {
+                            Value::Boolean(b) => *b,
+                            _ => result.to_truthy(),
+                        };
+                        if !success {
+                            return Err(raise_type_error!("'preventExtensions' on proxy: trap returned falsish").into());
+                        }
+                        return Ok(args[0].clone());
+                    }
                     obj.borrow_mut(mc).prevent_extensions();
                     Ok(Value::Object(*obj))
                 }
-                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                // ES6+: If Type(O) is not Object, return O
                 other => Ok(other.clone()),
             }
         }
         "seal" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.seal requires exactly one argument"));
+                return Err(raise_type_error!("Object.seal requires exactly one argument").into());
             }
             match &args[0] {
                 Value::Object(obj) => {
+                    // Check if object is a proxy wrapper
+                    if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        // SetIntegrityLevel step 3: O.[[PreventExtensions]]()
+                        let pe_result =
+                            crate::js_proxy::apply_proxy_trap(mc, proxy, "preventExtensions", vec![(*proxy.target).clone()], || {
+                                if let Value::Object(target_obj) = &*proxy.target {
+                                    target_obj.borrow_mut(mc).prevent_extensions();
+                                }
+                                Ok(Value::Boolean(true))
+                            })?;
+                        let pe_success = match &pe_result {
+                            Value::Boolean(b) => *b,
+                            _ => pe_result.to_truthy(),
+                        };
+                        if !pe_success {
+                            return Err(raise_type_error!("'preventExtensions' on proxy: trap returned falsish").into());
+                        }
+                        // SetIntegrityLevel step 5: get ownKeys, then defineProperty each with configurable:false
+                        let keys = crate::js_proxy::proxy_own_keys(mc, proxy)?;
+                        for k in keys {
+                            let desc_obj = crate::core::new_js_object_data(mc);
+                            crate::core::object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(false))?;
+                            crate::js_proxy::apply_proxy_trap(
+                                mc,
+                                proxy,
+                                "defineProperty",
+                                vec![
+                                    (*proxy.target).clone(),
+                                    crate::js_proxy::property_key_to_value_pub(&k),
+                                    Value::Object(desc_obj),
+                                ],
+                                || {
+                                    // Default: make non-configurable on target
+                                    if let Value::Object(target_obj) = &*proxy.target {
+                                        target_obj.borrow_mut(mc).set_non_configurable(k.clone());
+                                    }
+                                    Ok(Value::Boolean(true))
+                                },
+                            )?;
+                        }
+                        return Ok(args[0].clone());
+                    }
                     // Make all own properties non-configurable
                     let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
                     for k in ordered {
@@ -915,13 +1030,13 @@ pub fn handle_object_method<'gc>(
                     obj.borrow_mut(mc).prevent_extensions();
                     Ok(Value::Object(*obj))
                 }
-                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                // ES6+: If Type(O) is not Object, return O
                 other => Ok(other.clone()),
             }
         }
         "isSealed" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.isSealed requires exactly one argument"));
+                return Err(raise_type_error!("Object.isSealed requires exactly one argument").into());
             }
             let arg = args[0].clone();
             match arg {
@@ -948,33 +1063,190 @@ pub fn handle_object_method<'gc>(
                         return Ok(Value::Boolean(false));
                     }
 
-                    if obj.borrow().is_extensible() {
+                    // Check if this is a proxy
+                    let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                        Value::Proxy(p) => Some(*p),
+                        _ => None,
+                    });
+
+                    if let Some(ref proxy) = proxy_opt {
+                        // For proxy: check isExtensible trap
+                        let ext_result =
+                            crate::js_proxy::apply_proxy_trap(mc, proxy, "isExtensible", vec![(*proxy.target).clone()], || {
+                                if let Value::Object(target_obj) = &*proxy.target {
+                                    Ok(Value::Boolean(target_obj.borrow().is_extensible()))
+                                } else {
+                                    Ok(Value::Boolean(false))
+                                }
+                            })?;
+                        if ext_result.to_truthy() {
+                            return Ok(Value::Boolean(false));
+                        }
+                    } else if obj.borrow().is_extensible() {
                         return Ok(Value::Boolean(false));
                     }
+
                     let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
                     for k in ordered {
-                        if obj.borrow().is_configurable(&k) {
+                        // Skip engine-internal __ properties
+                        if let PropertyKey::String(ref s) = k
+                            && s.len() > 2
+                            && s.starts_with("__")
+                        {
+                            continue;
+                        }
+                        if let Some(ref proxy) = proxy_opt {
+                            // Use getOwnPropertyDescriptor trap
+                            let desc_result = crate::js_proxy::apply_proxy_trap(
+                                mc,
+                                proxy,
+                                "getOwnPropertyDescriptor",
+                                vec![(*proxy.target).clone(), crate::js_proxy::property_key_to_value_pub(&k)],
+                                || {
+                                    if let Value::Object(target_obj) = &*proxy.target {
+                                        if let Some(pd) = crate::core::build_property_descriptor(mc, target_obj, &k) {
+                                            Ok(Value::Object(pd.to_object(mc)?))
+                                        } else {
+                                            Ok(Value::Undefined)
+                                        }
+                                    } else {
+                                        Ok(Value::Undefined)
+                                    }
+                                },
+                            )?;
+                            if let Value::Object(desc_obj) = &desc_result {
+                                let configurable = crate::core::object_get_key_value(desc_obj, "configurable")
+                                    .map(|v| v.borrow().to_truthy())
+                                    .unwrap_or(false);
+                                if configurable {
+                                    return Ok(Value::Boolean(false));
+                                }
+                            }
+                        } else if obj.borrow().is_configurable(&k) {
                             return Ok(Value::Boolean(false));
                         }
                     }
                     Ok(Value::Boolean(true))
                 }
-                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                // ES6+: If Type(O) is not Object, return true
                 _ => Ok(Value::Boolean(true)),
             }
         }
         "freeze" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.freeze requires exactly one argument"));
+                return Err(raise_type_error!("Object.freeze requires exactly one argument").into());
             }
             match &args[0] {
                 Value::Object(obj) => {
+                    // Check if object is a proxy wrapper
+                    if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        // SetIntegrityLevel step 3: O.[[PreventExtensions]]()
+                        let pe_result =
+                            crate::js_proxy::apply_proxy_trap(mc, proxy, "preventExtensions", vec![(*proxy.target).clone()], || {
+                                if let Value::Object(target_obj) = &*proxy.target {
+                                    target_obj.borrow_mut(mc).prevent_extensions();
+                                }
+                                Ok(Value::Boolean(true))
+                            })?;
+                        let pe_success = match &pe_result {
+                            Value::Boolean(b) => *b,
+                            _ => pe_result.to_truthy(),
+                        };
+                        if !pe_success {
+                            return Err(raise_type_error!("'preventExtensions' on proxy: trap returned falsish").into());
+                        }
+                        // SetIntegrityLevel step 6 (frozen): get ownKeys, getOwnPropertyDescriptor, then defineProperty
+                        let keys = crate::js_proxy::proxy_own_keys(mc, proxy)?;
+                        for k in keys {
+                            // Get current descriptor via proxy trap
+                            let gopd_result = crate::js_proxy::apply_proxy_trap(
+                                mc,
+                                proxy,
+                                "getOwnPropertyDescriptor",
+                                vec![(*proxy.target).clone(), crate::js_proxy::property_key_to_value_pub(&k)],
+                                || {
+                                    // Default: build descriptor from target
+                                    if let Value::Object(target_obj) = &*proxy.target
+                                        && let Some(val_rc) = crate::core::object_get_key_value(target_obj, &k)
+                                    {
+                                        let desc_obj = crate::core::new_js_object_data(mc);
+                                        crate::core::object_set_key_value(mc, &desc_obj, "value", &val_rc.borrow().clone())?;
+                                        crate::core::object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;
+                                        crate::core::object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(true))?;
+                                        crate::core::object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+                                        return Ok(Value::Object(desc_obj));
+                                    }
+                                    Ok(Value::Undefined)
+                                },
+                            )?;
+
+                            if let Value::Object(desc_obj) = &gopd_result {
+                                let is_accessor = crate::core::object_get_key_value(desc_obj, "get").is_some()
+                                    || crate::core::object_get_key_value(desc_obj, "set").is_some();
+                                let new_desc = crate::core::new_js_object_data(mc);
+                                crate::core::object_set_key_value(mc, &new_desc, "configurable", &Value::Boolean(false))?;
+                                if !is_accessor {
+                                    crate::core::object_set_key_value(mc, &new_desc, "writable", &Value::Boolean(false))?;
+                                }
+                                crate::js_proxy::apply_proxy_trap(
+                                    mc,
+                                    proxy,
+                                    "defineProperty",
+                                    vec![
+                                        (*proxy.target).clone(),
+                                        crate::js_proxy::property_key_to_value_pub(&k),
+                                        Value::Object(new_desc),
+                                    ],
+                                    || {
+                                        if let Value::Object(target_obj) = &*proxy.target {
+                                            if !is_accessor {
+                                                target_obj.borrow_mut(mc).set_non_writable(k.clone());
+                                            }
+                                            target_obj.borrow_mut(mc).set_non_configurable(k.clone());
+                                        }
+                                        Ok(Value::Boolean(true))
+                                    },
+                                )?;
+                            }
+                        }
+                        return Ok(args[0].clone());
+                    }
+
                     let is_module_namespace = {
                         let b = obj.borrow();
                         b.deferred_module_path.is_some() || b.deferred_cache_env.is_some() || (b.prototype.is_none() && !b.is_extensible())
                     };
                     if is_module_namespace {
-                        return Err(raise_type_error!("Cannot freeze module namespace object"));
+                        return Err(raise_type_error!("Cannot freeze module namespace object").into());
+                    }
+
+                    // Per spec (10.4.5.3), TypedArray integer-indexed properties
+                    // have fixed attributes {writable:true, configurable:false, enumerable:true}.
+                    // Attempting to set writable:false on them must return false, which
+                    // DefinePropertyOrThrow translates to a TypeError.
+                    // Additionally, per spec 10.4.5.4, [[PreventExtensions]] returns false
+                    // for TypedArrays backed by resizable ArrayBuffers, so Object.freeze
+                    // always throws for such arrays (regardless of length).
+                    if let Some(ta_val) = crate::core::get_own_property(obj, "__typedarray")
+                        && let Value::TypedArray(ta) = &*ta_val.borrow()
+                    {
+                        // Check if backed by a resizable ArrayBuffer
+                        let is_resizable = ta.buffer.borrow().max_byte_length.is_some();
+                        if is_resizable {
+                            return Err(raise_type_error!("Cannot freeze array buffer views backed by resizable buffers").into());
+                        }
+                        // Check effective length (may be length-tracking)
+                        let eff_len = if ta.length_tracking {
+                            let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                            (buf_len.saturating_sub(ta.byte_offset)) / ta.element_size()
+                        } else {
+                            ta.length
+                        };
+                        if eff_len > 0 {
+                            return Err(raise_type_error!("Cannot freeze array buffer views with elements").into());
+                        }
                     }
 
                     // For every own property: if data property -> make non-writable; in any case make non-configurable
@@ -1001,13 +1273,13 @@ pub fn handle_object_method<'gc>(
                     obj.borrow_mut(mc).prevent_extensions();
                     Ok(Value::Object(*obj))
                 }
-                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                // ES6+: If Type(O) is not Object, return O
                 other => Ok(other.clone()),
             }
         }
         "isFrozen" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.isFrozen requires exactly one argument"));
+                return Err(raise_type_error!("Object.isFrozen requires exactly one argument").into());
             }
             let arg = args[0].clone();
             match arg {
@@ -1034,24 +1306,90 @@ pub fn handle_object_method<'gc>(
                         return Ok(Value::Boolean(false));
                     }
 
-                    if obj.borrow().is_extensible() {
-                        return Ok(Value::Boolean(false));
-                    }
-                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
-                    for k in ordered {
-                        if obj.borrow().is_configurable(&k) {
+                    // Check if this is a proxy
+                    let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                        Value::Proxy(p) => Some(*p),
+                        _ => None,
+                    });
+
+                    if let Some(ref proxy) = proxy_opt {
+                        let ext_result =
+                            crate::js_proxy::apply_proxy_trap(mc, proxy, "isExtensible", vec![(*proxy.target).clone()], || {
+                                if let Value::Object(target_obj) = &*proxy.target {
+                                    Ok(Value::Boolean(target_obj.borrow().is_extensible()))
+                                } else {
+                                    Ok(Value::Boolean(false))
+                                }
+                            })?;
+                        if ext_result.to_truthy() {
                             return Ok(Value::Boolean(false));
                         }
-                        // If data property, it must be non-writable
-                        if let Some(desc_rc) = crate::core::object_get_key_value(&obj, &k) {
-                            match &*desc_rc.borrow() {
-                                // Accessor properties have no writable attribute
-                                Value::Property { getter: Some(_), .. } | Value::Property { setter: Some(_), .. } => {}
-                                Value::Getter(..) | Value::Setter(..) => {}
-                                // Data descriptor or direct value
-                                _ => {
-                                    if obj.borrow().is_writable(&k) {
+                    } else if obj.borrow().is_extensible() {
+                        return Ok(Value::Boolean(false));
+                    }
+
+                    let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+                    for k in ordered {
+                        // Skip engine-internal __ properties
+                        if let PropertyKey::String(ref s) = k
+                            && s.len() > 2
+                            && s.starts_with("__")
+                        {
+                            continue;
+                        }
+                        if let Some(ref proxy) = proxy_opt {
+                            // Use getOwnPropertyDescriptor trap
+                            let desc_result = crate::js_proxy::apply_proxy_trap(
+                                mc,
+                                proxy,
+                                "getOwnPropertyDescriptor",
+                                vec![(*proxy.target).clone(), crate::js_proxy::property_key_to_value_pub(&k)],
+                                || {
+                                    if let Value::Object(target_obj) = &*proxy.target {
+                                        if let Some(pd) = crate::core::build_property_descriptor(mc, target_obj, &k) {
+                                            Ok(Value::Object(pd.to_object(mc)?))
+                                        } else {
+                                            Ok(Value::Undefined)
+                                        }
+                                    } else {
+                                        Ok(Value::Undefined)
+                                    }
+                                },
+                            )?;
+                            if let Value::Object(desc_obj) = &desc_result {
+                                let configurable = crate::core::object_get_key_value(desc_obj, "configurable")
+                                    .map(|v| v.borrow().to_truthy())
+                                    .unwrap_or(false);
+                                if configurable {
+                                    return Ok(Value::Boolean(false));
+                                }
+                                // isFrozen also needs non-writable for data properties
+                                let is_accessor = crate::core::object_get_key_value(desc_obj, "get").is_some()
+                                    || crate::core::object_get_key_value(desc_obj, "set").is_some();
+                                if !is_accessor {
+                                    let writable = crate::core::object_get_key_value(desc_obj, "writable")
+                                        .map(|v| v.borrow().to_truthy())
+                                        .unwrap_or(false);
+                                    if writable {
                                         return Ok(Value::Boolean(false));
+                                    }
+                                }
+                            }
+                        } else {
+                            if obj.borrow().is_configurable(&k) {
+                                return Ok(Value::Boolean(false));
+                            }
+                            // If data property, it must be non-writable
+                            if let Some(desc_rc) = crate::core::object_get_key_value(&obj, &k) {
+                                match &*desc_rc.borrow() {
+                                    // Accessor properties have no writable attribute
+                                    Value::Property { getter: Some(_), .. } | Value::Property { setter: Some(_), .. } => {}
+                                    Value::Getter(..) | Value::Setter(..) => {}
+                                    // Data descriptor or direct value
+                                    _ => {
+                                        if obj.borrow().is_writable(&k) {
+                                            return Ok(Value::Boolean(false));
+                                        }
                                     }
                                 }
                             }
@@ -1059,20 +1397,20 @@ pub fn handle_object_method<'gc>(
                     }
                     Ok(Value::Boolean(true))
                 }
-                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                // ES6+: If Type(O) is not Object, return true
                 _ => Ok(Value::Boolean(true)),
             }
         }
         "groupBy" => {
             if args.len() != 2 {
-                return Err(raise_type_error!("Object.groupBy requires exactly two arguments"));
+                return Err(raise_type_error!("Object.groupBy requires exactly two arguments").into());
             }
             let items_val = args[0].clone();
             let callback_val = args[1].clone();
 
             let items_obj = match items_val {
                 Value::Object(obj) => obj,
-                _ => return Err(raise_type_error!("Object.groupBy expects an object as first argument")),
+                _ => return Err(raise_type_error!("Object.groupBy expects an object as first argument").into()),
             };
 
             let result_obj = new_js_object_data(mc);
@@ -1090,7 +1428,7 @@ pub fn handle_object_method<'gc>(
                         let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params), &args, Some(env))?;
                         crate::core::evaluate_statements(mc, &func_env, &body)?
                     } else {
-                        return Err(raise_type_error!("Object.groupBy expects a function as second argument"));
+                        return Err(raise_type_error!("Object.groupBy expects a function as second argument").into());
                     };
 
                     let key = key_val.to_property_key(mc, env)?;
@@ -1117,14 +1455,14 @@ pub fn handle_object_method<'gc>(
         }
         "create" => {
             if args.is_empty() {
-                return Err(raise_type_error!("Object.create requires at least one argument"));
+                return Err(raise_type_error!("Object.create requires at least one argument").into());
             }
             let proto_val = args[0].clone();
             let proto_obj = match proto_val {
                 Value::Object(obj) => Some(obj),
                 Value::Null => None,
                 _ => {
-                    return Err(raise_type_error!("Object.create prototype must be an object or null"));
+                    return Err(raise_type_error!("Object.create prototype must be an object or null").into());
                 }
             };
 
@@ -1165,7 +1503,7 @@ pub fn handle_object_method<'gc>(
                     let desc_val = get_property_with_accessors(mc, env, &props_obj, &key)?;
                     let desc_obj = match desc_val {
                         Value::Object(o) => o,
-                        _ => return Err(raise_type_error!("Property description must be an object")),
+                        _ => return Err(raise_type_error!("Property description must be an object").into()),
                     };
 
                     let desc_obj_norm = materialize_property_descriptor_object(mc, env, &desc_obj)?;
@@ -1183,7 +1521,7 @@ pub fn handle_object_method<'gc>(
         }
         "setPrototypeOf" => {
             if args.len() != 2 {
-                return Err(raise_type_error!("Object.setPrototypeOf requires exactly two arguments"));
+                return Err(raise_type_error!("Object.setPrototypeOf requires exactly two arguments").into());
             }
             let target = args[0].clone();
             let proto_obj = match &args[1] {
@@ -1210,12 +1548,43 @@ pub fn handle_object_method<'gc>(
                     }
                     Some(wrapper)
                 }
-                _ => return Err(raise_type_error!("Object.setPrototypeOf prototype must be an object or null")),
+                _ => return Err(raise_type_error!("Object.setPrototypeOf prototype must be an object or null").into()),
             };
 
             match target {
-                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object").into()),
                 Value::Object(obj) => {
+                    // Check if the object is a proxy – invoke setPrototypeOf trap
+                    if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        let proto_val = match proto_obj {
+                            Some(p) => Value::Object(p),
+                            None => Value::Null,
+                        };
+                        let trap_result = crate::js_proxy::apply_proxy_trap(
+                            mc,
+                            proxy,
+                            "setPrototypeOf",
+                            vec![(*proxy.target).clone(), proto_val.clone()],
+                            || {
+                                // Default: ordinary [[SetPrototypeOf]] on the target
+                                if let Value::Object(target_obj) = &*proxy.target {
+                                    target_obj.borrow_mut(mc).prototype = proto_obj;
+                                }
+                                Ok(Value::Boolean(true))
+                            },
+                        )?;
+                        let success = match trap_result {
+                            Value::Boolean(b) => b,
+                            _ => trap_result.to_truthy(),
+                        };
+                        if !success {
+                            return Err(raise_type_error!("'setPrototypeOf' on proxy: trap returned falsish").into());
+                        }
+                        return Ok(Value::Object(obj));
+                    }
+
                     let current_proto = obj.borrow().prototype;
                     let is_extensible = obj.borrow().is_extensible();
                     let same_proto = match (current_proto, proto_obj) {
@@ -1226,7 +1595,7 @@ pub fn handle_object_method<'gc>(
                     if !same_proto && let Some(mut probe) = proto_obj {
                         loop {
                             if crate::core::Gc::ptr_eq(probe, obj) {
-                                return Err(raise_type_error!("Cannot create prototype cycle"));
+                                return Err(raise_type_error!("Cannot create prototype cycle").into());
                             }
                             if let Some(next) = probe.borrow().prototype {
                                 probe = next;
@@ -1236,7 +1605,7 @@ pub fn handle_object_method<'gc>(
                         }
                     }
                     if !is_extensible && !same_proto {
-                        return Err(raise_type_error!("Cannot set prototype of non-extensible object"));
+                        return Err(raise_type_error!("Cannot set prototype of non-extensible object").into());
                     }
                     obj.borrow_mut(mc).prototype = proto_obj;
                     Ok(Value::Object(obj))
@@ -1246,7 +1615,7 @@ pub fn handle_object_method<'gc>(
         }
         "getOwnPropertySymbols" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.getOwnPropertySymbols requires exactly one argument"));
+                return Err(raise_type_error!("Object.getOwnPropertySymbols requires exactly one argument").into());
             }
             let obj = to_object_for_object_static(mc, env, &args[0])?;
             crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
@@ -1264,7 +1633,7 @@ pub fn handle_object_method<'gc>(
         }
         "getOwnPropertyNames" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.getOwnPropertyNames requires exactly one argument"));
+                return Err(raise_type_error!("Object.getOwnPropertyNames requires exactly one argument").into());
             }
             let obj = to_object_for_object_static(mc, env, &args[0])?;
             crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
@@ -1287,7 +1656,7 @@ pub fn handle_object_method<'gc>(
         }
         "getOwnPropertyDescriptor" => {
             if args.len() < 2 {
-                return Err(raise_type_error!("Object.getOwnPropertyDescriptor requires at least two arguments"));
+                return Err(raise_type_error!("Object.getOwnPropertyDescriptor requires at least two arguments").into());
             }
             let obj_val = args[0].clone();
             let prop_val = args[1].clone();
@@ -1427,16 +1796,70 @@ pub fn handle_object_method<'gc>(
         }
         "getOwnPropertyDescriptors" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Object.getOwnPropertyDescriptors requires exactly one argument"));
+                return Err(raise_type_error!("Object.getOwnPropertyDescriptors requires exactly one argument").into());
             }
             let obj = to_object_for_object_static(mc, env, &args[0])?;
             crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
             let result_obj = new_js_object_data(mc);
 
+            // Ensure result inherits from Object.prototype
+            if let Some(obj_val) = crate::core::env_get(env, "Object")
+                && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
+                && let Value::Object(proto) = &*proto_val.borrow()
+            {
+                result_obj.borrow_mut(mc).prototype = Some(*proto);
+            }
+
             let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
+
+            // Check if the object is a proxy
+            let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                Value::Proxy(p) => Some(*p),
+                _ => None,
+            });
+
             for key in &ordered {
-                if let Some(pd) = crate::core::build_property_descriptor(mc, &obj, key) {
-                    let desc_obj = pd.to_object(mc)?;
+                // Skip engine-internal __ properties
+                if let PropertyKey::String(s) = key
+                    && s.len() > 2
+                    && s.starts_with("__")
+                {
+                    continue;
+                }
+
+                let desc_obj_opt = if let Some(ref proxy) = proxy_opt {
+                    // For proxies, call the getOwnPropertyDescriptor trap
+                    let trap_result = crate::js_proxy::apply_proxy_trap(
+                        mc,
+                        proxy,
+                        "getOwnPropertyDescriptor",
+                        vec![(*proxy.target).clone(), crate::js_proxy::property_key_to_value_pub(key)],
+                        || {
+                            // Default: build descriptor from target
+                            if let Value::Object(target_obj) = &*proxy.target {
+                                if let Some(pd) = crate::core::build_property_descriptor(mc, target_obj, key) {
+                                    Ok(Value::Object(pd.to_object(mc)?))
+                                } else {
+                                    Ok(Value::Undefined)
+                                }
+                            } else {
+                                Ok(Value::Undefined)
+                            }
+                        },
+                    )?;
+                    match trap_result {
+                        Value::Undefined => None,
+                        Value::Object(d) => Some(d),
+                        _ => None,
+                    }
+                } else if let Some(pd) = crate::core::build_property_descriptor(mc, &obj, key) {
+                    Some(pd.to_object(mc)?)
+                } else {
+                    None
+                };
+
+                if let Some(desc_obj) = desc_obj_opt {
                     match key {
                         PropertyKey::String(s) => {
                             object_set_key_value(mc, &result_obj, s, &Value::Object(desc_obj))?;
@@ -1454,7 +1877,7 @@ pub fn handle_object_method<'gc>(
         }
         "assign" => {
             if args.is_empty() {
-                return Err(raise_type_error!("Object.assign requires at least one argument"));
+                return Err(raise_type_error!("Object.assign requires at least one argument").into());
             }
             let target_obj = to_object_for_object_static(mc, env, args.first().unwrap())?;
 
@@ -1507,12 +1930,12 @@ pub fn handle_object_method<'gc>(
         "defineProperty" => {
             // Minimal implementation: Object.defineProperty(target, prop, descriptor)
             if args.len() < 3 {
-                return Err(raise_type_error!("Object.defineProperty requires three arguments"));
+                return Err(raise_type_error!("Object.defineProperty requires three arguments").into());
             }
             let target_val = args[0].clone();
             let target_obj = match target_val {
                 Value::Object(o) => o,
-                _ => return Err(raise_type_error!("Object.defineProperty called on non-object")),
+                _ => return Err(raise_type_error!("Object.defineProperty called on non-object").into()),
             };
 
             let prop_val = args[1].clone();
@@ -1525,7 +1948,7 @@ pub fn handle_object_method<'gc>(
             let desc_val = args[2].clone();
             let desc_obj = match desc_val {
                 Value::Object(o) => o,
-                _ => return Err(raise_type_error!("Property descriptor must be an object")),
+                _ => return Err(raise_type_error!("Property descriptor must be an object").into()),
             };
 
             let desc_obj_norm = materialize_property_descriptor_object(mc, env, &desc_obj)?;
@@ -1537,7 +1960,7 @@ pub fn handle_object_method<'gc>(
                 && s == "length"
             {
                 if pd.get.is_some() || pd.set.is_some() {
-                    return Err(raise_type_error!("Cannot redefine array length property as accessor"));
+                    return Err(raise_type_error!("Cannot redefine array length property as accessor").into());
                 }
 
                 let to_number_with_hint = |value: &Value<'gc>| -> Result<f64, JSError> {
@@ -1566,7 +1989,7 @@ pub fn handle_object_method<'gc>(
                     let number_len = to_number_with_hint(&v)?;
 
                     if (uint32_len as f64) != number_len {
-                        return Err(raise_range_error!("Invalid array length"));
+                        return Err(raise_range_error!("Invalid array length").into());
                     }
                     computed_new_len = Some(uint32_len as usize);
                 }
@@ -1575,27 +1998,27 @@ pub fn handle_object_method<'gc>(
                 if let Some(new_len) = computed_new_len
                     && new_len > u32::MAX as usize
                 {
-                    return Err(raise_range_error!("Invalid array length"));
+                    return Err(raise_range_error!("Invalid array length").into());
                 }
 
                 if pd.configurable == Some(true) || pd.enumerable == Some(true) {
-                    return Err(raise_type_error!("Cannot redefine array length property"));
+                    return Err(raise_type_error!("Cannot redefine array length property").into());
                 }
 
                 let length_writable = target_obj.borrow().is_writable("length");
                 if pd.writable == Some(true) && !length_writable {
-                    return Err(raise_type_error!("Cannot make non-writable property writable"));
+                    return Err(raise_type_error!("Cannot make non-writable property writable").into());
                 }
 
                 if let Some(new_len) = computed_new_len {
                     if !length_writable && new_len != old_len {
-                        return Err(raise_type_error!("Cannot assign to read only property 'length'"));
+                        return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
                     }
                     if let Err(e) = set_array_length(mc, &target_obj, new_len) {
                         if pd.writable == Some(false) {
                             target_obj.borrow_mut(mc).set_non_writable("length");
                         }
-                        return Err(e);
+                        return Err(e.into());
                     }
                 }
 
@@ -1615,10 +2038,10 @@ pub fn handle_object_method<'gc>(
                 && idx.to_string() == *s
             {
                 if pd.get.is_some() || pd.set.is_some() {
-                    return Err(raise_type_error!("Invalid typed array index descriptor"));
+                    return Err(raise_type_error!("Invalid typed array index descriptor").into());
                 }
                 if pd.configurable == Some(true) || pd.enumerable == Some(false) || pd.writable == Some(false) {
-                    return Err(raise_type_error!("Invalid typed array index descriptor"));
+                    return Err(raise_type_error!("Invalid typed array index descriptor").into());
                 }
 
                 let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
@@ -1634,7 +2057,7 @@ pub fn handle_object_method<'gc>(
                 };
 
                 if idx >= cur_len {
-                    return Err(raise_type_error!("Invalid typed array index"));
+                    return Err(raise_type_error!("Invalid typed array index").into());
                 }
 
                 let element_val = pd.value.clone().unwrap_or(Value::Undefined);
@@ -1648,39 +2071,71 @@ pub fn handle_object_method<'gc>(
             };
             if is_module_namespace {
                 if pd.get.is_some() || pd.set.is_some() {
-                    return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                    return Err(raise_type_error!("Cannot redefine property on module namespace object").into());
                 }
 
                 match &prop_key {
                     PropertyKey::String(name) => {
                         if crate::core::build_property_descriptor(mc, &target_obj, &prop_key).is_none() {
-                            return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                            return Err(raise_type_error!("Cannot redefine property on module namespace object").into());
                         }
                         if pd.configurable == Some(true) || pd.enumerable == Some(false) || pd.writable == Some(false) {
-                            return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                            return Err(raise_type_error!("Cannot redefine property on module namespace object").into());
                         }
                         if let Some(v) = pd.value {
                             let cur = crate::core::get_property_with_accessors(mc, env, &target_obj, name.as_str())?;
                             if !crate::core::values_equal(mc, &cur, &v) {
-                                return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                                return Err(raise_type_error!("Cannot redefine property on module namespace object").into());
                             }
                         }
                     }
                     PropertyKey::Symbol(sym) if sym.description() == Some("Symbol.toStringTag") => {
                         if pd.configurable == Some(true) || pd.enumerable == Some(true) || pd.writable == Some(true) {
-                            return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                            return Err(raise_type_error!("Cannot redefine property on module namespace object").into());
                         }
                         if let Some(v) = pd.value
                             && !crate::core::values_equal(mc, &v, &Value::String(utf8_to_utf16("Module")))
                         {
-                            return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                            return Err(raise_type_error!("Cannot redefine property on module namespace object").into());
                         }
                     }
                     _ => {
-                        return Err(raise_type_error!("Cannot redefine property on module namespace object"));
+                        return Err(raise_type_error!("Cannot redefine property on module namespace object").into());
                     }
                 }
 
+                return Ok(Value::Object(target_obj));
+            }
+
+            // If the target is a proxy, invoke the defineProperty trap
+            if let Some(proxy_cell) = crate::core::get_own_property(&target_obj, "__proxy__")
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+            {
+                let trap_result = crate::js_proxy::apply_proxy_trap(
+                    mc,
+                    proxy,
+                    "defineProperty",
+                    vec![
+                        (*proxy.target).clone(),
+                        crate::js_proxy::property_key_to_value_pub(&prop_key),
+                        Value::Object(desc_obj_norm),
+                    ],
+                    || {
+                        // Default: forward to target
+                        if let Value::Object(target_inner) = &*proxy.target {
+                            let mat_desc = materialize_property_descriptor_object(mc, env, &desc_obj)?;
+                            define_property_internal(mc, target_inner, &prop_key, &mat_desc)?;
+                        }
+                        Ok(Value::Boolean(true))
+                    },
+                )?;
+                let success = match trap_result {
+                    Value::Boolean(b) => b,
+                    _ => trap_result.to_truthy(),
+                };
+                if !success {
+                    return Err(raise_type_error!("'defineProperty' on proxy: trap returned falsish").into());
+                }
                 return Ok(Value::Object(target_obj));
             }
 
@@ -1689,12 +2144,12 @@ pub fn handle_object_method<'gc>(
         }
         "defineProperties" => {
             if args.len() < 2 {
-                return Err(raise_type_error!("Object.defineProperties requires two arguments"));
+                return Err(raise_type_error!("Object.defineProperties requires two arguments").into());
             }
             let target_val = args[0].clone();
             let target_obj = match target_val {
                 Value::Object(o) => o,
-                _ => return Err(raise_type_error!("Object.defineProperties called on non-object")),
+                _ => return Err(raise_type_error!("Object.defineProperties called on non-object").into()),
             };
 
             let props_val = args[1].clone();
@@ -1732,7 +2187,7 @@ pub fn handle_object_method<'gc>(
                 let desc_val = get_property_with_accessors(mc, env, &props_obj, &key)?;
                 let desc_obj = match desc_val {
                     Value::Object(o) => o,
-                    _ => return Err(raise_type_error!("Property descriptor must be an object")),
+                    _ => return Err(raise_type_error!("Property descriptor must be an object").into()),
                 };
 
                 let desc_obj_norm = materialize_property_descriptor_object(mc, env, &desc_obj)?;
@@ -1761,7 +2216,7 @@ pub fn handle_object_method<'gc>(
             let eq = crate::core::values_equal(mc, &a, &b);
             Ok(Value::Boolean(eq))
         }
-        _ => Err(raise_eval_error!(format!("Object.{method} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("Object.{method} is not implemented")).into()),
     }
 }
 

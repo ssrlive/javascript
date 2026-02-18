@@ -83,6 +83,13 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     number_obj.borrow_mut(mc).set_non_enumerable("__is_constructor");
     number_obj.borrow_mut(mc).set_non_enumerable("__native_ctor");
     number_obj.borrow_mut(mc).set_non_enumerable("prototype");
+    number_obj.borrow_mut(mc).set_non_writable("prototype");
+    number_obj.borrow_mut(mc).set_non_configurable("prototype");
+
+    // Number.length = 1 (non-writable, non-enumerable, non-configurable)
+    object_set_key_value(mc, &number_obj, "length", &Value::Number(1.0))?;
+    number_obj.borrow_mut(mc).set_non_enumerable("length");
+    number_obj.borrow_mut(mc).set_non_writable("length");
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")

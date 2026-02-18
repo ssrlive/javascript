@@ -109,9 +109,15 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     }
 
     object_set_key_value(mc, &error_ctor, "prototype", &Value::Object(error_proto))?;
+    error_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    error_ctor.borrow_mut(mc).set_non_writable("prototype");
+    error_ctor.borrow_mut(mc).set_non_configurable("prototype");
     object_set_key_value(mc, &error_proto, "constructor", &Value::Object(error_ctor))?;
+    error_proto.borrow_mut(mc).set_non_enumerable("constructor");
     object_set_key_value(mc, &error_proto, "name", &Value::String(utf8_to_utf16("Error")))?;
+    error_proto.borrow_mut(mc).set_non_enumerable("name");
     object_set_key_value(mc, &error_proto, "message", &Value::String(utf8_to_utf16("")))?;
+    error_proto.borrow_mut(mc).set_non_enumerable("message");
     // Provide Error.prototype.toString implementation
     let val = Value::Function("Error.prototype.toString".to_string());
     object_set_key_value(mc, &error_proto, "toString", &val)?;
@@ -168,6 +174,9 @@ fn initialize_native_error<'gc>(
     }
 
     object_set_key_value(mc, &ctor, "prototype", &Value::Object(proto))?;
+    ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    ctor.borrow_mut(mc).set_non_writable("prototype");
+    ctor.borrow_mut(mc).set_non_configurable("prototype");
     object_set_key_value(mc, &proto, "constructor", &Value::Object(ctor))?;
     object_set_key_value(mc, &proto, "name", &Value::String(utf8_to_utf16(name)))?;
     object_set_key_value(mc, &proto, "message", &Value::String(utf8_to_utf16("")))?;

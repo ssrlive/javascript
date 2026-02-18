@@ -1074,7 +1074,8 @@ pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value
             if n1.is_nan() && n2.is_nan() {
                 true
             } else {
-                n1 == n2
+                // SameValue: +0 and -0 are not equal
+                n1.to_bits() == n2.to_bits()
             }
         }
         (Value::String(s1), Value::String(s2)) => s1 == s2,
@@ -1182,6 +1183,48 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
                 // If this property is one of the typed array index helpers we already
                 // added above, skip it to avoid duplication.
                 if typed_indices.contains(s) {
+                    continue;
+                }
+
+                // Skip engine-internal properties.  We use a conservative
+                // heuristic: hide any property whose name matches known
+                // engine-internal naming patterns (starting with "__").
+                // User-defined names like __foo__ or __bar remain visible.
+                if s == "__proto__" {
+                    continue;
+                }
+                if s.starts_with("__")
+                    && (s.starts_with("__is_")               // __is_constructor, __is_arrow_function, ...
+                    || s.starts_with("__internal_")      // __internal_resolve_promise, ...
+                    || s.starts_with("__bound_")         // __bound_target, __bound_this, ...
+                    || s.starts_with("__import_")        // __import_meta, __import_src_...
+                    || s.starts_with("__module_")        // __module_cache, ...
+                    || s.starts_with("__ns_")            // __ns_export_names, __ns_src_...
+                    || s.starts_with("__reexport_")      // __reexport_src_...
+                    || s.starts_with("__param_binding_") // __param_binding__{n}
+                    || s.starts_with("__pending_iterator") // __pending_iterator, __pending_iterator_done
+                    || s.starts_with("__class_field_")   // __class_field_initializer
+                    || s.starts_with("__async_generator") // __async_generator_proto
+                    || s.starts_with("__suppress_")      // __suppress_dynamic_import_result
+                    || s.starts_with("__allow_")         // __allow_dynamic_import_result
+                    || s.starts_with("__global_lex_")    // __global_lex_env
+                    || s.starts_with("__iterator_")      // __iterator_array__, __iterator_index__, __iterator_kind__
+                    || matches!(s.as_str(),
+                        "__function" | "__instance" | "__super" | "__caller"
+                        | "__proxy__" | "__proxy_wrapper" | "__arraybuffer"
+                        | "__typedarray" | "__regex" | "__map__" | "__set__"
+                        | "__weakmap__" | "__weakset__" | "__value__"
+                        | "__native_ctor" | "__new_target" | "__this_initialized"
+                        | "__computed_proto" | "__default_export" | "__definition_env"
+                        | "__extends_null" | "__filepath" | "__frame"
+                        | "__in_generator" | "__kind" | "__obj_param_placeholder"
+                        | "__origin_global" | "__revoke_proxy" | "__template_registry"
+                        | "__test262_global_code_mode" | "__fn_name_prefix"
+                        | "__detachArrayBuffer__" | "__lookupGetter__" | "__lookupSetter__"
+                        | "__createRealm__" | "__callable__" | "__generator__"
+                        | "__line__" | "__column__"
+                    ))
+                {
                     continue;
                 }
 
@@ -1707,6 +1750,21 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         }
         let parent_opt = current.borrow().prototype;
         if let Some(parent_rc) = parent_opt {
+            // If `current` is the global object (has `globalThis` as own property),
+            // do NOT follow its [[Prototype]] (which is Object.prototype).
+            // Instead, treat this as the end of the scope chain.
+            let is_global = {
+                let borrowed = current.borrow();
+                borrowed.properties.contains_key(&PropertyKey::String("globalThis".to_string()))
+            };
+            if is_global {
+                // Sloppy mode: create global binding on the global object itself.
+                if env_get_strictness(&current) {
+                    return Err(crate::raise_reference_error!(format!("{key} is not defined")));
+                } else {
+                    return env_set(mc, &current, key, val);
+                }
+            }
             current = parent_rc;
         } else {
             // Reached global scope (or end of chain) and variable not found.

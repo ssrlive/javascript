@@ -4,7 +4,7 @@ use crate::env_set;
 use crate::unicode::utf16_to_utf8;
 use crate::{
     core::{
-        EvalError, JSObjectDataPtr, PropertyKey, Value, evaluate_call_dispatch, new_js_object_data, object_get_key_value,
+        EvalError, JSObjectDataPtr, PropertyKey, Value, call_accessor, evaluate_call_dispatch, new_js_object_data, object_get_key_value,
         object_set_key_value,
     },
     error::JSError,
@@ -124,27 +124,80 @@ pub(crate) fn apply_proxy_trap<'gc>(
     }
 
     // Check if handler has the trap
-    if let Value::Object(handler_obj) = &*proxy.handler
-        && let Some(trap_val) = object_get_key_value(handler_obj, trap_name)
-    {
-        let trap = match &*trap_val.borrow() {
-            Value::Property { value: Some(v), .. } => v.borrow().clone(),
-            other => other.clone(),
+    if let Value::Object(handler_obj) = &*proxy.handler {
+        // If the handler is itself a proxy, use proxy get to look up the trap
+        // so the handler-proxy's traps are observed.
+        let trap_key = crate::core::PropertyKey::String(trap_name.to_string());
+        let trap_opt = if let Some(inner_proxy_cell) = crate::core::get_own_property(handler_obj, "__proxy__")
+            && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
+        {
+            proxy_get_property(mc, inner_proxy, &trap_key)?
+        } else if let Some(trap_val) = object_get_key_value(handler_obj, trap_name) {
+            let unwrapped = match &*trap_val.borrow() {
+                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                Value::Property {
+                    getter: Some(getter),
+                    value: None,
+                    ..
+                } => {
+                    // Accessor property (Property variant): invoke the getter with handler as this
+                    let getter_fn = (**getter).clone();
+                    call_accessor(mc, handler_obj, handler_obj, &getter_fn)?
+                }
+                Value::Getter(..) => {
+                    // Bare Getter variant (object literal with only `get` accessor):
+                    // invoke via call_accessor so the body is evaluated correctly
+                    let getter_fn = trap_val.borrow().clone();
+                    call_accessor(mc, handler_obj, handler_obj, &getter_fn)?
+                }
+                other => other.clone(),
+            };
+            Some(unwrapped)
+        } else {
+            None
         };
 
-        // Per spec, undefined/null trap means "not present" and should use default behavior.
-        if matches!(trap, Value::Undefined | Value::Null) {
-            return default_fn();
-        }
+        if let Some(trap) = trap_opt {
+            // Per spec, undefined/null trap means "not present" and should use default behavior.
+            if matches!(trap, Value::Undefined | Value::Null) {
+                return default_fn();
+            }
 
-        // If trap property exists it must be callable; invoke via normal call dispatch
-        // so return semantics and `this` binding are correct.
-        let handler_this = Value::Object(*handler_obj);
-        return evaluate_call_dispatch(mc, handler_obj, &trap, Some(&handler_this), &args);
+            // If trap property exists it must be callable; invoke via normal call dispatch
+            // so return semantics and `this` binding are correct.
+            let handler_this = Value::Object(*handler_obj);
+            return evaluate_call_dispatch(mc, handler_obj, &trap, Some(&handler_this), &args);
+        }
     }
 
     // No trap or trap not callable, use default behavior
     default_fn()
+}
+
+/// Read a property from an object, invoking getter accessors if the stored
+/// value is a `Value::Getter` or `Value::Property { getter: Some(..), .. }`.
+/// This is used to implement CreateListFromArrayLike semantics where
+/// getters on the trap result must be observable.
+fn read_property_invoking_getters<'gc>(
+    mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    key: impl Into<crate::core::PropertyKey<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if let Some(val_rc) = crate::core::object_get_key_value(obj, key) {
+        let raw = val_rc.borrow().clone();
+        match &raw {
+            Value::Property { value: Some(v), .. } => Ok(v.borrow().clone()),
+            Value::Property {
+                getter: Some(getter),
+                value: None,
+                ..
+            } => call_accessor(mc, obj, obj, getter),
+            Value::Getter(..) => call_accessor(mc, obj, obj, &raw),
+            _ => Ok(raw),
+        }
+    } else {
+        Ok(Value::Undefined)
+    }
 }
 
 /// Obtain the "ownKeys" result for a proxy by invoking the trap (if present)
@@ -182,27 +235,79 @@ pub(crate) fn proxy_own_keys<'gc>(
     log::trace!("proxy_own_keys: trap returned {:?}", res);
 
     // Convert the returned array-like into PropertyKey vector
+    // This implements CreateListFromArrayLike: reads `length` and each index
+    // through accessor-aware property access so getters are invoked.
     match res {
         Value::Object(arr_obj) => {
-            let len = crate::js_array::get_array_length(mc, &arr_obj).unwrap_or(0);
+            // Read `length` through accessor-aware path
+            let len = {
+                let len_val = read_property_invoking_getters(mc, &arr_obj, "length")?;
+                match len_val {
+                    Value::Number(n) => n as usize,
+                    _ => 0,
+                }
+            };
             let mut out: Vec<crate::core::PropertyKey<'gc>> = Vec::new();
             for i in 0..len {
-                if let Some(val_rc) = crate::core::object_get_key_value(&arr_obj, i) {
-                    match &*val_rc.borrow() {
-                        Value::String(s) => out.push(crate::core::PropertyKey::String(utf16_to_utf8(s))),
-                        Value::Symbol(sd) => out.push(crate::core::PropertyKey::Symbol(*sd)),
-                        other => {
-                            return Err(raise_type_error!(format!("Invalid value returned from proxy ownKeys trap: {:?}", other)).into());
-                        }
+                let elem = read_property_invoking_getters(mc, &arr_obj, i)?;
+                match elem {
+                    Value::String(s) => out.push(crate::core::PropertyKey::String(utf16_to_utf8(&s))),
+                    Value::Symbol(sd) => out.push(crate::core::PropertyKey::Symbol(sd)),
+                    other => {
+                        return Err(raise_type_error!(format!("Invalid value returned from proxy ownKeys trap: {:?}", other)).into());
                     }
-                } else {
-                    return Err(raise_type_error!("Proxy ownKeys trap returned a non-dense array").into());
                 }
             }
             // Per CopyDataProperties / spec behavior, callers performing CopyDataProperties
             // (such as object-rest/spread or destructuring) must call [[GetOwnProperty]] for
             // each key returned by the ownKeys trap. The proxy helper only returns the key
             // list here; callers should invoke `proxy_get_own_property_descriptor` as needed.
+
+            // Invariant checks per spec 10.5.11 step 17-24:
+            // 1. Check for duplicates
+            {
+                let mut seen = std::collections::HashSet::new();
+                for key in &out {
+                    let key_id = format!("{:?}", key);
+                    if !seen.insert(key_id) {
+                        return Err(raise_type_error!("'ownKeys' on proxy: trap returned duplicate entries").into());
+                    }
+                }
+            }
+
+            // 2. Get target's own keys and check non-configurable invariant
+            if let Value::Object(target_obj) = &*proxy.target {
+                let target_keys = crate::core::ordinary_own_property_keys(target_obj);
+                let is_extensible = target_obj.borrow().is_extensible();
+
+                // Check that all non-configurable keys of target are in trap result
+                for tk in &target_keys {
+                    let is_configurable = target_obj.borrow().is_configurable(tk);
+                    if !is_configurable && !out.contains(tk) {
+                        return Err(raise_type_error!("'ownKeys' on proxy: trap result did not include non-configurable key").into());
+                    }
+                }
+
+                // If the target is not extensible:
+                // - All target keys must be in trap result
+                // - No extra keys allowed
+                if !is_extensible {
+                    for tk in &target_keys {
+                        if !out.contains(tk) {
+                            return Err(raise_type_error!(
+                                "'ownKeys' on proxy: trap result did not include all keys of non-extensible target"
+                            )
+                            .into());
+                        }
+                    }
+                    for ok in &out {
+                        if !target_keys.contains(ok) {
+                            return Err(raise_type_error!("'ownKeys' on proxy: trap returned extra key for non-extensible target").into());
+                        }
+                    }
+                }
+            }
+
             Ok(out)
         }
         _ => Err(raise_type_error!("Proxy ownKeys trap did not return an object").into()),
@@ -215,36 +320,53 @@ pub(crate) fn proxy_get_property<'gc>(
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    proxy_get_property_with_receiver(mc, proxy, key, None)
+}
+
+/// Get property from proxy target with explicit receiver, applying get trap if available
+pub(crate) fn proxy_get_property_with_receiver<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
+    key: &PropertyKey<'gc>,
+    receiver: Option<Value<'gc>>,
+) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
     let key_clone = key.clone();
-    let result = apply_proxy_trap(mc, proxy, "get", vec![(*proxy.target).clone(), property_key_to_value(key)], || {
-        // Default behavior: get property from target
-        // If the target is a proxy wrapper (Object with __proxy__), delegate to that proxy
-        match &*proxy.target {
-            Value::Object(obj) => {
-                if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
-                    && let Value::Proxy(inner_proxy) = &*proxy_cell.borrow()
-                {
-                    return match proxy_get_property(mc, inner_proxy, &key_clone)? {
-                        Some(v) => Ok(v),
-                        None => Ok(Value::Undefined),
-                    };
-                }
-                let val_opt = object_get_key_value(obj, &key_clone);
-                match val_opt {
-                    Some(val_rc) => {
-                        let unwrapped = match &*val_rc.borrow() {
-                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                            Value::Property { value: None, .. } => Value::Undefined,
-                            other => other.clone(),
+    let receiver_val = receiver.unwrap_or(Value::Undefined);
+    let result = apply_proxy_trap(
+        mc,
+        proxy,
+        "get",
+        vec![(*proxy.target).clone(), property_key_to_value(key), receiver_val],
+        || {
+            // Default behavior: get property from target
+            // If the target is a proxy wrapper (Object with __proxy__), delegate to that proxy
+            match &*proxy.target {
+                Value::Object(obj) => {
+                    if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                        && let Value::Proxy(inner_proxy) = &*proxy_cell.borrow()
+                    {
+                        return match proxy_get_property(mc, inner_proxy, &key_clone)? {
+                            Some(v) => Ok(v),
+                            None => Ok(Value::Undefined),
                         };
-                        Ok(unwrapped)
                     }
-                    None => Ok(Value::Undefined),
+                    let val_opt = object_get_key_value(obj, &key_clone);
+                    match val_opt {
+                        Some(val_rc) => {
+                            let unwrapped = match &*val_rc.borrow() {
+                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                Value::Property { value: None, .. } => Value::Undefined,
+                                other => other.clone(),
+                            };
+                            Ok(unwrapped)
+                        }
+                        None => Ok(Value::Undefined),
+                    }
                 }
+                _ => Ok(Value::Undefined), // Non-objects don't have properties
             }
-            _ => Ok(Value::Undefined), // Non-objects don't have properties
-        }
-    })?;
+        },
+    )?;
 
     match result {
         Value::Undefined => Ok(None),
@@ -434,6 +556,11 @@ fn property_key_to_value<'gc>(key: &PropertyKey<'gc>) -> Value<'gc> {
         PropertyKey::Symbol(sd) => Value::Symbol(*sd),
         PropertyKey::Private(..) => unreachable!("Private keys should not be passed to proxy traps"),
     }
+}
+
+/// Public version of property_key_to_value for use in other modules
+pub(crate) fn property_key_to_value_pub<'gc>(key: &PropertyKey<'gc>) -> Value<'gc> {
+    property_key_to_value(key)
 }
 
 /// Initialize Proxy constructor and prototype

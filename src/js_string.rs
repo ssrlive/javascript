@@ -25,6 +25,13 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     string_ctor.borrow_mut(mc).set_non_enumerable("__is_constructor");
     string_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
     string_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    string_ctor.borrow_mut(mc).set_non_writable("prototype");
+    string_ctor.borrow_mut(mc).set_non_configurable("prototype");
+
+    // String.length = 1 (non-writable, non-enumerable, non-configurable)
+    object_set_key_value(mc, &string_ctor, "length", &Value::Number(1.0))?;
+    string_ctor.borrow_mut(mc).set_non_enumerable("length");
+    string_ctor.borrow_mut(mc).set_non_writable("length");
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -115,6 +122,7 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         "matchAll",
         "toLocaleLowerCase",
         "toLocaleUpperCase",
+        "localeCompare",
         "normalize",
         "toWellFormed",
         "replaceAll",

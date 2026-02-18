@@ -11290,33 +11290,22 @@ fn handle_eval_function<'gc>(
         // miss some simple cases where the tokenization step behaves unexpectedly
         // or is skipped, so include a cheap substring check first to ensure we
         // reliably catch direct evals that reference `import.meta`.
+        // eval() always uses Script as goal symbol – import.meta is only valid
+        // in Module, so it is ALWAYS a SyntaxError in eval code (direct or indirect,
+        // module or script caller).
         if script.contains("import.meta") {
-            let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
-                .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
-                .unwrap_or(false);
-            let mut root_env = *env;
-            while let Some(proto) = root_env.borrow().prototype {
-                root_env = proto;
-            }
-            let is_in_module = object_get_key_value(&root_env, "__import_meta").is_some();
-            log::trace!(
-                "HANDLE_EVAL quick-check (string): script contains import.meta, is_in_module={} is_indirect_eval={}",
-                is_in_module,
-                is_indirect_eval
-            );
-            if is_in_module && !is_indirect_eval {
-                let msg = "import.meta is not allowed in eval code";
-                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
-                let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
-                    v.borrow().clone()
-                } else {
-                    return Err(raise_syntax_error!(msg).into());
-                };
-                match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
-                    Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
-                    Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                    Err(_) => return Err(raise_syntax_error!(msg).into()),
-                }
+            log::trace!("HANDLE_EVAL quick-check (string): script contains import.meta - throwing SyntaxError");
+            let msg = "import.meta is not allowed in eval code";
+            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(raise_syntax_error!(msg).into());
+            };
+            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+                Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(raise_syntax_error!(msg).into()),
             }
         }
 
@@ -11335,33 +11324,18 @@ fn handle_eval_function<'gc>(
                 && matches!(&w[2].token, Token::Identifier(id2) if id2 == "meta")
         });
         if has_import_meta_token {
-            let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
-                .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
-                .unwrap_or(false);
-            let mut root_env = *env;
-            while let Some(proto) = root_env.borrow().prototype {
-                root_env = proto;
-            }
-            let is_in_module = object_get_key_value(&root_env, "__import_meta").is_some();
-            log::trace!(
-                "HANDLE_EVAL quick-check: has_import_meta_token={} is_in_module={} is_indirect_eval={}",
-                has_import_meta_token,
-                is_in_module,
-                is_indirect_eval
-            );
-            if is_in_module && !is_indirect_eval {
-                let msg = "import.meta is not allowed in eval code";
-                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
-                let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
-                    v.borrow().clone()
-                } else {
-                    return Err(raise_syntax_error!(msg).into());
-                };
-                match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
-                    Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
-                    Ok(other) => return Err(EvalError::Throw(other, None, None)),
-                    Err(_) => return Err(raise_syntax_error!(msg).into()),
-                }
+            log::trace!("HANDLE_EVAL token-check: import.meta tokens found - throwing SyntaxError");
+            let msg = "import.meta is not allowed in eval code";
+            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(raise_syntax_error!(msg).into());
+            };
+            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+                Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(raise_syntax_error!(msg).into()),
             }
         }
 
@@ -11426,7 +11400,7 @@ fn handle_eval_function<'gc>(
             let mut in_function = false;
             let mut in_arrow = false;
             while let Some(e) = cur {
-                if e.borrow().is_function_scope && e.borrow().prototype.is_some() {
+                if e.borrow().is_function_scope && e.borrow().prototype.is_some() && env_get_own(&e, "globalThis").is_none() {
                     in_function = true;
                     if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function") {
                         in_arrow = matches!(*flag_rc.borrow(), Value::Boolean(true));
@@ -11624,7 +11598,7 @@ fn handle_eval_function<'gc>(
             let mut in_function = false;
             let mut in_arrow = false;
             while let Some(e) = cur {
-                if e.borrow().is_function_scope {
+                if e.borrow().is_function_scope && e.borrow().prototype.is_some() && crate::core::env_get_own(&e, "globalThis").is_none() {
                     in_function = true;
                     if let Some(flag_rc) = crate::core::object_get_key_value(&e, "__is_arrow_function") {
                         in_arrow = matches!(*flag_rc.borrow(), crate::core::Value::Boolean(true));
@@ -12680,12 +12654,15 @@ fn evaluate_expr_call<'gc>(
             // direct eval (callee is IdentifierReference) so is_indirect_eval=false
             let is_indirect_eval = false;
             // Find nearest function scope and whether it's an arrow
-            // NOTE: do not treat the global environment (prototype == None) as a function scope
+            // NOTE: do not treat the global environment as a function scope.
+            // The global env has is_function_scope=true for var-hoisting purposes
+            // but also has a "globalThis" binding — use that to distinguish it
+            // from a real function scope.
             let mut cur = Some(*env);
             let mut in_function = false;
             let mut in_arrow = false;
             while let Some(e) = cur {
-                if e.borrow().is_function_scope && e.borrow().prototype.is_some() {
+                if e.borrow().is_function_scope && e.borrow().prototype.is_some() && crate::core::env_get_own(&e, "globalThis").is_none() {
                     in_function = true;
                     if let Some(flag_rc) = crate::core::object_get_key_value(&e, "__is_arrow_function") {
                         in_arrow = matches!(*flag_rc.borrow(), crate::core::Value::Boolean(true));
@@ -18060,6 +18037,15 @@ pub fn call_native_function<'gc>(
         return Ok(Some(v));
     }
 
+    // RegExp.prototype accessor getters (dispatched via call_accessor)
+    if let Some(prop) = name.strip_prefix("RegExp.prototype.get ") {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return crate::js_regexp::handle_regexp_getter(obj, prop);
+        }
+        return Ok(Some(Value::Undefined));
+    }
+
     if name == "__detachArrayBuffer__" {
         if let Some(Value::Object(obj)) = args.first()
             && let Some(ab_val) = object_get_key_value(obj, "__arraybuffer")
@@ -18244,10 +18230,14 @@ pub fn call_native_function<'gc>(
                     object_set_key_value(mc, &call_env, "this", new_this)?;
                     // If this is a call/apply that targets the builtin "eval", evaluate in the global environment
                     let target_env_for_call = if func_name == "eval" {
-                        let mut root_env = *env;
-                        while let Some(proto) = root_env.borrow().prototype {
-                            root_env = proto;
-                        }
+                        // Use globalThis lookup to find the actual global object,
+                        // rather than walking the prototype chain (which would overshoot
+                        // to Object.prototype now that the global has a [[Prototype]]).
+                        let root_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
+                            if let Value::Object(obj) = &*gt.borrow() { *obj } else { *env }
+                        } else {
+                            *env
+                        };
                         let key = PropertyKey::String("__is_indirect_eval".to_string());
                         object_set_key_value(mc, &root_env, &key, &Value::Boolean(true))?;
                         root_env
@@ -18341,10 +18331,14 @@ pub fn call_native_function<'gc>(
                     object_set_key_value(mc, &call_env, "this", &new_this)?;
                     // If this is a call/apply that targets the builtin "eval", evaluate in the global environment
                     let target_env_for_call = if func_name == "eval" {
-                        let mut root_env = *env;
-                        while let Some(proto) = root_env.borrow().prototype {
-                            root_env = proto;
-                        }
+                        // Use globalThis lookup to find the actual global object,
+                        // rather than walking the prototype chain (which would overshoot
+                        // to Object.prototype now that the global has a [[Prototype]]).
+                        let root_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
+                            if let Value::Object(obj) = &*gt.borrow() { *obj } else { *env }
+                        } else {
+                            *env
+                        };
                         let key = PropertyKey::String("__is_indirect_eval".to_string());
                         object_set_key_value(mc, &root_env, &key, &Value::Boolean(true))?;
                         root_env
@@ -19162,12 +19156,15 @@ pub fn call_closure<'gc>(
         if fn_is_strict {
             Some(Value::Undefined)
         } else {
-            // Non-strict: default to the global object (topmost env object)
-            let mut root_env = *env;
-            while let Some(proto) = root_env.borrow().prototype {
-                root_env = proto;
+            // Non-strict: default to the global object. Use `globalThis` lookup
+            // which walks the scope chain to find the actual global object,
+            // rather than walking the prototype chain (which would overshoot
+            // to Object.prototype now that the global has a [[Prototype]]).
+            if let Some(gt) = crate::core::env_get(env, "globalThis") {
+                Some(gt.borrow().clone())
+            } else {
+                Some(Value::Object(*env))
             }
-            Some(Value::Object(root_env))
         }
     };
 
@@ -20619,6 +20616,12 @@ fn evaluate_expr_new<'gc>(
 
                         let call_env_for_function = if let Some(re) = ctor_re_env { re } else { *env };
                         return crate::js_function::handle_global_function(mc, "Function", &eval_args, &call_env_for_function);
+                    } else if name_str == "GeneratorFunction" {
+                        return crate::js_function::handle_global_function(mc, "GeneratorFunction", &eval_args, env);
+                    } else if name_str == "AsyncFunction" {
+                        return crate::js_function::handle_global_function(mc, "AsyncFunction", &eval_args, env);
+                    } else if name_str == "AsyncGeneratorFunction" {
+                        return crate::js_function::handle_global_function(mc, "AsyncGeneratorFunction", &eval_args, env);
                     } else if name_str == "AbstractModuleSource" {
                         return Err(raise_type_error!("AbstractModuleSource constructor cannot be invoked").into());
                     } else if name_str == "Symbol" {

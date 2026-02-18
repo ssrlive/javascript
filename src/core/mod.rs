@@ -69,6 +69,28 @@ pub type JsArena = gc_arena::Arena<gc_arena::Rootable!['gc => JsRoot<'gc>]>;
 pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     crate::js_object::initialize_object_module(mc, env)?;
 
+    // Set the global object's [[Prototype]] to Object.prototype per spec.
+    // This ensures `Object.getPrototypeOf(globalThis)` returns Object.prototype.
+    if let Some(obj_ctor_val) = env_get(env, "Object")
+        && let Value::Object(obj_ctor) = &*obj_ctor_val.borrow()
+        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+    {
+        let proto_obj = match &*obj_proto_val.borrow() {
+            Value::Object(p) => Some(*p),
+            Value::Property { value: Some(v), .. } => {
+                if let Value::Object(p) = &*v.borrow() {
+                    Some(*p)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(proto) = proto_obj {
+            env.borrow_mut(mc).prototype = Some(proto);
+        }
+    }
+
     initialize_error_constructor(mc, env)?;
 
     let console_obj = initialize_console_object(mc)?;
@@ -297,6 +319,7 @@ where
 
     arena.mutate(|mc, root| {
         initialize_global_constructors(mc, &root.global_env)?;
+
         env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
         object_set_key_value(mc, &root.global_env, "this", &Value::Object(root.global_env))?;
 

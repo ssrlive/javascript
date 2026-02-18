@@ -39,6 +39,13 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     boolean_ctor.borrow_mut(mc).set_non_enumerable("__is_constructor");
     boolean_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
     boolean_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    boolean_ctor.borrow_mut(mc).set_non_writable("prototype");
+    boolean_ctor.borrow_mut(mc).set_non_configurable("prototype");
+
+    // Boolean.length = 1 (non-writable, non-enumerable, non-configurable)
+    object_set_key_value(mc, &boolean_ctor, "length", &Value::Number(1.0))?;
+    boolean_ctor.borrow_mut(mc).set_non_enumerable("length");
+    boolean_ctor.borrow_mut(mc).set_non_writable("length");
 
     // Ensure the Boolean constructor object uses Function.prototype as its internal prototype
     // (Function may have already been initialized).

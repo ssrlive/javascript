@@ -163,6 +163,19 @@ pub fn handle_global_function<'gc>(
             }
             return Err(raise_eval_error!("RegExp.prototype.toString called without this").into());
         }
+        // RegExp.prototype accessor getters (source, global, ignoreCase, etc.)
+        _ if func_name.starts_with("RegExp.prototype.get ") => {
+            let prop = &func_name["RegExp.prototype.get ".len()..];
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_v = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_v
+                    && let Some(val) = crate::js_regexp::handle_regexp_getter(&obj, prop)?
+                {
+                    return Ok(val);
+                }
+            }
+            return Ok(Value::Undefined);
+        }
         "parseInt" => return parse_int_function(args),
         "parseFloat" => return parse_float_function(args),
         "isNaN" => return is_nan_function(args),
@@ -625,7 +638,7 @@ pub fn handle_global_function<'gc>(
         _ => {
             if func_name.starts_with("Object.") && !func_name.contains(".prototype.") {
                 let method = &func_name["Object.".len()..];
-                return Ok(crate::js_object::handle_object_method(mc, method, args, env)?);
+                return crate::js_object::handle_object_method(mc, method, args, env);
             }
             Err(raise_eval_error!(format!("Global function {} not found", func_name)).into())
         }
@@ -1102,19 +1115,17 @@ fn function_constructor<'gc>(
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
     // Find global environment (Function constructor always creates functions in global scope).
-    // If the call site provided an object `this` binding, prefer it as the
-    // realm-global root for constructor-created functions.
-    let mut global_env = if let Some(this_rc) = crate::core::env_get(env, "this") {
-        match &*this_rc.borrow() {
+    // Per spec, the created function's scope is the Global Environment, not the caller's scope.
+    // Use `globalThis` lookup which walks the scope/prototype chain to find the actual global object,
+    // rather than walking the prototype chain (which would overshoot to Object.prototype).
+    let global_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
+        match &*gt.borrow() {
             Value::Object(o) => *o,
             _ => *env,
         }
     } else {
         *env
     };
-    while let Some(proto) = global_env.borrow().prototype {
-        global_env = proto;
-    }
 
     // DIAG: log resolved global environment for functions created by the Function constructor
     log::warn!(
@@ -1230,17 +1241,14 @@ fn generator_function_constructor<'gc>(
     let mut index = 0;
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
-    let mut global_env = if let Some(this_rc) = crate::core::env_get(env, "this") {
-        match &*this_rc.borrow() {
+    let global_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
+        match &*gt.borrow() {
             Value::Object(o) => *o,
             _ => *env,
         }
     } else {
         *env
     };
-    while let Some(proto) = global_env.borrow().prototype {
-        global_env = proto;
-    }
 
     if let Some(Statement { kind, .. }) = stmts.first()
         && let StatementKind::Expr(expr) = &**kind
@@ -1296,17 +1304,14 @@ fn async_function_constructor<'gc>(
     let mut index = 0;
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
-    let mut global_env = if let Some(this_rc) = crate::core::env_get(env, "this") {
-        match &*this_rc.borrow() {
+    let global_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
+        match &*gt.borrow() {
             Value::Object(o) => *o,
             _ => *env,
         }
     } else {
         *env
     };
-    while let Some(proto) = global_env.borrow().prototype {
-        global_env = proto;
-    }
 
     if let Some(Statement { kind, .. }) = stmts.first()
         && let StatementKind::Expr(expr) = &**kind
@@ -1362,17 +1367,14 @@ fn async_generator_function_constructor<'gc>(
     let mut index = 0;
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
-    let mut global_env = if let Some(this_rc) = crate::core::env_get(env, "this") {
-        match &*this_rc.borrow() {
+    let global_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
+        match &*gt.borrow() {
             Value::Object(o) => *o,
             _ => *env,
         }
     } else {
         *env
     };
-    while let Some(proto) = global_env.borrow().prototype {
-        global_env = proto;
-    }
 
     if let Some(Statement { kind, .. }) = stmts.first()
         && let StatementKind::Expr(expr) = &**kind
@@ -1821,7 +1823,7 @@ fn evalute_eval_function<'gc>(
         let mut in_function = false;
         let mut in_arrow = false;
         while let Some(e) = cur {
-            if e.borrow().is_function_scope && e.borrow().prototype.is_some() {
+            if e.borrow().is_function_scope && e.borrow().prototype.is_some() && crate::core::env_get_own(&e, "globalThis").is_none() {
                 in_function = true;
                 if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function") {
                     in_arrow = matches!(*flag_rc.borrow(), Value::Boolean(true));
@@ -2915,6 +2917,9 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     }
 
     object_set_key_value(mc, &func_ctor, "prototype", &Value::Object(func_proto))?;
+    func_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    func_ctor.borrow_mut(mc).set_non_writable("prototype");
+    func_ctor.borrow_mut(mc).set_non_configurable("prototype");
     object_set_key_value(mc, &func_proto, "constructor", &Value::Object(func_ctor))?;
 
     // Make Function.prototype itself callable (typeof Function.prototype === 'function') by
@@ -2925,6 +2930,15 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     };
     let proto_closure_val = Value::Closure(Gc::new(mc, proto_closure));
     func_proto.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, proto_closure_val)));
+
+    // Function.prototype.toString
+    object_set_key_value(
+        mc,
+        &func_proto,
+        "toString",
+        &Value::Function("Function.prototype.toString".to_string()),
+    )?;
+    func_proto.borrow_mut(mc).set_non_enumerable("toString");
 
     // Function.prototype.bind
     object_set_key_value(mc, &func_proto, "bind", &Value::Function("Function.prototype.bind".to_string()))?;
@@ -2954,7 +2968,7 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
     // Define Function.length as non-writable to match spec so assignments to it
     // in strict mode throw a TypeError.
-    let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, false)?;
+    let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
     if let Some(wrc) = crate::core::object_get_key_value(&desc_len, "writable") {
         log::debug!("initialize_function: desc_len writable raw = {:?}", wrc.borrow());
     } else {
@@ -2985,10 +2999,9 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     // Function.prototype members (e.g., `toString`, `constructor`).
     let native_constructors = [
         "Error",
-        "ReferenceError",
-        "TypeError",
-        "RangeError",
-        "SyntaxError",
+        // NOTE: native error subclasses (ReferenceError, TypeError, etc.) are excluded
+        // because their internal [[Prototype]] should be Error (set in initialize_native_error),
+        // not Function.prototype.
         // Common constructors that may have been created prior to initialize_function
         "Object",
         "Array",
@@ -3226,6 +3239,54 @@ pub fn handle_function_prototype_method<'gc>(
             } else {
                 Err(crate::raise_type_error!("Function.prototype.bind called on non-function").into())
             }
+        }
+        "toString" => {
+            // Function.prototype.toString: return a string representation of the function.
+            // Since we don't store source text, produce `function name() { [native code] }`.
+            let name = match this_value {
+                Value::Function(n) => n.clone(),
+                Value::Closure(cl) => {
+                    if let Some(ref nt) = cl.native_target {
+                        nt.clone()
+                    } else {
+                        String::new()
+                    }
+                }
+                Value::AsyncClosure(cl) => {
+                    if let Some(ref nt) = cl.native_target {
+                        nt.clone()
+                    } else {
+                        String::new()
+                    }
+                }
+                Value::GeneratorFunction(n, ..) => n.clone().unwrap_or_default(),
+                Value::AsyncGeneratorFunction(n, ..) => n.clone().unwrap_or_default(),
+                Value::Object(obj) => {
+                    // Try to get the `name` property from the object
+                    if let Some(name_rc) = crate::core::object_get_key_value(obj, "name") {
+                        let v = name_rc.borrow().clone();
+                        match v {
+                            Value::String(s) => crate::unicode::utf16_to_utf8(&s),
+                            Value::Property { value: Some(v), .. } => {
+                                let inner = v.borrow().clone();
+                                if let Value::String(s) = inner {
+                                    crate::unicode::utf16_to_utf8(&s)
+                                } else {
+                                    String::new()
+                                }
+                            }
+                            _ => String::new(),
+                        }
+                    } else {
+                        String::new()
+                    }
+                }
+                _ => {
+                    return Err(crate::raise_type_error!("Function.prototype.toString requires that 'this' be a Function").into());
+                }
+            };
+            let repr = format!("function {}() {{ [native code] }}", name);
+            Ok(Value::String(crate::unicode::utf8_to_utf16(&repr)))
         }
         _ => Err(crate::raise_type_error!(format!("Unknown Function.prototype method: {method}")).into()),
     }

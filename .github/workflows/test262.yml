@@ -39,6 +39,7 @@ jobs:
           - id: 26
           - id: 27
           - id: 28
+          - id: 29
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -180,6 +181,10 @@ jobs:
               FOCUS='built-ins/Array'
               ;;
             28)
+              TITLE='"built-ins/Object"'
+              FOCUS='built-ins/Object'
+              ;;
+            29)
               TITLE='"built-ins/AbstractModuleSource" - "built-ins/ArrayBuffer"'
               FOCUS='built-ins/AbstractModuleSource,built-ins/AggregateError,built-ins/ArrayBuffer'
               ;;

@@ -1,6 +1,6 @@
 use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, extract_closure_from_value};
-use crate::core::{new_js_object_data, object_get_key_value, object_set_key_value};
+use crate::core::{InternalSlot, new_js_object_data, object_get_key_value, object_set_key_value, slot_get, slot_set};
 use crate::error::JSError;
 use crate::js_array::get_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -178,7 +178,7 @@ pub fn create_mock_intl_instance<'gc>(
                 match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
                     Ok(CoreValue::String(canon_utf16)) => {
                         let canonical = utf16_to_utf8(canon_utf16);
-                        object_set_key_value(mc, &instance, &"__locale".into(), &Value::String(utf8_to_utf16(&canonical)))?;
+                        slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&canonical)));
                     }
                     _ => {
                         // Fall back to canonicalizedTags if canonicalize returned
@@ -206,16 +206,16 @@ pub fn create_mock_intl_instance<'gc>(
                                 match crate::core::evaluate_expr(mc, &global_env, &first) {
                                     Ok(CoreValue::String(first_utf16)) => {
                                         let first_str = utf16_to_utf8(first_utf16);
-                                        object_set_key_value(mc, &instance, &"__locale".into(), &Value::String(utf8_to_utf16(&first_str)))?;
+                                        slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&first_str)));
                                     }
                                     _ => {
-                                        object_set_key_value(mc, &instance, &"__locale".into(), &Value::String(utf8_to_utf16(&locale)))?;
+                                        slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
                                     }
                                 }
                             }
                             _ => {
                                 // Nothing helpful found; store the original locale
-                                object_set_key_value(mc, &instance, &"__locale".into(), &Value::String(utf8_to_utf16(&locale)))?;
+                                slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
                             }
                         }
                     }
@@ -262,16 +262,16 @@ pub fn create_mock_intl_instance<'gc>(
                         match crate::core::evaluate_expr(mc, &global_env, &first) {
                             Ok(CoreValue::String(first_utf16)) => {
                                 let first_str = utf16_to_utf8(first_utf16);
-                                object_set_key_value(mc, &instance, &"__locale".into(), &Value::String(utf8_to_utf16(&first_str)))?;
+                                slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&first_str)));
                             }
                             _ => {
-                                object_set_key_value(mc, &instance, &"__locale".into(), &Value::String(utf8_to_utf16(&locale)))?;
+                                slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
                             }
                         }
                     }
                     _ => {
                         // Nothing helpful found; store the original locale
-                        object_set_key_value(mc, &instance, &"__locale".into(), &Value::String(utf8_to_utf16(&locale)))?;
+                        slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
                     }
                 }
             }
@@ -287,7 +287,7 @@ pub fn handle_resolved_options(instance: &JSObjectDataPtr) -> Result<Value, JSEr
     let result = new_js_object_data(mc);
 
     // Get the stored locale, or default to "en-US"
-    let locale = if let Some(locale_val) = object_get_key_value(instance, &"__locale".into()) {
+    let locale = if let Some(locale_val) = slot_get(instance, &InternalSlot::Locale) {
         match &*locale_val.borrow() {
             Value::String(s) => utf16_to_utf8(&s),
             _ => "en-US".to_string(),

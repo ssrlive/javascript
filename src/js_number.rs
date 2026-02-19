@@ -1,7 +1,10 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::MutationContext;
-use crate::core::{JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value, to_primitive};
+use crate::core::{
+    InternalSlot, JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value, slot_get_chained, slot_set,
+    to_primitive,
+};
 use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -16,8 +19,8 @@ pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 /// Create the Number object with all number constants and functions
 fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let number_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &number_obj, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &number_obj, "__native_ctor", &Value::String(utf8_to_utf16("Number")))?;
+    slot_set(mc, &number_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &number_obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Number")));
 
     object_set_key_value(mc, &number_obj, "MAX_VALUE", &Value::Number(f64::MAX))?;
     object_set_key_value(mc, &number_obj, "MIN_VALUE", &Value::Number(f64::from_bits(1)))?;
@@ -80,8 +83,6 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     number_obj.borrow_mut(mc).set_non_configurable("MIN_SAFE_INTEGER");
 
     // Internal markers and prototype should not be enumerable
-    number_obj.borrow_mut(mc).set_non_enumerable("__is_constructor");
-    number_obj.borrow_mut(mc).set_non_enumerable("__native_ctor");
     number_obj.borrow_mut(mc).set_non_enumerable("prototype");
     number_obj.borrow_mut(mc).set_non_writable("prototype");
     number_obj.borrow_mut(mc).set_non_configurable("prototype");
@@ -545,7 +546,7 @@ pub fn handle_number_prototype_method<'gc>(this: Option<&Value<'gc>>, method: &s
     if let Some(Value::Number(n)) = this {
         handle_number_instance_method(n, method, args)
     } else if let Some(Value::Object(obj)) = this {
-        if let Some(val) = object_get_key_value(obj, "__value__") {
+        if let Some(val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
             if let Value::Number(n) = &*val.borrow() {
                 handle_number_instance_method(n, method, args)
             } else {

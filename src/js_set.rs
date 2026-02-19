@@ -1,9 +1,9 @@
 use crate::core::JSSet;
-use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
+use crate::core::{Gc, GcCell, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::{
     core::{
-        EvalError, JSObjectDataPtr, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data,
-        object_get_key_value, object_set_key_value, values_equal,
+        EvalError, JSObjectDataPtr, Value, env_set, initialize_collection_from_iterable, new_js_object_data, object_get_key_value,
+        object_set_key_value, values_equal,
     },
     error::JSError,
     js_array::{create_array, set_array_length},
@@ -13,8 +13,8 @@ use crate::{
 /// Initialize Set constructor and prototype
 pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let set_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &set_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &set_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Set")))?;
+    slot_set(mc, &set_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &set_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Set")));
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -102,9 +102,7 @@ pub(crate) fn handle_set_constructor<'gc>(
     // Create a wrapper object for the Set
     let set_obj = new_js_object_data(mc);
     // Store the actual set data
-    set_obj
-        .borrow_mut(mc)
-        .insert(PropertyKey::String("__set__".to_string()), new_gc_cell_ptr(mc, Value::Set(set)));
+    slot_set(mc, &set_obj, InternalSlot::Set, &Value::Set(set));
 
     // Set prototype to Set.prototype
     if let Some(set_ctor) = object_get_key_value(env, "Set")
@@ -221,7 +219,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
                                 return Err(raise_type_error!("Set.prototype.forEach callback is not a closure").into());
                             }
                         }
-                    } else if let Some(_native_ctor) = object_get_key_value(&obj, "__native_ctor") {
+                    } else if let Some(_native_ctor) = slot_get_chained(&obj, &InternalSlot::NativeCtor) {
                         // Native function object
                         return Err(raise_eval_error!("Native functions in forEach not supported yet").into());
                     } else {
@@ -251,12 +249,12 @@ fn create_set_iterator<'gc>(
     // However, cycle collection might be tricky if we use strong ref here and set has ref to iterator?
     // Usually iterators are created from set, set doesn't hold iterators. So strong ref matches spec.
     // Use Value::Set to store it.
-    object_set_key_value(mc, &iterator, "__iterator_set__", &Value::Set(set))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorSet, &Value::Set(set));
 
     // Store index
-    object_set_key_value(mc, &iterator, "__iterator_index__", &Value::Number(0.0))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
     // Store kind
-    object_set_key_value(mc, &iterator, "__iterator_kind__", &Value::String(utf8_to_utf16(kind)))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
 
     // next method - shared native function name, handled in eval.rs
     object_set_key_value(mc, &iterator, "next", &Value::Function("SetIterator.prototype.next".to_string()))?;
@@ -289,7 +287,7 @@ pub(crate) fn handle_set_iterator_next<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get set
-    let set_val = object_get_key_value(iterator, "__iterator_set__").ok_or(raise_eval_error!("Iterator has no set"))?;
+    let set_val = slot_get_chained(iterator, &InternalSlot::IteratorSet).ok_or(raise_eval_error!("Iterator has no set"))?;
     let set_ptr = if let Value::Set(s) = &*set_val.borrow() {
         *s
     } else {
@@ -297,7 +295,7 @@ pub(crate) fn handle_set_iterator_next<'gc>(
     };
 
     // Get index
-    let index_val = object_get_key_value(iterator, "__iterator_index__").ok_or(raise_eval_error!("Iterator has no index"))?;
+    let index_val = slot_get_chained(iterator, &InternalSlot::IteratorIndex).ok_or(raise_eval_error!("Iterator has no index"))?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
@@ -305,7 +303,7 @@ pub(crate) fn handle_set_iterator_next<'gc>(
     };
 
     // Get kind
-    let kind_val = object_get_key_value(iterator, "__iterator_kind__").ok_or(raise_eval_error!("Iterator has no kind"))?;
+    let kind_val = slot_get_chained(iterator, &InternalSlot::IteratorKind).ok_or(raise_eval_error!("Iterator has no kind"))?;
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {
@@ -336,7 +334,7 @@ pub(crate) fn handle_set_iterator_next<'gc>(
 
     // Update index
     index += 1;
-    object_set_key_value(mc, iterator, "__iterator_index__", &Value::Number(index as f64))?;
+    slot_set(mc, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
 
     let result_obj = new_js_object_data(mc);
     object_set_key_value(mc, &result_obj, "value", &result_value)?;

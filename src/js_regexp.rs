@@ -1,6 +1,6 @@
 use crate::core::{
-    EvalError, JSObjectDataPtr, MutationContext, Value, env_set, get_own_property, new_js_object_data, object_get_key_value,
-    object_set_key_value,
+    EvalError, InternalSlot, JSObjectDataPtr, MutationContext, Value, env_set, get_own_property, new_js_object_data, object_get_key_value,
+    object_set_key_value, slot_get, slot_set,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -9,8 +9,8 @@ use regress::Regex;
 
 pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let regexp_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &regexp_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &regexp_ctor, "__native_ctor", &Value::String(utf8_to_utf16("RegExp")))?;
+    slot_set(mc, &regexp_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &regexp_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("RegExp")));
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -80,7 +80,7 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 }
 
 pub fn internal_get_regex_pattern(obj: &JSObjectDataPtr) -> Result<Vec<u16>, JSError> {
-    match get_own_property(obj, "__regex") {
+    match slot_get(obj, &InternalSlot::Regex) {
         Some(val) => match &*val.borrow() {
             Value::String(s) => Ok(s.clone()),
             _ => Err(raise_type_error!("Invalid regex pattern")),
@@ -93,7 +93,7 @@ pub fn internal_get_regex_pattern(obj: &JSObjectDataPtr) -> Result<Vec<u16>, JSE
 /// These read internal slots from the RegExp instance (`this`).
 pub(crate) fn handle_regexp_getter<'gc>(obj: &JSObjectDataPtr<'gc>, prop: &str) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
     // Check if obj is actually a RegExp (has __regex internal slot)
-    let is_regexp = get_own_property(obj, "__regex").is_some();
+    let is_regexp = slot_get(obj, &InternalSlot::Regex).is_some();
     if !is_regexp {
         // Per spec, accessing these on non-RegExp returns undefined for some,
         // throws TypeError for others. For RegExp.prototype itself, "flags" returns ""
@@ -102,22 +102,22 @@ pub(crate) fn handle_regexp_getter<'gc>(obj: &JSObjectDataPtr<'gc>, prop: &str) 
     }
     match prop {
         "source" => {
-            if let Some(val) = get_own_property(obj, "__regex") {
+            if let Some(val) = slot_get(obj, &InternalSlot::Regex) {
                 Ok(Some(val.borrow().clone()))
             } else {
                 Ok(Some(Value::String(utf8_to_utf16("(?:)"))))
             }
         }
-        "global" => Ok(Some(get_bool_slot(obj, "__global"))),
-        "ignoreCase" => Ok(Some(get_bool_slot(obj, "__ignoreCase"))),
-        "multiline" => Ok(Some(get_bool_slot(obj, "__multiline"))),
-        "dotAll" => Ok(Some(get_bool_slot(obj, "__dotAll"))),
-        "unicode" => Ok(Some(get_bool_slot(obj, "__unicode"))),
-        "sticky" => Ok(Some(get_bool_slot(obj, "__sticky"))),
-        "hasIndices" => Ok(Some(get_bool_slot(obj, "__hasIndices"))),
-        "unicodeSets" => Ok(Some(get_bool_slot(obj, "__unicodeSets"))),
+        "global" => Ok(Some(get_bool_slot(obj, &InternalSlot::RegexGlobal))),
+        "ignoreCase" => Ok(Some(get_bool_slot(obj, &InternalSlot::RegexIgnoreCase))),
+        "multiline" => Ok(Some(get_bool_slot(obj, &InternalSlot::RegexMultiline))),
+        "dotAll" => Ok(Some(get_bool_slot(obj, &InternalSlot::RegexDotAll))),
+        "unicode" => Ok(Some(get_bool_slot(obj, &InternalSlot::RegexUnicode))),
+        "sticky" => Ok(Some(get_bool_slot(obj, &InternalSlot::RegexSticky))),
+        "hasIndices" => Ok(Some(get_bool_slot(obj, &InternalSlot::RegexHasIndices))),
+        "unicodeSets" => Ok(Some(get_bool_slot(obj, &InternalSlot::RegexUnicodeSets))),
         "flags" => {
-            if let Some(val) = get_own_property(obj, "__flags") {
+            if let Some(val) = slot_get(obj, &InternalSlot::Flags) {
                 Ok(Some(val.borrow().clone()))
             } else {
                 Ok(Some(Value::String(utf8_to_utf16(""))))
@@ -127,8 +127,8 @@ pub(crate) fn handle_regexp_getter<'gc>(obj: &JSObjectDataPtr<'gc>, prop: &str) 
     }
 }
 
-fn get_bool_slot<'gc>(obj: &JSObjectDataPtr<'gc>, slot: &str) -> Value<'gc> {
-    if let Some(val) = get_own_property(obj, slot) {
+fn get_bool_slot<'gc>(obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Value<'gc> {
+    if let Some(val) = slot_get(obj, slot) {
         val.borrow().clone()
     } else {
         Value::Boolean(false)
@@ -206,7 +206,7 @@ pub fn get_regex_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
 
 pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
     let pat = get_regex_pattern(obj)?;
-    let flags = match get_own_property(obj, "__flags") {
+    let flags = match slot_get(obj, &InternalSlot::Flags) {
         Some(val) => match &*val.borrow() {
             Value::String(s) => utf16_to_utf8(s),
             _ => String::new(),
@@ -287,30 +287,18 @@ fn create_regexp_object_from_parts<'gc>(
     {
         regexp_obj.borrow_mut(mc).prototype = Some(*regexp_proto_obj);
     }
-    object_set_key_value(mc, &regexp_obj, "__regex", &Value::String(pattern_u16.clone()))?;
-    object_set_key_value(mc, &regexp_obj, "__flags", &Value::String(utf8_to_utf16(&flags)))?;
-    object_set_key_value(mc, &regexp_obj, "__global", &Value::Boolean(global))?;
-    object_set_key_value(mc, &regexp_obj, "__ignoreCase", &Value::Boolean(ignore_case))?;
-    object_set_key_value(mc, &regexp_obj, "__multiline", &Value::Boolean(multiline))?;
-    object_set_key_value(mc, &regexp_obj, "__dotAll", &Value::Boolean(dot_matches_new_line))?;
-    object_set_key_value(mc, &regexp_obj, "__unicode", &Value::Boolean(unicode))?;
-    object_set_key_value(mc, &regexp_obj, "__sticky", &Value::Boolean(sticky))?;
-    object_set_key_value(mc, &regexp_obj, "__swapGreed", &Value::Boolean(swap_greed))?;
-    object_set_key_value(mc, &regexp_obj, "__crlf", &Value::Boolean(crlf))?;
-    object_set_key_value(mc, &regexp_obj, "__hasIndices", &Value::Boolean(has_indices))?;
-    object_set_key_value(mc, &regexp_obj, "__unicodeSets", &Value::Boolean(unicode_sets))?;
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__regex");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__flags");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__global");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__ignoreCase");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__multiline");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__dotAll");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__unicode");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__sticky");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__swapGreed");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__crlf");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__hasIndices");
-    regexp_obj.borrow_mut(mc).set_non_enumerable("__unicodeSets");
+    slot_set(mc, &regexp_obj, InternalSlot::Regex, &Value::String(pattern_u16.clone()));
+    slot_set(mc, &regexp_obj, InternalSlot::Flags, &Value::String(utf8_to_utf16(&flags)));
+    slot_set(mc, &regexp_obj, InternalSlot::RegexGlobal, &Value::Boolean(global));
+    slot_set(mc, &regexp_obj, InternalSlot::RegexIgnoreCase, &Value::Boolean(ignore_case));
+    slot_set(mc, &regexp_obj, InternalSlot::RegexMultiline, &Value::Boolean(multiline));
+    slot_set(mc, &regexp_obj, InternalSlot::RegexDotAll, &Value::Boolean(dot_matches_new_line));
+    slot_set(mc, &regexp_obj, InternalSlot::RegexUnicode, &Value::Boolean(unicode));
+    slot_set(mc, &regexp_obj, InternalSlot::RegexSticky, &Value::Boolean(sticky));
+    slot_set(mc, &regexp_obj, InternalSlot::SwapGreed, &Value::Boolean(swap_greed));
+    slot_set(mc, &regexp_obj, InternalSlot::Crlf, &Value::Boolean(crlf));
+    slot_set(mc, &regexp_obj, InternalSlot::RegexHasIndices, &Value::Boolean(has_indices));
+    slot_set(mc, &regexp_obj, InternalSlot::RegexUnicodeSets, &Value::Boolean(unicode_sets));
 
     object_set_key_value(mc, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
     regexp_obj.borrow_mut(mc).set_non_enumerable("lastIndex");
@@ -415,7 +403,7 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             // Get regex pattern and flags
             let pattern_u16 = internal_get_regex_pattern(object)?;
-            let flags = match get_own_property(object, "__flags") {
+            let flags = match slot_get(object, &InternalSlot::Flags) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -613,7 +601,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             };
 
             let pattern_u16 = internal_get_regex_pattern(object)?;
-            let flags = match get_own_property(object, "__flags") {
+            let flags = match slot_get(object, &InternalSlot::Flags) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -676,7 +664,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             // Get pattern and flags (two-step get to avoid long-lived borrows)
             let pattern = utf16_to_utf8(&internal_get_regex_pattern(object).unwrap_or_default());
 
-            let flags = match get_own_property(object, "__flags") {
+            let flags = match slot_get(object, &InternalSlot::Flags) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),

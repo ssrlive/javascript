@@ -1,5 +1,5 @@
-use crate::core::{EvalError, GcPtr, JSObjectDataPtr};
-use crate::core::{MutationContext, Value, env_set, get_own_property, new_js_object_data, object_get_key_value, object_set_key_value};
+use crate::core::{EvalError, GcPtr, InternalSlot, JSObjectDataPtr, slot_get, slot_set};
+use crate::core::{MutationContext, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
@@ -8,8 +8,8 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Tim
 pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     // Create Date constructor and prototype
     let date_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &date_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &date_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Date")))?;
+    slot_set(mc, &date_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &date_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Date")));
 
     // Get Object.prototype if available
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -114,7 +114,7 @@ pub fn is_date_object(obj: &JSObjectDataPtr) -> bool {
 }
 
 pub(crate) fn internal_get_time_stamp_value<'gc>(date_obj: &JSObjectDataPtr<'gc>) -> Option<GcPtr<'gc, Value<'gc>>> {
-    get_own_property(date_obj, "__timestamp")
+    slot_get(date_obj, &InternalSlot::Timestamp)
 }
 
 fn get_time_stamp_value(date_obj: &JSObjectDataPtr) -> Result<f64, JSError> {
@@ -129,8 +129,7 @@ fn get_time_stamp_value(date_obj: &JSObjectDataPtr) -> Result<f64, JSError> {
 }
 
 fn set_time_stamp_value<'gc>(mc: &MutationContext<'gc>, date_obj: &JSObjectDataPtr<'gc>, timestamp: f64) -> Result<(), JSError> {
-    object_set_key_value(mc, date_obj, "__timestamp", &Value::Number(timestamp))?;
-    date_obj.borrow_mut(mc).set_non_enumerable("__timestamp");
+    slot_set(mc, date_obj, InternalSlot::Timestamp, &Value::Number(timestamp));
     Ok(())
 }
 

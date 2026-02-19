@@ -156,13 +156,12 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
             crate::js_object::define_property_internal(mc, &async_func_proto, *tag_sym, &desc_tag)?;
         }
         // Make AsyncFunction callable via __native_ctor so AsyncFunction("...") works
-        object_set_key_value(
+        slot_set(
             mc,
             &async_func_ctor,
-            "__native_ctor",
+            InternalSlot::NativeCtor,
             &Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")),
-        )?;
-        async_func_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
+        );
         // Link constructor ↔ prototype
         object_set_key_value(mc, &async_func_ctor, "prototype", &Value::Object(async_func_proto))?;
         object_set_key_value(mc, &async_func_proto, "constructor", &Value::Object(async_func_ctor))?;
@@ -212,7 +211,10 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     env_set(mc, env, "__internal_allsettled_state_record_rejected_env", &val)?;
 
     let val = Value::Function("__detachArrayBuffer__".to_string());
-    env_set(mc, env, "__detachArrayBuffer__", &val)?;
+    // Use object_set_key_value (not env_set) so it stays as a String property
+    // visible to JS via `globalThis.__detachArrayBuffer__`.  env_set would route
+    // through str_to_internal_slot, hiding it from property access.
+    object_set_key_value(mc, env, "__detachArrayBuffer__", &val)?;
 
     // Expose common global functions as callables
     env_set(mc, env, "parseInt", &Value::Function("parseInt".to_string()))?;
@@ -345,11 +347,16 @@ where
                 p_str = injected_path;
             }
             // Store __filepath
-            object_set_key_value(mc, &root.global_env, "__filepath", &Value::String(utf8_to_utf16(&p_str)))?;
+            slot_set(mc, &root.global_env, InternalSlot::Filepath, &Value::String(utf8_to_utf16(&p_str)));
         }
 
         if kind == ProgramKind::Script {
-            object_set_key_value(mc, &root.global_env, "__suppress_dynamic_import_result", &Value::Boolean(true))?;
+            slot_set(
+                mc,
+                &root.global_env,
+                InternalSlot::SuppressDynamicImportResult,
+                &Value::Boolean(true),
+            );
         }
 
         if kind == ProgramKind::Module
@@ -373,7 +380,7 @@ where
             // Create import.meta for the entry module so `import.meta` is defined in module scripts
             let import_meta = new_js_object_data(mc);
             object_set_key_value(mc, &import_meta, "url", &Value::String(utf8_to_utf16(&module_path)))?;
-            object_set_key_value(mc, &root.global_env, "__import_meta", &Value::Object(import_meta))?;
+            slot_set(mc, &root.global_env, InternalSlot::ImportMeta, &Value::Object(import_meta));
         }
 
         // Pre-scan the script source for the test262 global-code-mode marker.
@@ -383,7 +390,7 @@ where
         // apply the proper GlobalDeclarationInstantiation semantics (separate
         // lexical environment for let/const/class).
         if script.contains("__test262_global_code_mode") {
-            object_set_key_value(mc, &root.global_env, "__test262_global_code_mode", &Value::Boolean(true))?;
+            slot_set(mc, &root.global_env, InternalSlot::Test262GlobalCodeMode, &Value::Boolean(true));
         }
 
         let exec_env = if kind == ProgramKind::Module {
@@ -628,12 +635,12 @@ where
                         crate::core::PromiseState::Rejected(val) => {
                             let mut is_error_like = false;
                             if let Value::Object(obj) = val {
-                                if let Some(is_err_rc) = object_get_key_value(obj, "__is_error")
+                                if let Some(is_err_rc) = slot_get_chained(obj, &InternalSlot::IsError)
                                     && let Value::Boolean(true) = *is_err_rc.borrow()
                                 {
                                     is_error_like = true;
                                 }
-                                if !is_error_like && object_get_key_value(obj, "__line__").is_some() {
+                                if !is_error_like && slot_get_chained(obj, &InternalSlot::Line).is_some() {
                                     is_error_like = true;
                                 }
                             }
@@ -643,11 +650,11 @@ where
                             } else {
                                 let mut err = crate::raise_throw_error!(val.clone());
                                 if let Value::Object(obj) = val {
-                                    if let Some(line_rc) = object_get_key_value(obj, "__line__")
+                                    if let Some(line_rc) = slot_get_chained(obj, &InternalSlot::Line)
                                         && let Value::Number(line) = *line_rc.borrow()
                                     {
                                         let mut column = 0usize;
-                                        if let Some(col_rc) = object_get_key_value(obj, "__column__")
+                                        if let Some(col_rc) = slot_get_chained(obj, &InternalSlot::Column)
                                             && let Value::Number(col) = *col_rc.borrow()
                                         {
                                             column = col as usize;
@@ -723,6 +730,10 @@ where
                             let mut cur_obj_opt: Option<crate::core::JSObjectDataPtr<'_>> = Some(*obj);
                             while let Some(cur_obj) = cur_obj_opt {
                                 for key in cur_obj.borrow().properties.keys() {
+                                    // Skip internal slot keys — they are never JS-visible
+                                    if matches!(key, crate::core::PropertyKey::Internal(_)) {
+                                        continue;
+                                    }
                                     // Skip non-enumerable and internal properties (like __proto__)
                                     if !cur_obj.borrow().is_enumerable(key)
                                         || matches!(key, crate::core::PropertyKey::String(s) if s == "__proto__")

@@ -1,8 +1,8 @@
 use crate::core::{
-    AsyncGeneratorRequest, ClosureData, EvalError, Expr, JSAsyncGenerator, JSObjectDataPtr, JSPromise, PropertyKey, Statement,
-    StatementKind, Value, VarDeclKind, env_set, env_set_recursive, evaluate_call_dispatch, evaluate_expr, evaluate_statements,
+    AsyncGeneratorRequest, ClosureData, EvalError, Expr, InternalSlot, JSAsyncGenerator, JSObjectDataPtr, JSPromise, PropertyKey,
+    Statement, StatementKind, Value, VarDeclKind, env_set, env_set_recursive, evaluate_call_dispatch, evaluate_expr, evaluate_statements,
     get_own_property, new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env,
-    prepare_function_call_env_with_home,
+    prepare_function_call_env_with_home, slot_get, slot_get_chained, slot_set,
 };
 use crate::core::{Gc, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::{JSError, JSErrorKind};
@@ -115,7 +115,7 @@ pub fn handle_async_generator_function_call<'gc>(
     );
 
     // Store it on the object under a hidden key
-    object_set_key_value(mc, &gen_obj, "__async_generator__", &Value::AsyncGenerator(async_gen))?;
+    slot_set(mc, &gen_obj, InternalSlot::AsyncGeneratorState, &Value::AsyncGenerator(async_gen));
 
     // Determine prototype for the async generator object.
     // Prefer the function object's own `prototype` if it's an object; otherwise
@@ -132,7 +132,7 @@ pub fn handle_async_generator_function_call<'gc>(
             }
         }
         if proto_candidate.is_none()
-            && let Some(proto_val) = get_own_property(&fn_obj, "__async_generator_proto")
+            && let Some(proto_val) = slot_get(&fn_obj, &InternalSlot::AsyncGeneratorProto)
         {
             let proto_value = match &*proto_val.borrow() {
                 Value::Property { value: Some(v), .. } => v.borrow().clone(),
@@ -310,13 +310,12 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     {
         async_gen_func_ctor.borrow_mut(mc).prototype = Some(*func_proto);
     }
-    object_set_key_value(
+    slot_set(
         mc,
         &async_gen_func_ctor,
-        "__native_ctor",
+        InternalSlot::NativeCtor,
         &Value::String(crate::unicode::utf8_to_utf16("AsyncGeneratorFunction")),
-    )?;
-    async_gen_func_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
+    );
 
     let async_gen_func_proto = crate::core::new_js_object_data(mc);
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
@@ -767,7 +766,7 @@ fn process_one_pending<'gc>(
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
                         let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", &Value::Undefined)?;
+                        slot_set(mc, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
                         match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == crate::js_generator::YieldKind::YieldStar {
@@ -815,8 +814,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -842,8 +841,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val)?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
@@ -941,8 +940,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -964,8 +963,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val)?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
@@ -1148,7 +1147,7 @@ fn process_one_pending<'gc>(
 
                 // Prefer the queued send value if it is concrete; otherwise fall back
                 // to the cached initially-yielded value if present.
-                object_set_key_value(mc, &func_env, &var_name, &_send_value.clone())?;
+                env_set(mc, &func_env, &var_name, &_send_value.clone())?;
 
                 if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = crate::js_generator::find_first_yield_in_statements(&tail) {
                     if idx > 0 {
@@ -1186,7 +1185,7 @@ fn process_one_pending<'gc>(
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
                         let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", &Value::Undefined)?;
+                        slot_set(mc, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
                         match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == crate::js_generator::YieldKind::YieldStar {
@@ -1234,8 +1233,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -1261,8 +1260,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val)?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
@@ -1353,8 +1352,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -1376,8 +1375,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val)?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
@@ -1472,7 +1471,7 @@ fn process_one_pending<'gc>(
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
                         let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        object_set_key_value(mc, &inner_eval_env, "__gen_throw_val", &Value::Undefined)?;
+                        slot_set(mc, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
                         match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == YieldKind::YieldStar {
@@ -1546,8 +1545,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val.clone())?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val.clone())?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -1569,8 +1568,8 @@ fn process_one_pending<'gc>(
                                                         {
                                                             let e = new_js_object_data(mc);
                                                             e.borrow_mut(mc).prototype = Some(*env);
-                                                            env_set(mc, &e, "__gen", &gen_val)?;
-                                                            env_set(mc, &e, "__p", &promise_cell_val)?;
+                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
@@ -1660,7 +1659,7 @@ fn process_one_pending<'gc>(
                 } else {
                     crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                 };
-                object_set_key_value(mc, &func_env, "__gen_throw_val", &throw_val.clone())?;
+                slot_set(mc, &func_env, InternalSlot::GenThrowVal, &throw_val.clone());
 
                 match crate::core::evaluate_statements(mc, &func_env, &tail) {
                     Ok(v) => {
@@ -1705,7 +1704,7 @@ fn process_one_pending<'gc>(
                 } else {
                     crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                 };
-                object_set_key_value(mc, &func_env, "__gen_throw_val", &ret_val.clone())?;
+                slot_set(mc, &func_env, InternalSlot::GenThrowVal, &ret_val.clone());
 
                 match crate::core::evaluate_statements(mc, &func_env, &tail) {
                     Ok(v) => {
@@ -1750,7 +1749,7 @@ pub fn handle_async_generator_prototype_next<'gc>(
     let this = this_val.ok_or_else(|| crate::raise_eval_error!("AsyncGenerator.prototype.next called without this"))?;
     if let Value::Object(obj) = this {
         // Obtain internal async generator struct
-        if let Some(inner) = object_get_key_value(&obj, "__async_generator__") {
+        if let Some(inner) = slot_get_chained(&obj, &InternalSlot::AsyncGeneratorState) {
             match &*inner.borrow() {
                 Value::AsyncGenerator(gen_ptr) => {
                     // create a new pending Promise and enqueue it
@@ -1792,7 +1791,7 @@ pub fn handle_async_generator_prototype_throw<'gc>(
     let this = this_val.ok_or_else(|| crate::raise_eval_error!("AsyncGenerator.prototype.throw called without this"))?;
     if let Value::Object(obj) = this {
         // Obtain internal async generator struct
-        if let Some(inner) = object_get_key_value(&obj, "__async_generator__") {
+        if let Some(inner) = slot_get_chained(&obj, &InternalSlot::AsyncGeneratorState) {
             match &*inner.borrow() {
                 Value::AsyncGenerator(gen_ptr) => {
                     // create a new pending Promise and enqueue it
@@ -1834,7 +1833,7 @@ pub fn handle_async_generator_prototype_return<'gc>(
     let this = this_val.ok_or_else(|| crate::raise_eval_error!("AsyncGenerator.prototype.return called without this"))?;
     if let Value::Object(obj) = this {
         // Obtain internal async generator struct
-        if let Some(inner) = object_get_key_value(&obj, "__async_generator__") {
+        if let Some(inner) = slot_get_chained(&obj, &InternalSlot::AsyncGeneratorState) {
             match &*inner.borrow() {
                 Value::AsyncGenerator(gen_ptr) => {
                     // create a new pending Promise and enqueue it
@@ -2030,7 +2029,7 @@ fn handle_yield_star_call<'gc>(
     args: Vec<Value<'gc>>,
 ) -> Result<(), JSError> {
     let method_func = if method == "next" {
-        if let Some(cached) = object_get_key_value(&iter_obj, "__yield_star_next_method") {
+        if let Some(cached) = slot_get(&iter_obj, &InternalSlot::YieldStarNextMethod) {
             cached.borrow().clone()
         } else {
             let fetched = match crate::core::get_property_with_accessors(mc, env, &iter_obj, method) {
@@ -2045,7 +2044,7 @@ fn handle_yield_star_call<'gc>(
                 }
             };
             if !matches!(fetched, Value::Undefined | Value::Null) {
-                object_set_key_value(mc, &iter_obj, "__yield_star_next_method", &fetched.clone())?;
+                slot_set(mc, &iter_obj, InternalSlot::YieldStarNextMethod, &fetched.clone());
                 iter_obj.borrow_mut(mc).set_non_enumerable("__yield_star_next_method");
             }
             fetched
@@ -2143,8 +2142,8 @@ fn handle_yield_star_call<'gc>(
                 {
                     let e = new_js_object_data(mc);
                     e.borrow_mut(mc).prototype = Some(*env);
-                    env_set(mc, &e, "__gen", &gen_val.clone())?;
-                    env_set(mc, &e, "__p", &p_val.clone())?;
+                    slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
+                    slot_set(mc, &e, InternalSlot::P, &p_val.clone());
                     Some(e)
                 },
                 None,
@@ -2166,8 +2165,8 @@ fn handle_yield_star_call<'gc>(
                 {
                     let e = new_js_object_data(mc);
                     e.borrow_mut(mc).prototype = Some(*env);
-                    env_set(mc, &e, "__gen", &gen_val.clone())?;
-                    env_set(mc, &e, "__p", &p_val.clone())?;
+                    slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
+                    slot_set(mc, &e, InternalSlot::P, &p_val.clone());
                     Some(e)
                 },
                 None,

@@ -24,9 +24,10 @@
 //! Future refactoring will introduce dedicated Rust structures for better type safety.
 
 use crate::core::{
-    ClosureData, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, Statement,
-    StatementKind, Value, env_set, evaluate_call_dispatch, evaluate_statements, extract_closure_from_value, generate_unique_id,
-    object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    ClosureData, DestructuringElement, EvalError, Expr, InternalSlot, JSGenerator, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState,
+    Statement, StatementKind, Value, evaluate_call_dispatch, evaluate_statements, extract_closure_from_value, generate_unique_id,
+    object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, slot_get, slot_get_chained, slot_set,
+    value_to_string,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -229,15 +230,14 @@ fn get_global_env<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -
 /// for pending unhandled checks and allSettled state so they are arena-rooted.
 fn ensure_promise_runtime<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let global = get_global_env(mc, env);
-    if let Some(rc) = object_get_key_value(&global, "__promise_runtime")
+    if let Some(rc) = slot_get_chained(&global, &InternalSlot::PromiseRuntime)
         && let Value::Object(obj) = &*rc.borrow()
     {
         return Ok(*obj);
     }
     // create runtime object and set it
     let runtime = new_js_object_data(mc);
-    object_set_key_value(mc, &global, "__promise_runtime", &Value::Object(runtime))?;
-    global.borrow_mut(mc).set_non_enumerable("__promise_runtime");
+    slot_set(mc, &global, InternalSlot::PromiseRuntime, &Value::Object(runtime));
     Ok(runtime)
 }
 
@@ -287,11 +287,11 @@ fn runtime_push_pending_unhandled<'gc>(
 /// Peek and take unhandled rejection stored on runtime (as stringified reason)
 pub fn take_unhandled_rejection<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Option<Value<'gc>> {
     if let Ok(runtime) = ensure_promise_runtime(mc, env)
-        && let Some(rc) = object_get_key_value(&runtime, "__unhandled_rejection")
+        && let Some(rc) = slot_get_chained(&runtime, &InternalSlot::UnhandledRejection)
         && let Value::String(s) = &*rc.borrow()
     {
         // consume it
-        object_set_key_value(mc, &runtime, "__unhandled_rejection", &Value::Undefined).unwrap();
+        slot_set(mc, &runtime, InternalSlot::UnhandledRejection, &Value::Undefined);
         return Some(Value::String(s.clone()));
     }
     None
@@ -300,13 +300,13 @@ pub fn take_unhandled_rejection<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 /// Clear any recorded runtime unhandled rejection if it was caused by `ptr`.
 pub fn clear_runtime_unhandled_for_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, ptr: usize) -> Result<(), JSError> {
     if let Ok(runtime) = ensure_promise_runtime(mc, env)
-        && let Some(rc) = object_get_key_value(&runtime, "__unhandled_rejection_promise_ptr")
+        && let Some(rc) = slot_get(&runtime, &InternalSlot::UnhandledRejectionPromisePtr)
         && let Value::Number(n) = &*rc.borrow()
         && *n as usize == ptr
     {
         // Clear both the reason and the pointer
-        object_set_key_value(mc, &runtime, "__unhandled_rejection", &Value::Undefined)?;
-        object_set_key_value(mc, &runtime, "__unhandled_rejection_promise_ptr", &Value::Undefined)?;
+        slot_set(mc, &runtime, InternalSlot::UnhandledRejection, &Value::Undefined);
+        slot_set(mc, &runtime, InternalSlot::UnhandledRejectionPromisePtr, &Value::Undefined);
     }
     Ok(())
 }
@@ -318,7 +318,7 @@ pub fn runtime_remove_pending_unhandled_for_promise<'gc>(
     ptr: usize,
 ) -> Result<(), JSError> {
     if let Ok(runtime) = ensure_promise_runtime(mc, env)
-        && let Some(rc) = object_get_key_value(&runtime, "__pending_unhandled")
+        && let Some(rc) = slot_get_chained(&runtime, &InternalSlot::PendingUnhandled)
         && let Value::Object(arr) = &*rc.borrow()
     {
         let len = crate::core::object_get_length(arr).unwrap_or(0);
@@ -341,7 +341,7 @@ pub fn runtime_remove_pending_unhandled_for_promise<'gc>(
                 }
             }
         }
-        object_set_key_value(mc, &runtime, "__pending_unhandled", &Value::Object(new_arr))?;
+        slot_set(mc, &runtime, InternalSlot::PendingUnhandled, &Value::Object(new_arr));
     }
     Ok(())
 }
@@ -351,7 +351,7 @@ pub fn runtime_remove_pending_unhandled_for_promise<'gc>(
 pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, force: bool) -> Result<bool, JSError> {
     let mut queued_any = false;
     if let Ok(runtime) = ensure_promise_runtime(mc, env)
-        && let Some(rc) = object_get_key_value(&runtime, "__pending_unhandled")
+        && let Some(rc) = slot_get_chained(&runtime, &InternalSlot::PendingUnhandled)
         && let Value::Object(arr) = &*rc.borrow()
     {
         let len = crate::core::object_get_length(arr).unwrap_or(0);
@@ -420,7 +420,7 @@ pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &J
                 }
             }
         }
-        object_set_key_value(mc, &runtime, "__pending_unhandled", &Value::Object(new_arr))?;
+        slot_set(mc, &runtime, InternalSlot::PendingUnhandled, &Value::Object(new_arr));
         // Debug: report how many pending entries remain after processing
         log::debug!(
             "process_runtime_pending_unhandled: queued_any={} pending_count={}",
@@ -500,12 +500,12 @@ pub fn peek_pending_unhandled_info<'gc>(
                     let mut allow_immediate = false;
                     if let Value::Object(obj) = reason {
                         // __is_error flag or presence of __line__ indicates Error
-                        if let Some(is_err_rc) = object_get_key_value(obj, "__is_error")
+                        if let Some(is_err_rc) = slot_get_chained(obj, &InternalSlot::IsError)
                             && let Value::Boolean(true) = &*is_err_rc.borrow()
                         {
                             allow_immediate = true;
                         }
-                        if !allow_immediate && object_get_key_value(obj, "__line__").is_some() {
+                        if !allow_immediate && slot_get_chained(obj, &InternalSlot::Line).is_some() {
                             allow_immediate = true;
                         }
                     }
@@ -550,10 +550,10 @@ pub fn peek_pending_unhandled_info<'gc>(
                             let msg = utf16_to_utf8(s_utf16);
                             // Try __line__ and __column__
                             let mut loc: Option<(usize, usize)> = None;
-                            if let Some(line_rc) = object_get_key_value(obj, "__line__")
+                            if let Some(line_rc) = slot_get_chained(obj, &InternalSlot::Line)
                                 && let Value::Number(line_num) = &*line_rc.borrow()
                             {
-                                let col = if let Some(col_rc) = object_get_key_value(obj, "__column__") {
+                                let col = if let Some(col_rc) = slot_get_chained(obj, &InternalSlot::Column) {
                                     if let Value::Number(col_num) = &*col_rc.borrow() {
                                         *col_num as usize
                                     } else {
@@ -1319,7 +1319,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                     _ => value_to_string(&prim),
                 };
 
-                let base_path = if let Some(cell) = crate::core::env_get(env, "__filepath")
+                let base_path = if let Some(cell) = crate::core::slot_get_chained(env, &InternalSlot::Filepath)
                     && let Value::String(s) = cell.borrow().clone()
                 {
                     Some(utf16_to_utf8(&s))
@@ -1496,10 +1496,10 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
                     // Store the stringified reason into runtime property for later pick-up
                     let s = utf8_to_utf16(&value_to_string(&reason));
                     if let Ok(runtime) = ensure_promise_runtime(mc, &env) {
-                        object_set_key_value(mc, &runtime, "__unhandled_rejection", &Value::String(s))?;
+                        slot_set(mc, &runtime, InternalSlot::UnhandledRejection, &Value::String(s));
                         // Record which promise ptr caused this so it can be cleared if a handler attaches later
                         let ptr_num = (Gc::as_ptr(promise) as usize) as f64;
-                        object_set_key_value(mc, &runtime, "__unhandled_rejection_promise_ptr", &Value::Number(ptr_num))?;
+                        slot_set(mc, &runtime, InternalSlot::UnhandledRejectionPromisePtr, &Value::Number(ptr_num));
                     }
                 } else {
                     // Not yet elapsed: defer to the runtime pending list to avoid tight requeue loops
@@ -1912,7 +1912,7 @@ pub fn __internal_promise_reject_captured<'gc>(
 
 // Look up Promise.prototype
 fn get_promise_prototype_from_env<'gc>(env: JSObjectDataPtr<'gc>) -> Option<JSObjectDataPtr<'gc>> {
-    if let Some(proto_val) = crate::core::env_get(&env, "__intrinsic_promise_proto")
+    if let Some(proto_val) = crate::core::slot_get_chained(&env, &InternalSlot::IntrinsicPromiseProto)
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         return Some(*proto_obj);
@@ -1950,14 +1950,14 @@ pub fn make_promise_js_object<'gc>(
 
     // Assign a stable object-side id for debugging/tracking
     let id = generate_unique_id();
-    object_set_key_value(mc, &promise_obj, "__promise_obj_id", &Value::Number(id as f64))?;
+    slot_set(mc, &promise_obj, InternalSlot::PromiseObjId, &Value::Number(id as f64));
 
-    object_set_key_value(mc, &promise_obj, "__promise", &Value::Promise(promise))?;
+    slot_set(mc, &promise_obj, InternalSlot::Promise, &Value::Promise(promise));
     Ok(promise_obj)
 }
 
 pub fn get_promise_from_js_object<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<GcPtr<'gc, JSPromise<'gc>>> {
-    if let Some(promise_val) = object_get_key_value(obj, "__promise")
+    if let Some(promise_val) = slot_get_chained(obj, &InternalSlot::Promise)
         && let Value::Promise(promise) = &*promise_val.borrow()
     {
         return Some(*promise);
@@ -2084,9 +2084,7 @@ pub fn resolve_promise<'gc>(
                         // setting the new env's prototype to the caller's env
                         new_env.borrow_mut(mc).prototype = Some(*env);
                         // Bind current promise on the env so the helper can access it
-                        if let Err(e) = env_set(mc, &new_env, "__current_promise", &Value::Promise(current_promise)) {
-                            log::error!("resolve_promise: failed to set __current_promise in env: {}", e);
-                        }
+                        slot_set(mc, &new_env, InternalSlot::CurrentPromise, &Value::Promise(current_promise));
                         Some(new_env)
                     },
                     None,
@@ -2109,9 +2107,7 @@ pub fn resolve_promise<'gc>(
                         // Ensure the helper names and globals are reachable via prototype chain by
                         // setting the new env's prototype to the caller's env
                         new_env.borrow_mut(mc).prototype = Some(*env);
-                        if let Err(e) = env_set(mc, &new_env, "__current_promise", &Value::Promise(current_promise)) {
-                            log::error!("resolve_promise: failed to set __current_promise in env: {}", e);
-                        }
+                        slot_set(mc, &new_env, InternalSlot::CurrentPromise, &Value::Promise(current_promise));
                         Some(new_env)
                     },
                     None,
@@ -2555,7 +2551,7 @@ pub fn __internal_allsettled_state_record_fulfilled_env<'gc>(
     log::trace!("__internal_allsettled_state_record_fulfilled_env called: idx={index}, val={value:?}");
     let index = index as usize;
     if let Value::Object(state_obj) = &state_env {
-        if let Some(results_rc) = object_get_key_value(state_obj, "__results")
+        if let Some(results_rc) = slot_get_chained(state_obj, &InternalSlot::Results)
             && let Value::Object(results_arr) = &*results_rc.borrow()
         {
             // create result object
@@ -2565,19 +2561,19 @@ pub fn __internal_allsettled_state_record_fulfilled_env<'gc>(
             object_set_key_value(mc, results_arr, index, &Value::Object(result_obj))?;
         }
         // increment completed
-        if let Some(comp_rc) = object_get_key_value(state_obj, "__completed")
+        if let Some(comp_rc) = slot_get_chained(state_obj, &InternalSlot::Completed)
             && let Value::Number(n) = &*comp_rc.borrow()
         {
-            object_set_key_value(mc, state_obj, "__completed", &Value::Number(n + 1.0))?;
+            slot_set(mc, state_obj, InternalSlot::Completed, &Value::Number(n + 1.0));
             // check for completion
-            if let Some(total_rc) = object_get_key_value(state_obj, "__total")
+            if let Some(total_rc) = slot_get_chained(state_obj, &InternalSlot::Total)
                 && let Value::Number(total) = &*total_rc.borrow()
                 && (n + 1.0) == *total
-                && let Some(promise_rc) = object_get_key_value(state_obj, "__result_promise")
+                && let Some(promise_rc) = slot_get_chained(state_obj, &InternalSlot::ResultPromise)
                 && let Value::Promise(result_promise_ref) = &*promise_rc.borrow()
             {
                 // get results array
-                if let Some(results_rc2) = object_get_key_value(state_obj, "__results")
+                if let Some(results_rc2) = slot_get_chained(state_obj, &InternalSlot::Results)
                     && let Value::Object(results_arr2) = &*results_rc2.borrow()
                 {
                     resolve_promise(mc, result_promise_ref, Value::Object(*results_arr2), env);
@@ -2607,7 +2603,7 @@ pub fn __internal_allsettled_state_record_rejected_env<'gc>(
     log::trace!("__internal_allsettled_state_record_rejected_env called: idx={index}, reason={reason:?}");
     let index = index as usize;
     if let Value::Object(state_obj) = &state_env {
-        if let Some(results_rc) = object_get_key_value(state_obj, "__results")
+        if let Some(results_rc) = slot_get_chained(state_obj, &InternalSlot::Results)
             && let Value::Object(results_arr) = &*results_rc.borrow()
         {
             // create result object
@@ -2617,19 +2613,19 @@ pub fn __internal_allsettled_state_record_rejected_env<'gc>(
             object_set_key_value(mc, results_arr, index, &Value::Object(result_obj))?;
         }
         // increment completed
-        if let Some(comp_rc) = object_get_key_value(state_obj, "__completed")
+        if let Some(comp_rc) = slot_get_chained(state_obj, &InternalSlot::Completed)
             && let Value::Number(n) = &*comp_rc.borrow()
         {
-            object_set_key_value(mc, state_obj, "__completed", &Value::Number(n + 1.0))?;
+            slot_set(mc, state_obj, InternalSlot::Completed, &Value::Number(n + 1.0));
             // check for completion
-            if let Some(total_rc) = object_get_key_value(state_obj, "__total")
+            if let Some(total_rc) = slot_get_chained(state_obj, &InternalSlot::Total)
                 && let Value::Number(total) = &*total_rc.borrow()
                 && (n + 1.0) == *total
-                && let Some(promise_rc) = object_get_key_value(state_obj, "__result_promise")
+                && let Some(promise_rc) = slot_get_chained(state_obj, &InternalSlot::ResultPromise)
                 && let Value::Promise(result_promise_ref) = &*promise_rc.borrow()
             {
                 // get results array
-                if let Some(results_rc2) = object_get_key_value(state_obj, "__results")
+                if let Some(results_rc2) = slot_get_chained(state_obj, &InternalSlot::Results)
                     && let Value::Object(results_arr2) = &*results_rc2.borrow()
                 {
                     resolve_promise(mc, result_promise_ref, Value::Object(*results_arr2), env);
@@ -2676,7 +2672,7 @@ fn create_allsettled_resolve_callback<'gc>(
             {
                 let env = new_js_object_data(mc);
                 env.borrow_mut(mc).prototype = Some(parent_env);
-                env_set(mc, &env, "__state_env", &Value::Object(state_env)).unwrap();
+                slot_set(mc, &env, InternalSlot::StateEnv, &Value::Object(state_env));
                 Some(env)
             },
             None,
@@ -2709,7 +2705,7 @@ fn create_allsettled_reject_callback<'gc>(
             {
                 let env = new_js_object_data(mc);
                 env.borrow_mut(mc).prototype = Some(parent_env);
-                env_set(mc, &env, "__state_env", &Value::Object(state_env)).unwrap();
+                slot_set(mc, &env, InternalSlot::StateEnv, &Value::Object(state_env));
                 Some(env)
             },
             None,
@@ -2959,8 +2955,13 @@ pub fn handle_clear_interval_val<'gc>(
 /// Initialize Promise constructor and prototype
 pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let promise_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &promise_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &promise_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Promise")))?;
+    slot_set(mc, &promise_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(
+        mc,
+        &promise_ctor,
+        InternalSlot::NativeCtor,
+        &Value::String(utf8_to_utf16("Promise")),
+    );
     object_set_key_value(mc, &promise_ctor, "name", &Value::String(utf8_to_utf16("Promise")))?;
 
     // Setup prototype
@@ -3000,8 +3001,8 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 
     // Preserve the intrinsic Promise constructor/prototype for internal uses
     // like dynamic import, even if the global Promise binding is later replaced.
-    object_set_key_value(mc, env, "__intrinsic_promise_ctor", &Value::Object(promise_ctor))?;
-    object_set_key_value(mc, env, "__intrinsic_promise_proto", &Value::Object(promise_proto))?;
+    slot_set(mc, env, InternalSlot::IntrinsicPromiseCtor, &Value::Object(promise_ctor));
+    slot_set(mc, env, InternalSlot::IntrinsicPromiseProto, &Value::Object(promise_proto));
 
     // Internal helpers for resolution/rejection captures
     crate::core::env_set(
@@ -3175,10 +3176,10 @@ pub fn handle_promise_static_method_val<'gc>(
 
             let results_array = crate::js_array::create_array(mc, env)?;
             let state_env = crate::core::new_js_object_data(mc);
-            object_set_key_value(mc, &state_env, "__results", &Value::Object(results_array))?;
-            object_set_key_value(mc, &state_env, "__completed", &Value::Number(0.0))?;
-            object_set_key_value(mc, &state_env, "__total", &Value::Number(num_promises as f64))?;
-            object_set_key_value(mc, &state_env, "__result_promise", &Value::Promise(result_promise))?;
+            slot_set(mc, &state_env, InternalSlot::Results, &Value::Object(results_array));
+            slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(0.0));
+            slot_set(mc, &state_env, InternalSlot::Total, &Value::Number(num_promises as f64));
+            slot_set(mc, &state_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
 
             for (idx, promise_val) in promises.into_iter().enumerate() {
                 match promise_val {
@@ -3191,11 +3192,11 @@ pub fn handle_promise_static_method_val<'gc>(
                                     object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
                                     object_set_key_value(mc, &result_obj, "value", &val.clone())?;
                                     object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
-                                    if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
+                                    if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
                                         && let Value::Number(n) = &*comp_rc.borrow()
                                     {
-                                        object_set_key_value(mc, &state_env, "__completed", &Value::Number(n + 1.0))?;
-                                        if let Some(total_rc) = object_get_key_value(&state_env, "__total")
+                                        slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(n + 1.0));
+                                        if let Some(total_rc) = slot_get_chained(&state_env, &InternalSlot::Total)
                                             && let Value::Number(total) = &*total_rc.borrow()
                                             && (n + 1.0) == *total
                                         {
@@ -3209,10 +3210,10 @@ pub fn handle_promise_static_method_val<'gc>(
                                     object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("rejected")))?;
                                     object_set_key_value(mc, &result_obj, "reason", &reason.clone())?;
                                     object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
-                                    if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
+                                    if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
                                         && let Value::Number(n) = &*comp_rc.borrow()
                                     {
-                                        object_set_key_value(mc, &state_env, "__completed", &Value::Number(n + 1.0))?;
+                                        slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(n + 1.0));
                                     }
                                 }
                                 PromiseState::Pending => {
@@ -3233,10 +3234,10 @@ pub fn handle_promise_static_method_val<'gc>(
                             object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
                             object_set_key_value(mc, &result_obj, "value", &Value::Object(obj))?;
                             object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
-                            if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
+                            if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
                                 && let Value::Number(n) = &*comp_rc.borrow()
                             {
-                                object_set_key_value(mc, &state_env, "__completed", &Value::Number(n + 1.0))?;
+                                slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(n + 1.0));
                             }
                         }
                     }
@@ -3245,16 +3246,16 @@ pub fn handle_promise_static_method_val<'gc>(
                         object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
                         object_set_key_value(mc, &result_obj, "value", &val.clone())?;
                         object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
-                        if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
+                        if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
                             && let Value::Number(n) = &*comp_rc.borrow()
                         {
-                            object_set_key_value(mc, &state_env, "__completed", &Value::Number(n + 1.0))?;
+                            slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(n + 1.0));
                         }
                     }
                 }
             }
 
-            if let Some(comp_rc) = object_get_key_value(&state_env, "__completed")
+            if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
                 && let Value::Number(n) = &*comp_rc.borrow()
                 && (*n as usize) == num_promises
             {
@@ -3354,7 +3355,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                             ))],
                                             {
                                                 let new_env = *env;
-                                                object_set_key_value(mc, &new_env, "__state", &Value::Object(state_obj_clone))?;
+                                                slot_set(mc, &new_env, InternalSlot::State, &Value::Object(state_obj_clone));
                                                 Some(new_env)
                                             },
                                             None,
@@ -3374,7 +3375,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                             ))],
                                             {
                                                 let new_env = *env;
-                                                object_set_key_value(mc, &new_env, "__state", &Value::Object(state_obj_clone))?;
+                                                slot_set(mc, &new_env, InternalSlot::State, &Value::Object(state_obj_clone));
                                                 Some(new_env)
                                             },
                                             None,
@@ -3685,8 +3686,8 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
-                                        object_set_key_value(mc, &new_env, "__orig_value", &orig_value.clone())?;
+                                        slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
+                                        slot_set(mc, &new_env, InternalSlot::OrigValue, &orig_value.clone());
                                         Some(new_env)
                                     },
                                     None,
@@ -3695,7 +3696,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                             Some(Value::Closure(Gc::new(
                                 mc,
                                 ClosureData::new(
-                                    &[],
+                                    &[DestructuringElement::Variable("__reason".to_string(), None)],
                                     &[stmt_expr(Expr::Call(
                                         Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
                                         vec![
@@ -3705,7 +3706,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                        slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
                                         Some(new_env)
                                     },
                                     None,
@@ -3753,8 +3754,8 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                         ))],
                                         {
                                             let new_env = *env;
-                                            object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
-                                            object_set_key_value(mc, &new_env, "__orig_value", &orig_value.clone())?;
+                                            slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
+                                            slot_set(mc, &new_env, InternalSlot::OrigValue, &orig_value.clone());
                                             Some(new_env)
                                         },
                                         None,
@@ -3763,7 +3764,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                 Some(Value::Closure(Gc::new(
                                     mc,
                                     ClosureData::new(
-                                        &[],
+                                        &[DestructuringElement::Variable("__reason".to_string(), None)],
                                         &[stmt_expr(Expr::Call(
                                             Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
                                             vec![
@@ -3773,7 +3774,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                         ))],
                                         {
                                             let new_env = *env;
-                                            object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                            slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
                                             Some(new_env)
                                         },
                                         None,
@@ -3820,8 +3821,8 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
-                                        object_set_key_value(mc, &new_env, "__orig_value", &orig_value.clone())?;
+                                        slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
+                                        slot_set(mc, &new_env, InternalSlot::OrigValue, &orig_value.clone());
                                         Some(new_env)
                                     },
                                     None,
@@ -3830,7 +3831,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                             Some(Value::Closure(Gc::new(
                                 mc,
                                 ClosureData::new(
-                                    &[],
+                                    &[DestructuringElement::Variable("__reason".to_string(), None)],
                                     &[stmt_expr(Expr::Call(
                                         Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
                                         vec![
@@ -3840,7 +3841,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                        slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
                                         Some(new_env)
                                     },
                                     None,
@@ -3909,8 +3910,8 @@ pub fn __internal_promise_finally_reject<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
-                                        object_set_key_value(mc, &new_env, "__orig_reason", &orig_reason.clone())?;
+                                        slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
+                                        slot_set(mc, &new_env, InternalSlot::OrigReason, &orig_reason.clone());
                                         Some(new_env)
                                     },
                                     None,
@@ -3919,7 +3920,7 @@ pub fn __internal_promise_finally_reject<'gc>(
                             Some(Value::Closure(Gc::new(
                                 mc,
                                 ClosureData::new(
-                                    &[],
+                                    &[DestructuringElement::Variable("__reason".to_string(), None)],
                                     &[stmt_expr(Expr::Call(
                                         Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
                                         vec![
@@ -3929,7 +3930,7 @@ pub fn __internal_promise_finally_reject<'gc>(
                                     ))],
                                     {
                                         let new_env = *env;
-                                        object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                        slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
                                         Some(new_env)
                                     },
                                     None,
@@ -3972,8 +3973,8 @@ pub fn __internal_promise_finally_reject<'gc>(
                                 ))],
                                 {
                                     let new_env = *env;
-                                    object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
-                                    object_set_key_value(mc, &new_env, "__orig_reason", &orig_reason.clone())?;
+                                    slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
+                                    slot_set(mc, &new_env, InternalSlot::OrigReason, &orig_reason.clone());
                                     Some(new_env)
                                 },
                                 None,
@@ -3982,7 +3983,7 @@ pub fn __internal_promise_finally_reject<'gc>(
                         Some(Value::Closure(Gc::new(
                             mc,
                             ClosureData::new(
-                                &[],
+                                &[DestructuringElement::Variable("__reason".to_string(), None)],
                                 &[stmt_expr(Expr::Call(
                                     Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
                                     vec![
@@ -3992,7 +3993,7 @@ pub fn __internal_promise_finally_reject<'gc>(
                                 ))],
                                 {
                                     let new_env = *env;
-                                    object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(result_promise))?;
+                                    slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
                                     Some(new_env)
                                 },
                                 None,
@@ -4042,8 +4043,8 @@ pub fn handle_promise_finally_val<'gc>(
             ))],
             {
                 let new_env = *env;
-                object_set_key_value(mc, &new_env, "__on_finally", &on_finally_val.clone())?;
-                object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(new_promise))?;
+                slot_set(mc, &new_env, InternalSlot::OnFinally, &on_finally_val.clone());
+                slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(new_promise));
                 Some(new_env)
             },
             None,
@@ -4064,8 +4065,8 @@ pub fn handle_promise_finally_val<'gc>(
             ))],
             {
                 let new_env = *env;
-                object_set_key_value(mc, &new_env, "__on_finally", &on_finally_val.clone())?;
-                object_set_key_value(mc, &new_env, "__result_promise", &Value::Promise(new_promise))?;
+                slot_set(mc, &new_env, InternalSlot::OnFinally, &on_finally_val.clone());
+                slot_set(mc, &new_env, InternalSlot::ResultPromise, &Value::Promise(new_promise));
                 Some(new_env)
             },
             None,

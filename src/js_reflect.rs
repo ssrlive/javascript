@@ -1,7 +1,7 @@
 use crate::core::MutationContext;
 use crate::core::{
-    JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value,
-    prepare_function_call_env,
+    InternalSlot, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value,
+    prepare_function_call_env, slot_get_chained,
 };
 use crate::js_array::{get_array_length, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -131,7 +131,7 @@ pub fn handle_reflect_method<'gc>(
 
             // If target is a native constructor object (e.g., String), call its native handler
             if let Value::Object(obj) = &target
-                && let Some(native_rc) = object_get_key_value(obj, "__native_ctor")
+                && let Some(native_rc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                 && let Value::String(name_utf16) = &*native_rc.borrow()
             {
                 let name = utf16_to_utf8(name_utf16);
@@ -191,19 +191,19 @@ pub fn handle_reflect_method<'gc>(
             fn is_constructor_value<'gc>(v: &Value<'gc>) -> bool {
                 match v {
                     Value::Object(obj) => {
-                        if let Some(proxy_cell) = crate::core::object_get_key_value(obj, "__proxy__")
+                        if let Some(proxy_cell) = crate::core::slot_get_chained(obj, &InternalSlot::Proxy)
                             && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                         {
                             return is_constructor_value(&proxy.target);
                         }
 
-                        if let Some(bound_target) = crate::core::object_get_key_value(obj, "__bound_target") {
+                        if let Some(bound_target) = crate::core::slot_get_chained(obj, &InternalSlot::BoundTarget) {
                             return is_constructor_value(&bound_target.borrow());
                         }
 
                         if obj.borrow().class_def.is_some()
-                            || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
-                            || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
+                            || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
+                            || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
                         {
                             return true;
                         }
@@ -596,7 +596,7 @@ pub fn handle_reflect_method<'gc>(
                     crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
                     // Diagnostic trace to ensure proxy wrapper is visible here
                     let obj_ptr = obj.as_ptr();
-                    let has_proxy = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string())).is_some();
+                    let has_proxy = crate::core::slot_has(&obj, &InternalSlot::Proxy);
                     log::trace!("Reflect.ownKeys: obj_ptr={:p} has_proxy={}", obj_ptr, has_proxy);
                     // Use proxy-aware ownKeys so Proxy handlers are observed
                     let keys_vec: Vec<crate::core::PropertyKey> = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
@@ -649,7 +649,7 @@ pub fn handle_reflect_method<'gc>(
                     let prop_key = to_property_key(mc, env, property_key)?;
 
                     if let Value::Object(receiver_obj) = &receiver
-                        && let Some(proxy_cell) = crate::core::get_own_property(receiver_obj, "__proxy__")
+                        && let Some(proxy_cell) = crate::core::slot_get(receiver_obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         let _ = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &prop_key)?;

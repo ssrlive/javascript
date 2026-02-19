@@ -205,6 +205,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                                     }
                                 }
                                 PropertyKey::Private(s, _) => s.clone(),
+                                PropertyKey::Internal(s) => format!("[[{:?}]]", s),
                             };
                             let full_name = format!("get {}", prop_name);
                             let desc = crate::core::create_descriptor_object(
@@ -248,6 +249,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                                     }
                                 }
                                 PropertyKey::Private(s, _) => s.clone(),
+                                PropertyKey::Internal(s) => format!("[[{:?}]]", s),
                             };
                             let full_name = format!("set {}", prop_name);
                             let desc = crate::core::create_descriptor_object(
@@ -294,6 +296,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                         }
                     }
                     PropertyKey::Private(s, _) => s.clone(),
+                    PropertyKey::Internal(s) => format!("[[{:?}]]", s),
                 };
                 let full_name = format!("get {}", prop_name);
                 let desc = crate::core::create_descriptor_object(
@@ -338,6 +341,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                         }
                     }
                     PropertyKey::Private(s, _) => s.clone(),
+                    PropertyKey::Internal(s) => format!("[[{:?}]]", s),
                 };
                 let full_name = format!("set {}", prop_name);
                 let desc = crate::core::create_descriptor_object(

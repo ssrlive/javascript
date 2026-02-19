@@ -1,5 +1,5 @@
-use crate::core::{ClosureData, Expr, JSProxy, Statement, StatementKind};
-use crate::core::{Gc, MutationContext, new_gc_cell_ptr};
+use crate::core::{ClosureData, Expr, InternalSlot, JSProxy, Statement, StatementKind, slot_set};
+use crate::core::{Gc, MutationContext};
 use crate::env_set;
 use crate::unicode::utf16_to_utf8;
 use crate::{
@@ -37,10 +37,7 @@ pub(crate) fn handle_proxy_constructor<'gc>(
     // Create a wrapper object for the Proxy
     let proxy_obj = new_js_object_data(mc);
     // Store the actual proxy data
-    proxy_obj.borrow_mut(mc).insert(
-        PropertyKey::String("__proxy__".to_string()),
-        new_gc_cell_ptr(mc, Value::Proxy(proxy)),
-    );
+    slot_set(mc, &proxy_obj, InternalSlot::Proxy, &Value::Proxy(proxy));
 
     Ok(Value::Object(proxy_obj))
 }
@@ -78,27 +75,22 @@ pub(crate) fn handle_proxy_revocable<'gc>(
     ];
 
     let revoke_env = new_js_object_data(mc);
-    revoke_env
-        .borrow_mut(mc)
-        .insert("__revoke_proxy", new_gc_cell_ptr(mc, Value::Proxy(proxy)));
+    slot_set(mc, &revoke_env, InternalSlot::RevokeProxy, &Value::Proxy(proxy));
 
     // Create a wrapper object for the Proxy
     let proxy_wrapper = new_js_object_data(mc);
     // Store the actual proxy data
-    proxy_wrapper.borrow_mut(mc).insert(
-        PropertyKey::String("__proxy__".to_string()),
-        new_gc_cell_ptr(mc, Value::Proxy(proxy)),
-    );
+    slot_set(mc, &proxy_wrapper, InternalSlot::Proxy, &Value::Proxy(proxy));
 
     // Also capture the wrapper object so the internal revoke helper can replace the stored proxy
-    revoke_env
-        .borrow_mut(mc)
-        .insert("__proxy_wrapper", new_gc_cell_ptr(mc, Value::Object(proxy_wrapper)));
+    slot_set(mc, &revoke_env, InternalSlot::ProxyWrapper, &Value::Object(proxy_wrapper));
 
     // Provide a callable function in the revoke env that dispatches to the internal revoke helper
-    revoke_env.borrow_mut(mc).insert(
-        "__internal_revoke",
-        new_gc_cell_ptr(mc, Value::Function("Proxy.__internal_revoke".to_string())),
+    slot_set(
+        mc,
+        &revoke_env,
+        InternalSlot::InternalFn("revoke".to_string()),
+        &Value::Function("Proxy.__internal_revoke".to_string()),
     );
 
     let revoke_func = Value::Closure(Gc::new(mc, ClosureData::new(&[], &revoke_body, Some(revoke_env), None)));
@@ -128,7 +120,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
         // If the handler is itself a proxy, use proxy get to look up the trap
         // so the handler-proxy's traps are observed.
         let trap_key = crate::core::PropertyKey::String(trap_name.to_string());
-        let trap_opt = if let Some(inner_proxy_cell) = crate::core::get_own_property(handler_obj, "__proxy__")
+        let trap_opt = if let Some(inner_proxy_cell) = crate::core::slot_get(handler_obj, &InternalSlot::Proxy)
             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
         {
             proxy_get_property(mc, inner_proxy, &trap_key)?
@@ -342,7 +334,7 @@ pub(crate) fn proxy_get_property_with_receiver<'gc>(
             // If the target is a proxy wrapper (Object with __proxy__), delegate to that proxy
             match &*proxy.target {
                 Value::Object(obj) => {
-                    if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                    if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(inner_proxy) = &*proxy_cell.borrow()
                     {
                         return match proxy_get_property(mc, inner_proxy, &key_clone)? {
@@ -555,6 +547,7 @@ fn property_key_to_value<'gc>(key: &PropertyKey<'gc>) -> Value<'gc> {
         PropertyKey::String(s) => Value::String(utf8_to_utf16(s)),
         PropertyKey::Symbol(sd) => Value::Symbol(*sd),
         PropertyKey::Private(..) => unreachable!("Private keys should not be passed to proxy traps"),
+        PropertyKey::Internal(..) => unreachable!("Internal keys should not be passed to proxy traps"),
     }
 }
 
@@ -566,8 +559,8 @@ pub(crate) fn property_key_to_value_pub<'gc>(key: &PropertyKey<'gc>) -> Value<'g
 /// Initialize Proxy constructor and prototype
 pub fn initialize_proxy<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let proxy_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &proxy_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &proxy_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Proxy")))?;
+    slot_set(mc, &proxy_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &proxy_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Proxy")));
 
     // Register revocable static method
     object_set_key_value(mc, &proxy_ctor, "revocable", &Value::Function("Proxy.revocable".to_string()))?;

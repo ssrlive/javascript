@@ -1,7 +1,7 @@
 use crate::core::js_error::EvalError;
 use crate::core::{
-    JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, evaluate_call_dispatch, get_own_property, new_js_object_data,
-    object_get_key_value, object_set_key_value, to_primitive, value_to_string,
+    InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, evaluate_call_dispatch, get_own_property,
+    new_js_object_data, object_get_key_value, object_set_key_value, slot_get, slot_get_chained, slot_set, to_primitive, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -16,14 +16,12 @@ use std::collections::BTreeMap;
 
 pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let string_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &string_ctor, "__is_constructor", &Value::Boolean(true))?;
+    slot_set(mc, &string_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     object_set_key_value(mc, &string_ctor, "name", &Value::String(utf8_to_utf16("String")))?;
 
     // Mark as native constructor so it can be called as a function (String(...))
-    object_set_key_value(mc, &string_ctor, "__native_ctor", &Value::String(utf8_to_utf16("String")))?;
+    slot_set(mc, &string_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("String")));
     // Hide internal flags/prototype from enumeration
-    string_ctor.borrow_mut(mc).set_non_enumerable("__is_constructor");
-    string_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
     string_ctor.borrow_mut(mc).set_non_enumerable("prototype");
     string_ctor.borrow_mut(mc).set_non_writable("prototype");
     string_ctor.borrow_mut(mc).set_non_configurable("prototype");
@@ -464,7 +462,7 @@ fn string_replace_method<'gc>(
         if let Value::Object(object) = search_val {
             if is_regex_object(&object) {
                 // get flags
-                let flags = match get_own_property(&object, "__flags") {
+                let flags = match slot_get(&object, &InternalSlot::Flags) {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
@@ -922,7 +920,7 @@ fn string_split_method<'gc>(
             // Separator is a RegExp-like object
             let pattern_u16 = internal_get_regex_pattern(&object)?;
 
-            let flags_opt = get_own_property(&object, "__flags");
+            let flags_opt = slot_get(&object, &InternalSlot::Flags);
             let flags = match flags_opt {
                 Some(val_rc) => match &*val_rc.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
@@ -1057,7 +1055,7 @@ fn string_match_method<'gc>(
     };
 
     // Determine flags
-    let flags = match get_own_property(&regexp_obj, "__flags") {
+    let flags = match slot_get(&regexp_obj, &InternalSlot::Flags) {
         Some(val) => match &*val.borrow() {
             Value::String(s) => utf16_to_utf8(s),
             _ => String::new(),
@@ -1415,7 +1413,7 @@ fn string_search_method<'gc>(
         match arg {
             Value::Object(obj) if is_regex_object(&obj) => {
                 let _p = internal_get_regex_pattern(&obj)?;
-                let f = match get_own_property(&obj, "__flags") {
+                let f = match slot_get(&obj, &InternalSlot::Flags) {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => String::new(),
@@ -1455,7 +1453,7 @@ fn string_search_method<'gc>(
     };
 
     let pattern = internal_get_regex_pattern(&regexp_obj)?;
-    let flags_str = match get_own_property(&regexp_obj, "__flags") {
+    let flags_str = match slot_get(&regexp_obj, &InternalSlot::Flags) {
         Some(val) => match &*val.borrow() {
             Value::String(s) => utf16_to_utf8(s),
             _ => String::new(),
@@ -1498,7 +1496,7 @@ fn string_match_all_method<'gc>(
         let arg = args[0].clone();
         match arg {
             Value::Object(obj) if is_regex_object(&obj) => {
-                let f = match get_own_property(&obj, "__flags") {
+                let f = match slot_get(&obj, &InternalSlot::Flags) {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => String::new(),
@@ -1654,7 +1652,7 @@ fn string_replace_all_method<'gc>(
         if let Value::Object(object) = search_val {
             if is_regex_object(&object) {
                 // get flags
-                let flags = match get_own_property(&object, "__flags") {
+                let flags = match slot_get(&object, &InternalSlot::Flags) {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
@@ -1953,8 +1951,8 @@ pub(crate) fn create_string_iterator<'gc>(mc: &MutationContext<'gc>, s: &[u16]) 
     let iterator = new_js_object_data(mc);
 
     // Store string data
-    object_set_key_value(mc, &iterator, "__iterator_string__", &Value::String(s.to_vec()))?;
-    object_set_key_value(mc, &iterator, "__iterator_index__", &Value::Number(0.0))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorString, &Value::String(s.to_vec()));
+    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
 
     // next method
     object_set_key_value(mc, &iterator, "next", &Value::Function("StringIterator.prototype.next".to_string()))?;
@@ -1967,7 +1965,7 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     iterator: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Get string
-    let str_val = object_get_key_value(iterator, "__iterator_string__").ok_or(raise_eval_error!("Iterator has no string"))?;
+    let str_val = slot_get_chained(iterator, &InternalSlot::IteratorString).ok_or(raise_eval_error!("Iterator has no string"))?;
     let s = if let Value::String(utf16) = &*str_val.borrow() {
         utf16.clone()
     } else {
@@ -1975,7 +1973,7 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     };
 
     // Get index
-    let index_val = object_get_key_value(iterator, "__iterator_index__").ok_or(raise_eval_error!("Iterator has no index"))?;
+    let index_val = slot_get_chained(iterator, &InternalSlot::IteratorIndex).ok_or(raise_eval_error!("Iterator has no index"))?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         if *n < 0.0 { 0 } else { *n as usize }
     } else {
@@ -2004,7 +2002,7 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     }
 
     index += code_unit_count;
-    object_set_key_value(mc, iterator, "__iterator_index__", &Value::Number(index as f64))?;
+    slot_set(mc, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
 
     let result_obj = new_js_object_data(mc);
     object_set_key_value(mc, &result_obj, "value", &Value::String(ch_vec))?;

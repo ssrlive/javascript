@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
 use crate::core::MutationContext;
-use crate::core::{JSObjectDataPtr, Value, get_own_property, new_js_object_data, object_set_key_value};
+use crate::core::{InternalSlot, JSObjectDataPtr, Value, new_js_object_data, object_set_key_value, slot_get, slot_set};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
@@ -42,8 +42,8 @@ pub(crate) fn create_tmpfile<'gc>(mc: &MutationContext<'gc>) -> Result<Value<'gc
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
             let tmp = new_js_object_data(mc);
-            object_set_key_value(mc, &tmp, "__file_id", &Value::Number(file_id as f64))?;
-            object_set_key_value(mc, &tmp, "__eof", &Value::Boolean(false))?;
+            slot_set(mc, &tmp, InternalSlot::FileId, &Value::Number(file_id as f64));
+            slot_set(mc, &tmp, InternalSlot::Eof, &Value::Boolean(false));
             // methods
             object_set_key_value(mc, &tmp, "puts", &Value::Function("tmp.puts".to_string()))?;
             object_set_key_value(mc, &tmp, "readAsString", &Value::Function("tmp.readAsString".to_string()))?;
@@ -63,7 +63,7 @@ pub(crate) fn create_tmpfile<'gc>(mc: &MutationContext<'gc>) -> Result<Value<'gc
 /// Handle file object method calls
 pub(crate) fn handle_file_method<'gc>(object: &JSObjectDataPtr<'gc>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
-    if let Some(file_id_val) = get_own_property(object, "__file_id") {
+    if let Some(file_id_val) = slot_get(object, &InternalSlot::FileId) {
         let file_id = match *file_id_val.borrow() {
             Value::Number(n) => n as u64,
             _ => return Err(raise_eval_error!("Invalid file object")),

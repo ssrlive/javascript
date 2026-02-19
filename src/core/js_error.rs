@@ -1,8 +1,8 @@
 use crate::{
     JSError,
     core::{
-        JSObjectDataPtr, MutationContext, PropertyKey, Value, create_descriptor_object, env_get, env_set, new_js_object_data,
-        object_set_key_value, to_primitive, value_to_string,
+        InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, create_descriptor_object, env_get, env_set, new_js_object_data,
+        object_set_key_value, slot_set, to_primitive, value_to_string,
     },
     object_get_key_value, raise_type_error, utf8_to_utf16, utf16_to_utf8,
 };
@@ -84,8 +84,8 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     {
         error_ctor.borrow_mut(mc).prototype = Some(*func_proto);
     }
-    object_set_key_value(mc, &error_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &error_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Error")))?;
+    slot_set(mc, &error_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &error_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Error")));
     object_set_key_value(mc, &error_ctor, "name", &Value::String(utf8_to_utf16("Error")))?;
 
     // We need Object.prototype to set as the prototype of Error.prototype
@@ -156,8 +156,8 @@ fn initialize_native_error<'gc>(
     {
         ctor.borrow_mut(mc).prototype = Some(*func_proto);
     }
-    object_set_key_value(mc, &ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &ctor, "__native_ctor", &Value::String(utf8_to_utf16(name)))?;
+    slot_set(mc, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16(name)));
     object_set_key_value(mc, &ctor, "name", &Value::String(utf8_to_utf16(name)))?;
 
     // Set prototype of constructor to parent constructor (Error) so strict inheritance works if checked
@@ -330,9 +330,8 @@ pub fn create_error<'gc>(
     }
 
     // Internal marker to identify Error objects
-    object_set_key_value(mc, &error_obj, "__is_error", &Value::Boolean(true))?;
+    slot_set(mc, &error_obj, InternalSlot::IsError, &Value::Boolean(true));
     // Make internal marker non-enumerable so it doesn't show up in enumerations
-    error_obj.borrow_mut(mc).set_non_enumerable("__is_error");
 
     Ok(Value::Object(error_obj))
 }
@@ -342,7 +341,7 @@ pub fn is_error<'gc>(val: &Value<'gc>) -> bool {
     if let Value::Object(obj) = val
         && let Ok(borrowed) = obj.try_borrow()
     {
-        return borrowed.properties.contains_key(&PropertyKey::String("__is_error".to_string()));
+        return borrowed.properties.contains_key(&PropertyKey::Internal(InternalSlot::IsError));
     }
     false
 }

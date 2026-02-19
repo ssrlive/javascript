@@ -274,6 +274,404 @@ unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
     }
 }
 
+/// Type-safe key for engine-internal slots stored on `JSObjectData`.
+///
+/// Using an enum guarantees zero collision with user-defined JS properties:
+/// only Rust engine code can construct `InternalSlot` variants; user JS code
+/// always goes through string-based property APIs that write to `properties`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Collect)]
+#[collect(require_static)]
+pub enum InternalSlot {
+    // --- Prototype / Core Object ---
+    Proto,               // __proto__
+    PrimitiveValue,      // __value__
+    NativeCtor,          // __native_ctor
+    IsConstructor,       // __is_constructor
+    Callable,            // __callable__
+    ComputedProto,       // __computed_proto
+    ExtendsNull,         // __extends_null
+    Kind,                // __kind
+    ObjParamPlaceholder, // __obj_param_placeholder
+
+    // --- Function / Execution ---
+    Function,              // __function
+    Instance,              // __instance
+    Caller,                // __caller
+    Super,                 // __super
+    Frame,                 // __frame
+    DefinitionEnv,         // __definition_env
+    NewTarget,             // __new_target
+    ThisInitialized,       // __this_initialized
+    OriginGlobal,          // __origin_global
+    IsArrowFunction,       // __is_arrow_function
+    IsStrict,              // __is_strict
+    IsIndirectEval,        // __is_indirect_eval
+    FnNamePrefix,          // __fn_name_prefix
+    Filepath,              // __filepath
+    FileId,                // __file_id
+    Line,                  // __line__
+    Column,                // __column__
+    ClassDef,              // __class_def__
+    IsParameterEnv,        // __is_parameter_env
+    Test262GlobalCodeMode, // __test262_global_code_mode
+
+    // --- Bound Functions ---
+    BoundTarget,     // __bound_target
+    BoundThis,       // __bound_this
+    BoundArgLen,     // __bound_arg_len
+    BoundArg(usize), // __bound_arg_{i}
+
+    // --- Proxy ---
+    Proxy,        // __proxy__
+    ProxyWrapper, // __proxy_wrapper
+    RevokeProxy,  // __revoke_proxy
+
+    // --- Promise ---
+    Promise,               // __promise
+    PromiseRuntime,        // __promise_runtime
+    PromiseObjId,          // __promise_obj_id
+    PromiseInternalId,     // __promise_internal_id
+    ResultPromise,         // __result_promise
+    State,                 // __state
+    StateEnv,              // __state_env
+    Completed,             // __completed
+    Total,                 // __total
+    Results,               // __results
+    Reason,                // __reason
+    OrigValue,             // __orig_value
+    OrigReason,            // __orig_reason
+    OnFinally,             // __on_finally
+    CurrentPromise,        // __current_promise
+    Index,                 // __index
+    UnhandledRejection,    // __unhandled_rejection
+    PendingUnhandled,      // __pending_unhandled
+    IntrinsicPromiseProto, // __intrinsic_promise_proto
+    IntrinsicPromiseCtor,  // __intrinsic_promise_ctor
+
+    // --- Async ---
+    AsyncResolve, // __async_resolve
+    AsyncReject,  // __async_reject
+
+    // --- Generator ---
+    Generator,    // __generator__
+    InGenerator,  // __in_generator
+    Gen,          // __gen
+    P,            // __p
+    GenThrowVal,  // __gen_throw_val
+    GenForofSend, // __gen_forof_send
+
+    // --- Async Generator ---
+    AsyncGenerator,      // __async_generator
+    AsyncGeneratorState, // __async_generator__
+    AsyncGeneratorProto, // __async_generator_proto
+
+    // --- Iterator ---
+    IteratorIndex,       // __iterator_index__
+    IteratorKind,        // __iterator_kind__
+    IteratorArray,       // __iterator_array__
+    IteratorMap,         // __iterator_map__
+    IteratorSet,         // __iterator_set__
+    IteratorString,      // __iterator_string__
+    PendingIterator,     // __pending_iterator
+    PendingIteratorDone, // __pending_iterator_done
+
+    // --- Collections ---
+    Map,     // __map__
+    Set,     // __set__
+    WeakMap, // __weakmap__
+    WeakSet, // __weakset__
+
+    // --- RegExp ---
+    Regex,            // __regex
+    Flags,            // __flags
+    SwapGreed,        // __swapGreed
+    Crlf,             // __crlf
+    Locale,           // __locale
+    RegexGlobal,      // __global
+    RegexIgnoreCase,  // __ignoreCase
+    RegexMultiline,   // __multiline
+    RegexDotAll,      // __dotAll
+    RegexUnicode,     // __unicode
+    RegexSticky,      // __sticky
+    RegexHasIndices,  // __hasIndices
+    RegexUnicodeSets, // __unicodeSets
+
+    // --- Date ---
+    Timestamp, // __timestamp
+
+    // --- Async Generator yield* ---
+    YieldStarNextMethod, // __yield_star_next_method
+
+    // --- Promise runtime ---
+    UnhandledRejectionPromisePtr, // __unhandled_rejection_promise_ptr
+
+    // --- Function virtual prop deletion ---
+    FnDeleted(String), // __fn_deleted::{fn}::{prop}
+
+    // --- TypedArray / ArrayBuffer ---
+    TypedArray,         // __typedarray
+    ArrayBuffer,        // __arraybuffer
+    SharedArrayBuffer,  // __sharedarraybuffer
+    DataView,           // __dataview
+    BufferObject,       // __buffer_object
+    TypedArrayIterator, // __typedarray_iterator
+    DetachArrayBuffer,  // __detachArrayBuffer__
+
+    // --- Module ---
+    ImportMeta,                 // __import_meta
+    ModuleCache,                // __module_cache
+    ModuleLoading,              // __module_loading
+    ModuleEvalErrors,           // __module_eval_errors
+    ModuleAsyncPending,         // __module_async_pending
+    ModuleDeferredNsCache,      // __module_deferred_namespace_cache
+    ModuleNamespaceCache,       // __module_namespace_cache
+    ModuleDeferPendingPreloads, // __module_defer_pending_preloads
+    ModuleSourceClassName,      // __module_source_class_name
+    AbstractModuleSourceCtor,   // __abstract_module_source_ctor
+    DefaultExport,              // __default_export
+
+    // --- Error / Type flags ---
+    IsError,              // __is_error
+    IsErrorConstructor,   // __is_error_constructor
+    IsArray,              // __is_array
+    IsArrayConstructor,   // __is_array_constructor
+    IsBooleanConstructor, // __is_boolean_constructor
+    IsDateConstructor,    // __is_date_constructor
+    IsStringConstructor,  // __is_string_constructor
+
+    // --- Environment ---
+    GlobalLexEnv,                // __global_lex_env
+    AllowDynamicImportResult,    // __allow_dynamic_import_result
+    SuppressDynamicImportResult, // __suppress_dynamic_import_result
+    SymbolRegistry,              // __symbol_registry
+    TemplateRegistry,            // __template_registry
+
+    // --- Misc ---
+    Eof,          // __eof
+    CreateRealm,  // __createRealm__
+    LookupGetter, // __lookupGetter__
+    LookupSetter, // __lookupSetter__
+
+    // --- Dynamic keys (carry runtime data) ---
+    ClassField(String),   // __class_field_{suffix}
+    ParamBinding(String), // __param_binding__{name}
+    ImportSrc(String),    // __import_src_{suffix}
+    ReexportSrc(String),  // __reexport_src_{suffix}
+    NsSrc(String),        // __ns_src_{suffix}
+    GlobalLex(String),    // __global_lex_{name}  (NOT __global_lex_env)
+    GenPreExec(String),   // __gen_pre_exec_{suffix}
+    GenYieldVal(String),  // __gen_yield_val_{suffix}
+    InternalFn(String),   // __internal_{name}  (engine function dispatch names)
+}
+
+/// Convert a `__`-prefixed string key to its typed `InternalSlot` variant.
+///
+/// This is a **temporary bridge** used during migration.  Once all engine call
+/// sites are converted to use `InternalSlot` directly, this function (and the
+/// transparent routing that calls it) will be removed.
+pub fn str_to_internal_slot(s: &str) -> Option<InternalSlot> {
+    if !s.starts_with("__") {
+        return None;
+    }
+    // Exact matches first (most common path)
+    match s {
+        // Core
+        // "__proto__" => return Some(InternalSlot::Proto), // REMOVED: __proto__ should be a normal property
+        "__value__" => return Some(InternalSlot::PrimitiveValue),
+        "__native_ctor" => return Some(InternalSlot::NativeCtor),
+        "__is_constructor" => return Some(InternalSlot::IsConstructor),
+        "__callable__" => return Some(InternalSlot::Callable),
+        "__computed_proto" => return Some(InternalSlot::ComputedProto),
+        "__extends_null" => return Some(InternalSlot::ExtendsNull),
+        "__kind" => return Some(InternalSlot::Kind),
+        "__obj_param_placeholder" => return Some(InternalSlot::ObjParamPlaceholder),
+        // Function / Execution
+        "__function" => return Some(InternalSlot::Function),
+        "__instance" => return Some(InternalSlot::Instance),
+        "__caller" => return Some(InternalSlot::Caller),
+        "__super" => return Some(InternalSlot::Super),
+        "__frame" => return Some(InternalSlot::Frame),
+        "__definition_env" => return Some(InternalSlot::DefinitionEnv),
+        "__new_target" => return Some(InternalSlot::NewTarget),
+        "__this_initialized" => return Some(InternalSlot::ThisInitialized),
+        "__origin_global" => return Some(InternalSlot::OriginGlobal),
+        "__is_arrow_function" => return Some(InternalSlot::IsArrowFunction),
+        "__is_strict" => return Some(InternalSlot::IsStrict),
+        "__is_indirect_eval" => return Some(InternalSlot::IsIndirectEval),
+        "__fn_name_prefix" => return Some(InternalSlot::FnNamePrefix),
+        "__filepath" => return Some(InternalSlot::Filepath),
+        "__file_id" => return Some(InternalSlot::FileId),
+        "__line__" => return Some(InternalSlot::Line),
+        "__column__" => return Some(InternalSlot::Column),
+        "__class_def__" => return Some(InternalSlot::ClassDef),
+        "__is_parameter_env" => return Some(InternalSlot::IsParameterEnv),
+        "__test262_global_code_mode" => return Some(InternalSlot::Test262GlobalCodeMode),
+        // Bound
+        "__bound_target" => return Some(InternalSlot::BoundTarget),
+        "__bound_this" => return Some(InternalSlot::BoundThis),
+        "__bound_arg_len" => return Some(InternalSlot::BoundArgLen),
+        // Proxy
+        "__proxy__" => return Some(InternalSlot::Proxy),
+        "__proxy_wrapper" => return Some(InternalSlot::ProxyWrapper),
+        "__revoke_proxy" => return Some(InternalSlot::RevokeProxy),
+        // Promise
+        "__promise" => return Some(InternalSlot::Promise),
+        "__promise_runtime" => return Some(InternalSlot::PromiseRuntime),
+        "__promise_obj_id" => return Some(InternalSlot::PromiseObjId),
+        "__promise_internal_id" => return Some(InternalSlot::PromiseInternalId),
+        "__result_promise" => return Some(InternalSlot::ResultPromise),
+        "__state" => return Some(InternalSlot::State),
+        "__state_env" => return Some(InternalSlot::StateEnv),
+        "__completed" => return Some(InternalSlot::Completed),
+        "__total" => return Some(InternalSlot::Total),
+        "__results" => return Some(InternalSlot::Results),
+        "__reason" => return Some(InternalSlot::Reason),
+        "__orig_value" => return Some(InternalSlot::OrigValue),
+        "__orig_reason" => return Some(InternalSlot::OrigReason),
+        "__on_finally" => return Some(InternalSlot::OnFinally),
+        "__current_promise" => return Some(InternalSlot::CurrentPromise),
+        "__index" => return Some(InternalSlot::Index),
+        "__unhandled_rejection" => return Some(InternalSlot::UnhandledRejection),
+        "__pending_unhandled" => return Some(InternalSlot::PendingUnhandled),
+        "__intrinsic_promise_proto" => return Some(InternalSlot::IntrinsicPromiseProto),
+        "__intrinsic_promise_ctor" => return Some(InternalSlot::IntrinsicPromiseCtor),
+        // Async
+        "__async_resolve" => return Some(InternalSlot::AsyncResolve),
+        "__async_reject" => return Some(InternalSlot::AsyncReject),
+        // Generator
+        "__generator__" => return Some(InternalSlot::Generator),
+        "__in_generator" => return Some(InternalSlot::InGenerator),
+        "__gen" => return Some(InternalSlot::Gen),
+        "__p" => return Some(InternalSlot::P),
+        "__gen_throw_val" => return Some(InternalSlot::GenThrowVal),
+        "__gen_forof_send" => return Some(InternalSlot::GenForofSend),
+        // Async Generator
+        "__async_generator" => return Some(InternalSlot::AsyncGenerator),
+        "__async_generator__" => return Some(InternalSlot::AsyncGeneratorState),
+        "__async_generator_proto" => return Some(InternalSlot::AsyncGeneratorProto),
+        // Iterator
+        "__iterator_index__" => return Some(InternalSlot::IteratorIndex),
+        "__iterator_kind__" => return Some(InternalSlot::IteratorKind),
+        "__iterator_array__" => return Some(InternalSlot::IteratorArray),
+        "__iterator_map__" => return Some(InternalSlot::IteratorMap),
+        "__iterator_set__" => return Some(InternalSlot::IteratorSet),
+        "__iterator_string__" => return Some(InternalSlot::IteratorString),
+        "__pending_iterator" => return Some(InternalSlot::PendingIterator),
+        "__pending_iterator_done" => return Some(InternalSlot::PendingIteratorDone),
+        // Collections
+        "__map__" => return Some(InternalSlot::Map),
+        "__set__" => return Some(InternalSlot::Set),
+        "__weakmap__" => return Some(InternalSlot::WeakMap),
+        "__weakset__" => return Some(InternalSlot::WeakSet),
+        // RegExp
+        "__regex" => return Some(InternalSlot::Regex),
+        "__flags" => return Some(InternalSlot::Flags),
+        "__swapGreed" => return Some(InternalSlot::SwapGreed),
+        "__crlf" => return Some(InternalSlot::Crlf),
+        "__locale" => return Some(InternalSlot::Locale),
+        "__global" => return Some(InternalSlot::RegexGlobal),
+        "__ignoreCase" => return Some(InternalSlot::RegexIgnoreCase),
+        "__multiline" => return Some(InternalSlot::RegexMultiline),
+        "__dotAll" => return Some(InternalSlot::RegexDotAll),
+        "__unicode" => return Some(InternalSlot::RegexUnicode),
+        "__sticky" => return Some(InternalSlot::RegexSticky),
+        "__hasIndices" => return Some(InternalSlot::RegexHasIndices),
+        "__unicodeSets" => return Some(InternalSlot::RegexUnicodeSets),
+        // Date
+        "__timestamp" => return Some(InternalSlot::Timestamp),
+        // Async generator yield*
+        "__yield_star_next_method" => return Some(InternalSlot::YieldStarNextMethod),
+        // Promise runtime
+        "__unhandled_rejection_promise_ptr" => return Some(InternalSlot::UnhandledRejectionPromisePtr),
+        // TypedArray / ArrayBuffer
+        "__typedarray" => return Some(InternalSlot::TypedArray),
+        "__arraybuffer" => return Some(InternalSlot::ArrayBuffer),
+        "__sharedarraybuffer" => return Some(InternalSlot::SharedArrayBuffer),
+        "__dataview" => return Some(InternalSlot::DataView),
+        "__buffer_object" => return Some(InternalSlot::BufferObject),
+        "__typedarray_iterator" => return Some(InternalSlot::TypedArrayIterator),
+        "__detachArrayBuffer__" => return Some(InternalSlot::DetachArrayBuffer),
+        // Module
+        "__import_meta" => return Some(InternalSlot::ImportMeta),
+        "__module_cache" => return Some(InternalSlot::ModuleCache),
+        "__module_loading" => return Some(InternalSlot::ModuleLoading),
+        "__module_eval_errors" => return Some(InternalSlot::ModuleEvalErrors),
+        "__module_async_pending" => return Some(InternalSlot::ModuleAsyncPending),
+        "__module_deferred_namespace_cache" => return Some(InternalSlot::ModuleDeferredNsCache),
+        "__module_namespace_cache" => return Some(InternalSlot::ModuleNamespaceCache),
+        "__module_defer_pending_preloads" => return Some(InternalSlot::ModuleDeferPendingPreloads),
+        "__module_source_class_name" => return Some(InternalSlot::ModuleSourceClassName),
+        "__abstract_module_source_ctor" => return Some(InternalSlot::AbstractModuleSourceCtor),
+        "__default_export" => return Some(InternalSlot::DefaultExport),
+        // Error/Type flags
+        "__is_error" => return Some(InternalSlot::IsError),
+        "__is_error_constructor" => return Some(InternalSlot::IsErrorConstructor),
+        "__is_array" => return Some(InternalSlot::IsArray),
+        "__is_array_constructor" => return Some(InternalSlot::IsArrayConstructor),
+        "__is_boolean_constructor" => return Some(InternalSlot::IsBooleanConstructor),
+        "__is_date_constructor" => return Some(InternalSlot::IsDateConstructor),
+        "__is_string_constructor" => return Some(InternalSlot::IsStringConstructor),
+        // Environment
+        "__global_lex_env" => return Some(InternalSlot::GlobalLexEnv),
+        "__allow_dynamic_import_result" => return Some(InternalSlot::AllowDynamicImportResult),
+        "__suppress_dynamic_import_result" => return Some(InternalSlot::SuppressDynamicImportResult),
+        "__symbol_registry" => return Some(InternalSlot::SymbolRegistry),
+        "__template_registry" => return Some(InternalSlot::TemplateRegistry),
+        // Misc
+        "__eof" => return Some(InternalSlot::Eof),
+        "__createRealm__" => return Some(InternalSlot::CreateRealm),
+        "__lookupGetter__" => return Some(InternalSlot::LookupGetter),
+        "__lookupSetter__" => return Some(InternalSlot::LookupSetter),
+        _ => {} // fall through to prefix matching below
+    }
+
+    // Dynamic prefix patterns (order matters: longer/more-specific prefixes first)
+    if let Some(rest) = s.strip_prefix("__bound_arg_") {
+        return rest.parse::<usize>().ok().map(InternalSlot::BoundArg);
+    }
+    if let Some(rest) = s.strip_prefix("__class_field_") {
+        return Some(InternalSlot::ClassField(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__param_binding__") {
+        return Some(InternalSlot::ParamBinding(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__import_src_") {
+        return Some(InternalSlot::ImportSrc(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__reexport_src_") {
+        return Some(InternalSlot::ReexportSrc(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__ns_src_") {
+        return Some(InternalSlot::NsSrc(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__global_lex_") {
+        return Some(InternalSlot::GlobalLex(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__gen_pre_exec_") {
+        return Some(InternalSlot::GenPreExec(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__gen_yield_val_") {
+        return Some(InternalSlot::GenYieldVal(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__internal_") {
+        return Some(InternalSlot::InternalFn(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("__fn_deleted::") {
+        return Some(InternalSlot::FnDeleted(rest.to_string()));
+    }
+
+    // Not a recognized internal slot — stays in `properties`.
+    None
+}
+
+/// Return `true` if `s` is a known engine-internal slot name.
+/// Delegates to `str_to_internal_slot`.
+#[inline]
+#[allow(dead_code)]
+pub fn is_internal_slot_key(s: &str) -> bool {
+    str_to_internal_slot(s).is_some()
+}
+
 impl<'gc> JSObjectData<'gc> {
     pub fn new() -> Self {
         // JSObjectData::default() would initialize `extensible` to false, so ensure it's true by default
@@ -284,9 +682,6 @@ impl<'gc> JSObjectData<'gc> {
     }
     pub fn insert(&mut self, key: impl Into<PropertyKey<'gc>>, val: GcPtr<'gc, Value<'gc>>) {
         let key = key.into();
-        // Normal insertion into the object's property map. Avoid panicking here -
-        // higher-level helpers (e.g., `set_property` and `object_set_key_value`) are
-        // responsible for treating implementation-internal keys specially.
         self.properties.insert(key, val);
     }
     pub fn set_const(&mut self, key: String) {
@@ -392,17 +787,16 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_line(&mut self, line: usize, mc: &MutationContext<'gc>) -> Result<(), JSError> {
-        let key = PropertyKey::String("__line__".to_string());
-        if !self.properties.contains_key(&key) {
-            let val = Value::Number(line as f64);
-            let val_ptr = new_gc_cell_ptr(mc, val);
-            self.insert(key, val_ptr);
-        }
+        let key = PropertyKey::Internal(InternalSlot::Line);
+        self.properties
+            .entry(key)
+            .or_insert_with(|| new_gc_cell_ptr(mc, Value::Number(line as f64)));
         Ok(())
     }
 
     pub fn get_line(&self) -> Option<usize> {
-        if let Some(line_ptr) = self.properties.get(&PropertyKey::String("__line__".to_string()))
+        let key = PropertyKey::Internal(InternalSlot::Line);
+        if let Some(line_ptr) = self.properties.get(&key)
             && let Value::Number(n) = &*line_ptr.borrow()
         {
             return Some(*n as usize);
@@ -411,17 +805,16 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_column(&mut self, column: usize, mc: &MutationContext<'gc>) -> Result<(), JSError> {
-        let key = PropertyKey::String("__column__".to_string());
-        if !self.properties.contains_key(&key) {
-            let val = Value::Number(column as f64);
-            let val_ptr = new_gc_cell_ptr(mc, val);
-            self.insert(key, val_ptr);
-        }
+        let key = PropertyKey::Internal(InternalSlot::Column);
+        self.properties
+            .entry(key)
+            .or_insert_with(|| new_gc_cell_ptr(mc, Value::Number(column as f64)));
         Ok(())
     }
 
     pub fn get_column(&self) -> Option<usize> {
-        if let Some(col_ptr) = self.properties.get(&PropertyKey::String("__column__".to_string()))
+        let key = PropertyKey::Internal(InternalSlot::Column);
+        if let Some(col_ptr) = self.properties.get(&key)
             && let Value::Number(n) = &*col_ptr.borrow()
         {
             return Some(*n as usize);
@@ -1110,6 +1503,7 @@ pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value
 
 pub fn object_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<PropertyKey<'gc>>) -> Option<GcPtr<'gc, Value<'gc>>> {
     let key = key.into();
+
     let mut current = Some(*obj);
     while let Some(cur) = current {
         if let Some(val) = cur.borrow().properties.get(&key) {
@@ -1155,7 +1549,7 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
     // properties (0..length-1) which should appear in ordinary own property keys
     // even if we don't materialize them in the object's properties map.
     let mut typed_indices: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string()))
+    if let Some(ta_cell) = slot_get(obj, &InternalSlot::TypedArray)
         && let Value::TypedArray(ta) = &*ta_cell.borrow()
     {
         // Support length-tracking typed arrays by computing the current length
@@ -1171,7 +1565,6 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
         };
         for i in 0..cur_len {
             let s = i.to_string();
-            // push as numeric index entry (keeps numeric ordering)
             indices.push((i as u64, PropertyKey::String(s.clone())));
             typed_indices.insert(s);
         }
@@ -1186,52 +1579,11 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
                     continue;
                 }
 
-                // Skip engine-internal properties.  We use a conservative
-                // heuristic: hide any property whose name matches known
-                // engine-internal naming patterns (starting with "__").
-                // User-defined names like __foo__ or __bar remain visible.
+                // __proto__ is an accessor on Object.prototype, not an own property key.
                 if s == "__proto__" {
                     continue;
                 }
-                if s.starts_with("__")
-                    && (s.starts_with("__is_")               // __is_constructor, __is_arrow_function, ...
-                    || s.starts_with("__internal_")      // __internal_resolve_promise, ...
-                    || s.starts_with("__bound_")         // __bound_target, __bound_this, ...
-                    || s.starts_with("__import_")        // __import_meta, __import_src_...
-                    || s.starts_with("__module_")        // __module_cache, ...
-                    || s.starts_with("__ns_")            // __ns_export_names, __ns_src_...
-                    || s.starts_with("__reexport_")      // __reexport_src_...
-                    || s.starts_with("__param_binding_") // __param_binding__{n}
-                    || s.starts_with("__pending_iterator") // __pending_iterator, __pending_iterator_done
-                    || s.starts_with("__class_field_")   // __class_field_initializer
-                    || s.starts_with("__async_generator") // __async_generator_proto
-                    || s.starts_with("__suppress_")      // __suppress_dynamic_import_result
-                    || s.starts_with("__allow_")         // __allow_dynamic_import_result
-                    || s.starts_with("__global_lex_")    // __global_lex_env
-                    || s.starts_with("__iterator_")      // __iterator_array__, __iterator_index__, __iterator_kind__
-                    || matches!(s.as_str(),
-                        "__function" | "__instance" | "__super" | "__caller"
-                        | "__proxy__" | "__proxy_wrapper" | "__arraybuffer"
-                        | "__typedarray" | "__regex" | "__map__" | "__set__"
-                        | "__weakmap__" | "__weakset__" | "__value__"
-                        | "__native_ctor" | "__new_target" | "__this_initialized"
-                        | "__computed_proto" | "__default_export" | "__definition_env"
-                        | "__extends_null" | "__filepath" | "__frame"
-                        | "__in_generator" | "__kind" | "__obj_param_placeholder"
-                        | "__origin_global" | "__revoke_proxy" | "__template_registry"
-                        | "__test262_global_code_mode" | "__fn_name_prefix"
-                        | "__detachArrayBuffer__" | "__lookupGetter__" | "__lookupSetter__"
-                        | "__createRealm__" | "__callable__" | "__generator__"
-                        | "__line__" | "__column__"
-                    ))
-                {
-                    continue;
-                }
 
-                // Debug: log if key contains the word 'definition' (helps diagnose odd keys)
-                if s.contains("definition") {
-                    log::debug!("ordinary_own_property_keys: encountered key with definition substring: '{}'", s);
-                }
                 // Check canonical numeric index: no leading + or spaces; must roundtrip to same string
                 if let Ok(parsed) = s.parse::<u64>() {
                     // canonical representation check (no leading zeros except "0")
@@ -1243,7 +1595,8 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
                 string_keys.push(k.clone());
             }
             PropertyKey::Symbol(_) => symbol_keys.push(k.clone()),
-            PropertyKey::Private(..) => {}
+            // Internal and Private keys are never visible to JS enumeration
+            PropertyKey::Private(..) | PropertyKey::Internal(_) => {}
         }
     }
 
@@ -1262,18 +1615,15 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
 /// Result because invoking proxy traps can trigger user code and therefore
 /// can fail with an exception.
 pub fn ordinary_own_property_keys_mc<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<PropertyKey<'gc>>, JSError> {
-    // Debug: show whether object is a proxy wrapper so we can diagnose missing trap calls
     let obj_ptr = obj.as_ptr();
-    let has_proxy = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string())).is_some();
+    let has_proxy = slot_has(obj, &InternalSlot::Proxy);
     log::trace!("ordinary_own_property_keys_mc: obj_ptr={:p} has_proxy={}", obj_ptr, has_proxy);
 
     // If this is a proxy wrapper object, delegate to the proxy helper so
-    // traps are observed. The proxy is stored in an internal `__proxy__`
-    // property as a `Value::Proxy`.
-    if let Some(proxy_cell) = obj.borrow().properties.get(&PropertyKey::String("__proxy__".to_string()))
+    // traps are observed.
+    if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
     {
-        // Use the proxy helper to obtain the key list
         log::trace!(
             "ordinary_own_property_keys_mc: delegating to proxy_own_keys, proxy_ptr={:p}",
             Gc::as_ptr(*proxy)
@@ -1333,7 +1683,7 @@ pub fn object_set_key_value<'gc>(
                     }
                 };
 
-                if let Some(inner) = object_get_key_value(o, "__value__") {
+                if let Some(inner) = slot_get(o, &InternalSlot::PrimitiveValue) {
                     let unwrapped = hydrate_prop(&inner.borrow());
                     crate::core::eval::to_number(&unwrapped).map_err(|_| raise_type_error!("Cannot convert object to number"))?
                 } else {
@@ -1394,50 +1744,25 @@ pub fn object_set_key_value<'gc>(
         PropertyKey::String(s) => s.clone(),
         PropertyKey::Symbol(_) => "<symbol>".to_string(),
         PropertyKey::Private(n, _) => format!("#{n}"),
+        PropertyKey::Internal(_) => "<internal>".to_string(),
     };
 
-    // Intercept attempts to set the implementation-only key '__definition_env' and
-    // store it in the object's internal slot instead of creating a visible property.
-    if key_desc == "__definition_env" {
-        if let Value::Object(env_obj) = val {
+    // Internal slot keys bypass extensibility checks and property attribute semantics
+    // entirely — internal slots are an engine concept, not a JS one.
+    if let PropertyKey::Internal(ref slot) = key {
+        // Special case: DefinitionEnv also updates the typed field
+        if *slot == InternalSlot::DefinitionEnv
+            && let Value::Object(env_obj) = val
+        {
             obj.borrow_mut(mc).definition_env = Some(*env_obj);
-            return Ok(());
-        } else {
-            // Ignore non-object assignments to the internal slot.
-            return Ok(());
         }
+        let gc_val = new_gc_cell_ptr(mc, val.clone());
+        obj.borrow_mut(mc).properties.insert(key, gc_val);
+        return Ok(());
     }
 
     // Disallow creating new own properties on non-extensible objects.
-    // Exception: allow a very small whitelist of engine markers only on the
-    // global environment object itself. This is needed for test harness/global
-    // code plumbing, while still preventing arbitrary `__*` user properties.
-    let is_global_env_obj = obj
-        .borrow()
-        .properties
-        .get(&PropertyKey::String("globalThis".to_string()))
-        .and_then(|global_this_cell| {
-            if let Value::Object(global_this_obj) = &*global_this_cell.borrow()
-                && Gc::ptr_eq(*global_this_obj, *obj)
-            {
-                Some(true)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(false);
-
-    let allow_nonextensible_internal_write = if let PropertyKey::String(s) = &key {
-        is_global_env_obj
-            && matches!(
-                s.as_str(),
-                "__test262_global_code_mode" | "__global_lex_env" | "__is_indirect_eval" | "__allow_dynamic_import_result"
-            )
-    } else {
-        false
-    };
-
-    if !exists && !is_extensible && !allow_nonextensible_internal_write {
+    if !exists && !is_extensible {
         return Err(raise_type_error!("Cannot add property to non-extensible object"));
     }
 
@@ -1447,7 +1772,7 @@ pub fn object_set_key_value<'gc>(
     // TypedArray indexed stores.
     if let PropertyKey::String(s) = &key
         && let Ok(idx) = s.parse::<usize>()
-        && let Some(ta_cell) = object_get_key_value(obj, "__typedarray")
+        && let Some(ta_cell) = slot_get(obj, &InternalSlot::TypedArray)
         && let Value::TypedArray(ta) = &*ta_cell.borrow()
     {
         let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
@@ -1630,13 +1955,28 @@ pub fn object_set_key_value<'gc>(
 }
 
 pub fn env_get_own<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
+    if let Some(slot) = str_to_internal_slot(key) {
+        return env.borrow().properties.get(&PropertyKey::Internal(slot)).cloned();
+    }
     env.borrow().properties.get(&PropertyKey::String(key.to_string())).cloned()
 }
 
 pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
+    if let Some(slot) = str_to_internal_slot(key) {
+        let pk = PropertyKey::Internal(slot);
+        let mut current = Some(*env);
+        while let Some(cur) = current {
+            if let Some(val) = cur.borrow().properties.get(&pk) {
+                return Some(*val);
+            }
+            current = cur.borrow().prototype;
+        }
+        return None;
+    }
+    let pk = PropertyKey::String(key.to_string());
     let mut current = Some(*env);
     while let Some(cur) = current {
-        if let Some(val) = cur.borrow().properties.get(&PropertyKey::String(key.to_string())) {
+        if let Some(val) = cur.borrow().properties.get(&pk) {
             return Some(*val);
         }
         current = cur.borrow().prototype;
@@ -1657,27 +1997,28 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
         return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
     }
     let val_ptr = new_gc_cell_ptr(mc, val.clone());
-    let pk = PropertyKey::String(key.to_string());
+    let pk = if let Some(slot) = str_to_internal_slot(key) {
+        PropertyKey::Internal(slot)
+    } else {
+        PropertyKey::String(key.to_string())
+    };
 
-    // If the current env already has this binding as an own property, update it
-    // directly without walking the prototype chain. This ensures that lexical
-    // bindings (let/const) on a lex_env are updated in-place rather than
-    // accidentally overwriting same-named bindings in a parent scope.
-    if env.borrow().properties.contains_key(&pk) {
+    // If the current env already has this binding as an own property,
+    // update it directly without walking the prototype chain.
+    let has_own = env.borrow().properties.contains_key(&pk);
+    if has_own {
         env.borrow_mut(mc).insert(pk, val_ptr);
         return Ok(());
     }
 
     // Walk the prototype chain to find an existing binding and update it there.
-    // This ensures that var declarations hoisted to an outer variable environment
-    // are properly updated rather than shadowed by a new local binding.
-    // Also check for const constraints in outer scopes.
     let mut cur = env.borrow().prototype;
     while let Some(c) = cur {
         if c.borrow().is_const(key) {
             return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
         }
-        if c.borrow().properties.contains_key(&pk) {
+        let found = c.borrow().properties.contains_key(&pk);
+        if found {
             c.borrow_mut(mc).insert(pk, val_ptr);
             return Ok(());
         }
@@ -1689,27 +2030,109 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
     Ok(())
 }
 
-pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
-    // Walk the environment's prototype chain looking for an own `__is_strict` marker.
-    // Some environments are created transiently (e.g., call frames) and may not
-    // directly own the marker; strictness should be inherited from an ancestor
-    // so check prototypes as well.
-    let mut cur = Some(*env);
-    while let Some(c) = cur {
-        if let Some(is_strict_cell) = get_own_property(&c, "__is_strict")
-            && let Value::Boolean(is_strict) = *is_strict_cell.borrow()
-        {
-            return is_strict;
+// ---------------------------------------------------------------------------
+// Public internal-slot helpers — preferred API for new code
+// ---------------------------------------------------------------------------
+
+/// Store a value in an object's internal slot.  The key must start with `__`.
+#[inline]
+#[allow(dead_code)]
+pub fn set_internal_slot<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str, value: &Value<'gc>) {
+    let slot = str_to_internal_slot(key).unwrap_or_else(|| panic!("set_internal_slot: unknown key '{}'", key));
+    slot_set(mc, obj, slot, value);
+}
+
+/// Read an internal slot from an object (own only — no prototype chain walk).
+#[inline]
+#[allow(dead_code)]
+pub fn get_internal_slot<'gc>(obj: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
+    let slot = str_to_internal_slot(key)?;
+    slot_get(obj, &slot)
+}
+
+/// Check whether an object has a particular internal slot (own only).
+#[inline]
+#[allow(dead_code)]
+pub fn has_internal_slot(obj: &JSObjectDataPtr, key: &str) -> bool {
+    if let Some(slot) = str_to_internal_slot(key) {
+        slot_has(obj, &slot)
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Direct enum-key internal-slot API  (no string conversion)
+// ---------------------------------------------------------------------------
+
+/// Store a value in an internal slot using a typed `InternalSlot` key.
+#[inline]
+pub fn slot_set<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: InternalSlot, value: &Value<'gc>) {
+    let gc_val = new_gc_cell_ptr(mc, value.clone());
+    let key = PropertyKey::Internal(slot);
+    obj.borrow_mut(mc).properties.insert(key, gc_val);
+}
+
+/// Read an internal slot (own only) using a typed `InternalSlot` key.
+#[inline]
+pub fn slot_get<'gc>(obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Option<GcPtr<'gc, Value<'gc>>> {
+    let key = PropertyKey::Internal(slot.clone());
+    obj.borrow().properties.get(&key).copied()
+}
+
+/// Check whether an object has a particular internal slot (own only) using a typed key.
+#[inline]
+#[allow(dead_code)]
+pub fn slot_has(obj: &JSObjectDataPtr, slot: &InternalSlot) -> bool {
+    let key = PropertyKey::Internal(slot.clone());
+    obj.borrow().properties.contains_key(&key)
+}
+
+/// Remove an internal slot using a typed `InternalSlot` key.
+#[inline]
+#[allow(dead_code)]
+pub fn slot_remove<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Option<GcPtr<'gc, Value<'gc>>> {
+    let key = PropertyKey::Internal(slot.clone());
+    obj.borrow_mut(mc).properties.shift_remove(&key)
+}
+
+/// Walk prototype chain looking for an internal slot (typed key).
+#[inline]
+pub fn slot_get_chained<'gc>(obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Option<GcPtr<'gc, Value<'gc>>> {
+    let key = PropertyKey::Internal(slot.clone());
+    let mut current = Some(*obj);
+    while let Some(cur) = current {
+        if let Some(val) = cur.borrow().properties.get(&key) {
+            return Some(*val);
         }
-        cur = c.borrow().prototype;
+        current = cur.borrow().prototype;
+    }
+    None
+}
+
+/// Convenience: read internal slot, unwrap it, and check if it's a truthy `Boolean(true)`.
+#[inline]
+#[allow(dead_code)]
+pub fn slot_is_true(obj: &JSObjectDataPtr, slot: &InternalSlot) -> bool {
+    let key = PropertyKey::Internal(slot.clone());
+    if let Some(v) = obj.borrow().properties.get(&key) {
+        matches!(*v.borrow(), Value::Boolean(true))
+    } else {
+        false
+    }
+}
+
+pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
+    if let Some(v) = slot_get_chained(env, &InternalSlot::IsStrict)
+        && let Value::Boolean(is_strict) = *v.borrow()
+    {
+        return is_strict;
     }
     false
 }
 
 pub fn env_set_strictness<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
-    let val = Value::Boolean(is_strict);
-    let val_ptr = new_gc_cell_ptr(mc, val);
-    env.borrow_mut(mc).insert("__is_strict", val_ptr);
+    slot_set(mc, env, InternalSlot::IsStrict, &Value::Boolean(is_strict));
     Ok(())
 }
 
@@ -1733,11 +2156,16 @@ pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'
 }
 
 pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
+    let pk = if let Some(slot) = str_to_internal_slot(key) {
+        PropertyKey::Internal(slot)
+    } else {
+        PropertyKey::String(key.to_string())
+    };
     let mut current = *env;
     loop {
         let existing = {
             let borrowed = current.borrow();
-            borrowed.properties.get(&PropertyKey::String(key.to_string())).cloned()
+            borrowed.properties.get(&pk).cloned()
         };
         if let Some(existing) = existing {
             if matches!(*existing.borrow(), Value::Uninitialized) {

@@ -1,5 +1,8 @@
 use crate::core::MutationContext;
-use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value, to_primitive};
+use crate::core::{
+    InternalSlot, JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value, slot_get_chained,
+    slot_set, to_primitive,
+};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use num_bigint::BigInt;
@@ -59,7 +62,7 @@ pub fn handle_bigint_object_method<'gc>(this_val: &Value<'gc>, method: &str, arg
     let h = match this_val {
         Value::BigInt(b) => b.clone(),
         Value::Object(obj) => {
-            if let Some(value_val) = object_get_key_value(obj, "__value__") {
+            if let Some(value_val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
                 if let Value::BigInt(h) = &*value_val.borrow() {
                     h.clone()
                 } else {
@@ -302,7 +305,7 @@ pub fn compare_bigint_and_number(b: &BigInt, n: f64) -> Option<std::cmp::Orderin
 
 pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let bigint_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &bigint_ctor, "__native_ctor", &Value::String(utf8_to_utf16("BigInt")))?;
+    slot_set(mc, &bigint_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("BigInt")));
 
     // Add static methods
     object_set_key_value(mc, &bigint_ctor, "asIntN", &Value::Function("BigInt.asIntN".to_string()))?;

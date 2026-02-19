@@ -1,3 +1,4 @@
+use crate::core::{InternalSlot, slot_get_chained, slot_set};
 use crate::{
     JSError, Value,
     core::{
@@ -414,7 +415,7 @@ fn module_requested_modules(module_path: &str) -> Result<Vec<String>, JSError> {
 fn is_module_loading_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>, module_path: &str) -> bool {
     let mut cur = Some(*env);
     while let Some(e) = cur {
-        if let Some(loading_val) = object_get_key_value(&e, "__module_loading")
+        if let Some(loading_val) = slot_get_chained(&e, &InternalSlot::ModuleLoading)
             && let Value::Object(loading_obj) = loading_val.borrow().clone()
             && let Some(flag_rc) = object_get_key_value(&loading_obj, module_path)
             && matches!(*flag_rc.borrow(), Value::Boolean(true))
@@ -424,7 +425,7 @@ fn is_module_loading_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>, module_path: 
 
         if let Some(global_val) = object_get_key_value(&e, "globalThis")
             && let Value::Object(global_obj) = global_val.borrow().clone()
-            && let Some(loading_val) = object_get_key_value(&global_obj, "__module_loading")
+            && let Some(loading_val) = slot_get_chained(&global_obj, &InternalSlot::ModuleLoading)
             && let Value::Object(loading_obj) = loading_val.borrow().clone()
             && let Some(flag_rc) = object_get_key_value(&loading_obj, module_path)
             && matches!(*flag_rc.borrow(), Value::Boolean(true))
@@ -441,7 +442,7 @@ fn is_module_loading_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>, module_path: 
 fn any_module_loading_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
     let mut cur = Some(*env);
     while let Some(e) = cur {
-        if let Some(loading_val) = object_get_key_value(&e, "__module_loading")
+        if let Some(loading_val) = slot_get_chained(&e, &InternalSlot::ModuleLoading)
             && let Value::Object(loading_obj) = loading_val.borrow().clone()
         {
             for flag in loading_obj.borrow().properties.values() {
@@ -453,7 +454,7 @@ fn any_module_loading_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
 
         if let Some(global_val) = object_get_key_value(&e, "globalThis")
             && let Value::Object(global_obj) = global_val.borrow().clone()
-            && let Some(loading_val) = object_get_key_value(&global_obj, "__module_loading")
+            && let Some(loading_val) = slot_get_chained(&global_obj, &InternalSlot::ModuleLoading)
             && let Value::Object(loading_obj) = loading_val.borrow().clone()
         {
             for flag in loading_obj.borrow().properties.values() {
@@ -494,7 +495,7 @@ fn module_has_loading_dependency(
 fn is_module_async_pending_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>, module_path: &str) -> bool {
     let mut cur = Some(*env);
     while let Some(e) = cur {
-        if let Some(pending_val) = object_get_key_value(&e, "__module_async_pending")
+        if let Some(pending_val) = slot_get_chained(&e, &InternalSlot::ModuleAsyncPending)
             && let Value::Object(pending_obj) = pending_val.borrow().clone()
             && let Some(flag_rc) = object_get_key_value(&pending_obj, module_path)
             && matches!(*flag_rc.borrow(), Value::Boolean(true))
@@ -504,7 +505,7 @@ fn is_module_async_pending_in_env_chain<'gc>(env: &JSObjectDataPtr<'gc>, module_
 
         if let Some(global_val) = object_get_key_value(&e, "globalThis")
             && let Value::Object(global_obj) = global_val.borrow().clone()
-            && let Some(pending_val) = object_get_key_value(&global_obj, "__module_async_pending")
+            && let Some(pending_val) = slot_get_chained(&global_obj, &InternalSlot::ModuleAsyncPending)
             && let Value::Object(pending_obj) = pending_val.borrow().clone()
             && let Some(flag_rc) = object_get_key_value(&pending_obj, module_path)
             && matches!(*flag_rc.borrow(), Value::Boolean(true))
@@ -757,7 +758,7 @@ fn execute_module<'gc>(
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__filepath` similarly to `evaluate_script`.
     let val = Value::String(crate::unicode::utf8_to_utf16(module_path));
-    object_set_key_value(mc, &env, "__filepath", &val)?;
+    slot_set(mc, &env, InternalSlot::Filepath, &val);
 
     // Add exports object to the environment
     env.borrow_mut(mc).insert(
@@ -784,7 +785,7 @@ fn execute_module<'gc>(
     // Provide a 'url' property referencing the module path; leave as raw path string
     object_set_key_value(mc, &import_meta, "url", &Value::String(crate::unicode::utf8_to_utf16(module_path)))?;
     // Store the import.meta object on the module environment under a hidden key
-    object_set_key_value(mc, &env, "__import_meta", &Value::Object(import_meta))?;
+    slot_set(mc, &env, InternalSlot::ImportMeta, &Value::Object(import_meta));
 
     if caller_env.is_none() {
         // Initialize global constructors for standalone module execution
@@ -870,14 +871,14 @@ pub(crate) fn get_or_create_module_cache<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(val_rc) = object_get_key_value(env, "__module_cache")
+    if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleCache)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
     let cache = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__module_cache", &Value::Object(cache))?;
+    slot_set(mc, env, InternalSlot::ModuleCache, &Value::Object(cache));
     Ok(cache)
 }
 
@@ -885,38 +886,38 @@ pub(crate) fn get_or_create_module_loading<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(val_rc) = object_get_key_value(env, "__module_loading")
+    if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleLoading)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
     let loading = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__module_loading", &Value::Object(loading))?;
+    slot_set(mc, env, InternalSlot::ModuleLoading, &Value::Object(loading));
     Ok(loading)
 }
 
 fn get_or_create_module_eval_errors<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(val_rc) = object_get_key_value(env, "__module_eval_errors")
+    if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleEvalErrors)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
     let errors = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__module_eval_errors", &Value::Object(errors))?;
+    slot_set(mc, env, InternalSlot::ModuleEvalErrors, &Value::Object(errors));
     Ok(errors)
 }
 
 fn get_or_create_module_async_pending<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(val_rc) = object_get_key_value(env, "__module_async_pending")
+    if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleAsyncPending)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
     let pending = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__module_async_pending", &Value::Object(pending))?;
+    slot_set(mc, env, InternalSlot::ModuleAsyncPending, &Value::Object(pending));
     Ok(pending)
 }
 
@@ -924,14 +925,14 @@ fn get_or_create_module_deferred_namespace_cache<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(val_rc) = object_get_key_value(env, "__module_deferred_namespace_cache")
+    if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleDeferredNsCache)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
     let cache = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__module_deferred_namespace_cache", &Value::Object(cache))?;
+    slot_set(mc, env, InternalSlot::ModuleDeferredNsCache, &Value::Object(cache));
     Ok(cache)
 }
 
@@ -939,13 +940,13 @@ fn get_or_create_module_namespace_cache<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(val_rc) = object_get_key_value(env, "__module_namespace_cache")
+    if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleNamespaceCache)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
     let cache = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__module_namespace_cache", &Value::Object(cache))?;
+    slot_set(mc, env, InternalSlot::ModuleNamespaceCache, &Value::Object(cache));
     Ok(cache)
 }
 
@@ -954,14 +955,14 @@ fn get_or_create_module_defer_pending_preloads<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(val_rc) = object_get_key_value(env, "__module_defer_pending_preloads")
+    if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleDeferPendingPreloads)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
     let arr = crate::js_array::create_array(mc, env)?;
-    object_set_key_value(mc, env, "__module_defer_pending_preloads", &Value::Object(arr))?;
+    slot_set(mc, env, InternalSlot::ModuleDeferPendingPreloads, &Value::Object(arr));
     Ok(arr)
 }
 
@@ -1129,7 +1130,7 @@ pub fn make_module_namespace_object<'gc>(
 
     let module_path_for_exports = {
         let mut found: Option<String> = None;
-        if let Some(cache_val) = object_get_key_value(&cache_env, "__module_cache")
+        if let Some(cache_val) = slot_get_chained(&cache_env, &InternalSlot::ModuleCache)
             && let Value::Object(cache_obj) = cache_val.borrow().clone()
         {
             for (k, v) in &cache_obj.borrow().properties {
@@ -1147,7 +1148,7 @@ pub fn make_module_namespace_object<'gc>(
             && let Some(exports_val) = object_get_key_value(env, "exports")
             && let Value::Object(self_exports) = exports_val.borrow().clone()
             && crate::core::Gc::ptr_eq(self_exports, *exports_obj)
-            && let Some(path_val) = object_get_key_value(env, "__filepath")
+            && let Some(path_val) = slot_get_chained(env, &InternalSlot::Filepath)
             && let Value::String(path16) = path_val.borrow().clone()
         {
             found = Some(crate::unicode::utf16_to_utf8(&path16));
@@ -1193,7 +1194,7 @@ pub fn make_module_namespace_object<'gc>(
             crate::js_object::define_property_internal(mc, &namespace_obj, key, &desc).map_err(EvalError::from)?;
         } else {
             let hidden = format!("__ns_src_{}_{}", cache_key.replace(':', "_"), name);
-            object_set_key_value(mc, &cache_env, hidden.as_str(), &Value::Object(*exports_obj)).map_err(EvalError::from)?;
+            crate::core::env_set(mc, &cache_env, hidden.as_str(), &Value::Object(*exports_obj)).map_err(EvalError::from)?;
 
             let getter_body = vec![Statement {
                 kind: Box::new(StatementKind::Return(Some(Expr::Property(
@@ -1506,7 +1507,7 @@ pub fn ensure_deferred_namespace_evaluated<'gc>(
     }
 
     fn scan_cache_for_obj<'gc>(holder: &JSObjectDataPtr<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<String> {
-        if let Some(cache_val) = object_get_key_value(holder, "__module_deferred_namespace_cache")
+        if let Some(cache_val) = slot_get_chained(holder, &InternalSlot::ModuleDeferredNsCache)
             && let Value::Object(cache_obj) = cache_val.borrow().clone()
         {
             for (k, v) in &cache_obj.borrow().properties {
@@ -1589,7 +1590,7 @@ pub fn ensure_deferred_namespace_evaluated<'gc>(
     let mut same_module_context = false;
     let mut cur_file_env = Some(*env);
     while let Some(e) = cur_file_env {
-        if let Some(cur_file_val) = object_get_key_value(&e, "__filepath")
+        if let Some(cur_file_val) = slot_get_chained(&e, &InternalSlot::Filepath)
             && let Value::String(cur_file) = cur_file_val.borrow().clone()
             && crate::unicode::utf16_to_utf8(&cur_file) == module_path
         {

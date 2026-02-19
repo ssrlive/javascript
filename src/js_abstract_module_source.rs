@@ -1,6 +1,6 @@
 use crate::core::{
-    JSObjectDataPtr, MutationContext, PropertyKey, Value, create_descriptor_object, new_js_object_data, object_get_key_value,
-    object_set_key_value,
+    InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, create_descriptor_object, new_js_object_data, object_get_key_value,
+    object_set_key_value, slot_set,
 };
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
@@ -22,10 +22,13 @@ fn lookup_abstract_module_source_ctor<'gc>(env: &JSObjectDataPtr<'gc>) -> Option
 
 pub fn initialize_abstract_module_source<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &ctor, "__native_ctor", &Value::String(utf8_to_utf16("AbstractModuleSource")))?;
-    ctor.borrow_mut(mc).set_non_enumerable("__is_constructor");
-    ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
+    slot_set(mc, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(
+        mc,
+        &ctor,
+        InternalSlot::NativeCtor,
+        &Value::String(utf8_to_utf16("AbstractModuleSource")),
+    );
 
     let _ = crate::core::set_internal_prototype_from_constructor(mc, &ctor, env, "Function");
 
@@ -86,7 +89,6 @@ pub fn create_module_source_placeholder<'gc>(mc: &MutationContext<'gc>, env: &JS
         "__module_source_class_name",
         &Value::String(utf8_to_utf16("ModuleSource")),
     )?;
-    obj.borrow_mut(mc).set_non_enumerable("__module_source_class_name");
 
     Ok(Value::Object(obj))
 }

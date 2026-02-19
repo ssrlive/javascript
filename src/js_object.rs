@@ -1,7 +1,7 @@
 use crate::core::{
-    ClosureData, EvalError, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, evaluate_call_dispatch, get_own_property,
-    get_property_with_accessors, new_js_object_data, object_get_key_value, object_set_key_value, prepare_closure_call_env,
-    prepare_function_call_env,
+    ClosureData, EvalError, InternalSlot, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, evaluate_call_dispatch,
+    get_own_property, get_property_with_accessors, new_js_object_data, object_get_key_value, object_set_key_value,
+    prepare_closure_call_env, prepare_function_call_env, slot_get, slot_get_chained, slot_set,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -12,8 +12,8 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     // 1. Create Object constructor
     let object_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &object_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &object_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Object")))?;
+    slot_set(mc, &object_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &object_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Object")));
     object_set_key_value(mc, &object_ctor, "length", &Value::Number(1.0))?;
     object_ctor.borrow_mut(mc).set_non_enumerable("length");
     object_ctor.borrow_mut(mc).set_non_writable("length");
@@ -95,6 +95,7 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
             setter: Some(Box::new(Value::Function("Object.prototype.set __proto__".to_string()))),
         },
     )?;
+    // __proto__ accessor property must be non-enumerable
     object_proto.borrow_mut(mc).set_non_enumerable("__proto__");
 
     Ok(())
@@ -111,8 +112,7 @@ fn to_object_for_object_static<'gc>(
         Value::String(s) => {
             let obj = new_js_object_data(mc);
             object_set_key_value(mc, &obj, "length", &Value::Number(s.len() as f64))?;
-            object_set_key_value(mc, &obj, "__value__", &Value::String(s.clone()))?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::String(s.clone()));
             obj.borrow_mut(mc).set_non_enumerable("length");
             obj.borrow_mut(mc).set_non_writable("length");
             obj.borrow_mut(mc).set_non_configurable("length");
@@ -128,8 +128,7 @@ fn to_object_for_object_static<'gc>(
         }
         Value::Number(_n) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "__value__", value)?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, value);
             if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number") {
                 log::warn!("Failed to set internal prototype for Number object: {e:?}");
             }
@@ -137,8 +136,7 @@ fn to_object_for_object_static<'gc>(
         }
         Value::Boolean(_b) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "__value__", value)?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, value);
             if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean") {
                 log::warn!("Failed to set internal prototype for Boolean object: {e:?}");
             }
@@ -146,8 +144,7 @@ fn to_object_for_object_static<'gc>(
         }
         Value::BigInt(_h) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "__value__", value)?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, value);
             if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt") {
                 log::warn!("Failed to set internal prototype for BigInt object: {e:?}");
             }
@@ -155,8 +152,7 @@ fn to_object_for_object_static<'gc>(
         }
         Value::Symbol(_sd) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "__value__", value)?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, value);
             if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol") {
                 log::warn!("Failed to set internal prototype for Symbol object: {e:?}");
             }
@@ -604,7 +600,7 @@ pub fn handle_object_method<'gc>(
                     if s == "__proto__" {
                         continue;
                     }
-                    let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                    let is_enumerable = if let Some(proxy_cell) = crate::core::slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
@@ -643,7 +639,7 @@ pub fn handle_object_method<'gc>(
             let mut values = Vec::new();
             let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
             for key in ordered {
-                let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                let is_enumerable = if let Some(proxy_cell) = crate::core::slot_get(&obj, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
@@ -671,7 +667,7 @@ pub fn handle_object_method<'gc>(
                         let _ = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
                     }
                     // Use proxy get trap when object is a proxy
-                    let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                    let proxy_opt = crate::core::slot_get(&obj, &InternalSlot::Proxy).and_then(|pc| match &*pc.borrow() {
                         Value::Proxy(p) => Some(*p),
                         _ => None,
                     });
@@ -706,7 +702,7 @@ pub fn handle_object_method<'gc>(
             let mut out_index = 0usize;
 
             for key in ordered {
-                let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                let is_enumerable = if let Some(proxy_cell) = crate::core::slot_get(&obj, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?.unwrap_or(false)
@@ -728,7 +724,7 @@ pub fn handle_object_method<'gc>(
                         continue;
                     }
                     // Use proxy get trap when object is a proxy
-                    let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                    let proxy_opt = crate::core::slot_get(&obj, &InternalSlot::Proxy).and_then(|pc| match &*pc.borrow() {
                         Value::Proxy(p) => Some(*p),
                         _ => None,
                     });
@@ -801,7 +797,7 @@ pub fn handle_object_method<'gc>(
                             Value::Object(target_obj) => {
                                 if let Some(p) = target_obj.borrow().prototype {
                                     Ok(Value::Object(p))
-                                } else if let Some(pv) = object_get_key_value(target_obj, "__proto__")
+                                } else if let Some(pv) = slot_get_chained(target_obj, &InternalSlot::Proto)
                                     && let Value::Object(p) = &*pv.borrow()
                                 {
                                     Ok(Value::Object(*p))
@@ -819,7 +815,7 @@ pub fn handle_object_method<'gc>(
                 }
                 Value::Object(obj) => {
                     // Check if this is a proxy wrapper object
-                    if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                    if let Some(proxy_cell) = crate::core::slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         let result =
@@ -832,7 +828,7 @@ pub fn handle_object_method<'gc>(
                                     Value::Object(target_obj) => {
                                         if let Some(p) = target_obj.borrow().prototype {
                                             Ok(Value::Object(p))
-                                        } else if let Some(pv) = object_get_key_value(target_obj, "__proto__")
+                                        } else if let Some(pv) = slot_get_chained(target_obj, &InternalSlot::Proto)
                                             && let Value::Object(p) = &*pv.borrow()
                                         {
                                             Ok(Value::Object(*p))
@@ -855,7 +851,7 @@ pub fn handle_object_method<'gc>(
                             Gc::as_ptr(proto_rc)
                         );
                         // DIAG: print whether object has an own '__proto__' property and its value
-                        if let Some(pv) = object_get_key_value(&obj, "__proto__") {
+                        if let Some(pv) = slot_get_chained(&obj, &InternalSlot::Proto) {
                             log::debug!(
                                 "DBG Object.getPrototypeOf: obj ptr={:p} has own __proto__ prop = {:?}",
                                 Gc::as_ptr(obj),
@@ -867,7 +863,7 @@ pub fn handle_object_method<'gc>(
                         Ok(Value::Object(proto_rc))
                     } else {
                         log::debug!("DBG Object.getPrototypeOf: obj ptr={:p} -> proto NULL", Gc::as_ptr(obj));
-                        if let Some(pv) = object_get_key_value(&obj, "__proto__") {
+                        if let Some(pv) = slot_get_chained(&obj, &InternalSlot::Proto) {
                             log::debug!(
                                 "DBG Object.getPrototypeOf: obj ptr={:p} has own __proto__ prop = {:?}",
                                 Gc::as_ptr(obj),
@@ -944,7 +940,7 @@ pub fn handle_object_method<'gc>(
             match &args[0] {
                 Value::Object(obj) => {
                     // Check if object is a proxy wrapper
-                    if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                    if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         let result =
@@ -978,7 +974,7 @@ pub fn handle_object_method<'gc>(
             match &args[0] {
                 Value::Object(obj) => {
                     // Check if object is a proxy wrapper
-                    if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                    if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         // SetIntegrityLevel step 3: O.[[PreventExtensions]]()
@@ -1064,7 +1060,7 @@ pub fn handle_object_method<'gc>(
                     }
 
                     // Check if this is a proxy
-                    let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                    let proxy_opt = crate::core::slot_get(&obj, &InternalSlot::Proxy).and_then(|pc| match &*pc.borrow() {
                         Value::Proxy(p) => Some(*p),
                         _ => None,
                     });
@@ -1139,7 +1135,7 @@ pub fn handle_object_method<'gc>(
             match &args[0] {
                 Value::Object(obj) => {
                     // Check if object is a proxy wrapper
-                    if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                    if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         // SetIntegrityLevel step 3: O.[[PreventExtensions]]()
@@ -1229,7 +1225,7 @@ pub fn handle_object_method<'gc>(
                     // Additionally, per spec 10.4.5.4, [[PreventExtensions]] returns false
                     // for TypedArrays backed by resizable ArrayBuffers, so Object.freeze
                     // always throws for such arrays (regardless of length).
-                    if let Some(ta_val) = crate::core::get_own_property(obj, "__typedarray")
+                    if let Some(ta_val) = crate::core::slot_get(obj, &InternalSlot::TypedArray)
                         && let Value::TypedArray(ta) = &*ta_val.borrow()
                     {
                         // Check if backed by a resizable ArrayBuffer
@@ -1307,7 +1303,7 @@ pub fn handle_object_method<'gc>(
                     }
 
                     // Check if this is a proxy
-                    let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+                    let proxy_opt = crate::core::slot_get(&obj, &InternalSlot::Proxy).and_then(|pc| match &*pc.borrow() {
                         Value::Proxy(p) => Some(*p),
                         _ => None,
                     });
@@ -1482,7 +1478,7 @@ pub fn handle_object_method<'gc>(
                 let mut descriptors: Vec<(PropertyKey<'gc>, JSObjectDataPtr<'gc>)> = Vec::new();
 
                 for key in keys {
-                    let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&props_obj, "__proxy__")
+                    let is_enumerable = if let Some(proxy_cell) = crate::core::slot_get(&props_obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         match crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)? {
@@ -1535,8 +1531,7 @@ pub fn handle_object_method<'gc>(
                 | Value::GeneratorFunction(..)
                 | Value::AsyncGeneratorFunction(..) => {
                     let wrapper = new_js_object_data(mc);
-                    object_set_key_value(mc, &wrapper, "__callable__", &args[1])?;
-                    wrapper.borrow_mut(mc).set_non_enumerable("__callable__");
+                    slot_set(mc, &wrapper, InternalSlot::Callable, &args[1]);
                     // Copy the function's own prototype chain so getPrototypeOf
                     // traversals keep working.
                     if let Some(fp) = crate::core::env_get(env, "Function")
@@ -1555,7 +1550,7 @@ pub fn handle_object_method<'gc>(
                 Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object").into()),
                 Value::Object(obj) => {
                     // Check if the object is a proxy – invoke setPrototypeOf trap
-                    if let Some(proxy_cell) = crate::core::get_own_property(&obj, "__proxy__")
+                    if let Some(proxy_cell) = crate::core::slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         let proto_val = match proto_obj {
@@ -1676,7 +1671,7 @@ pub fn handle_object_method<'gc>(
                             .unwrap_or(false);
                     let deleted_in_global = if let Some(global_this_rc) = crate::core::env_get(env, "globalThis")
                         && let Value::Object(global_obj) = &*global_this_rc.borrow()
-                        && let Some(v) = crate::core::object_get_key_value(global_obj, marker.as_str())
+                        && let Some(v) = slot_get(global_obj, &InternalSlot::FnDeleted(format!("{}::{}", func_name, prop_name)))
                     {
                         matches!(*v.borrow(), Value::Boolean(true))
                     } else {
@@ -1814,7 +1809,7 @@ pub fn handle_object_method<'gc>(
             let ordered = crate::core::ordinary_own_property_keys_mc(mc, &obj)?;
 
             // Check if the object is a proxy
-            let proxy_opt = crate::core::get_own_property(&obj, "__proxy__").and_then(|pc| match &*pc.borrow() {
+            let proxy_opt = crate::core::slot_get(&obj, &InternalSlot::Proxy).and_then(|pc| match &*pc.borrow() {
                 Value::Proxy(p) => Some(*p),
                 _ => None,
             });
@@ -1869,6 +1864,7 @@ pub fn handle_object_method<'gc>(
                             object_set_key_value(mc, &result_obj, &property_key, &Value::Object(desc_obj))?;
                         }
                         PropertyKey::Private(..) => {}
+                        PropertyKey::Internal(..) => {}
                     }
                 }
             }
@@ -1889,7 +1885,7 @@ pub fn handle_object_method<'gc>(
                 }
 
                 let source_obj = to_object_for_object_static(mc, env, &src_val)?;
-                let ordered = if let Some(proxy_cell) = crate::core::get_own_property(&source_obj, "__proxy__")
+                let ordered = if let Some(proxy_cell) = crate::core::slot_get(&source_obj, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     crate::js_proxy::proxy_own_keys(mc, proxy)?
@@ -1902,7 +1898,7 @@ pub fn handle_object_method<'gc>(
                         continue;
                     }
 
-                    let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&source_obj, "__proxy__")
+                    let is_enumerable = if let Some(proxy_cell) = crate::core::slot_get(&source_obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         match crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)? {
@@ -2031,7 +2027,7 @@ pub fn handle_object_method<'gc>(
                 return Ok(Value::Object(target_obj));
             }
 
-            if let Some(ta_cell) = object_get_key_value(&target_obj, "__typedarray")
+            if let Some(ta_cell) = slot_get_chained(&target_obj, &InternalSlot::TypedArray)
                 && let Value::TypedArray(ta) = &*ta_cell.borrow()
                 && let PropertyKey::String(s) = &prop_key
                 && let Ok(idx) = s.parse::<usize>()
@@ -2108,7 +2104,7 @@ pub fn handle_object_method<'gc>(
             }
 
             // If the target is a proxy, invoke the defineProperty trap
-            if let Some(proxy_cell) = crate::core::get_own_property(&target_obj, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(&target_obj, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
                 let trap_result = crate::js_proxy::apply_proxy_trap(
@@ -2156,7 +2152,7 @@ pub fn handle_object_method<'gc>(
             let props_obj = to_object_for_object_static(mc, env, &props_val)?;
 
             // Collect all descriptors first (per spec ordering/atomicity), then define.
-            let keys = if let Some(proxy_cell) = crate::core::get_own_property(&props_obj, "__proxy__")
+            let keys = if let Some(proxy_cell) = crate::core::slot_get(&props_obj, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
                 crate::js_proxy::proxy_own_keys(mc, proxy)?
@@ -2166,7 +2162,7 @@ pub fn handle_object_method<'gc>(
             let mut descriptors: Vec<(PropertyKey<'gc>, JSObjectDataPtr<'gc>)> = Vec::new();
 
             for key in keys {
-                let is_enumerable = if let Some(proxy_cell) = crate::core::get_own_property(&props_obj, "__proxy__")
+                let is_enumerable = if let Some(proxy_cell) = crate::core::slot_get(&props_obj, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     match crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)? {
@@ -2201,6 +2197,7 @@ pub fn handle_object_method<'gc>(
                     PropertyKey::String(s) => Value::String(utf8_to_utf16(&s)),
                     PropertyKey::Symbol(sym) => Value::Symbol(sym),
                     PropertyKey::Private(..) => continue,
+                    PropertyKey::Internal(..) => continue,
                 };
 
                 let define_args = [Value::Object(target_obj), key_val, Value::Object(desc_obj)];
@@ -2327,7 +2324,7 @@ pub(crate) fn handle_to_string_method<'gc>(
             }
 
             // Check if this is a wrapped primitive object
-            if let Some(wrapped_val) = object_get_key_value(object, "__value__") {
+            if let Some(wrapped_val) = slot_get_chained(object, &InternalSlot::PrimitiveValue) {
                 match &*wrapped_val.borrow() {
                     Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n))))),
                     Value::BigInt(h) => return Ok(Value::String(utf8_to_utf16(&h.to_string()))),
@@ -2345,9 +2342,9 @@ pub(crate) fn handle_to_string_method<'gc>(
             // Engine-internal function-like objects (constructors and callable wrappers)
             // should be branded as Function for Object.prototype.toString.
             if object.borrow().get_closure().is_some()
-                || object_get_key_value(object, "__native_ctor").is_some()
-                || object_get_key_value(object, "__is_constructor").is_some()
-                || object_get_key_value(object, "__bound_target").is_some()
+                || slot_get_chained(object, &InternalSlot::NativeCtor).is_some()
+                || slot_get_chained(object, &InternalSlot::IsConstructor).is_some()
+                || slot_get_chained(object, &InternalSlot::BoundTarget).is_some()
             {
                 return Ok(Value::String(utf8_to_utf16("[object Function]")));
             }
@@ -2504,7 +2501,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::Null => Err(raise_type_error!("Cannot convert null to object").into()),
         Value::Object(obj) => {
             // Check if this is a wrapped primitive object
-            if let Some(wrapped_val) = object_get_key_value(obj, "__value__") {
+            if let Some(wrapped_val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
                 return Ok(wrapped_val.borrow().clone());
             }
             // If object defines a user valueOf function, call it and use its
@@ -2693,7 +2690,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
                     };
                 }
                 if func_name_opt.is_none()
-                    && let Some(native_ctor_rc) = crate::core::object_get_key_value(object, "__native_ctor")
+                    && let Some(native_ctor_rc) = crate::core::slot_get_chained(object, &InternalSlot::NativeCtor)
                 {
                     match &*native_ctor_rc.borrow() {
                         Value::String(name) => {

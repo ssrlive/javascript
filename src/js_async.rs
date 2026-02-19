@@ -1,5 +1,6 @@
 use crate::core::{
-    ClosureData, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectDataPtr, Value, object_get_key_value, object_set_key_value,
+    ClosureData, DestructuringElement, EvalError, Expr, InternalSlot, JSGenerator, JSObjectDataPtr, Value, object_get_key_value,
+    slot_get_chained, slot_set,
 };
 use crate::core::{Gc, GcPtr, MutationContext};
 use crate::error::JSError;
@@ -26,7 +27,7 @@ pub fn handle_async_closure_call<'gc>(
     match crate::js_generator::handle_generator_function_call(mc, closure, args, _this_val, None, None) {
         Ok(gen_val) => {
             if let Value::Object(gen_obj) = gen_val
-                && let Some(gen_inner) = object_get_key_value(&gen_obj, "__generator__")
+                && let Some(gen_inner) = slot_get_chained(&gen_obj, &InternalSlot::Generator)
                 && let Value::Generator(gen_ptr) = &*gen_inner.borrow()
                 && let Err(e) = continue_async_step_direct(mc, *gen_ptr, &resolve, &reject, &Ok(Value::Undefined), env)
                 && let Err(e) = crate::js_promise::call_function(mc, &reject, &[Value::String(utf8_to_utf16(&e.message()))], env)
@@ -41,15 +42,11 @@ pub fn handle_async_closure_call<'gc>(
                     let msg = je.message();
                     let err_val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = &err_val {
-                        if let Some(line) = je.js_line()
-                            && let Err(e) = object_set_key_value(mc, obj, "__line__", &Value::Number(line as f64))
-                        {
-                            log::debug!("error setting __line__ on error object: {:?}", e);
+                        if let Some(line) = je.js_line() {
+                            slot_set(mc, obj, InternalSlot::Line, &Value::Number(line as f64));
                         }
-                        if let Some(col) = je.js_column()
-                            && let Err(e) = object_set_key_value(mc, obj, "__column__", &Value::Number(col as f64))
-                        {
-                            log::debug!("error setting __column__ on error object: {:?}", e);
+                        if let Some(col) = je.js_column() {
+                            slot_set(mc, obj, InternalSlot::Column, &Value::Number(col as f64));
                         }
                     }
                     err_val
@@ -153,15 +150,11 @@ fn step<'gc>(
                     let msg = j.message();
                     let val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = &val {
-                        if let Some(line) = j.js_line()
-                            && let Err(e) = object_set_key_value(mc, obj, "__line__", &Value::Number(line as f64))
-                        {
-                            log::warn!("error setting __line__ on error object: {:?}", e);
+                        if let Some(line) = j.js_line() {
+                            slot_set(mc, obj, InternalSlot::Line, &Value::Number(line as f64));
                         }
-                        if let Some(col) = j.js_column()
-                            && let Err(e) = object_set_key_value(mc, obj, "__column__", &Value::Number(col as f64))
-                        {
-                            log::warn!("error setting __column__ on error object: {:?}", e);
+                        if let Some(col) = j.js_column() {
+                            slot_set(mc, obj, InternalSlot::Column, &Value::Number(col as f64));
                         }
                     }
                     val
@@ -184,9 +177,9 @@ fn create_async_step_callback<'gc>(
     let env = crate::new_js_object_data(mc);
     env.borrow_mut(mc).prototype = Some(global_env);
 
-    object_set_key_value(mc, &env, "__async_generator", &Value::Generator(generator)).unwrap();
-    object_set_key_value(mc, &env, "__async_resolve", resolve).unwrap();
-    object_set_key_value(mc, &env, "__async_reject", reject).unwrap();
+    slot_set(mc, &env, InternalSlot::AsyncGenerator, &Value::Generator(generator));
+    slot_set(mc, &env, InternalSlot::AsyncResolve, resolve);
+    slot_set(mc, &env, InternalSlot::AsyncReject, reject);
 
     let func_name = if is_reject {
         "__internal_async_step_reject"
@@ -234,9 +227,9 @@ fn queue_async_step_from_env<'gc>(
     value: &Value<'gc>,
     is_reject: bool,
 ) -> Result<Value<'gc>, JSError> {
-    let generator_val = object_get_key_value(env, "__async_generator").unwrap().borrow().clone();
-    let resolve_val = object_get_key_value(env, "__async_resolve").unwrap().borrow().clone();
-    let reject_val = object_get_key_value(env, "__async_reject").unwrap().borrow().clone();
+    let generator_val = slot_get_chained(env, &InternalSlot::AsyncGenerator).unwrap().borrow().clone();
+    let resolve_val = slot_get_chained(env, &InternalSlot::AsyncResolve).unwrap().borrow().clone();
+    let reject_val = slot_get_chained(env, &InternalSlot::AsyncReject).unwrap().borrow().clone();
 
     if let Value::Generator(gen_ref) = generator_val {
         queue_async_step(mc, gen_ref, &resolve_val, &reject_val, value, is_reject, env);

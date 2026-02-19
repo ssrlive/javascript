@@ -1,6 +1,6 @@
 use crate::core::{
-    ClosureData, EvalError, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr, get_own_property,
-    has_own_property_value, new_js_object_data, prepare_function_call_env,
+    ClosureData, EvalError, Expr, Gc, InternalSlot, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr,
+    get_own_property, has_own_property_value, new_js_object_data, prepare_function_call_env, slot_get, slot_get_chained, slot_set,
 };
 use crate::core::{PropertyKey, SwitchCase, SymbolData, Token, new_gc_cell_ptr, object_get_key_value, object_set_key_value};
 use crate::error::{JSError, JSErrorKind};
@@ -189,11 +189,11 @@ pub fn handle_global_function<'gc>(
         "Proxy.revocable" => return crate::js_proxy::handle_proxy_revocable(mc, args, env),
         "Proxy.__internal_revoke" => {
             // Revoke the proxy stored in the captured closure environment
-            if let Some(revoke_rc) = crate::core::env_get(env, "__proxy_wrapper") {
+            if let Some(revoke_rc) = crate::core::slot_get_chained(env, &InternalSlot::ProxyWrapper) {
                 let revoke_val = revoke_rc.borrow().clone();
                 if let Value::Object(wrapper_obj) = revoke_val {
                     // Get the stored __proxy__ property on the wrapper
-                    if let Some(proxy_prop) = object_get_key_value(&wrapper_obj, "__proxy__") {
+                    if let Some(proxy_prop) = slot_get_chained(&wrapper_obj, &InternalSlot::Proxy) {
                         let old_proxy = {
                             let borrowed = proxy_prop.borrow();
                             if let Value::Proxy(p) = &*borrowed { Some(*p) } else { None }
@@ -208,7 +208,7 @@ pub fn handle_global_function<'gc>(
                                     revoked: true,
                                 },
                             );
-                            let _ = object_set_key_value(mc, &wrapper_obj, "__proxy__", &Value::Proxy(new_proxy));
+                            slot_set(mc, &wrapper_obj, InternalSlot::Proxy, &Value::Proxy(new_proxy));
                         }
                     }
                 }
@@ -346,7 +346,7 @@ pub fn handle_global_function<'gc>(
                                 if !deleted
                                     && let Some(global_this_rc) = crate::core::env_get(env, "globalThis")
                                     && let Value::Object(global_obj) = &*global_this_rc.borrow()
-                                    && let Some(v) = crate::core::object_get_key_value(global_obj, marker.as_str())
+                                    && let Some(v) = slot_get(global_obj, &InternalSlot::FnDeleted(format!("{}::{}", target_name, key)))
                                 {
                                     deleted = matches!(*v.borrow(), Value::Boolean(true));
                                 }
@@ -370,7 +370,7 @@ pub fn handle_global_function<'gc>(
                     }
                 }
                 if let Value::Object(obj) = &this_val
-                    && let Some(native_ctor_rc) = crate::core::object_get_key_value(obj, "__native_ctor")
+                    && let Some(native_ctor_rc) = crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor)
                 {
                     let native_ctor_val = match &*native_ctor_rc.borrow() {
                         Value::Property { value: Some(v), .. } => v.borrow().clone(),
@@ -688,7 +688,7 @@ fn dynamic_import_defer_function<'gc>(
             return Ok(crate::js_abstract_module_source::create_module_source_placeholder(mc, env)?);
         }
 
-        let base_path = if let Some(cell) = crate::core::env_get(env, "__filepath")
+        let base_path = if let Some(cell) = crate::core::slot_get_chained(env, &InternalSlot::Filepath)
             && let Value::String(s) = cell.borrow().clone()
         {
             Some(utf16_to_utf8(&s))
@@ -740,7 +740,7 @@ fn dynamic_import_source_function<'gc>(
             return Ok(crate::js_abstract_module_source::create_module_source_placeholder(mc, env)?);
         }
 
-        let base_path = if let Some(cell) = crate::core::env_get(env, "__filepath")
+        let base_path = if let Some(cell) = crate::core::slot_get_chained(env, &InternalSlot::Filepath)
             && let Value::String(s) = cell.borrow().clone()
         {
             Some(utf16_to_utf8(&s))
@@ -1156,8 +1156,7 @@ fn function_constructor<'gc>(
             func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
 
             // Record origin global so callers can trace which realm this function was created in
-            object_set_key_value(mc, &func_obj, "__origin_global", &Value::Object(global_env))?;
-            func_obj.borrow_mut(mc).set_non_enumerable("__origin_global");
+            slot_set(mc, &func_obj, InternalSlot::OriginGlobal, &Value::Object(global_env));
 
             // Set name as anonymous for Function constructor-produced functions
             object_set_key_value(mc, &func_obj, "name", &Value::String(crate::unicode::utf8_to_utf16("anonymous")))?;
@@ -1449,7 +1448,7 @@ fn symbol_prototype_value_of<'gc>(
     match this_val {
         Value::Symbol(s) => Ok(Value::Symbol(s)),
         Value::Object(obj) => {
-            if let Some(val) = object_get_key_value(&obj, "__value__")
+            if let Some(val) = slot_get_chained(&obj, &InternalSlot::PrimitiveValue)
                 && let Value::Symbol(s) = &*val.borrow()
             {
                 return Ok(Value::Symbol(*s));
@@ -1469,7 +1468,7 @@ fn symbol_prototype_to_string<'gc>(
     let sym = match this_val {
         Value::Symbol(s) => s,
         Value::Object(obj) => {
-            if let Some(val) = object_get_key_value(&obj, "__value__") {
+            if let Some(val) = slot_get_chained(&obj, &InternalSlot::PrimitiveValue) {
                 if let Value::Symbol(s) = &*val.borrow() {
                     *s
                 } else {
@@ -1735,7 +1734,7 @@ fn evalute_eval_function<'gc>(
             && matches!(&w[2].token, Token::Identifier(id2) if id2 == "meta")
     });
     if has_import_meta_token {
-        let is_indirect_eval = if let Some(flag) = object_get_key_value(env, "__is_indirect_eval") {
+        let is_indirect_eval = if let Some(flag) = slot_get_chained(env, &InternalSlot::IsIndirectEval) {
             matches!(*flag.borrow(), Value::Boolean(true))
         } else {
             false
@@ -1745,7 +1744,7 @@ fn evalute_eval_function<'gc>(
         while let Some(proto) = root_env.borrow().prototype {
             root_env = proto;
         }
-        let is_in_module = object_get_key_value(&root_env, "__import_meta").is_some();
+        let is_in_module = slot_get_chained(&root_env, &InternalSlot::ImportMeta).is_some();
         log::trace!(
             "eval quick-check: has_import_meta_token={} is_in_module={} is_indirect_eval={}",
             has_import_meta_token,
@@ -1814,7 +1813,7 @@ fn evalute_eval_function<'gc>(
 
     if is_single_new_target {
         // detect indirect eval marker
-        let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
+        let is_indirect_eval = slot_get_chained(env, &InternalSlot::IsIndirectEval)
             .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
             .unwrap_or(false);
         // find nearest function scope and arrow-ness
@@ -1825,7 +1824,7 @@ fn evalute_eval_function<'gc>(
         while let Some(e) = cur {
             if e.borrow().is_function_scope && e.borrow().prototype.is_some() && crate::core::env_get_own(&e, "globalThis").is_none() {
                 in_function = true;
-                if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function") {
+                if let Some(flag_rc) = slot_get_chained(&e, &InternalSlot::IsArrowFunction) {
                     in_arrow = matches!(*flag_rc.borrow(), Value::Boolean(true));
                 }
                 break;
@@ -1852,9 +1851,9 @@ fn evalute_eval_function<'gc>(
         // allowed — return runtime new.target value: function object if constructor call, otherwise undefined
         if in_function
             && let Some(e) = cur
-            && let Some(inst_rc) = object_get_key_value(&e, "__instance")
+            && let Some(inst_rc) = slot_get_chained(&e, &InternalSlot::Instance)
             && !matches!(*inst_rc.borrow(), Value::Undefined)
-            && let Some(func_rc) = object_get_key_value(&e, "__function")
+            && let Some(func_rc) = slot_get_chained(&e, &InternalSlot::Function)
         {
             return Ok(Value::Closure(match &*func_rc.borrow() {
                 Value::Closure(cl) => *cl,
@@ -1932,7 +1931,7 @@ fn evalute_eval_function<'gc>(
         let mut in_class_field_initializer = false;
         let mut init_env = Some(*env);
         while let Some(e) = init_env {
-            if let Some(flag_rc) = object_get_key_value(&e, "__class_field_initializer")
+            if let Some(flag_rc) = slot_get_chained(&e, &InternalSlot::ClassField("initializer".to_string()))
                 && matches!(*flag_rc.borrow(), Value::Boolean(true))
             {
                 in_class_field_initializer = true;
@@ -1946,10 +1945,10 @@ fn evalute_eval_function<'gc>(
         }
 
         let in_constructor = if in_method {
-            if let Some(func_val_ptr) = crate::core::env_get(env, "__function") {
+            if let Some(func_val_ptr) = crate::core::slot_get_chained(env, &InternalSlot::Function) {
                 match &*func_val_ptr.borrow() {
                     Value::Object(func_obj) => {
-                        if let Some(is_ctor_ptr) = object_get_key_value(func_obj, "__is_constructor") {
+                        if let Some(is_ctor_ptr) = slot_get_chained(func_obj, &InternalSlot::IsConstructor) {
                             matches!(*is_ctor_ptr.borrow(), Value::Boolean(true))
                         } else {
                             false
@@ -2010,7 +2009,7 @@ fn evalute_eval_function<'gc>(
         // If AST contains `import.meta` and we're being called from module code via direct eval,
         // this is an early SyntaxError (import.meta is only valid when the syntactic goal is Module).
         if has_import_meta {
-            let is_indirect_eval = if let Some(flag) = object_get_key_value(env, "__is_indirect_eval") {
+            let is_indirect_eval = if let Some(flag) = slot_get_chained(env, &InternalSlot::IsIndirectEval) {
                 matches!(*flag.borrow(), Value::Boolean(true))
             } else {
                 false
@@ -2020,7 +2019,7 @@ fn evalute_eval_function<'gc>(
             while let Some(proto) = root_env.borrow().prototype {
                 root_env = proto;
             }
-            let is_in_module = object_get_key_value(&root_env, "__import_meta").is_some();
+            let is_in_module = slot_get_chained(&root_env, &InternalSlot::ImportMeta).is_some();
             if is_in_module && !is_indirect_eval {
                 let msg = "import.meta is not allowed in eval code";
                 let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
@@ -2042,7 +2041,7 @@ fn evalute_eval_function<'gc>(
         // NewTarget: only allowed in direct eval when the eval is contained in function code that is not an ArrowFunction
         if has_new_target {
             // is_indirect_eval = true when this is an indirect eval
-            let is_indirect_eval = if let Some(flag) = object_get_key_value(env, "__is_indirect_eval") {
+            let is_indirect_eval = if let Some(flag) = slot_get_chained(env, &InternalSlot::IsIndirectEval) {
                 matches!(*flag.borrow(), Value::Boolean(true))
             } else {
                 false
@@ -2057,7 +2056,7 @@ fn evalute_eval_function<'gc>(
             while let Some(e) = cur {
                 if e.borrow().is_function_scope {
                     in_function = true;
-                    if let Some(flag_rc) = object_get_key_value(&e, "__is_arrow_function") {
+                    if let Some(flag_rc) = slot_get_chained(&e, &InternalSlot::IsArrowFunction) {
                         in_arrow = matches!(*flag_rc.borrow(), Value::Boolean(true));
                     } else {
                         in_arrow = false;
@@ -2116,7 +2115,7 @@ fn evalute_eval_function<'gc>(
     // is strict (starts with "use strict"), do not instantiate top-level
     // FunctionDeclarations into the (global) variable environment. Convert
     // them into function expressions so they don't create bindings.
-    let is_indirect_eval = if let Some(flag) = object_get_key_value(env, "__is_indirect_eval") {
+    let is_indirect_eval = if let Some(flag) = slot_get_chained(env, &InternalSlot::IsIndirectEval) {
         matches!(*flag.borrow(), Value::Boolean(true))
     } else {
         false
@@ -2124,7 +2123,7 @@ fn evalute_eval_function<'gc>(
     log::trace!(
         "DEBUG: eval env ptr={:p} __is_indirect_eval present={}",
         env,
-        object_get_key_value(env, "__is_indirect_eval").is_some()
+        slot_get_chained(env, &InternalSlot::IsIndirectEval).is_some()
     );
     log::trace!("DEBUG: is_indirect_eval = {}", is_indirect_eval);
     if is_indirect_eval {
@@ -2440,7 +2439,7 @@ fn handle_object_has_own_property<'gc>(
                         if !deleted
                             && let Some(global_this_rc) = crate::core::env_get(env, "globalThis")
                             && let Value::Object(global_obj) = &*global_this_rc.borrow()
-                            && let Some(v) = crate::core::object_get_key_value(global_obj, marker.as_str())
+                            && let Some(v) = slot_get(global_obj, &InternalSlot::FnDeleted(format!("{}::{}", func_name, key_str)))
                         {
                             deleted = matches!(*v.borrow(), Value::Boolean(true));
                         }
@@ -2501,7 +2500,7 @@ fn handle_object_has_own_property<'gc>(
                     }
                     if let Some(global_this_rc) = crate::core::env_get(env, "globalThis")
                         && let Value::Object(global_obj) = &*global_this_rc.borrow()
-                        && let Some(v) = crate::core::object_get_key_value(global_obj, marker.as_str())
+                        && let Some(v) = slot_get(global_obj, &InternalSlot::FnDeleted(format!("{}::{}", func_name, prop)))
                     {
                         return matches!(*v.borrow(), Value::Boolean(true));
                     }
@@ -2653,7 +2652,7 @@ fn handle_object_is_prototype_of<'gc>(
     let get_prototype_of = |mc: &MutationContext<'gc>, v: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
         // Check for proxy wrapper Object
         if let Value::Object(obj) = v {
-            if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
                 let proto_val = crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
@@ -2661,7 +2660,7 @@ fn handle_object_is_prototype_of<'gc>(
                         Value::Object(target_obj) => {
                             if let Some(p) = target_obj.borrow().prototype {
                                 Ok(Value::Object(p))
-                            } else if let Some(pv) = object_get_key_value(target_obj, "__proto__")
+                            } else if let Some(pv) = slot_get_chained(target_obj, &InternalSlot::Proto)
                                 && let Value::Object(p) = &*pv.borrow()
                             {
                                 Ok(Value::Object(*p))
@@ -2762,7 +2761,7 @@ fn handle_object_proto_get<'gc>(
                 Value::Object(target_obj) => {
                     if let Some(p) = target_obj.borrow().prototype {
                         Ok(Value::Object(p))
-                    } else if let Some(pv) = object_get_key_value(target_obj, "__proto__")
+                    } else if let Some(pv) = slot_get_chained(target_obj, &InternalSlot::Proto)
                         && let Value::Object(p) = &*pv.borrow()
                     {
                         Ok(Value::Object(*p))
@@ -2789,7 +2788,7 @@ fn handle_object_proto_get<'gc>(
         },
     };
 
-    if let Some(proxy_ptr) = crate::core::get_own_property(&this_obj, "__proxy__")
+    if let Some(proxy_ptr) = crate::core::slot_get(&this_obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
     {
         let result = crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
@@ -2797,7 +2796,7 @@ fn handle_object_proto_get<'gc>(
                 Value::Object(target_obj) => {
                     if let Some(p) = target_obj.borrow().prototype {
                         Ok(Value::Object(p))
-                    } else if let Some(pv) = object_get_key_value(target_obj, "__proto__")
+                    } else if let Some(pv) = slot_get_chained(target_obj, &InternalSlot::Proto)
                         && let Value::Object(p) = &*pv.borrow()
                     {
                         Ok(Value::Object(*p))
@@ -2871,7 +2870,7 @@ fn handle_object_proto_set<'gc>(
         _ => return Ok(Value::Undefined),
     };
 
-    if let Some(proxy_ptr) = crate::core::get_own_property(&this_obj, "__proxy__")
+    if let Some(proxy_ptr) = crate::core::slot_get(&this_obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
     {
         let trap_result =
@@ -2902,8 +2901,8 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     log::debug!("initialize_function: starting initialization of Function constructor");
     let func_ctor = new_js_object_data(mc);
     object_set_key_value(mc, &func_ctor, "name", &Value::String(utf8_to_utf16("Function")))?;
-    object_set_key_value(mc, &func_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &func_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Function")))?;
+    slot_set(mc, &func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &func_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Function")));
 
     let func_proto = new_js_object_data(mc);
 
@@ -3075,16 +3074,16 @@ pub fn handle_function_prototype_method<'gc>(
             func_obj.borrow_mut(mc).prototype = Some(*proto);
         }
 
-        crate::core::object_set_key_value(mc, &func_obj, "__bound_target", target)?;
-        crate::core::object_set_key_value(mc, &func_obj, "__bound_this", bound_this)?;
-        crate::core::object_set_key_value(mc, &func_obj, "__bound_arg_len", &Value::Number(bound_args.len() as f64))?;
+        crate::core::slot_set(mc, &func_obj, InternalSlot::BoundTarget, target);
+        crate::core::slot_set(mc, &func_obj, InternalSlot::BoundThis, bound_this);
+        crate::core::slot_set(mc, &func_obj, InternalSlot::BoundArgLen, &Value::Number(bound_args.len() as f64));
         for (i, arg) in bound_args.iter().enumerate() {
-            crate::core::object_set_key_value(mc, &func_obj, format!("__bound_arg_{i}"), arg)?;
+            crate::core::slot_set(mc, &func_obj, InternalSlot::BoundArg(i), arg);
         }
 
-        if matches!(target, Value::Object(o) if o.borrow().class_def.is_some() || crate::core::get_own_property(o, "__is_constructor").is_some())
+        if matches!(target, Value::Object(o) if o.borrow().class_def.is_some() || crate::core::slot_get(o, &InternalSlot::IsConstructor).is_some())
         {
-            crate::core::object_set_key_value(mc, &func_obj, "__is_constructor", &Value::Boolean(true))?;
+            crate::core::slot_set(mc, &func_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
         }
 
         Ok(Value::Object(func_obj))
@@ -3147,8 +3146,8 @@ pub fn handle_function_prototype_method<'gc>(
                 if obj.borrow().class_def.is_some() {
                     return make_bound_target_wrapper(&Value::Object(*obj), &this_arg, &bound_prefix_args);
                 }
-                if crate::core::get_own_property(obj, "__native_ctor").is_some()
-                    || crate::core::get_own_property(obj, "__is_constructor").is_some()
+                if crate::core::slot_get(obj, &InternalSlot::NativeCtor).is_some()
+                    || crate::core::slot_get(obj, &InternalSlot::IsConstructor).is_some()
                 {
                     return make_bound_target_wrapper(&Value::Object(*obj), &this_arg, &bound_prefix_args);
                 }

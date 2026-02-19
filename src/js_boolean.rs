@@ -1,12 +1,20 @@
-use crate::core::{EvalError, JSObjectDataPtr, MutationContext, Value, new_js_object_data, object_get_key_value, object_set_key_value};
+use crate::core::{
+    EvalError, InternalSlot, JSObjectDataPtr, MutationContext, Value, new_js_object_data, object_get_key_value, object_set_key_value,
+    slot_get_chained, slot_set,
+};
 use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
 pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let boolean_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &boolean_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &boolean_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Boolean")))?;
+    slot_set(mc, &boolean_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(
+        mc,
+        &boolean_ctor,
+        InternalSlot::NativeCtor,
+        &Value::String(utf8_to_utf16("Boolean")),
+    );
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -36,8 +44,6 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     object_set_key_value(mc, &boolean_proto, "valueOf", &val)?;
     boolean_proto.borrow_mut(mc).set_non_enumerable("valueOf");
 
-    boolean_ctor.borrow_mut(mc).set_non_enumerable("__is_constructor");
-    boolean_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
     boolean_ctor.borrow_mut(mc).set_non_enumerable("prototype");
     boolean_ctor.borrow_mut(mc).set_non_writable("prototype");
     boolean_ctor.borrow_mut(mc).set_non_configurable("prototype");
@@ -68,8 +74,7 @@ pub(crate) fn handle_boolean_constructor<'gc>(
         evaluated_args[0].to_truthy()
     };
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "__value__", &Value::Boolean(bool_val))?;
-    obj.borrow_mut(mc).set_non_enumerable("__value__");
+    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Boolean(bool_val));
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
     Ok(Value::Object(obj))
 }
@@ -122,7 +127,7 @@ fn this_boolean_value<'gc>(value: &Value<'gc>) -> Result<bool, JSError> {
     match value {
         Value::Boolean(b) => Ok(*b),
         Value::Object(obj) => {
-            if let Some(val) = object_get_key_value(obj, "__value__")
+            if let Some(val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue)
                 && let Value::Boolean(b) = *val.borrow()
             {
                 return Ok(b);

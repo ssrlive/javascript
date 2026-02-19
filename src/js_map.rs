@@ -1,4 +1,4 @@
-use crate::core::{GcPtr, new_gc_cell_ptr};
+use crate::core::{GcPtr, InternalSlot, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::core::{
     JSMap, JSObjectDataPtr, MutationContext, Value, env_set, initialize_collection_from_iterable, new_js_object_data, object_get_key_value,
     object_set_key_value, values_equal,
@@ -10,8 +10,8 @@ use crate::{JSError, core::EvalError};
 /// Initialize Map constructor and prototype
 pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let map_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &map_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &map_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Map")))?;
+    slot_set(mc, &map_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &map_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Map")));
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -100,7 +100,7 @@ pub(crate) fn handle_map_constructor<'gc>(
     // Create a wrapper object for the Map
     let map_obj = new_js_object_data(mc);
     // Store the actual map data
-    object_set_key_value(mc, &map_obj, "__map__", &Value::Map(map))?;
+    slot_set(mc, &map_obj, InternalSlot::Map, &Value::Map(map));
 
     // Set prototype to Map.prototype
     if let Some(map_ctor) = object_get_key_value(env, "Map")
@@ -216,11 +216,11 @@ pub(crate) fn create_map_iterator<'gc>(
     let iterator = new_js_object_data(mc);
 
     // Store map
-    object_set_key_value(mc, &iterator, "__iterator_map__", &Value::Map(map))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorMap, &Value::Map(map));
     // Store index
-    object_set_key_value(mc, &iterator, "__iterator_index__", &Value::Number(0.0))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
     // Store kind
-    object_set_key_value(mc, &iterator, "__iterator_kind__", &Value::String(utf8_to_utf16(kind)))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
 
     // next method
     object_set_key_value(mc, &iterator, "next", &Value::Function("MapIterator.prototype.next".to_string()))?;
@@ -253,7 +253,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get map
-    let map_val = object_get_key_value(iterator, "__iterator_map__").ok_or(raise_eval_error!("Iterator has no map"))?;
+    let map_val = slot_get_chained(iterator, &InternalSlot::IteratorMap).ok_or(raise_eval_error!("Iterator has no map"))?;
     let map_ptr = if let Value::Map(m) = &*map_val.borrow() {
         *m
     } else {
@@ -261,7 +261,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     };
 
     // Get index
-    let index_val = object_get_key_value(iterator, "__iterator_index__").ok_or(raise_eval_error!("Iterator has no index"))?;
+    let index_val = slot_get_chained(iterator, &InternalSlot::IteratorIndex).ok_or(raise_eval_error!("Iterator has no index"))?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
@@ -269,7 +269,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     };
 
     // Get kind
-    let kind_val = object_get_key_value(iterator, "__iterator_kind__").ok_or(raise_eval_error!("Iterator has no kind"))?;
+    let kind_val = slot_get_chained(iterator, &InternalSlot::IteratorKind).ok_or(raise_eval_error!("Iterator has no kind"))?;
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {
@@ -301,7 +301,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 
     // Update index
     index += 1;
-    object_set_key_value(mc, iterator, "__iterator_index__", &Value::Number(index as f64))?;
+    slot_set(mc, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
 
     let result_obj = new_js_object_data(mc);
     object_set_key_value(mc, &result_obj, "value", &result_value)?;

@@ -1,8 +1,8 @@
 #![allow(warnings)]
 
 use crate::core::{
-    DestructuringElement, EvalError, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, Value, new_js_object_data,
-    object_get_key_value, object_set_key_value,
+    DestructuringElement, EvalError, InternalSlot, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, PropertyKey, Value,
+    new_js_object_data, object_get_key_value, object_set_key_value, slot_get_chained,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext};
 use crate::error::JSError;
@@ -109,10 +109,10 @@ fn format_value_pretty<'gc>(
                 Ok(s)
             } else {
                 // If object is a constructor-like function object, print concise "[Function: Name]" like Node
-                if let Some(is_ctor_rc) = object_get_key_value(obj, "__is_constructor") {
+                if let Some(is_ctor_rc) = slot_get_chained(obj, &InternalSlot::IsConstructor) {
                     if let Value::Boolean(true) = &*is_ctor_rc.borrow() {
                         // Prefer __native_ctor name
-                        if let Some(native_rc) = object_get_key_value(obj, "__native_ctor") {
+                        if let Some(native_rc) = slot_get_chained(obj, &InternalSlot::NativeCtor) {
                             if let Value::String(name_u16) = &*native_rc.borrow() {
                                 return Ok(format!("[Function: {}]", utf16_to_utf8(name_u16)));
                             }
@@ -131,7 +131,7 @@ fn format_value_pretty<'gc>(
                 }
 
                 // Check for boxed primitive
-                if let Some(val_rc) = object_get_key_value(obj, "__value__") {
+                if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
                     let val = val_rc.borrow();
                     match *val {
                         Value::Boolean(b) => return Ok(format!("[Boolean: {}]", b)),
@@ -182,6 +182,9 @@ fn format_value_pretty<'gc>(
                 s.push('{');
                 let mut first = true;
                 for (key, val_rc) in obj.borrow().properties.iter() {
+                    if matches!(key, PropertyKey::Internal(_)) {
+                        continue;
+                    }
                     let key_str = key.as_ref();
                     if key_str == "__proto__" || key_str == "constructor" || key_str == "__class_def__" {
                         continue;

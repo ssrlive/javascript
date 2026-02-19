@@ -1,4 +1,4 @@
-use crate::core::{Gc, MutationContext, SymbolData};
+use crate::core::{Gc, InternalSlot, MutationContext, SymbolData, slot_get_chained, slot_set};
 use crate::core::{JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
@@ -6,8 +6,8 @@ use crate::unicode::utf8_to_utf16;
 pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let symbol_ctor = new_js_object_data(mc);
 
-    object_set_key_value(mc, &symbol_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &symbol_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Symbol")))?;
+    slot_set(mc, &symbol_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &symbol_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Symbol")));
 
     // Symbol() is not a constructor (cannot new Symbol()), but a function. All good `__is_constructor` usually means it is callable as a class/function.
     // Spec says `new Symbol()` throws TypeError, but `Symbol()` works.
@@ -82,7 +82,7 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 
     // Create per-environment symbol registry object used by Symbol.for / Symbol.keyFor
     let registry_obj = new_js_object_data(mc);
-    object_set_key_value(mc, env, "__symbol_registry", &Value::Object(registry_obj))?;
+    slot_set(mc, env, InternalSlot::SymbolRegistry, &Value::Object(registry_obj));
 
     // Set Symbol.prototype[@@toStringTag] = "Symbol"
     // The toStringTag symbol was just created above and stored on symbol_ctor
@@ -121,7 +121,7 @@ pub(crate) fn handle_symbol_tostring<'gc>(_mc: &MutationContext<'gc>, this_value
     let sym = match this_value {
         Value::Symbol(s) => *s,
         Value::Object(obj) => {
-            if let Some(val) = object_get_key_value(obj, "__value__") {
+            if let Some(val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
                 if let Value::Symbol(s) = &*val.borrow() {
                     *s
                 } else {
@@ -155,7 +155,7 @@ pub(crate) fn handle_symbol_valueof<'gc>(_mc: &MutationContext<'gc>, this_value:
     match this_value {
         Value::Symbol(s) => Ok(Value::Symbol(*s)),
         Value::Object(obj) => {
-            if let Some(val) = object_get_key_value(obj, "__value__")
+            if let Some(val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue)
                 && let Value::Symbol(s) = &*val.borrow()
             {
                 return Ok(Value::Symbol(*s));
@@ -178,19 +178,19 @@ pub(crate) fn handle_symbol_for<'gc>(
     let key = crate::core::value_to_string(&args[0]);
 
     // Retrieve or create registry object on the environment
-    let registry_obj = match object_get_key_value(env, "__symbol_registry") {
+    let registry_obj = match slot_get_chained(env, &InternalSlot::SymbolRegistry) {
         Some(val) => {
             if let Value::Object(obj) = &*val.borrow() {
                 *obj
             } else {
                 let obj = new_js_object_data(mc);
-                object_set_key_value(mc, env, "__symbol_registry", &Value::Object(obj))?;
+                slot_set(mc, env, InternalSlot::SymbolRegistry, &Value::Object(obj));
                 obj
             }
         }
         None => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, env, "__symbol_registry", &Value::Object(obj))?;
+            slot_set(mc, env, InternalSlot::SymbolRegistry, &Value::Object(obj));
             obj
         }
     };
@@ -220,7 +220,7 @@ pub(crate) fn handle_symbol_keyfor<'gc>(
     match &args[0] {
         Value::Symbol(s) => {
             // Lookup registry object and iterate properties to find matching symbol
-            if let Some(val) = object_get_key_value(env, "__symbol_registry")
+            if let Some(val) = slot_get_chained(env, &InternalSlot::SymbolRegistry)
                 && let Value::Object(obj) = &*val.borrow()
             {
                 for (k, v) in &obj.borrow().properties {

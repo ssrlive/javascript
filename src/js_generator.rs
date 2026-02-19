@@ -1,9 +1,9 @@
-use crate::core::{Gc, GcCell, GcPtr, GeneratorState, MutationContext};
+use crate::core::{Gc, GcCell, GcPtr, GeneratorState, InternalSlot, MutationContext, slot_set};
 use crate::{
     core::{
         CatchParamPattern, ClassDefinition, ClassMember, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectDataPtr,
-        ObjectDestructuringElement, PropertyKey, Statement, StatementKind, Value, VarDeclKind, env_get, env_get_strictness, env_set,
-        env_set_recursive, env_set_strictness, evaluate_call_dispatch, evaluate_expr, new_js_object_data, object_get_key_value,
+        ObjectDestructuringElement, PropertyKey, Statement, StatementKind, Value, VarDeclKind, env_get, env_get_own, env_get_strictness,
+        env_set, env_set_recursive, env_set_strictness, evaluate_call_dispatch, evaluate_expr, new_js_object_data, object_get_key_value,
         object_set_key_value, prepare_function_call_env, prepare_function_call_env_with_home,
     },
     error::JSError,
@@ -243,7 +243,7 @@ pub fn handle_generator_function_call<'gc>(
         let var_env = new_js_object_data(mc);
         var_env.borrow_mut(mc).prototype = Some(param_env);
         var_env.borrow_mut(mc).is_function_scope = true;
-        object_set_key_value(mc, &var_env, "__is_arrow_function", &Value::Boolean(false))?;
+        slot_set(mc, &var_env, InternalSlot::IsArrowFunction, &Value::Boolean(false));
 
         let mut env_strict_ancestor = false;
         if closure.enforce_strictness_inheritance {
@@ -380,9 +380,9 @@ pub fn handle_generator_function_call<'gc>(
     let gen_obj = crate::core::new_js_object_data(mc);
 
     // Store the actual generator data
-    object_set_key_value(mc, &gen_obj, "__generator__", &Value::Generator(generator))?;
+    slot_set(mc, &gen_obj, InternalSlot::Generator, &Value::Generator(generator));
 
-    object_set_key_value(mc, &gen_obj, "__in_generator", &Value::Boolean(true))?;
+    slot_set(mc, &gen_obj, InternalSlot::InGenerator, &Value::Boolean(true));
 
     // DEBUG: Log the generator object pointer so we can inspect its prototype chain
     let proto_ptr = gen_obj.borrow().prototype.map(Gc::as_ptr);
@@ -2022,7 +2022,7 @@ pub fn generator_next<'gc>(
             // parameter accesses (and `arguments.length`) reflect the passed args.
             crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
 
-            object_set_key_value(mc, &func_env, "__in_generator", &Value::Boolean(true))?;
+            slot_set(mc, &func_env, InternalSlot::InGenerator, &Value::Boolean(true));
 
             if let Some((idx, decl_kind_opt, var_name, iterable, body)) = find_first_for_await_in_statements(&gen_obj.body)
                 && idx == 0
@@ -2109,7 +2109,7 @@ pub fn generator_next<'gc>(
                         pre_env: Some(func_env),
                     };
 
-                    object_set_key_value(mc, &func_env, "__gen_throw_val", &Value::Undefined)?;
+                    slot_set(mc, &func_env, InternalSlot::GenThrowVal, &Value::Undefined);
                     let effective_kind = if matches!(yield_kind, YieldKind::YieldStar | YieldKind::Yield) {
                         body_yield_kind
                     } else {
@@ -2243,7 +2243,7 @@ pub fn generator_next<'gc>(
                 } else if let Some(inner_idx) = inner_idx_opt {
                     if inner_idx > 0 {
                         let pre_key = format!("__gen_pre_exec_{}_{}", idx, inner_idx);
-                        if object_get_key_value(&func_env, &pre_key).is_none() {
+                        if env_get_own(&func_env, &pre_key).is_none() {
                             // Execute pre-statements before the yield for inner containers.
                             match &*gen_obj.body[idx].kind {
                                 StatementKind::Block(inner_stmts) => {
@@ -2276,7 +2276,7 @@ pub fn generator_next<'gc>(
                                 }
                                 _ => {}
                             }
-                            if let Err(e) = object_set_key_value(mc, &func_env, &pre_key, &Value::Boolean(true)) {
+                            if let Err(e) = env_set(mc, &func_env, &pre_key, &Value::Boolean(true)) {
                                 log::warn!("Error setting pre-execution env key: {e}");
                             }
                         }
@@ -2339,7 +2339,7 @@ pub fn generator_next<'gc>(
 
                     // Evaluate inner expression in the current function env so
                     // loop bindings are visible.
-                    object_set_key_value(mc, &func_env, "__gen_throw_val", &Value::Undefined)?;
+                    slot_set(mc, &func_env, InternalSlot::GenThrowVal, &Value::Undefined);
                     if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
                         gen_obj.cached_initial_yield = Some(Value::Undefined);
                         return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
@@ -2430,7 +2430,7 @@ pub fn generator_next<'gc>(
 
                 // Ensure `arguments` exists for the no-yield completion path too.
                 crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
-                object_set_key_value(mc, &func_env, "__in_generator", &Value::Boolean(true))?;
+                slot_set(mc, &func_env, InternalSlot::InGenerator, &Value::Boolean(true));
 
                 // Evaluate the function body and interpret completion per spec:
                 // - If a Return occurred, use its value
@@ -2592,7 +2592,7 @@ pub fn generator_next<'gc>(
                 let mut resumed_body = for_of.body.clone();
                 trim_statements_to_post_first_yield(&mut resumed_body);
                 let send_var = "__gen_forof_send";
-                object_set_key_value(mc, &for_of.iter_env, send_var, send_value)?;
+                env_set(mc, &for_of.iter_env, send_var, send_value)?;
                 for stmt in &mut resumed_body {
                     let mut did_replace = false;
                     replace_first_yield_in_statement(stmt, send_var, &mut did_replace);
@@ -2654,7 +2654,7 @@ pub fn generator_next<'gc>(
                     stack: vec![],
                     pre_env: Some(func_env),
                 };
-                object_set_key_value(mc, &func_env, "__gen_throw_val", &Value::Undefined)?;
+                slot_set(mc, &func_env, InternalSlot::GenThrowVal, &Value::Undefined);
 
                 if let Some(inner_expr_box) = yield_inner {
                     if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
@@ -2938,7 +2938,7 @@ pub fn generator_next<'gc>(
                             {
                                 **cond_mut = replace_first_yield_in_expr(cond_mut, &candidate, &mut did_replace);
                                 if did_replace {
-                                    object_set_key_value(mc, &func_env, &candidate, send_value)?;
+                                    env_set(mc, &func_env, &candidate, send_value)?;
                                 }
                             }
                         }
@@ -2971,7 +2971,7 @@ pub fn generator_next<'gc>(
                                                 **else_expr2 = replace_first_yield_in_expr(else_expr2, &candidate2, &mut did_replace2);
                                             }
                                             if did_replace2 {
-                                                object_set_key_value(mc, &func_env, &candidate2, &Value::Undefined)?;
+                                                env_set(mc, &func_env, &candidate2, &Value::Undefined)?;
                                                 bind_replaced_yield_decl(mc, &func_env, first_stmt, &candidate2)?;
                                             }
                                         }
@@ -3002,7 +3002,7 @@ pub fn generator_next<'gc>(
                                                                 replace_first_yield_in_expr(else_expr3, &candidate, &mut did_replace3);
                                                         }
                                                         if did_replace3 {
-                                                            object_set_key_value(mc, &func_env, &candidate, &Value::Undefined)?;
+                                                            env_set(mc, &func_env, &candidate, &Value::Undefined)?;
                                                             bind_replaced_yield_decl(mc, &func_env, body_stmt, &candidate)?;
                                                         }
                                                     }
@@ -3029,7 +3029,7 @@ pub fn generator_next<'gc>(
             // are ready to be updated on future resumes. If no replacements
             // occurred, fall back to the old single-var behavior.
             if !replaced_vars.is_empty() {
-                object_set_key_value(mc, &func_env, &replaced_vars[0], send_value)?;
+                env_set(mc, &func_env, &replaced_vars[0], send_value)?;
                 log::trace!(
                     "generator_next: bound yield var '{}' -> {:?} in func_env ptr={:p}",
                     replaced_vars[0],
@@ -3037,7 +3037,7 @@ pub fn generator_next<'gc>(
                     Gc::as_ptr(func_env)
                 );
                 for v in replaced_vars.iter().skip(1) {
-                    object_set_key_value(mc, &func_env, v, &Value::Undefined)?;
+                    env_set(mc, &func_env, v, &Value::Undefined)?;
                     log::trace!(
                         "generator_next: initialised placeholder yield var '{}' = undefined in func_env ptr={:p}",
                         v,
@@ -3085,7 +3085,7 @@ pub fn generator_next<'gc>(
                                 **else_expr = replace_first_yield_in_expr(else_expr, &candidate, &mut did_replace);
                             }
                             if did_replace {
-                                object_set_key_value(mc, &func_env, &candidate, &Value::Undefined)?;
+                                env_set(mc, &func_env, &candidate, &Value::Undefined)?;
                                 bind_replaced_yield_decl(mc, &func_env, first_stmt, &candidate)?;
                             }
 
@@ -3113,10 +3113,10 @@ pub fn generator_next<'gc>(
                 let mut updated_existing = false;
                 for i in 0..128usize {
                     let candidate = format!("{}{}", base_name, i);
-                    if let Some(val_rc) = object_get_key_value(&func_env, &candidate)
+                    if let Some(val_rc) = env_get_own(&func_env, &candidate)
                         && matches!(&*val_rc.borrow(), Value::Undefined)
                     {
-                        object_set_key_value(mc, &func_env, &candidate, send_value)?;
+                        env_set(mc, &func_env, &candidate, send_value)?;
                         log::trace!(
                             "generator_next: updated existing placeholder '{}' -> {:?} in func_env ptr={:p}",
                             candidate,
@@ -3138,7 +3138,7 @@ pub fn generator_next<'gc>(
                         0
                     };
                     let var_name = format!("{}{}", base_name, next_idx);
-                    object_set_key_value(mc, &func_env, &var_name, send_value)?;
+                    env_set(mc, &func_env, &var_name, send_value)?;
                     log::trace!(
                         "generator_next: bound yield var '{}' -> {:?} in func_env ptr={:p} (fallback new)",
                         var_name,
@@ -3189,7 +3189,7 @@ pub fn generator_next<'gc>(
                 } else if let Some(inner_idx) = inner_idx_opt {
                     if inner_idx > 0 {
                         let pre_key = format!("__gen_pre_exec_{}_{}", pc_val, inner_idx);
-                        if object_get_key_value(&func_env, &pre_key).is_none() {
+                        if env_get_own(&func_env, &pre_key).is_none() {
                             match &*tail[idx].kind {
                                 StatementKind::Block(inner_stmts) => {
                                     let pre_stmts = inner_stmts[0..inner_idx].to_vec();
@@ -3202,7 +3202,7 @@ pub fn generator_next<'gc>(
                                 }
                                 _ => {}
                             }
-                            if let Err(e) = object_set_key_value(mc, &func_env, &pre_key, &Value::Boolean(true)) {
+                            if let Err(e) = env_set(mc, &func_env, &pre_key, &Value::Boolean(true)) {
                                 log::warn!("Error setting pre-execution env key: {e}");
                             }
                         }
@@ -3267,7 +3267,7 @@ pub fn generator_next<'gc>(
                         }
                     }
 
-                    object_set_key_value(mc, &func_env, "__gen_throw_val", &Value::Undefined)?;
+                    slot_set(mc, &func_env, InternalSlot::GenThrowVal, &Value::Undefined);
 
                     // Special-case conditional expressions: the next yield in the
                     // statement may be inside the consequent or alternate. Re-evaluate
@@ -3309,7 +3309,7 @@ pub fn generator_next<'gc>(
                                                     **else_expr = replace_first_yield_in_expr(else_expr, &candidate, &mut did_replace);
                                                 }
                                                 if did_replace {
-                                                    object_set_key_value(mc, &func_env, &candidate, &Value::Undefined)?;
+                                                    env_set(mc, &func_env, &candidate, &Value::Undefined)?;
                                                     bind_replaced_yield_decl(mc, &func_env, body_stmt, &candidate)?;
                                                 }
                                             }
@@ -3343,7 +3343,7 @@ pub fn generator_next<'gc>(
                                             **else_expr = replace_first_yield_in_expr(else_expr, &candidate, &mut did_replace);
                                         }
                                         if did_replace {
-                                            object_set_key_value(mc, &func_env, &candidate, &Value::Undefined)?;
+                                            env_set(mc, &func_env, &candidate, &Value::Undefined)?;
                                             bind_replaced_yield_decl(mc, &func_env, body_stmt, &candidate)?;
                                         }
                                     }
@@ -3509,7 +3509,7 @@ fn resume_with_return_completion<'gc>(
                 }
             }
 
-            object_set_key_value(mc, &func_env, "__gen_throw_val", return_value)?;
+            slot_set(mc, &func_env, InternalSlot::GenThrowVal, return_value);
             let result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tail, &[]);
             gen_obj.state = GeneratorState::Completed;
 
@@ -3817,7 +3817,7 @@ pub fn generator_throw<'gc>(
                 }
             }
 
-            object_set_key_value(mc, &func_env, "__gen_throw_val", &throw_value.clone())?;
+            slot_set(mc, &func_env, InternalSlot::GenThrowVal, &throw_value.clone());
 
             // Execute the modified tail. If the throw is uncaught, evaluate_statements
             // will return Err and we should propagate that to the caller.
@@ -3948,13 +3948,12 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     // This prototype object should expose a `prototype` property pointing to
     // the `Generator.prototype` intrinsic (used as generator instances' [[Prototype]]).
     let gen_func_ctor = crate::core::new_js_object_data(mc);
-    object_set_key_value(
+    slot_set(
         mc,
         &gen_func_ctor,
-        "__native_ctor",
+        InternalSlot::NativeCtor,
         &Value::String(crate::unicode::utf8_to_utf16("GeneratorFunction")),
-    )?;
-    gen_func_ctor.borrow_mut(mc).set_non_enumerable("__native_ctor");
+    );
     // Set internal prototype of constructor to Function.prototype when available
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()

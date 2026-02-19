@@ -1,5 +1,5 @@
 use crate::core::{Collect, Gc};
-use crate::core::{SymbolData, Value};
+use crate::core::{InternalSlot, SymbolData, Value};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Clone, Debug, Collect)]
@@ -8,6 +8,9 @@ pub enum PropertyKey<'gc> {
     String(String),
     Symbol(Gc<'gc, SymbolData>),
     Private(String, u32),
+    /// Engine-internal slot key. JS code can never produce this variant,
+    /// guaranteeing zero collision with user-defined properties.
+    Internal(InternalSlot),
 }
 
 static PRIVATE_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -48,6 +51,7 @@ impl<'gc> From<&PropertyKey<'gc>> for PropertyKey<'gc> {
             PropertyKey::String(s) => PropertyKey::String(s.clone()),
             PropertyKey::Symbol(sym) => PropertyKey::Symbol(*sym),
             PropertyKey::Private(s, id) => PropertyKey::Private(s.clone(), *id),
+            PropertyKey::Internal(slot) => PropertyKey::Internal(slot.clone()),
         }
     }
 }
@@ -61,6 +65,12 @@ impl<'gc> From<&str> for PropertyKey<'gc> {
 impl<'gc> From<String> for PropertyKey<'gc> {
     fn from(s: String) -> Self {
         PropertyKey::String(s)
+    }
+}
+
+impl<'gc> From<InternalSlot> for PropertyKey<'gc> {
+    fn from(slot: InternalSlot) -> Self {
+        PropertyKey::Internal(slot)
     }
 }
 
@@ -91,6 +101,7 @@ impl<'gc> PartialEq for PropertyKey<'gc> {
             (PropertyKey::String(s1), PropertyKey::String(s2)) => s1 == s2,
             (PropertyKey::Symbol(sym1), PropertyKey::Symbol(sym2)) => Gc::ptr_eq(*sym1, *sym2),
             (PropertyKey::Private(s1, id1), PropertyKey::Private(s2, id2)) => s1 == s2 && id1 == id2,
+            (PropertyKey::Internal(a), PropertyKey::Internal(b)) => a == b,
             _ => false,
         }
     }
@@ -114,6 +125,10 @@ impl<'gc> std::hash::Hash for PropertyKey<'gc> {
                 s.hash(state);
                 id.hash(state);
             }
+            PropertyKey::Internal(slot) => {
+                3u8.hash(state);
+                slot.hash(state);
+            }
         }
     }
 }
@@ -124,6 +139,7 @@ impl<'gc> std::fmt::Display for PropertyKey<'gc> {
             PropertyKey::String(s) => write!(f, "{s}"),
             PropertyKey::Symbol(sym) => write!(f, "[symbol {:p}]", Gc::as_ptr(*sym)),
             PropertyKey::Private(s, _) => write!(f, "#{s}"),
+            PropertyKey::Internal(slot) => write!(f, "[internal {slot:?}]"),
         }
     }
 }
@@ -134,6 +150,7 @@ impl<'gc> AsRef<str> for PropertyKey<'gc> {
             PropertyKey::String(s) => s,
             PropertyKey::Symbol(_sym) => todo!("Cannot convert Symbol to &str"),
             PropertyKey::Private(s, _) => s,
+            PropertyKey::Internal(_) => todo!("Cannot convert Internal slot to &str"),
         }
     }
 }

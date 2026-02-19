@@ -1,4 +1,7 @@
-use crate::core::{ClosureData, Gc, MutationContext, get_property_with_accessors, js_error_to_value, new_gc_cell_ptr};
+use crate::core::{
+    ClosureData, Gc, InternalSlot, MutationContext, get_property_with_accessors, js_error_to_value, new_gc_cell_ptr, slot_get_chained,
+    slot_set,
+};
 use crate::core::{JSObjectDataPtr, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::js_array::is_array;
 use crate::unicode::utf8_to_utf16;
@@ -69,9 +72,9 @@ pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     obj.borrow_mut(mc).set_non_enumerable("isView");
 
     // Mark as ArrayBuffer constructor
-    object_set_key_value(mc, &obj, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &obj, "__arraybuffer", &Value::Boolean(true))?;
-    object_set_key_value(mc, &obj, "__native_ctor", &Value::String(utf8_to_utf16("ArrayBuffer")))?;
+    slot_set(mc, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::Boolean(true));
+    slot_set(mc, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("ArrayBuffer")));
 
     Ok(obj)
 }
@@ -97,7 +100,7 @@ pub fn make_atomics_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDat
 }
 
 pub(crate) fn is_typedarray(obj: &JSObjectDataPtr) -> bool {
-    object_get_key_value(obj, "__typedarray").is_some()
+    slot_get_chained(obj, &InternalSlot::TypedArray).is_some()
 }
 
 pub(crate) fn get_array_like_element<'gc>(
@@ -128,7 +131,7 @@ pub(crate) fn ensure_typedarray_in_bounds<'gc>(
 ) -> Result<(), EvalError<'gc>> {
     // If the object is a fixed-length TypedArray whose underlying ArrayBuffer
     // has been resized so the view falls outside the buffer, throw TypeError.
-    if let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string()))
+    if let Some(ta_cell) = crate::core::slot_get(obj, &InternalSlot::TypedArray)
         && let Value::TypedArray(ta) = &*ta_cell.borrow()
     {
         if !ta.length_tracking {
@@ -213,7 +216,7 @@ pub fn handle_atomics_method<'gc>(
     }
     let ta_val = args[0].clone();
     let ta_obj = if let Value::Object(object) = ta_val {
-        if let Some(ta_rc) = object_get_key_value(&object, "__typedarray") {
+        if let Some(ta_rc) = slot_get_chained(&object, &InternalSlot::TypedArray) {
             if let Value::TypedArray(ta) = &*ta_rc.borrow() {
                 *ta
             } else {
@@ -465,9 +468,14 @@ pub fn make_sharedarraybuffer_constructor<'gc>(mc: &MutationContext<'gc>) -> Res
     object_set_key_value(mc, &obj, "name", &Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
 
     // Mark as ArrayBuffer constructor and indicate it's the shared variant
-    object_set_key_value(mc, &obj, "__arraybuffer", &Value::Boolean(true))?;
-    object_set_key_value(mc, &obj, "__sharedarraybuffer", &Value::Boolean(true))?;
-    object_set_key_value(mc, &obj, "__native_ctor", &Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
+    slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::Boolean(true));
+    slot_set(mc, &obj, InternalSlot::SharedArrayBuffer, &Value::Boolean(true));
+    slot_set(
+        mc,
+        &obj,
+        InternalSlot::NativeCtor,
+        &Value::String(utf8_to_utf16("SharedArrayBuffer")),
+    );
 
     Ok(obj)
 }
@@ -563,8 +571,8 @@ pub fn make_dataview_constructor<'gc>(mc: &MutationContext<'gc>) -> Result<JSObj
     object_set_key_value(mc, &obj, "name", &Value::String(utf8_to_utf16("DataView")))?;
 
     // Mark as DataView constructor
-    object_set_key_value(mc, &obj, "__dataview", &Value::Boolean(true))?;
-    object_set_key_value(mc, &obj, "__native_ctor", &Value::String(utf8_to_utf16("DataView")))?;
+    slot_set(mc, &obj, InternalSlot::DataView, &Value::Boolean(true));
+    slot_set(mc, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("DataView")));
 
     Ok(obj)
 }
@@ -742,10 +750,9 @@ fn make_typedarray_constructor<'gc>(
     )?;
     object_set_key_value(mc, &obj, "name", &Value::String(utf8_to_utf16(name)))?;
 
-    object_set_key_value(mc, &obj, "__kind", &Value::Number(kind_value as f64))?;
-    object_set_key_value(mc, &obj, "__native_ctor", &Value::String(utf8_to_utf16("TypedArray")))?;
-    object_set_key_value(mc, &obj, "__is_constructor", &Value::Boolean(true))?;
-    obj.borrow_mut(mc).set_non_enumerable("__is_constructor");
+    slot_set(mc, &obj, InternalSlot::Kind, &Value::Number(kind_value as f64));
+    slot_set(mc, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("TypedArray")));
+    slot_set(mc, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
 
     // 22.2.5.1 TypedArray.BYTES_PER_ELEMENT - create constructor and prototype
     let bytes_per_element = match kind {
@@ -783,8 +790,7 @@ fn make_typedarray_prototype<'gc>(
 
     if let Some(proto_proto) = object_prototype {
         proto.borrow_mut(mc).prototype = Some(proto_proto);
-        object_set_key_value(mc, &proto, "__proto__", &Value::Object(proto_proto))?;
-        proto.borrow_mut(mc).set_non_enumerable("__proto__");
+        slot_set(mc, &proto, InternalSlot::Proto, &Value::Object(proto_proto));
     }
 
     // Store the kind in the prototype for later use
@@ -802,12 +808,7 @@ fn make_typedarray_prototype<'gc>(
         TypedArrayKind::BigUint64 => 10,
     };
 
-    object_set_key_value(mc, &proto, "__kind", &Value::Number(kind_value as f64))?;
-    // Make internal kind non-enumerable
-    proto
-        .borrow_mut(mc)
-        .non_enumerable
-        .insert(crate::core::PropertyKey::String("__kind".to_string()));
+    slot_set(mc, &proto, InternalSlot::Kind, &Value::Number(kind_value as f64));
     object_set_key_value(mc, &proto, "constructor", &Value::Function("TypedArray".to_string()))?;
     // constructor is non-enumerable per spec
     proto
@@ -991,12 +992,23 @@ pub fn handle_arraybuffer_constructor<'gc>(
         let proto_val = crate::core::get_property_with_accessors(mc, env, nt_obj, "prototype")?;
         if let Value::Object(proto_obj) = proto_val {
             proto_from_target = Some(proto_obj);
-        } else if let Value::Object(origin_global) = crate::core::get_property_with_accessors(mc, env, nt_obj, "__origin_global")? {
-            let origin_ctor = crate::core::get_property_with_accessors(mc, env, &origin_global, "ArrayBuffer")?;
-            if let Value::Object(origin_ctor_obj) = origin_ctor {
-                let origin_proto = crate::core::get_property_with_accessors(mc, env, &origin_ctor_obj, "prototype")?;
-                if let Value::Object(origin_proto_obj) = origin_proto {
-                    proto_from_target = Some(origin_proto_obj);
+        } else {
+            // Check JS-visible string property first, then internal slot.
+            let origin_val = crate::core::get_property_with_accessors(mc, env, nt_obj, "__origin_global")?;
+            let origin_val = if matches!(origin_val, Value::Undefined) {
+                crate::core::slot_get(nt_obj, &InternalSlot::OriginGlobal)
+                    .map(|rc| rc.borrow().clone())
+                    .unwrap_or(origin_val)
+            } else {
+                origin_val
+            };
+            if let Value::Object(origin_global) = origin_val {
+                let origin_ctor = crate::core::get_property_with_accessors(mc, env, &origin_global, "ArrayBuffer")?;
+                if let Value::Object(origin_ctor_obj) = origin_ctor {
+                    let origin_proto = crate::core::get_property_with_accessors(mc, env, &origin_ctor_obj, "prototype")?;
+                    if let Value::Object(origin_proto_obj) = origin_proto {
+                        proto_from_target = Some(origin_proto_obj);
+                    }
                 }
             }
         }
@@ -1041,7 +1053,7 @@ pub fn handle_arraybuffer_constructor<'gc>(
             ..JSArrayBuffer::default()
         },
     );
-    object_set_key_value(mc, &obj, "__arraybuffer", &Value::ArrayBuffer(buffer))?;
+    slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
 
     Ok(Value::Object(obj))
 }
@@ -1050,7 +1062,8 @@ pub fn handle_arraybuffer_static_method<'gc>(method: &str, args: &[Value<'gc>]) 
     match method {
         "isView" => {
             if let Some(Value::Object(obj)) = args.first() {
-                let is_view = object_get_key_value(obj, "__typedarray").is_some() || object_get_key_value(obj, "__dataview").is_some();
+                let is_view =
+                    slot_get_chained(obj, &InternalSlot::TypedArray).is_some() || slot_get_chained(obj, &InternalSlot::DataView).is_some();
                 Ok(Value::Boolean(is_view))
             } else {
                 Ok(Value::Boolean(false))
@@ -1089,7 +1102,7 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
 
     // Create the SharedArrayBuffer object wrapper
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "__arraybuffer", &Value::ArrayBuffer(buffer))?;
+    slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
 
     // Set prototype
     let mut proto_ptr = None;
@@ -1127,7 +1140,7 @@ pub fn handle_dataview_constructor<'gc>(
     let buffer_obj = if let Value::Object(obj) = &buffer_val { Some(*obj) } else { None };
     let buffer = match buffer_val {
         Value::Object(obj) => {
-            if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
+            if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     *ab
                 } else {
@@ -1177,9 +1190,9 @@ pub fn handle_dataview_constructor<'gc>(
 
     // Create the DataView object
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "__dataview", &Value::DataView(data_view))?;
+    slot_set(mc, &obj, InternalSlot::DataView, &Value::DataView(data_view));
     if let Some(buf_obj) = buffer_obj {
-        object_set_key_value(mc, &obj, "__buffer_object", &Value::Object(buf_obj))?;
+        slot_set(mc, &obj, InternalSlot::BufferObject, &Value::Object(buf_obj));
     }
 
     // Set prototype
@@ -1197,7 +1210,7 @@ pub fn handle_typedarray_constructor<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get the kind from the constructor
-    let kind_val = object_get_key_value(constructor_obj, "__kind");
+    let kind_val = slot_get_chained(constructor_obj, &InternalSlot::Kind);
     let kind = if let Some(kind_val) = kind_val {
         if let Value::Number(kind_num) = *kind_val.borrow() {
             match kind_num as i32 {
@@ -1257,7 +1270,7 @@ pub fn handle_typedarray_constructor<'gc>(
             }
             Value::Object(obj) => {
                 // Check if it's another TypedArray or ArrayBuffer
-                if let Some(ta_val) = object_get_key_value(&obj, "__typedarray") {
+                if let Some(ta_val) = slot_get_chained(&obj, &InternalSlot::TypedArray) {
                     if let Value::TypedArray(ta) = &*ta_val.borrow() {
                         // new TypedArray(typedArray) - copy constructor
                         let src_length = ta.length;
@@ -1300,7 +1313,7 @@ pub fn handle_typedarray_constructor<'gc>(
                     } else {
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
                     }
-                } else if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
+                } else if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
                     if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                         // new TypedArray(buffer)
                         (*ab, 0, (**ab).borrow().data.lock().unwrap().len() / element_size)
@@ -1344,7 +1357,7 @@ pub fn handle_typedarray_constructor<'gc>(
         let offset_val = args[1].clone();
 
         if let Value::Object(obj) = buffer_val {
-            if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
+            if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     if let Value::Number(offset_num) = offset_val {
                         let offset = offset_num as usize;
@@ -1373,7 +1386,7 @@ pub fn handle_typedarray_constructor<'gc>(
         let length_val = args[2].clone();
 
         if let Value::Object(obj) = buffer_val {
-            if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
+            if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     if let (Value::Number(offset_num), Value::Number(length_num)) = (offset_val, length_val) {
                         let offset = offset_num as usize;
@@ -1417,31 +1430,28 @@ pub fn handle_typedarray_constructor<'gc>(
 
         if let Some(proto_obj) = proto_candidate {
             obj.borrow_mut(mc).prototype = Some(proto_obj);
-            object_set_key_value(mc, &obj, "__proto__", &Value::Object(proto_obj))?;
-            obj.borrow_mut(mc).set_non_enumerable("__proto__");
+            slot_set(mc, &obj, InternalSlot::Proto, &Value::Object(proto_obj));
         } else {
             // Fallback: create new prototype (legacy behavior, though incorrect for identity)
             let proto = make_typedarray_prototype(mc, env, kind.clone(), None)?;
             obj.borrow_mut(mc).prototype = Some(proto);
-            object_set_key_value(mc, &obj, "__proto__", &Value::Object(proto))?;
-            obj.borrow_mut(mc).set_non_enumerable("__proto__");
+            slot_set(mc, &obj, InternalSlot::Proto, &Value::Object(proto));
         }
     } else {
         // Fallback
         let proto = make_typedarray_prototype(mc, env, kind.clone(), None)?;
         obj.borrow_mut(mc).prototype = Some(proto);
-        object_set_key_value(mc, &obj, "__proto__", &Value::Object(proto))?;
-        obj.borrow_mut(mc).set_non_enumerable("__proto__");
+        slot_set(mc, &obj, InternalSlot::Proto, &Value::Object(proto));
     }
 
     // Determine if this TypedArray should be length-tracking (no explicit length argument)
     let length_tracking = match args.len() {
         1 => match &args[0] {
-            Value::Object(obj) => object_get_key_value(obj, "__arraybuffer").is_some(),
+            Value::Object(obj) => slot_get_chained(obj, &InternalSlot::ArrayBuffer).is_some(),
             _ => false,
         },
         2 => match &args[0] {
-            Value::Object(obj) => object_get_key_value(obj, "__arraybuffer").is_some(),
+            Value::Object(obj) => slot_get_chained(obj, &InternalSlot::ArrayBuffer).is_some(),
             _ => false,
         },
         _ => false,
@@ -1459,11 +1469,7 @@ pub fn handle_typedarray_constructor<'gc>(
         },
     );
 
-    object_set_key_value(mc, &obj, "__typedarray", &Value::TypedArray(typed_array))?;
-    // __typedarray is an internal slot marker and should not be enumerable
-    obj.borrow_mut(mc)
-        .non_enumerable
-        .insert(crate::core::PropertyKey::String("__typedarray".to_string()));
+    slot_set(mc, &obj, InternalSlot::TypedArray, &Value::TypedArray(typed_array));
     log::debug!(
         "created typedarray instance: obj={:p} kind={:?} length_tracking={}",
         &*obj.borrow(),
@@ -1530,7 +1536,7 @@ pub fn handle_dataview_method<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Get the DataView from the object
-    let dv_val = object_get_key_value(object, "__dataview");
+    let dv_val = slot_get_chained(object, &InternalSlot::DataView);
     let data_view_rc = if let Some(dv_val) = dv_val {
         if let Value::DataView(dv) = &*dv_val.borrow() {
             *dv
@@ -1926,7 +1932,7 @@ pub fn handle_dataview_method<'gc>(
         }
         // Property accessors
         "buffer" => {
-            if let Some(buffer_obj) = object_get_key_value(object, "__buffer_object")
+            if let Some(buffer_obj) = slot_get_chained(object, &InternalSlot::BufferObject)
                 && let Value::Object(obj) = &*buffer_obj.borrow()
             {
                 Ok(Value::Object(*obj))
@@ -2256,7 +2262,7 @@ pub fn handle_arraybuffer_accessor<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     match property {
         "byteLength" => {
-            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     let len = (**ab).borrow().data.lock().unwrap().len();
                     Ok(Value::Number(len as f64))
@@ -2272,7 +2278,7 @@ pub fn handle_arraybuffer_accessor<'gc>(
             }
         }
         "maxByteLength" => {
-            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     let b = (**ab).borrow();
                     let len = b.data.lock().unwrap().len();
@@ -2289,7 +2295,7 @@ pub fn handle_arraybuffer_accessor<'gc>(
             }
         }
         "resizable" => {
-            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     Ok(Value::Boolean((**ab).borrow().max_byte_length.is_some()))
                 } else {
@@ -2316,7 +2322,7 @@ pub fn handle_arraybuffer_method<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     match method {
         "slice" => {
-            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer")
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
                 && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
             {
                 let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor").map_err(JSError::from)?;
@@ -2370,7 +2376,7 @@ pub fn handle_arraybuffer_method<'gc>(
                 );
 
                 let new_obj = new_js_object_data(mc);
-                object_set_key_value(mc, &new_obj, "__arraybuffer", &Value::ArrayBuffer(new_ab))?;
+                slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
                 new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
 
                 return Ok(Value::Object(new_obj));
@@ -2381,7 +2387,7 @@ pub fn handle_arraybuffer_method<'gc>(
         }
         "resize" => {
             // Get the ArrayBuffer internal
-            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
                 let ab = match &*ab_val.borrow() {
                     Value::ArrayBuffer(ab) => *ab,
                     _ => {
@@ -2454,7 +2460,7 @@ pub fn handle_typedarray_accessor<'gc>(
     object: &JSObjectDataPtr<'gc>,
     property: &str,
 ) -> Result<Value<'gc>, JSError> {
-    if let Some(ta_val) = object_get_key_value(object, "__typedarray") {
+    if let Some(ta_val) = slot_get_chained(object, &InternalSlot::TypedArray) {
         if let Value::TypedArray(ta) = &*ta_val.borrow() {
             match property {
                 "buffer" => Ok(Value::ArrayBuffer(ta.buffer)),
@@ -2521,9 +2527,9 @@ pub fn handle_typedarray_accessor<'gc>(
 
 pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Value::Object(obj) = this_val {
-        if let Some(ta_cell) = object_get_key_value(obj, "__typedarray_iterator")
+        if let Some(ta_cell) = slot_get_chained(obj, &InternalSlot::TypedArrayIterator)
             && let Value::TypedArray(ta) = &*ta_cell.borrow()
-            && let Some(index_cell) = object_get_key_value(obj, "__index")
+            && let Some(index_cell) = slot_get_chained(obj, &InternalSlot::Index)
             && let Value::Number(index) = &*index_cell.borrow()
         {
             // Check for detached buffer or out-of-bounds view (e.g. resizable buffer shrunk)
@@ -2594,7 +2600,7 @@ pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val:
                 };
 
                 // Update index
-                object_set_key_value(mc, obj, "__index", &Value::Number((idx + 1) as f64))?;
+                slot_set(mc, obj, InternalSlot::Index, &Value::Number((idx + 1) as f64));
 
                 // Return { value, done: false }
                 let result_obj = new_js_object_data(mc);
@@ -2624,7 +2630,7 @@ pub fn handle_typedarray_method<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     if let Value::Object(obj) = this_val {
-        if let Some(ta_cell) = object_get_key_value(obj, "__typedarray")
+        if let Some(ta_cell) = slot_get_chained(obj, &InternalSlot::TypedArray)
             && let Value::TypedArray(ta) = &*ta_cell.borrow()
         {
             match method {
@@ -2632,8 +2638,8 @@ pub fn handle_typedarray_method<'gc>(
                     // Return an iterator that yields the values
                     // For now, create a simple iterator object
                     let iter_obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &iter_obj, "__typedarray_iterator", &Value::TypedArray(*ta))?;
-                    object_set_key_value(mc, &iter_obj, "__index", &Value::Number(0.0))?;
+                    slot_set(mc, &iter_obj, InternalSlot::TypedArrayIterator, &Value::TypedArray(*ta));
+                    slot_set(mc, &iter_obj, InternalSlot::Index, &Value::Number(0.0));
                     object_set_key_value(
                         mc,
                         &iter_obj,

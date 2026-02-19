@@ -1,4 +1,4 @@
-use crate::core::{ClassDefinition, ClassMember, ControlFlow, get_own_property};
+use crate::core::{ClassDefinition, ClassMember, ControlFlow, InternalSlot, get_own_property, slot_get, slot_get_chained, slot_set};
 use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Value, create_descriptor_object, env_get, evaluate_expr,
     evaluate_statements, new_js_object_data,
@@ -17,7 +17,7 @@ use crate::{error::JSError, unicode::utf8_to_utf16};
 pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> {
     // Check if the object's prototype has a __class_def__ property
     // This means the object was created with 'new ClassName()'
-    if let Some(proto_val) = object_get_key_value(obj, "__proto__")
+    if let Some(proto_val) = slot_get_chained(obj, &InternalSlot::Proto)
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         if proto_obj.borrow().class_def.is_some() {
@@ -36,7 +36,7 @@ pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> 
 
 #[allow(dead_code)]
 pub(crate) fn get_class_proto_obj<'gc>(class_obj: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(proto_val) = object_get_key_value(class_obj, "__proto__")
+    if let Some(proto_val) = slot_get_chained(class_obj, &InternalSlot::Proto)
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         return Ok(*proto_obj);
@@ -343,7 +343,7 @@ fn find_home_object_in_env<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<GcCell<JSO
         // [[HomeObject]] from the bound function value (covers cases where the
         // environment is a fresh declarative environment created for strict direct
         // eval and the function object is stored on the caller env).
-        if let Some(f_rc) = object_get_key_value(&e, "__function") {
+        if let Some(f_rc) = slot_get_chained(&e, &InternalSlot::Function) {
             let f_val = f_rc.borrow().clone();
             match f_val {
                 Value::Object(obj) => {
@@ -365,6 +365,10 @@ fn find_home_object_in_env<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<GcCell<JSO
 }
 
 fn find_binding<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<Value<'gc>> {
+    // If name maps to an internal slot, use slot-based lookup
+    if let Some(slot) = crate::core::str_to_internal_slot(name) {
+        return slot_get_chained(env, &slot).map(|v| v.borrow().clone());
+    }
     let mut current = *env;
     loop {
         if let Some(val) = object_get_key_value(&current, name) {
@@ -380,14 +384,23 @@ fn find_binding<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<Value<'gc
 }
 
 fn find_binding_env<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<JSObjectDataPtr<'gc>> {
+    // If name maps to an internal slot, look for that slot as own property
+    if let Some(slot) = crate::core::str_to_internal_slot(name) {
+        let mut current = *env;
+        loop {
+            if crate::core::slot_has(&current, &slot) {
+                return Some(current);
+            }
+            if let Some(proto) = current.borrow().prototype {
+                current = proto;
+            } else {
+                break;
+            }
+        }
+        return None;
+    }
     let mut current = *env;
     loop {
-        // We need to check *own* properties only when locating the lexical
-        // environment that declares a binding. Using `object_get_key_value`
-        // here was incorrect because it searches the prototype chain and may
-        // return true even when the current object doesn't own the binding.
-        // Use `get_own_property` to ensure we return the actual declaring
-        // environment.
         if crate::core::get_own_property(&current, name).is_some() {
             return Some(current);
         }
@@ -511,6 +524,7 @@ fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr:
                 }
             }
             PropertyKey::Private(s, _) => format!("#{s}"),
+            PropertyKey::Internal(s) => format!("[[{s:?}]]"),
         };
         let name_val = Value::String(utf8_to_utf16(&name_string));
         let desc = create_descriptor_object(mc, &name_val, false, false, true)?;
@@ -530,6 +544,7 @@ fn property_key_to_name_string<'gc>(key: &PropertyKey<'gc>) -> String {
             }
         }
         PropertyKey::Private(s, _) => format!("#{s}"),
+        PropertyKey::Internal(s) => format!("[[{s:?}]]"),
     }
 }
 
@@ -560,7 +575,12 @@ fn initialize_instance_elements<'gc>(
         )?;
 
         // Mark this environment so eval() can apply class-field initializer early errors.
-        object_set_key_value(mc, &field_scope, "__class_field_initializer", &Value::Boolean(true))?;
+        slot_set(
+            mc,
+            &field_scope,
+            InternalSlot::ClassField("initializer".to_string()),
+            &Value::Boolean(true),
+        );
 
         // If the constructor has a 'prototype' property (it should), set that as the HomeObject
         // of the field scope so that super property access works in field initializers
@@ -845,7 +865,7 @@ fn initialize_instance_elements<'gc>(
                     let val = evaluate_expr(mc, &field_scope, init_expr)?;
                     set_name_if_anonymous(mc, &val, init_expr, &PropertyKey::String(name.clone()))?;
                     crate::js_module::ensure_deferred_namespace_evaluated(mc, &definition_env, instance, Some(name.as_str()))?;
-                    if let Some(proxy_ptr) = get_own_property(instance, "__proxy__")
+                    if let Some(proxy_ptr) = slot_get(instance, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
                     {
                         let ok = crate::js_proxy::proxy_define_data_property(mc, proxy, &PropertyKey::String(name.clone()), &val)?;
@@ -883,7 +903,7 @@ fn initialize_instance_elements<'gc>(
                     if let PropertyKey::String(s) = &key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, &definition_env, instance, Some(s.as_str()))?;
                     }
-                    if let Some(proxy_ptr) = get_own_property(instance, "__proxy__")
+                    if let Some(proxy_ptr) = slot_get(instance, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
                     {
                         let ok = crate::js_proxy::proxy_define_data_property(mc, proxy, &key, &val)?;
@@ -923,14 +943,14 @@ pub(crate) fn evaluate_new<'gc>(
     }
 
     if let Value::Object(bound_obj) = constructor_val
-        && let Some(bound_target_rc) = crate::core::get_own_property(bound_obj, "__bound_target")
+        && let Some(bound_target_rc) = crate::core::slot_get(bound_obj, &InternalSlot::BoundTarget)
     {
-        if crate::core::get_own_property(bound_obj, "__is_constructor").is_none() {
+        if crate::core::slot_get(bound_obj, &InternalSlot::IsConstructor).is_none() {
             return Err(raise_type_error!("Constructor is not callable").into());
         }
 
         let bound_target = bound_target_rc.borrow().clone();
-        let bound_arg_len = crate::core::get_own_property(bound_obj, "__bound_arg_len")
+        let bound_arg_len = crate::core::slot_get(bound_obj, &InternalSlot::BoundArgLen)
             .and_then(|v| {
                 if let Value::Number(n) = *v.borrow() {
                     Some(n.max(0.0) as usize)
@@ -942,7 +962,7 @@ pub(crate) fn evaluate_new<'gc>(
 
         let mut merged_args = Vec::with_capacity(bound_arg_len + evaluated_args.len());
         for i in 0..bound_arg_len {
-            if let Some(arg_rc) = crate::core::get_own_property(bound_obj, format!("__bound_arg_{i}")) {
+            if let Some(arg_rc) = crate::core::slot_get(bound_obj, &InternalSlot::BoundArg(i)) {
                 merged_args.push(arg_rc.borrow().clone());
             }
         }
@@ -960,9 +980,10 @@ pub(crate) fn evaluate_new<'gc>(
             let own_prototype_property = get_own_property(class_obj, "prototype");
             let has_own_prototype_property = own_prototype_property.is_some();
             let constructor_marked = class_obj.borrow().class_def.is_some()
-                || get_own_property(class_obj, "__is_constructor").is_some()
-                || get_own_property(class_obj, "__native_ctor").is_some();
-            let has_callable_shape = class_obj.borrow().get_closure().is_some() || get_own_property(class_obj, "__bound_target").is_some();
+                || slot_get(class_obj, &InternalSlot::IsConstructor).is_some()
+                || slot_get(class_obj, &InternalSlot::NativeCtor).is_some();
+            let has_callable_shape =
+                class_obj.borrow().get_closure().is_some() || slot_get(class_obj, &InternalSlot::BoundTarget).is_some();
             if has_callable_shape && !constructor_marked && !has_own_prototype_property {
                 return Err(raise_type_error!("Constructor is not callable").into());
             }
@@ -1036,7 +1057,7 @@ pub(crate) fn evaluate_new<'gc>(
                         // Defer actual assignment; remember it for finalization below.
                         computed_proto = Some(proto_obj);
                         instance.borrow_mut(mc).prototype = Some(proto_obj);
-                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto_obj))?;
+                        slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto_obj));
                         log::debug!("evaluate_new: computed prototype (deferred) -> proto={:p}", Gc::as_ptr(proto_obj));
                     } else {
                         // Fall back to the realm's Object.prototype for the
@@ -1063,7 +1084,7 @@ pub(crate) fn evaluate_new<'gc>(
                             // Defer assignment to final instance
                             computed_proto = Some(obj_proto);
                             instance.borrow_mut(mc).prototype = Some(obj_proto);
-                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
+                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(obj_proto));
                             log::warn!(
                                 "evaluate_new: computed fallback (from source obj) realm prototype (deferred) -> proto={:p}",
                                 Gc::as_ptr(obj_proto)
@@ -1072,8 +1093,15 @@ pub(crate) fn evaluate_new<'gc>(
                             // If the source object came from a Function constructor, it may
                             // carry an internal marker pointing to its origin global. Use
                             // that to find the realm's Object.prototype.
+                            // Check JS-visible string property first (realm shim writes
+                            // `f.__origin_global = g`), then fall back to the engine
+                            // internal slot.  The JS-set property takes priority because
+                            // the realm shim explicitly overrides it to point at the
+                            // emulated realm's global object.
                             if let Some(src_obj) = prototype_source_obj
                                 && let Some(origin_val) = object_get_key_value(&src_obj, "__origin_global")
+                                    .or_else(|| slot_get(&src_obj, &InternalSlot::OriginGlobal))
+                                    .or_else(|| slot_get_chained(&src_obj, &InternalSlot::OriginGlobal))
                                 && let Value::Object(origin_global) = &*origin_val.borrow()
                                 && let Some(obj_val) = object_get_key_value(origin_global, "Object")
                                 && let Value::Object(obj_ctor) = &*obj_val.borrow()
@@ -1091,7 +1119,7 @@ pub(crate) fn evaluate_new<'gc>(
                                     // Defer assignment to final instance
                                     computed_proto = Some(obj_proto);
                                     instance.borrow_mut(mc).prototype = Some(obj_proto);
-                                    object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
+                                    slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(obj_proto));
                                 }
                             }
                             // Only fall back to closure-env realm discovery if __origin_global
@@ -1172,7 +1200,7 @@ pub(crate) fn evaluate_new<'gc>(
                                     // Defer assignment to final instance
                                     computed_proto = Some(obj_proto);
                                     instance.borrow_mut(mc).prototype = Some(obj_proto);
-                                    object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
+                                    slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(obj_proto));
                                     log::debug!(
                                         "evaluate_new: computed fallback realm prototype (deferred) -> proto={:p}",
                                         Gc::as_ptr(obj_proto)
@@ -1197,7 +1225,7 @@ pub(crate) fn evaluate_new<'gc>(
                                         } else {
                                             // `o` is the top-most prototype (Object.prototype)
                                             instance.borrow_mut(mc).prototype = Some(o);
-                                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(o))?;
+                                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(o));
                                             log::warn!(
                                                 "evaluate_new: assigned fallback by walking prototype chain -> instance={:p} proto={:p}",
                                                 Gc::as_ptr(instance),
@@ -1257,7 +1285,7 @@ pub(crate) fn evaluate_new<'gc>(
                         fn_obj_ptr,
                     )?;
                     if let Some(nt) = &new_target {
-                        crate::core::object_set_key_value(mc, &func_env, "__new_target", nt)?;
+                        crate::core::slot_set(mc, &func_env, InternalSlot::NewTarget, nt);
                     }
 
                     // If we computed a deferred prototype, attach it to the function environment
@@ -1270,8 +1298,8 @@ pub(crate) fn evaluate_new<'gc>(
                         // `instance` object as a fallback lookup in case the
                         // lexical env chain at the super() call site does not
                         // include the function environment (nested envs, arrows, etc.).
-                        crate::core::object_set_key_value(mc, &func_env, "__computed_proto", &Value::Object(proto))?;
-                        crate::core::object_set_key_value(mc, &instance, "__computed_proto", &Value::Object(proto))?;
+                        crate::core::slot_set(mc, &func_env, InternalSlot::ComputedProto, &Value::Object(proto));
+                        crate::core::slot_set(mc, &instance, InternalSlot::ComputedProto, &Value::Object(proto));
                         log::warn!(
                             "evaluate_new: attached computed_proto to func_env ptr={:p} proto={:p}",
                             Gc::as_ptr(func_env),
@@ -1329,7 +1357,7 @@ pub(crate) fn evaluate_new<'gc>(
                     // object). Prefer that over the original `instance`.
                     let mut final_instance = instance;
                     if is_derived
-                        && let Some(inst_val_rc) = object_get_key_value(&func_env, "__instance")
+                        && let Some(inst_val_rc) = slot_get_chained(&func_env, &InternalSlot::Instance)
                         && let Value::Object(real_inst) = &*inst_val_rc.borrow()
                     {
                         final_instance = *real_inst;
@@ -1350,7 +1378,7 @@ pub(crate) fn evaluate_new<'gc>(
                         && let Some(proto) = instance.borrow().prototype
                     {
                         final_instance.borrow_mut(mc).prototype = Some(proto);
-                        object_set_key_value(mc, &final_instance, "__proto__", &Value::Object(proto))?;
+                        slot_set(mc, &final_instance, InternalSlot::Proto, &Value::Object(proto));
                         log::warn!(
                             "evaluate_new: copied assigned prototype from orig instance {:p} to final_instance {:p} proto={:p}",
                             Gc::as_ptr(instance),
@@ -1364,7 +1392,7 @@ pub(crate) fn evaluate_new<'gc>(
                         // any existing prototype so GetPrototypeFromConstructor semantics
                         // are honored even when super() returns a different object.
                         final_instance.borrow_mut(mc).prototype = Some(proto);
-                        object_set_key_value(mc, &final_instance, "__proto__", &Value::Object(proto))?;
+                        slot_set(mc, &final_instance, InternalSlot::Proto, &Value::Object(proto));
                         log::warn!(
                             "evaluate_new: finalized deferred prototype -> instance={:p} proto={:p}",
                             Gc::as_ptr(final_instance),
@@ -1372,10 +1400,10 @@ pub(crate) fn evaluate_new<'gc>(
                         );
                         // Clear any pending computed proto marker on the function env
                         // so subsequent super() handling won't re-apply it from that env.
-                        crate::core::object_set_key_value(mc, &func_env, "__computed_proto", &Value::Undefined)?;
+                        crate::core::slot_set(mc, &func_env, InternalSlot::ComputedProto, &Value::Undefined);
                         // Read-back diagnostics to ensure prototype persists
                         let read_proto_ptr = final_instance.borrow().prototype.map(Gc::as_ptr);
-                        let has_own_proto = object_get_key_value(&final_instance, "__proto__").is_some();
+                        let has_own_proto = slot_get_chained(&final_instance, &InternalSlot::Proto).is_some();
                         log::warn!(
                             "evaluate_new: after finalize readback -> instance={:p} read_proto={:?} has_own_proto={}",
                             Gc::as_ptr(final_instance),
@@ -1389,7 +1417,7 @@ pub(crate) fn evaluate_new<'gc>(
             }
 
             // Check for generic native constructor via __native_ctor (own property only)
-            if let Some(native_ctor_rc) = get_own_property(class_obj, "__native_ctor")
+            if let Some(native_ctor_rc) = slot_get(class_obj, &InternalSlot::NativeCtor)
                 && let Value::String(name) = &*native_ctor_rc.borrow()
             {
                 let name_desc = utf16_to_utf8(name);
@@ -1429,7 +1457,10 @@ pub(crate) fn evaluate_new<'gc>(
                                     // Per spec, fall back to GetFunctionRealm(C) to find
                                     // the realm's Object.prototype intrinsic.
                                     // Use __origin_global if available (set by realm emulation).
+                                    // Check JS-visible string property first, then internal slot.
                                     if let Some(origin_rc) = object_get_key_value(nt_obj, "__origin_global")
+                                        .or_else(|| slot_get(nt_obj, &InternalSlot::OriginGlobal))
+                                        .or_else(|| slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
                                         && let Value::Object(origin_global) = &*origin_rc.borrow()
                                         && let Some(obj_ctor_rc) = object_get_key_value(origin_global, "Object")
                                         && let Value::Object(obj_ctor) = &*obj_ctor_rc.borrow()
@@ -1559,6 +1590,14 @@ pub(crate) fn evaluate_new<'gc>(
                             && let Some(new_target_obj) = new_target_obj_for_realm
                         {
                             let origin_global_val = crate::core::get_property_with_accessors(mc, env, &new_target_obj, "__origin_global")?;
+                            // Also check the internal slot if the JS-visible property is absent.
+                            let origin_global_val = if matches!(origin_global_val, Value::Undefined) {
+                                slot_get(&new_target_obj, &InternalSlot::OriginGlobal)
+                                    .map(|rc| rc.borrow().clone())
+                                    .unwrap_or(origin_global_val)
+                            } else {
+                                origin_global_val
+                            };
                             if let Value::Object(origin_global) = origin_global_val {
                                 let ctor_val = crate::core::get_property_with_accessors(mc, env, &origin_global, "AggregateError")?;
                                 let ctor_val = match ctor_val {
@@ -1600,12 +1639,12 @@ pub(crate) fn evaluate_new<'gc>(
             }
 
             // Check if this is Array constructor
-            if get_own_property(class_obj, "__is_array_constructor").is_some() {
+            if slot_get(class_obj, &InternalSlot::IsArrayConstructor).is_some() {
                 return crate::js_array::handle_array_constructor(mc, evaluated_args, env);
             }
 
             // Check if this is a TypedArray constructor
-            if get_own_property(class_obj, "__kind").is_some() {
+            if slot_get(class_obj, &InternalSlot::Kind).is_some() {
                 let ctor_for_typedarray = if let Some(Value::Object(nt_obj)) = new_target {
                     nt_obj
                 } else {
@@ -1664,7 +1703,7 @@ pub(crate) fn evaluate_new<'gc>(
 
                 if let Some(proto_obj) = assigned_proto {
                     instance.borrow_mut(mc).prototype = Some(proto_obj);
-                    object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto_obj))?;
+                    slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto_obj));
                     let assigned_ptr = instance.borrow().prototype.map(Gc::as_ptr);
                     log::debug!(
                         "evaluate_new (class): assigned explicit prototype -> instance={:p} proto={:p} after assign ptr={:?}",
@@ -1678,9 +1717,12 @@ pub(crate) fn evaluate_new<'gc>(
 
                     // First try `__origin_global` — the realm shim sets this on
                     // functions created by another realm's Function constructor.
+                    // Check JS-visible string property first, then internal slot.
                     let mut found_via_origin = false;
                     if let Some(src_obj) = prototype_source_obj
                         && let Some(origin_val) = object_get_key_value(&src_obj, "__origin_global")
+                            .or_else(|| slot_get(&src_obj, &InternalSlot::OriginGlobal))
+                            .or_else(|| slot_get_chained(&src_obj, &InternalSlot::OriginGlobal))
                         && let Value::Object(origin_global) = &*origin_val.borrow()
                         && let Some(obj_val) = object_get_key_value(origin_global, "Object")
                         && let Value::Object(obj_ctor) = &*obj_val.borrow()
@@ -1696,7 +1738,7 @@ pub(crate) fn evaluate_new<'gc>(
                         };
                         if let Some(obj_proto) = proto_opt {
                             instance.borrow_mut(mc).prototype = Some(obj_proto);
-                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(obj_proto))?;
+                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(obj_proto));
                             found_via_origin = true;
                         }
                     }
@@ -1748,7 +1790,7 @@ pub(crate) fn evaluate_new<'gc>(
                             && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
                         {
                             instance.borrow_mut(mc).prototype = Some(*obj_proto);
-                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(*obj_proto))?;
+                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(*obj_proto));
                             let assigned_ptr = instance.borrow().prototype.map(Gc::as_ptr);
                             log::warn!(
                                 "evaluate_new: assigned fallback realm prototype -> instance={:p} proto={:p}",
@@ -1792,9 +1834,9 @@ pub(crate) fn evaluate_new<'gc>(
                         )?;
 
                         if let Some(nt) = new_target {
-                            crate::core::object_set_key_value(mc, &func_env, "__new_target", nt)?;
+                            crate::core::slot_set(mc, &func_env, InternalSlot::NewTarget, nt);
                         } else {
-                            crate::core::object_set_key_value(mc, &func_env, "__new_target", &Value::Object(*class_obj))?;
+                            crate::core::slot_set(mc, &func_env, InternalSlot::NewTarget, &Value::Object(*class_obj));
                         }
 
                         // For class constructors, ensure the home object points at the class prototype
@@ -1822,18 +1864,18 @@ pub(crate) fn evaluate_new<'gc>(
                                     && obj.borrow().prototype.is_none()
                                 {
                                     obj.borrow_mut(mc).prototype = Some(proto);
-                                    object_set_key_value(mc, obj, "__proto__", &Value::Object(proto))?;
+                                    slot_set(mc, obj, InternalSlot::Proto, &Value::Object(proto));
                                     log::warn!(
                                         "evaluate_new: finalized deferred prototype on explicit return -> instance={:p} proto={:p}",
                                         Gc::as_ptr(*obj),
                                         Gc::as_ptr(proto)
                                     );
                                     // Clear pending computed_proto markers
-                                    crate::core::object_set_key_value(mc, &func_env, "__computed_proto", &Value::Undefined)?;
-                                    crate::core::object_set_key_value(mc, &instance, "__computed_proto", &Value::Undefined)?;
+                                    crate::core::slot_set(mc, &func_env, InternalSlot::ComputedProto, &Value::Undefined);
+                                    crate::core::slot_set(mc, &instance, InternalSlot::ComputedProto, &Value::Undefined);
                                     // Read-back diagnostics
                                     let read_proto = obj.borrow().prototype.map(Gc::as_ptr);
-                                    let has_own = object_get_key_value(obj, "__proto__").is_some();
+                                    let has_own = slot_get_chained(obj, &InternalSlot::Proto).is_some();
                                     log::warn!(
                                         "evaluate_new: explicit-return instance readback -> instance={:p} read_proto={:?} has_own_proto={}",
                                         Gc::as_ptr(*obj),
@@ -1875,14 +1917,14 @@ pub(crate) fn evaluate_new<'gc>(
                             // was changed later by `super()`/parent constructor.
                             if let Some(proto) = computed_proto {
                                 final_instance.borrow_mut(mc).prototype = Some(proto);
-                                object_set_key_value(mc, final_instance, "__proto__", &Value::Object(proto))?;
+                                slot_set(mc, final_instance, InternalSlot::Proto, &Value::Object(proto));
                                 log::warn!(
                                     "evaluate_new: applied computed_proto at return site -> returning instance={:p} proto={:p}",
                                     Gc::as_ptr(*final_instance),
                                     Gc::as_ptr(proto)
                                 );
                                 let read_proto_ptr = final_instance.borrow().prototype.map(Gc::as_ptr);
-                                let has_own = object_get_key_value(final_instance, "__proto__").is_some();
+                                let has_own = slot_get_chained(final_instance, &InternalSlot::Proto).is_some();
                                 log::warn!(
                                     "evaluate_new: return-site readback -> instance={:p} read_proto={:?} has_own_proto={}",
                                     Gc::as_ptr(*final_instance),
@@ -1890,7 +1932,7 @@ pub(crate) fn evaluate_new<'gc>(
                                     has_own
                                 );
                             }
-                            let has_own = object_get_key_value(final_instance, "__proto__").is_some();
+                            let has_own = slot_get_chained(final_instance, &InternalSlot::Proto).is_some();
                             log::warn!(
                                 "evaluate_new: returning final_this readback -> instance={:p} has_own_proto={}",
                                 Gc::as_ptr(*final_instance),
@@ -1913,14 +1955,14 @@ pub(crate) fn evaluate_new<'gc>(
                         );
                         if let Some(proto) = computed_proto {
                             instance.borrow_mut(mc).prototype = Some(proto);
-                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto))?;
+                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto));
                             log::warn!(
                                 "evaluate_new: applied computed_proto at original return site -> instance={:p} proto={:p}",
                                 Gc::as_ptr(instance),
                                 Gc::as_ptr(proto)
                             );
                             let read_proto = instance.borrow().prototype.map(Gc::as_ptr);
-                            let has_own = object_get_key_value(&instance, "__proto__").is_some();
+                            let has_own = slot_get_chained(&instance, &InternalSlot::Proto).is_some();
                             log::warn!(
                                 "evaluate_new: original return-site readback -> instance={:p} read_proto={:?} has_own_proto={}",
                                 Gc::as_ptr(instance),
@@ -1928,7 +1970,7 @@ pub(crate) fn evaluate_new<'gc>(
                                 has_own
                             );
                         }
-                        let has_own = object_get_key_value(&instance, "__proto__").is_some();
+                        let has_own = slot_get_chained(&instance, &InternalSlot::Proto).is_some();
                         log::warn!(
                             "evaluate_new: returning original instance readback -> instance={:p} has_own_proto={}",
                             Gc::as_ptr(instance),
@@ -1966,12 +2008,11 @@ pub(crate) fn evaluate_new<'gc>(
                                         && inst_obj.borrow().is_extensible()
                                     {
                                         inst_obj.borrow_mut(mc).prototype = Some(proto_obj);
-                                        object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(proto_obj))?;
+                                        slot_set(mc, inst_obj, InternalSlot::Proto, &Value::Object(proto_obj));
                                     }
                                 }
                                 // Don't add an own 'constructor' property on instance; prototype carries it.
                                 // Fix __proto__ non-enumerable
-                                inst_obj.borrow_mut(mc).set_non_enumerable("__proto__");
 
                                 // Fix: Initialize derived class members (fields) since default constructor doesn't have a body to do it
                                 initialize_instance_elements(mc, inst_obj, class_obj)?;
@@ -1981,7 +2022,7 @@ pub(crate) fn evaluate_new<'gc>(
                                     // Always apply computed_proto to the parent-returned instance, overriding any previous prototype
                                     if inst_obj.borrow().is_extensible() {
                                         inst_obj.borrow_mut(mc).prototype = Some(proto);
-                                        object_set_key_value(mc, inst_obj, "__proto__", &Value::Object(proto))?;
+                                        slot_set(mc, inst_obj, InternalSlot::Proto, &Value::Object(proto));
                                     }
                                     log::warn!(
                                         "evaluate_new: finalized deferred prototype on parent-returned instance -> instance={:p} proto={:p}",
@@ -1992,7 +2033,7 @@ pub(crate) fn evaluate_new<'gc>(
                                     // still apply the computed prototype to any parent-returned replacement instance if needed.
                                     // Read-back diagnostics
                                     let read_proto = inst_obj.borrow().prototype.map(Gc::as_ptr);
-                                    let has_own = object_get_key_value(inst_obj, "__proto__").is_some();
+                                    let has_own = slot_get_chained(inst_obj, &InternalSlot::Proto).is_some();
                                     log::warn!(
                                         "evaluate_new: parent-returned instance readback -> instance={:p} read_proto={:?} has_own_proto={}",
                                         Gc::as_ptr(*inst_obj),
@@ -2014,7 +2055,7 @@ pub(crate) fn evaluate_new<'gc>(
                             && instance.borrow().prototype.is_none()
                         {
                             instance.borrow_mut(mc).prototype = Some(proto);
-                            object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto))?;
+                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto));
                             log::warn!(
                                 "evaluate_new: finalized deferred prototype on default-constructed instance -> instance={:p} proto={:p}",
                                 Gc::as_ptr(instance),
@@ -2024,7 +2065,7 @@ pub(crate) fn evaluate_new<'gc>(
                             // still apply the computed prototype to any parent-returned replacement instance if needed.
                             // Read-back diagnostics
                             let read_proto = instance.borrow().prototype.map(Gc::as_ptr);
-                            let has_own = object_get_key_value(&instance, "__proto__").is_some();
+                            let has_own = slot_get_chained(&instance, &InternalSlot::Proto).is_some();
                             log::warn!(
                                 "evaluate_new: default-constructed instance readback -> instance={:p} read_proto={:?} has_own_proto={}",
                                 Gc::as_ptr(instance),
@@ -2041,17 +2082,17 @@ pub(crate) fn evaluate_new<'gc>(
                 return Ok(crate::js_number::number_constructor(mc, evaluated_args, env)?);
             }
             // Check for constructor-like singleton objects created by the evaluator
-            if get_own_property(class_obj, "__is_string_constructor").is_some() {
+            if slot_get(class_obj, &InternalSlot::IsStringConstructor).is_some() {
                 return crate::js_string::string_constructor(mc, evaluated_args, env);
             }
-            if get_own_property(class_obj, "__is_boolean_constructor").is_some() {
+            if slot_get(class_obj, &InternalSlot::IsBooleanConstructor).is_some() {
                 return handle_boolean_constructor(mc, evaluated_args, env);
             }
-            if get_own_property(class_obj, "__is_date_constructor").is_some() {
+            if slot_get(class_obj, &InternalSlot::IsDateConstructor).is_some() {
                 return crate::js_date::handle_date_constructor(mc, evaluated_args, env);
             }
             // Error-like constructors (Error) created via ensure_constructor_object
-            if get_own_property(class_obj, "__is_error_constructor").is_some() {
+            if slot_get(class_obj, &InternalSlot::IsErrorConstructor).is_some() {
                 // Use the class_obj as the canonical constructor
                 let canonical_ctor = class_obj;
 
@@ -2066,12 +2107,10 @@ pub(crate) fn evaluate_new<'gc>(
                     };
                     if let Value::Object(proto_obj) = proto_value {
                         instance.borrow_mut(mc).prototype = Some(proto_obj);
-                        object_set_key_value(mc, &instance, "__proto__", &Value::Object(proto_obj))?;
+                        slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto_obj));
                         // Ensure the instance __proto__ helper property is non-enumerable
-                        instance.borrow_mut(mc).set_non_enumerable("__proto__");
                     } else {
-                        object_set_key_value(mc, &instance, "__proto__", &proto_value)?;
-                        instance.borrow_mut(mc).set_non_enumerable("__proto__");
+                        slot_set(mc, &instance, InternalSlot::Proto, &proto_value);
                     }
                 }
 
@@ -2151,13 +2190,13 @@ pub(crate) fn evaluate_new<'gc>(
                 // Walk caller chain starting from current env
                 let mut env_opt: Option<crate::core::JSObjectDataPtr> = Some(*env);
                 while let Some(env_ptr) = env_opt {
-                    if let Some(frame_val_rc) = object_get_key_value(&env_ptr, "__frame")
+                    if let Some(frame_val_rc) = slot_get_chained(&env_ptr, &InternalSlot::Frame)
                         && let Value::String(s_utf16) = &*frame_val_rc.borrow()
                     {
                         stack_lines.push(format!("    at {}", utf16_to_utf8(s_utf16)));
                     }
                     // follow caller link if present
-                    if let Some(caller_rc) = object_get_key_value(&env_ptr, "__caller")
+                    if let Some(caller_rc) = slot_get_chained(&env_ptr, &InternalSlot::Caller)
                         && let Value::Object(caller_env) = &*caller_rc.borrow()
                     {
                         env_opt = Some(*caller_env);
@@ -2194,7 +2233,7 @@ pub(crate) fn evaluate_new<'gc>(
             // Ensure the call environment is aware of the function object so `new.target`
             // can be returned at runtime. For closures we set the `__function` property
             // to the closure value so it can be returned directly.
-            crate::core::object_set_key_value(mc, &func_env, "__function", &Value::Closure(*data))?;
+            crate::core::slot_set(mc, &func_env, InternalSlot::Function, &Value::Closure(*data));
 
             create_arguments_object(mc, &func_env, evaluated_args, Some(constructor_val))?;
 
@@ -2363,15 +2402,14 @@ pub(crate) fn create_class_object<'gc>(
             Value::Null => {
                 // extends null -> proto parent is null, constructor parent is Function.prototype
                 prototype_obj.borrow_mut(mc).prototype = None;
-                object_set_key_value(mc, &class_obj, "__extends_null", &Value::Boolean(true))?;
-                class_obj.borrow_mut(mc).set_non_enumerable("__extends_null");
+                slot_set(mc, &class_obj, InternalSlot::ExtendsNull, &Value::Boolean(true));
             }
             Value::Object(parent_class_obj) => {
                 let is_constructor = if parent_class_obj.borrow().class_def.is_some() {
                     true
-                } else if let Some(flag_rc) = get_own_property(&parent_class_obj, "__is_constructor") {
+                } else if let Some(flag_rc) = slot_get(&parent_class_obj, &InternalSlot::IsConstructor) {
                     matches!(*flag_rc.borrow(), Value::Boolean(true))
-                } else if get_own_property(&parent_class_obj, "__native_ctor").is_some() {
+                } else if slot_get(&parent_class_obj, &InternalSlot::NativeCtor).is_some() {
                     true
                 } else if let Some(cl_ptr) = parent_class_obj.borrow().get_closure() {
                     match &*cl_ptr.borrow() {
@@ -2418,7 +2456,6 @@ pub(crate) fn create_class_object<'gc>(
     crate::js_object::define_property_internal(mc, &class_obj, "prototype", &proto_desc)?;
     object_set_key_value(mc, &prototype_obj, "constructor", &Value::Object(class_obj))?;
     // Make prototype internal properties non-enumerable so for..in does not list them
-    prototype_obj.borrow_mut(mc).set_non_enumerable("__proto__");
     prototype_obj.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Store class definition for later use (use internal slot, not an own property)
@@ -3326,7 +3363,12 @@ pub(crate) fn create_class_object<'gc>(
             PendingStaticElement::Field(key, value_expr) => {
                 let static_env =
                     prepare_call_env_with_this(mc, Some(&class_env), Some(&Value::Object(class_obj)), None, &[], None, None, None)?;
-                object_set_key_value(mc, &static_env, "__class_field_initializer", &Value::Boolean(true))?;
+                slot_set(
+                    mc,
+                    &static_env,
+                    InternalSlot::ClassField("initializer".to_string()),
+                    &Value::Boolean(true),
+                );
                 static_env.borrow_mut(mc).set_home_object(Some(class_obj.into()));
                 let value = evaluate_expr(mc, &static_env, &value_expr)?;
                 set_name_if_anonymous(mc, &value, &value_expr, &key)?;
@@ -3524,15 +3566,15 @@ pub(crate) fn evaluate_super_call<'gc>(
         return Err(raise_type_error!("super() called in invalid context").into());
     };
 
-    if let Some(proto_rc) = object_get_key_value(&instance, "__computed_proto")
+    if let Some(proto_rc) = slot_get_chained(&instance, &InternalSlot::ComputedProto)
         && let Value::Object(proto_obj) = &*proto_rc.borrow()
     {
         instance.borrow_mut(mc).prototype = Some(*proto_obj);
-        object_set_key_value(mc, &instance, "__proto__", &Value::Object(*proto_obj))?;
+        slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(*proto_obj));
     }
 
     // Get this initialization status from lexical environment
-    let this_initialized = object_get_key_value(&lexical_env, "__this_initialized")
+    let this_initialized = slot_get_chained(&lexical_env, &InternalSlot::ThisInitialized)
         .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
         .unwrap_or(false);
 
@@ -3546,7 +3588,7 @@ pub(crate) fn evaluate_super_call<'gc>(
     let mut cur_env = Some(*env);
     let mut chosen_function: Option<Value> = None;
     while let Some(e) = cur_env {
-        if let Some(f_rc) = object_get_key_value(&e, "__function") {
+        if let Some(f_rc) = slot_get_chained(&e, &InternalSlot::Function) {
             let f_val = f_rc.borrow().clone();
             // determine if f_val corresponds to an arrow function
             let mut is_arrow = false;
@@ -3582,7 +3624,7 @@ pub(crate) fn evaluate_super_call<'gc>(
         // the parent class. Fallback to an own `__proto__` property if present.
         if let Some(proto_ptr) = func_obj.borrow().prototype {
             Value::Object(proto_ptr)
-        } else if let Some(proto_val) = object_get_key_value(func_obj, "__proto__") {
+        } else if let Some(proto_val) = slot_get_chained(func_obj, &InternalSlot::Proto) {
             proto_val.borrow().clone()
         } else {
             Value::Undefined
@@ -3592,7 +3634,7 @@ pub(crate) fn evaluate_super_call<'gc>(
     };
 
     let current_extends_null = if let Value::Object(func_obj) = &current_function {
-        if let Some(flag_rc) = get_own_property(func_obj, "__extends_null") {
+        if let Some(flag_rc) = slot_get(func_obj, &InternalSlot::ExtendsNull) {
             matches!(*flag_rc.borrow(), Value::Boolean(true))
         } else {
             false
@@ -3605,11 +3647,11 @@ pub(crate) fn evaluate_super_call<'gc>(
         |mc: &MutationContext<'gc>, this_to_bind: Option<crate::core::JSObjectDataPtr<'gc>>| -> Result<(), JSError> {
             let to_set = this_to_bind.unwrap_or(instance);
             crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(to_set))?;
-            crate::core::object_set_key_value(mc, &lexical_env, "__this_initialized", &Value::Boolean(true))?;
+            crate::core::slot_set(mc, &lexical_env, InternalSlot::ThisInitialized, &Value::Boolean(true));
 
             let mut cur = Some(*env);
             while let Some(env_ptr) = cur {
-                crate::core::object_set_key_value(mc, &env_ptr, "__this_initialized", &Value::Boolean(true))?;
+                crate::core::slot_set(mc, &env_ptr, InternalSlot::ThisInitialized, &Value::Boolean(true));
                 crate::core::object_set_key_value(mc, &env_ptr, "this", &Value::Object(to_set))?;
 
                 if Gc::ptr_eq(env_ptr, lexical_env) {
@@ -3652,12 +3694,12 @@ pub(crate) fn evaluate_super_call<'gc>(
                         Some(parent_class_obj),
                     )?;
                     if let Some(nt_val) = find_binding(env, "__new_target") {
-                        crate::core::object_set_key_value(mc, &func_env, "__new_target", &nt_val)?;
+                        crate::core::slot_set(mc, &func_env, InternalSlot::NewTarget, &nt_val);
                     } else if let Value::Object(_) = &current_function {
-                        crate::core::object_set_key_value(mc, &func_env, "__new_target", &current_function)?;
+                        crate::core::slot_set(mc, &func_env, InternalSlot::NewTarget, &current_function);
                     }
                     // Set __super for the parent constructor (should be undefined for base classes)
-                    crate::core::object_set_key_value(mc, &func_env, "__super", &Value::Undefined)?;
+                    crate::core::slot_set(mc, &func_env, InternalSlot::Super, &Value::Undefined);
                     // Create the arguments object
                     create_arguments_object(mc, &func_env, evaluated_args, None)?;
                     let parent_result = crate::core::evaluate_statements_with_context(mc, &func_env, body, &[])?;
@@ -3730,12 +3772,12 @@ pub(crate) fn evaluate_super_call<'gc>(
                     if let Value::Object(new_instance) = res {
                         // Update this and __instance bindings to the actual returned instance
                         crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(new_instance))?;
-                        crate::core::object_set_key_value(mc, &lexical_env, "__instance", &Value::Object(new_instance))?;
+                        crate::core::slot_set(mc, &lexical_env, InternalSlot::Instance, &Value::Object(new_instance));
                         let mut cur_update = Some(*env);
                         while let Some(env_ptr) = cur_update {
                             crate::core::object_set_key_value(mc, &env_ptr, "this", &Value::Object(new_instance))?;
-                            if object_get_key_value(&env_ptr, "__instance").is_some() {
-                                crate::core::object_set_key_value(mc, &env_ptr, "__instance", &Value::Object(new_instance))?;
+                            if slot_get_chained(&env_ptr, &InternalSlot::Instance).is_some() {
+                                crate::core::slot_set(mc, &env_ptr, InternalSlot::Instance, &Value::Object(new_instance));
                             }
                             if Gc::ptr_eq(env_ptr, lexical_env) {
                                 break;
@@ -3748,28 +3790,28 @@ pub(crate) fn evaluate_super_call<'gc>(
                         // constructors, which may allocate and return a different object but must
                         // still use newTarget.prototype.
                         let should_apply_proto_transfer =
-                            Gc::ptr_eq(new_instance, instance) || get_own_property(&parent_class_obj, "__kind").is_some();
+                            Gc::ptr_eq(new_instance, instance) || slot_get(&parent_class_obj, &InternalSlot::Kind).is_some();
 
                         if should_apply_proto_transfer {
                             if let Some(proto_env) = find_binding_env(&lexical_env, "__computed_proto") {
-                                if let Some(proto_rc) = object_get_key_value(&proto_env, "__computed_proto") {
+                                if let Some(proto_rc) = slot_get_chained(&proto_env, &InternalSlot::ComputedProto) {
                                     match &*proto_rc.borrow() {
                                         Value::Object(proto_obj) => {
                                             new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                                            object_set_key_value(mc, &new_instance, "__proto__", &Value::Object(*proto_obj))?;
-                                            crate::core::object_set_key_value(mc, &proto_env, "__computed_proto", &Value::Undefined)?;
+                                            slot_set(mc, &new_instance, InternalSlot::Proto, &Value::Object(*proto_obj));
+                                            crate::core::slot_set(mc, &proto_env, InternalSlot::ComputedProto, &Value::Undefined);
                                         }
                                         _other => {}
                                     }
                                 }
-                            } else if let Some(orig_inst_rc) = object_get_key_value(&lexical_env, "__instance") {
+                            } else if let Some(orig_inst_rc) = slot_get_chained(&lexical_env, &InternalSlot::Instance) {
                                 match &*orig_inst_rc.borrow() {
                                     Value::Object(orig_inst) => {
-                                        if let Some(proto_rc) = object_get_key_value(orig_inst, "__computed_proto") {
+                                        if let Some(proto_rc) = slot_get_chained(orig_inst, &InternalSlot::ComputedProto) {
                                             match &*proto_rc.borrow() {
                                                 Value::Object(proto_obj) => {
                                                     new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                                                    object_set_key_value(mc, &new_instance, "__proto__", &Value::Object(*proto_obj))?;
+                                                    slot_set(mc, &new_instance, InternalSlot::Proto, &Value::Object(*proto_obj));
                                                     crate::core::object_set_key_value(
                                                         mc,
                                                         orig_inst,
@@ -3826,7 +3868,7 @@ pub(crate) fn evaluate_super_call<'gc>(
         }
 
         // Handle native constructors (like Array, Object, etc.)
-        if let Some(native_ctor_name_rc) = get_own_property(&parent_class_obj, "__native_ctor")
+        if let Some(native_ctor_name_rc) = slot_get(&parent_class_obj, &InternalSlot::NativeCtor)
             && let Value::String(_) = &*native_ctor_name_rc.borrow()
         {
             // Call native constructor as a constructor (not a normal call)
@@ -3848,12 +3890,12 @@ pub(crate) fn evaluate_super_call<'gc>(
             if let Value::Object(new_instance) = res {
                 // Update this and __instance bindings to the actual returned instance
                 crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(new_instance))?;
-                crate::core::object_set_key_value(mc, &lexical_env, "__instance", &Value::Object(new_instance))?;
+                crate::core::slot_set(mc, &lexical_env, InternalSlot::Instance, &Value::Object(new_instance));
                 let mut cur_update = Some(*env);
                 while let Some(env_ptr) = cur_update {
                     crate::core::object_set_key_value(mc, &env_ptr, "this", &Value::Object(new_instance))?;
-                    if object_get_key_value(&env_ptr, "__instance").is_some() {
-                        crate::core::object_set_key_value(mc, &env_ptr, "__instance", &Value::Object(new_instance))?;
+                    if slot_get_chained(&env_ptr, &InternalSlot::Instance).is_some() {
+                        crate::core::slot_set(mc, &env_ptr, InternalSlot::Instance, &Value::Object(new_instance));
                     }
                     if Gc::ptr_eq(env_ptr, lexical_env) {
                         break;
@@ -3997,11 +4039,11 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
     // Fallback for legacy class implementation
     if let Some(this_val) = object_get_key_value(env, "this")
         && let Value::Object(instance) = &*this_val.borrow()
-        && let Some(proto_val) = object_get_key_value(instance, "__proto__")
+        && let Some(proto_val) = slot_get_chained(instance, &InternalSlot::Proto)
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         // Get the parent prototype
-        if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__")
+        if let Some(parent_proto_val) = slot_get_chained(proto_obj, &InternalSlot::Proto)
             && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
         {
             if let crate::core::PropertyKey::String(s) = &key
@@ -4295,11 +4337,11 @@ pub(crate) fn evaluate_super_method<'gc>(
 
     // Fallback for legacy class implementation
     if let Value::Object(instance) = &actual_this
-        && let Some(proto_val) = object_get_key_value(instance, "__proto__")
+        && let Some(proto_val) = slot_get_chained(instance, &InternalSlot::Proto)
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         // Get the parent prototype
-        if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__")
+        if let Some(parent_proto_val) = slot_get_chained(proto_obj, &InternalSlot::Proto)
             && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
         {
             // Look for method in parent prototype
@@ -4391,15 +4433,13 @@ pub(crate) fn handle_object_constructor<'gc>(
         Value::Object(obj) => Ok(Value::Object(obj)),
         Value::Number(n) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "__value__", &Value::Number(n))?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Number(n));
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number")?;
             Ok(Value::Object(obj))
         }
         Value::Boolean(b) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "__value__", &Value::Boolean(b))?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Boolean(b));
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
             Ok(Value::Object(obj))
         }
@@ -4412,22 +4452,19 @@ pub(crate) fn handle_object_constructor<'gc>(
                 let idx_desc = crate::core::create_descriptor_object(mc, &ch_val, false, true, false)?;
                 crate::js_object::define_property_internal(mc, &obj, idx, &idx_desc)?;
             }
-            object_set_key_value(mc, &obj, "__value__", &Value::String(s))?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::String(s));
             crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String")?;
             Ok(Value::Object(obj))
         }
         Value::BigInt(h) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "__value__", &Value::BigInt(h.clone()))?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::BigInt(h.clone()));
             let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
             Ok(Value::Object(obj))
         }
         Value::Symbol(sd) => {
             let obj = new_js_object_data(mc);
-            object_set_key_value(mc, &obj, "__value__", &Value::Symbol(sd))?;
-            obj.borrow_mut(mc).set_non_enumerable("__value__");
+            slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Symbol(sd));
             if let Some(sym) = object_get_key_value(env, "Symbol")
                 && let Value::Object(ctor_obj) = &*sym.borrow()
                 && let Some(proto) = object_get_key_value(ctor_obj, "prototype")
@@ -4475,8 +4512,7 @@ pub(crate) fn handle_number_constructor<'gc>(
         }
     };
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "__value__", &Value::Number(num_val))?;
-    obj.borrow_mut(mc).set_non_enumerable("__value__");
+    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Number(num_val));
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number")?;
     Ok(Value::Object(obj))
 }
@@ -4504,9 +4540,9 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
     if let Some(t) = this_val {
         crate::core::object_set_key_value(mc, &new_env, "this", t)?;
         if matches!(t, Value::Uninitialized) {
-            crate::core::object_set_key_value(mc, &new_env, "__this_initialized", &Value::Boolean(false))?;
+            crate::core::slot_set(mc, &new_env, InternalSlot::ThisInitialized, &Value::Boolean(false));
         } else {
-            crate::core::object_set_key_value(mc, &new_env, "__this_initialized", &Value::Boolean(true))?;
+            crate::core::slot_set(mc, &new_env, InternalSlot::ThisInitialized, &Value::Boolean(true));
         }
     } else {
         // If this_val is None (e.g. arrow function captured its outer environment's this binding),
@@ -4516,8 +4552,8 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
         if let Some(c) = captured_env {
             let mut cur = Some(*c);
             while let Some(env_ptr) = cur {
-                if let Some(status) = crate::core::object_get_key_value(&env_ptr, "__this_initialized") {
-                    crate::core::object_set_key_value(mc, &new_env, "__this_initialized", &status.borrow().clone())?;
+                if let Some(status) = crate::core::slot_get_chained(&env_ptr, &InternalSlot::ThisInitialized) {
+                    crate::core::slot_set(mc, &new_env, InternalSlot::ThisInitialized, &status.borrow().clone());
                     status_found = true;
                     break;
                 }
@@ -4527,8 +4563,8 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
         if !status_found && let Some(s) = scope {
             let mut cur = Some(*s);
             while let Some(env_ptr) = cur {
-                if let Some(status) = crate::core::object_get_key_value(&env_ptr, "__this_initialized") {
-                    crate::core::object_set_key_value(mc, &new_env, "__this_initialized", &status.borrow().clone())?;
+                if let Some(status) = crate::core::slot_get_chained(&env_ptr, &InternalSlot::ThisInitialized) {
+                    crate::core::slot_set(mc, &new_env, InternalSlot::ThisInitialized, &status.borrow().clone());
                     break;
                 }
                 cur = env_ptr.borrow().prototype;
@@ -4538,25 +4574,25 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
 
     if instance.is_some() && this_val.is_none() {
         // Only set to false if not already set by this_val or inherited status above
-        if crate::core::object_get_key_value(&new_env, "__this_initialized").is_none() {
-            crate::core::object_set_key_value(mc, &new_env, "__this_initialized", &Value::Boolean(false))?;
+        if crate::core::slot_get_chained(&new_env, &InternalSlot::ThisInitialized).is_none() {
+            crate::core::slot_set(mc, &new_env, InternalSlot::ThisInitialized, &Value::Boolean(false));
         }
     }
 
     if let Some(inst) = instance {
-        crate::core::object_set_key_value(mc, &new_env, "__instance", &Value::Object(inst))?;
+        crate::core::slot_set(mc, &new_env, InternalSlot::Instance, &Value::Object(inst));
     }
 
     if let Some(f_obj) = fn_obj {
-        crate::core::object_set_key_value(mc, &new_env, "__function", &Value::Object(f_obj))?;
+        crate::core::slot_set(mc, &new_env, InternalSlot::Function, &Value::Object(f_obj));
     } else if let Some(c) = captured_env {
-        if let Some(f) = crate::core::object_get_key_value(c, "__function") {
-            crate::core::object_set_key_value(mc, &new_env, "__function", &f.borrow().clone())?;
+        if let Some(f) = crate::core::slot_get_chained(c, &InternalSlot::Function) {
+            crate::core::slot_set(mc, &new_env, InternalSlot::Function, &f.borrow().clone());
         }
     } else if let Some(s) = scope
-        && let Some(f) = crate::core::object_get_key_value(s, "__function")
+        && let Some(f) = crate::core::slot_get_chained(s, &InternalSlot::Function)
     {
-        crate::core::object_set_key_value(mc, &new_env, "__function", &f.borrow().clone())?;
+        crate::core::slot_set(mc, &new_env, InternalSlot::Function, &f.borrow().clone());
     }
 
     if let Some(ps) = params {
@@ -4604,7 +4640,7 @@ pub(crate) fn prepare_call_env_with_this<'gc>(
                     if let Some(v) = args.get(i) {
                         let obj_val = v.clone();
                         if let Value::Object(o) = obj_val {
-                            crate::core::env_set(mc, &new_env, "__obj_param_placeholder", &Value::Object(o))?;
+                            crate::core::slot_set(mc, &new_env, InternalSlot::ObjParamPlaceholder, &Value::Object(o));
                         }
                     }
                 }

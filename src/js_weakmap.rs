@@ -1,5 +1,5 @@
 use crate::core::JSWeakMap;
-use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
+use crate::core::{Gc, GcCell, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
     error::JSError,
@@ -26,11 +26,8 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
     // Create a wrapper object for the WeakMap
     let weakmap_obj = new_js_object_data(mc);
     // Store the actual weakmap data
-    weakmap_obj
-        .borrow_mut(mc)
-        .insert("__weakmap__", new_gc_cell_ptr(mc, Value::WeakMap(weakmap)));
+    slot_set(mc, &weakmap_obj, InternalSlot::WeakMap, &Value::WeakMap(weakmap));
     // Internal slot should be non-enumerable so it doesn't show up in `evaluate_script` output
-    weakmap_obj.borrow_mut(mc).set_non_enumerable("__weakmap__");
 
     // Set prototype to WeakMap.prototype if available
     if let Some(weakmap_ctor) = object_get_key_value(env, "WeakMap")
@@ -84,8 +81,13 @@ fn initialize_weakmap_from_iterable<'gc>(
 /// Initialize WeakMap constructor and prototype
 pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let weakmap_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &weakmap_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &weakmap_ctor, "__native_ctor", &Value::String(utf8_to_utf16("WeakMap")))?;
+    slot_set(mc, &weakmap_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(
+        mc,
+        &weakmap_ctor,
+        InternalSlot::NativeCtor,
+        &Value::String(utf8_to_utf16("WeakMap")),
+    );
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -237,7 +239,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 
 /// Check if a JS object wraps an internal WeakMap
 pub fn is_weakmap_object<'gc>(_mc: &MutationContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
-    if let Some(val_rc) = object_get_key_value(obj, "__weakmap__") {
+    if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::WeakMap) {
         matches!(&*val_rc.borrow(), crate::core::Value::WeakMap(_))
     } else {
         false

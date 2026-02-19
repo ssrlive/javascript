@@ -1,6 +1,6 @@
 use crate::core::{
-    ClosureData, Gc, Value, get_own_property, new_gc_cell_ptr, object_get_key_value, object_set_key_value, value_to_sort_string,
-    values_equal,
+    ClosureData, Gc, InternalSlot, Value, new_gc_cell_ptr, object_get_key_value, object_set_key_value, slot_get, slot_get_chained,
+    slot_set, value_to_sort_string, values_equal,
 };
 use crate::core::{MutationContext, object_get_length, object_set_length};
 use crate::js_proxy::proxy_set_property_with_receiver;
@@ -12,11 +12,11 @@ use crate::{
 
 pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let array_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &array_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &array_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Array")))?;
+    slot_set(mc, &array_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &array_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Array")));
     let array_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &array_ctor, "__is_constructor", &Value::Boolean(true))?;
-    object_set_key_value(mc, &array_ctor, "__native_ctor", &Value::String(utf8_to_utf16("Array")))?;
+    slot_set(mc, &array_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &array_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Array")));
 
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
@@ -33,8 +33,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         array_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &array_proto, "__is_array", &Value::Boolean(true))?;
-    array_proto.borrow_mut(mc).set_non_enumerable("__is_array");
+    slot_set(mc, &array_proto, InternalSlot::IsArray, &Value::Boolean(true));
 
     object_set_key_value(mc, &array_ctor, "prototype", &Value::Object(array_proto))?;
     array_ctor.borrow_mut(mc).set_non_writable("prototype");
@@ -246,7 +245,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                             .unwrap_or(true);
                         if should_update {
                             out_obj.borrow_mut(mc).prototype = Some(proto_obj);
-                            let _ = object_set_key_value(mc, &out_obj, "__proto__", &Value::Object(proto_obj));
+                            slot_set(mc, &out_obj, InternalSlot::Proto, &Value::Object(proto_obj));
                         }
                     }
                 }
@@ -271,8 +270,8 @@ pub(crate) fn handle_array_static_method<'gc>(
                         crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None)
                     }
                 }
-                Value::Object(obj) if object_get_key_value(obj, "__native_ctor").is_some() => {
-                    if let Some(native_ctor) = object_get_key_value(obj, "__native_ctor")
+                Value::Object(obj) if slot_get_chained(obj, &InternalSlot::NativeCtor).is_some() => {
+                    if let Some(native_ctor) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                         && let Value::String(name_u16) = &*native_ctor.borrow()
                     {
                         let native_name = utf16_to_utf8(name_u16);
@@ -342,7 +341,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                     .unwrap_or(true);
                 if should_update {
                     out.borrow_mut(mc).prototype = Some(array_proto);
-                    let _ = object_set_key_value(mc, &out, "__proto__", &Value::Object(array_proto));
+                    slot_set(mc, &out, InternalSlot::Proto, &Value::Object(array_proto));
                 }
             }
         }
@@ -350,7 +349,7 @@ pub(crate) fn handle_array_static_method<'gc>(
     };
 
     let create_data_property_or_throw = |target: &JSObjectDataPtr<'gc>, key: usize, value: &Value<'gc>| -> Result<(), EvalError<'gc>> {
-        if let Some(proxy_cell) = crate::core::get_own_property(target, "__proxy__")
+        if let Some(proxy_cell) = crate::core::slot_get(target, &InternalSlot::Proxy)
             && let Value::Proxy(proxy) = &*proxy_cell.borrow()
         {
             let prop_key = PropertyKey::from(key.to_string());
@@ -367,7 +366,7 @@ pub(crate) fn handle_array_static_method<'gc>(
     };
 
     let set_length_with_set_semantics = |target: &JSObjectDataPtr<'gc>, len: usize| -> Result<(), EvalError<'gc>> {
-        if let Some(proxy_cell) = crate::core::get_own_property(target, "__proxy__")
+        if let Some(proxy_cell) = crate::core::slot_get(target, &InternalSlot::Proxy)
             && let Value::Proxy(proxy) = &*proxy_cell.borrow()
         {
             let prop_key = PropertyKey::from("length");
@@ -427,7 +426,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                 Value::Object(object) => {
                     let mut current = object;
                     loop {
-                        if let Some(proxy_cell) = crate::core::get_own_property(&current, "__proxy__")
+                        if let Some(proxy_cell) = crate::core::slot_get(&current, &InternalSlot::Proxy)
                             && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                         {
                             if proxy.revoked {
@@ -467,8 +466,8 @@ pub(crate) fn handle_array_static_method<'gc>(
                         | Value::AsyncGeneratorFunction(_, _) => true,
                         Value::Object(obj) => {
                             obj.borrow().get_closure().is_some()
-                                || object_get_key_value(obj, "__native_ctor").is_some()
-                                || object_get_key_value(obj, "__bound_target").is_some()
+                                || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                                || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                         }
                         _ => false,
                     };
@@ -497,7 +496,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                     if let Value::Object(obj) = fn_val {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_fn = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                        } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                             && let Value::String(name_vec) = &*nc.borrow()
                         {
                             actual_fn = Value::Function(utf16_to_utf8(name_vec));
@@ -908,14 +907,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(length)
         }
         "join" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
                 return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
             }
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -990,14 +989,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::String(utf8_to_utf16(&result)))
         }
         "slice" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
                 return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
             }
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -1034,7 +1033,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
             };
 
-            let receiver_is_array = if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+            let receiver_is_array = if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                 if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                     if proxy.revoked {
                         return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
@@ -1057,8 +1056,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let ctor_is_constructor = match &ctor_val {
                         Value::Object(obj) => {
                             obj.borrow().class_def.is_some()
-                                || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
-                                || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
+                                || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
+                                || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
                                 || obj.borrow().get_closure().is_some()
                         }
                         _ => false,
@@ -1143,7 +1142,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         if buf_len < needed { 0 } else { ta.length }
                     };
                     k < effective_len
-                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         crate::js_proxy::proxy_has_property(mc, proxy, k.to_string())?
                     } else {
@@ -1166,7 +1165,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(new_array))
         }
         "forEach" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -1195,8 +1194,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -1204,7 +1203,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_type_error!("Array.forEach callback must be a function").into());
             }
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -1218,7 +1217,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                     && let Value::String(name_vec) = &*nc.borrow()
                 {
                     let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -1255,7 +1254,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Undefined)
         }
         "map" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -1282,8 +1281,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -1300,7 +1299,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // - revoked proxy receiver should throw TypeError before constructor access
             // - abrupt completion while reading `constructor` should propagate
             // - primitive/non-undefined constructor on arrays should throw TypeError
-            let receiver_is_array = if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+            let receiver_is_array = if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                 if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                     if proxy.revoked {
                         return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
@@ -1323,8 +1322,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let ctor_is_constructor = match &ctor_val {
                         Value::Object(obj) => {
                             obj.borrow().class_def.is_some()
-                                || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
-                                || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
+                                || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
+                                || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
                                 || obj.borrow().get_closure().is_some()
                         }
                         _ => false,
@@ -1339,7 +1338,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let new_array = create_array(mc, env)?;
             set_array_length(mc, &new_array, current_len)?;
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -1376,7 +1375,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if let Value::Object(obj) = &callback_val {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_callback_val = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                        } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                             && let Value::String(name_vec) = &*nc.borrow()
                         {
                             let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -1392,7 +1391,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(new_array))
         }
         "filter" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -1420,8 +1419,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -1433,7 +1432,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_range_error!("Invalid array length").into());
             }
 
-            let receiver_is_array = if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+            let receiver_is_array = if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                 if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                     if proxy.revoked {
                         return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
@@ -1456,8 +1455,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let ctor_is_constructor = match &ctor_val {
                         Value::Object(obj) => {
                             obj.borrow().class_def.is_some()
-                                || crate::core::object_get_key_value(obj, "__is_constructor").is_some()
-                                || crate::core::object_get_key_value(obj, "__native_ctor").is_some()
+                                || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
+                                || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
                                 || obj.borrow().get_closure().is_some()
                         }
                         _ => false,
@@ -1472,7 +1471,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let new_array = create_array(mc, env)?;
             let mut idx = 0usize;
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -1509,7 +1508,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if let Value::Object(obj) = &callback_val {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_callback_val = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                        } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                             && let Value::String(name_vec) = &*nc.borrow()
                         {
                             let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -1529,7 +1528,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(new_array))
         }
         "reduce" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -1558,8 +1557,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -1567,7 +1566,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_type_error!("Array.reduce callback must be a function").into());
             }
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -1634,7 +1633,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                     && let Value::String(name_vec) = &*nc.borrow()
                 {
                     let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -1654,7 +1653,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(accumulator)
         }
         "reduceRight" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -1683,8 +1682,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -1692,7 +1691,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_type_error!("Array.reduceRight callback must be a function").into());
             }
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -1760,7 +1759,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                     && let Value::String(name_vec) = &*nc.borrow()
                 {
                     let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -1784,7 +1783,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(accumulator)
         }
         "find" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -1813,8 +1812,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -1826,7 +1825,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                     && let Value::String(name_vec) = &*nc.borrow()
                 {
                     let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -1846,7 +1845,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Undefined)
         }
         "findIndex" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -1875,8 +1874,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -1888,7 +1887,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                     && let Value::String(name_vec) = &*nc.borrow()
                 {
                     let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -1929,8 +1928,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -1940,7 +1939,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -1977,7 +1976,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if let Value::Object(obj) = &callback {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_callback_val = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                        } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                             && let Value::String(name_vec) = &*nc.borrow()
                         {
                             let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -2016,8 +2015,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -2027,7 +2026,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -2064,7 +2063,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if let Value::Object(obj) = &callback {
                         if let Some(prop) = obj.borrow().get_closure() {
                             actual_callback_val = prop.borrow().clone();
-                        } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                        } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                             && let Value::String(name_vec) = &*nc.borrow()
                         {
                             let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -2086,8 +2085,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 match v {
                     Value::Object(obj) => {
                         obj.borrow().class_def.is_some()
-                            || object_get_key_value(obj, "__is_constructor").is_some()
-                            || object_get_key_value(obj, "__native_ctor").is_some()
+                            || slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
+                            || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
                             || obj.borrow().get_closure().is_some()
                     }
                     Value::Function(name) => matches!(
@@ -2100,7 +2099,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let is_array_or_throw = |obj: &JSObjectDataPtr<'gc>| -> Result<bool, EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(obj, "__proxy__")
+                if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     if proxy.revoked {
@@ -2221,7 +2220,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(out))
         }
         "indexOf" => {
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -2615,8 +2614,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     | Value::AsyncGeneratorFunction(_, _) => true,
                     Value::Object(obj) => {
                         obj.borrow().get_closure().is_some()
-                            || object_get_key_value(obj, "__native_ctor").is_some()
-                            || object_get_key_value(obj, "__bound_target").is_some()
+                            || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                            || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                     }
                     _ => false,
                 };
@@ -2637,7 +2636,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 len_num.floor().min(max_len) as usize
             };
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -2665,7 +2664,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         if buf_len < needed { 0 } else { ta.length }
                     };
                     i < effective_len
-                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         crate::js_proxy::proxy_has_property(mc, proxy, i.to_string())?
                     } else {
@@ -2800,7 +2799,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // Remove remaining own indexed properties in [itemCount, len).
             let mut idx = items.len();
             while idx < current_len {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         let key_prop = PropertyKey::from(idx.to_string());
                         let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
@@ -2839,7 +2838,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 len_num.floor().min(max_len) as usize
             };
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -2864,7 +2863,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         if buf_len < needed { 0 } else { ta.length }
                     };
                     Ok(index < effective_len)
-                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
                     } else {
@@ -2876,7 +2875,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
@@ -2898,7 +2897,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let set_property_or_throw = |index: usize, value: &Value<'gc>| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
@@ -2946,7 +2945,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(*object))
         }
         "splice" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -2957,8 +2956,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 match v {
                     Value::Object(obj) => {
                         obj.borrow().class_def.is_some()
-                            || object_get_key_value(obj, "__is_constructor").is_some()
-                            || object_get_key_value(obj, "__native_ctor").is_some()
+                            || slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
+                            || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
                             || obj.borrow().get_closure().is_some()
                     }
                     Value::Function(name) => matches!(
@@ -3193,7 +3192,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
                     } else {
@@ -3205,7 +3204,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
@@ -3314,7 +3313,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
                     } else {
@@ -3326,7 +3325,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
@@ -3384,7 +3383,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
         }
         "unshift" => {
             if !is_array(mc, object)
-                && let Some(wrapped) = object_get_key_value(object, "__value__")
+                && let Some(wrapped) = slot_get_chained(object, &InternalSlot::PrimitiveValue)
                 && matches!(*wrapped.borrow(), Value::String(_))
             {
                 return Err(raise_type_error!("Cannot assign to read only property").into());
@@ -3511,7 +3510,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
                     } else {
@@ -3523,7 +3522,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let delete_property_or_throw = |index: usize| -> Result<(), EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+                if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
@@ -3582,7 +3581,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Number(new_len as f64))
         }
         "fill" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -3591,7 +3590,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let fill_value = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -3715,7 +3714,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(*object))
         }
         "lastIndexOf" => {
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -4038,8 +4037,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -4049,7 +4048,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return evaluate_call_dispatch(mc, env, &join_method, Some(&this_arg), &[]);
             }
 
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -4184,14 +4183,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(new_array))
         }
         "copyWithin" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
                 return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
             }
 
-            let typed_array_ptr = if let Some(ta_cell) = object_get_key_value(object, "__typedarray") {
+            let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)
                 } else {
@@ -4317,7 +4316,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         if buf_len < needed { 0usize } else { ta.length }
                     };
                     from_key < effective_len
-                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         crate::js_proxy::proxy_has_property(mc, proxy, from_key.to_string())?
                     } else {
@@ -4342,7 +4341,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     } else {
                         object_set_key_value(mc, object, to_key, &from_val)?;
                     }
-                } else if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__") {
+                } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         let to_key_prop = PropertyKey::from(to_key.to_string());
                         let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &to_key_prop)?;
@@ -4392,7 +4391,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(create_array_iterator(mc, env, *object, "entries")?)
         }
         "findLast" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -4421,8 +4420,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -4434,7 +4433,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                     && let Value::String(name_vec) = &*nc.borrow()
                 {
                     let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -4454,7 +4453,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Undefined)
         }
         "findLastIndex" => {
-            if let Some(proxy_cell) = crate::core::get_own_property(object, "__proxy__")
+            if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 && proxy.revoked
             {
@@ -4483,8 +4482,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 | Value::AsyncGeneratorFunction(_, _) => true,
                 Value::Object(obj) => {
                     obj.borrow().get_closure().is_some()
-                        || object_get_key_value(obj, "__native_ctor").is_some()
-                        || object_get_key_value(obj, "__bound_target").is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
                 }
                 _ => false,
             };
@@ -4496,7 +4495,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if let Value::Object(obj) = &callback_val {
                 if let Some(prop) = obj.borrow().get_closure() {
                     actual_callback_val = prop.borrow().clone();
-                } else if let Some(nc) = object_get_key_value(obj, "__native_ctor")
+                } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
                     && let Value::String(name_vec) = &*nc.borrow()
                 {
                     let name = crate::unicode::utf16_to_utf8(name_vec);
@@ -4566,7 +4565,7 @@ fn flatten_single_value<'gc>(
 
 /// Check if an object is an Array
 pub(crate) fn is_array<'gc>(_mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
-    if let Some(val) = get_own_property(obj, "__is_array")
+    if let Some(val) = slot_get(obj, &InternalSlot::IsArray)
         && let Value::Boolean(b) = *val.borrow()
     {
         return b;
@@ -4586,8 +4585,7 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     let arr = new_js_object_data(mc);
     set_array_length(mc, &arr, 0)?;
 
-    object_set_key_value(mc, &arr, "__is_array", &Value::Boolean(true))?;
-    arr.borrow_mut(mc).non_enumerable.insert("__is_array".into());
+    slot_set(mc, &arr, InternalSlot::IsArray, &Value::Boolean(true));
     // Mark 'length' as non-enumerable on arrays per spec
     arr.borrow_mut(mc).set_non_enumerable("length");
     arr.borrow_mut(mc).set_non_configurable("length");
@@ -4607,7 +4605,7 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
         if let Some(array_proto) = array_proto_candidate {
             arr.borrow_mut(mc).prototype = Some(array_proto);
-            let _ = object_set_key_value(mc, &arr, "__proto__", &Value::Object(array_proto));
+            slot_set(mc, &arr, InternalSlot::Proto, &Value::Object(array_proto));
             return Ok(arr);
         }
     }
@@ -4642,11 +4640,11 @@ pub(crate) fn create_array_iterator<'gc>(
     let iterator = new_js_object_data(mc);
 
     // Store array
-    object_set_key_value(mc, &iterator, "__iterator_array__", &Value::Object(object))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorArray, &Value::Object(object));
     // Store index
-    object_set_key_value(mc, &iterator, "__iterator_index__", &Value::Number(0.0))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
     // Store kind
-    object_set_key_value(mc, &iterator, "__iterator_kind__", &Value::String(utf8_to_utf16(kind)))?;
+    slot_set(mc, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
     // next method
     object_set_key_value(mc, &iterator, "next", &Value::Function("ArrayIterator.prototype.next".to_string()))?;
 
@@ -4678,7 +4676,8 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Get array
-    let arr_val = object_get_key_value(iterator, "__iterator_array__").ok_or(EvalError::Js(raise_eval_error!("Iterator has no array")))?;
+    let arr_val =
+        slot_get_chained(iterator, &InternalSlot::IteratorArray).ok_or(EvalError::Js(raise_eval_error!("Iterator has no array")))?;
     let arr_ptr = if let Value::Object(o) = &*arr_val.borrow() {
         *o
     } else if matches!(&*arr_val.borrow(), Value::Undefined) {
@@ -4692,7 +4691,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
 
     // Get index
     let index_val =
-        object_get_key_value(iterator, "__iterator_index__").ok_or(EvalError::Js(raise_eval_error!("Iterator has no index")))?;
+        slot_get_chained(iterator, &InternalSlot::IteratorIndex).ok_or(EvalError::Js(raise_eval_error!("Iterator has no index")))?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
@@ -4700,14 +4699,15 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     };
 
     // Get kind
-    let kind_val = object_get_key_value(iterator, "__iterator_kind__").ok_or(EvalError::Js(raise_eval_error!("Iterator has no kind")))?;
+    let kind_val =
+        slot_get_chained(iterator, &InternalSlot::IteratorKind).ok_or(EvalError::Js(raise_eval_error!("Iterator has no kind")))?;
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {
         return Err(raise_eval_error!("Iterator kind is invalid").into());
     };
 
-    let length = if let Some(ta_cell) = object_get_key_value(&arr_ptr, "__typedarray") {
+    let length = if let Some(ta_cell) = slot_get_chained(&arr_ptr, &InternalSlot::TypedArray) {
         if let Value::TypedArray(ta) = &*ta_cell.borrow() {
             if ta.length_tracking {
                 let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
@@ -4753,7 +4753,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     };
 
     if index >= length {
-        object_set_key_value(mc, iterator, "__iterator_array__", &Value::Undefined)?;
+        slot_set(mc, iterator, InternalSlot::IteratorArray, &Value::Undefined);
         let result_obj = new_js_object_data(mc);
         object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
         object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
@@ -4777,7 +4777,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
 
     // Update index
     index += 1;
-    object_set_key_value(mc, iterator, "__iterator_index__", &Value::Number(index as f64))?;
+    slot_set(mc, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
 
     let result_obj = new_js_object_data(mc);
     object_set_key_value(mc, &result_obj, "value", &result_value)?;

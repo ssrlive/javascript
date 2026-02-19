@@ -131,15 +131,22 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     {
         let async_func_ctor = new_js_object_data(mc);
         let async_func_proto = new_js_object_data(mc);
+
         // AsyncFunction.prototype inherits from Function.prototype
+        // AsyncFunction itself inherits from Function (the constructor)
         if let Some(func_ctor_val) = env_get(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-            && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            async_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
-            async_func_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+            // [[Prototype]] of AsyncFunction is Function
+            async_func_ctor.borrow_mut(mc).prototype = Some(*func_ctor);
+            // AsyncFunction.prototype.[[Prototype]] is Function.prototype
+            if let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+                && let Value::Object(func_proto) = &*proto_val.borrow()
+            {
+                async_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
+            }
         }
+
         // Set @@toStringTag = "AsyncFunction" on AsyncFunction.prototype
         if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
             && let Value::Object(sym_obj) = &*sym_ctor.borrow()
@@ -155,6 +162,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
             )?;
             crate::js_object::define_property_internal(mc, &async_func_proto, *tag_sym, &desc_tag)?;
         }
+
         // Make AsyncFunction callable via __native_ctor so AsyncFunction("...") works
         slot_set(
             mc,
@@ -162,11 +170,34 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
             InternalSlot::NativeCtor,
             &Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")),
         );
+        // Mark as constructor so typeof returns "function" and isConstructor is true
+        slot_set(mc, &async_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+
+        // AsyncFunction.length = 1 (non-writable, non-enumerable, configurable)
+        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &async_func_ctor, "length", &desc_len)?;
+
+        // AsyncFunction.name = "AsyncFunction" (non-writable, non-enumerable, configurable)
+        let desc_name = crate::core::create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")),
+            false,
+            false,
+            true,
+        )?;
+        crate::js_object::define_property_internal(mc, &async_func_ctor, "name", &desc_name)?;
+
         // Link constructor ↔ prototype
+        // AsyncFunction.prototype: non-writable, non-enumerable, non-configurable
         object_set_key_value(mc, &async_func_ctor, "prototype", &Value::Object(async_func_proto))?;
+        async_func_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+        async_func_ctor.borrow_mut(mc).set_non_writable("prototype");
+        async_func_ctor.borrow_mut(mc).set_non_configurable("prototype");
         object_set_key_value(mc, &async_func_proto, "constructor", &Value::Object(async_func_ctor))?;
         async_func_proto.borrow_mut(mc).set_non_enumerable("constructor");
-        env_set(mc, env, "AsyncFunction", &Value::Object(async_func_ctor))?;
+
+        // Store as hidden intrinsic (NOT a global) via internal slot
+        slot_set(mc, env, InternalSlot::AsyncFunctionCtor, &Value::Object(async_func_ctor));
     }
 
     env_set(mc, env, "undefined", &Value::Undefined)?;

@@ -375,6 +375,7 @@ pub enum InternalSlot {
     PendingIterator,        // __pending_iterator
     PendingIteratorDone,    // __pending_iterator_done
     ArrayIteratorPrototype, // %ArrayIteratorPrototype%
+    AsyncFunctionCtor,      // %AsyncFunction% constructor (hidden intrinsic)
 
     // --- Collections ---
     Map,     // __map__

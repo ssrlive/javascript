@@ -1646,7 +1646,7 @@ fn hoist_declarations<'gc>(
 
                 // Set __proto__ to AsyncFunction.prototype (or fall back to Function.prototype)
                 let mut async_proto_set = false;
-                if let Some(async_func_val) = env_get(env, "AsyncFunction")
+                if let Some(async_func_val) = slot_get_chained(env, &InternalSlot::AsyncFunctionCtor)
                     && let Value::Object(async_func_ctor) = &*async_func_val.borrow()
                     && let Some(proto_val) = object_get_key_value(async_func_ctor, "prototype")
                     && let Value::Object(proto) = &*proto_val.borrow()
@@ -1677,7 +1677,9 @@ fn hoist_declarations<'gc>(
                 let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
 
                 func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
-                object_set_key_value(mc, &func_obj, "name", &Value::String(utf8_to_utf16(name)))?;
+                // name: non-writable, non-enumerable, configurable
+                let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(name)), false, false, true)?;
+                crate::js_object::define_property_internal(mc, &func_obj, "name", &desc_name)?;
                 // Set 'length' property for async function declaration
                 let mut fn_length = 0_usize;
                 for p in params.iter() {
@@ -15520,7 +15522,7 @@ fn evaluate_expr_async_function<'gc>(
 
     // Set __proto__ to AsyncFunction.prototype (or fall back to Function.prototype)
     let mut proto_set = false;
-    if let Some(async_func_val) = env_get(env, "AsyncFunction")
+    if let Some(async_func_val) = slot_get_chained(env, &InternalSlot::AsyncFunctionCtor)
         && let Value::Object(async_func_ctor) = &*async_func_val.borrow()
         && let Some(proto_val) = object_get_key_value(async_func_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
@@ -16733,7 +16735,7 @@ fn evaluate_expr_async_arrow_function<'gc>(
     let func_obj = crate::core::new_js_object_data(mc);
     // Set __proto__ to AsyncFunction.prototype (or fall back to Function.prototype)
     let mut proto_set = false;
-    if let Some(async_func_val) = env_get(env, "AsyncFunction")
+    if let Some(async_func_val) = slot_get_chained(env, &InternalSlot::AsyncFunctionCtor)
         && let Value::Object(async_func_ctor) = &*async_func_val.borrow()
         && let Some(proto_val) = object_get_key_value(async_func_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()

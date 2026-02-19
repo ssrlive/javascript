@@ -56,7 +56,7 @@ jobs:
 
       - name: Build JavaScript engine
         run: |
-          cargo build --all-features --release --example js
+          cargo build --all-features --release --package js
 
       - name: Run test262 subset ${{ matrix.id }}
         if: ${{ !cancelled() }}

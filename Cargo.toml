@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["javascript", "engine", "interpreter", "runtime"]
 categories = ["development-tools", "parsing"]
 
+[workspace]
+members = ["js"]
+
 [features]
 default = ["os", "std"]
 os = ["libc", "windows-sys"]
@@ -41,11 +44,6 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 ctor = "0.6.3"
 env_logger = { version = "0.11.9" }
 rustyline = "17.0.2"
-
-[[example]]
-name = "js"
-path = "examples/js.rs"
-required-features = ["os", "std"]
 
 [[bench]]
 name = "promise_benchmarks"

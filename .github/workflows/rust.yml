@@ -56,7 +56,7 @@ jobs:
 
         for f in "${examples[@]}"; do
           printf '\n🔧 Running %s\n' "$f"
-          cargo run --all-features --example js -- "$f"
+          cargo run --all-features --package js -- "$f"
         done
 
         printf '\n✅ All tests passed\n'

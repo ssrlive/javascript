@@ -152,13 +152,13 @@ The crate provides a CLI binary with REPL support:
 #### `js` - Command-line interface with REPL
 ```bash
 # Execute a script string
-cargo run --example js -- -e "console.log('Hello World!')"
+cargo run --package js -- -e "console.log('Hello World!')"
 
 # Execute a JavaScript file
-cargo run --example js -- script.js
+cargo run --package js -- script.js
 
 # Start interactive REPL (persistent environment)
-cargo run --example js
+cargo run --package js
 ```
 
 The REPL maintains state between evaluations, allowing you to define variables and functions that persist across multiple inputs.

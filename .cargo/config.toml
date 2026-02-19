@@ -1,2 +1,2 @@
 [alias]
-run-js = "run --example js --features=os,std --"
+run-js = "run --package js --features=os,std --"

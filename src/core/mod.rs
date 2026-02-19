@@ -198,6 +198,8 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
         // Store as hidden intrinsic (NOT a global) via internal slot
         slot_set(mc, env, InternalSlot::AsyncFunctionCtor, &Value::Object(async_func_ctor));
+        // Stamp with OriginGlobal so evaluate_new can discover the constructor's realm
+        slot_set(mc, &async_func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
     }
 
     env_set(mc, env, "undefined", &Value::Undefined)?;
@@ -213,7 +215,30 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     env.borrow_mut(mc).set_non_configurable("Infinity");
     env.borrow_mut(mc).set_non_writable("Infinity");
 
-    env_set(mc, env, "eval", &Value::Function("eval".to_string()))?;
+    // Wrap eval in an Object so it carries OriginGlobal for cross-realm indirect eval.
+    // Without this, `var otherEval = otherRealm.eval; otherEval('var x = 1')` would
+    // execute in the caller's realm instead of the eval function's realm.
+    {
+        let eval_obj = new_js_object_data(mc);
+        eval_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("eval".to_string()))));
+        slot_set(mc, &eval_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        // [[Prototype]] = Function.prototype so `eval instanceof Function` works
+        if let Some(func_ctor_val) = env_get(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            eval_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        // eval.name = "eval", eval.length = 1
+        let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("eval")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &eval_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &eval_obj, "length", &desc_len)?;
+        env_set(mc, env, "eval", &Value::Object(eval_obj))?;
+    }
 
     // This engine operates in strict mode only; mark the global environment accordingly so
     // eval() and nested function parsing can enforce strict-mode rules unconditionally.
@@ -263,6 +288,9 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     env_set(mc, env, "setInterval", &Value::Function("setInterval".to_string()))?;
     env_set(mc, env, "clearInterval", &Value::Function("clearInterval".to_string()))?;
 
+    // Expose __createRealm__ as a native callable for cross-realm tests.
+    env_set(mc, env, "__createRealm__", &Value::Function("__createRealm__".to_string()))?;
+
     #[cfg(feature = "os")]
     crate::js_os::initialize_os_module(mc, env)?;
 
@@ -282,6 +310,26 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     }
 
     Ok(())
+}
+
+/// Create a new Realm: a fresh global environment with its own set of built-in
+/// intrinsics.  Returns the new global-env object (the "global" property
+/// expected by the `$262.createRealm()` harness).
+pub fn create_new_realm<'gc>(mc: &MutationContext<'gc>, _parent_env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let new_env = new_js_object_data(mc);
+    new_env.borrow_mut(mc).is_function_scope = true;
+
+    initialize_global_constructors(mc, &new_env)?;
+
+    env_set(mc, &new_env, "globalThis", &Value::Object(new_env))?;
+    object_set_key_value(mc, &new_env, "this", &Value::Object(new_env))?;
+
+    // Copy `print` from the parent realm so test harnesses have access.
+    if let Some(print_val) = env_get(_parent_env, "print") {
+        env_set(mc, &new_env, "print", &print_val.borrow())?;
+    }
+
+    Ok(new_env)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

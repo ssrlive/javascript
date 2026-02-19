@@ -12507,6 +12507,8 @@ pub fn evaluate_call_dispatch<'gc>(
                     }
                     // Async generator functions: create AsyncGenerator instance
                     Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, &cl, eval_args, Some(*obj))?),
+                    // Native function stored as closure (e.g., eval Object wrapper)
+                    Value::Function(name) => evaluate_call_dispatch(mc, env, &Value::Function(name), this_val, eval_args),
                     _ => Err(raise_type_error!("Not a function").into()),
                 }
             } else if obj.borrow().class_def.is_some() {
@@ -13138,15 +13140,74 @@ fn evaluate_expr_call<'gc>(
     // (the environment provided to the call), not necessarily the topmost realm object. Use the
     // passed-in `env` as the env_for_call when indirect. This allows detecting global lexical
     // declarations that live in the caller's global scope.
-    let is_indirect_eval_call = matches!(func_val, Value::Function(ref name) if name == "eval") && !is_direct_eval;
+    //
+    // Cross-realm: when the receiver (this_val) is a global object from another
+    // realm (identified by "globalThis === self"), use that object as the eval
+    // scope so that identifiers resolve in the receiver's realm.
+    // Detect whether func_val is an eval function — either Value::Function("eval")
+    // or an Object whose internal closure is Value::Function("eval").
+    let is_eval_value = match &func_val {
+        Value::Function(name) if name == "eval" => true,
+        Value::Object(obj) => {
+            if let Some(cl_ptr) = obj.borrow().get_closure()
+                && let Value::Function(name) = &*cl_ptr.borrow()
+                && name == "eval"
+            {
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    };
+    let is_indirect_eval_call = is_eval_value && !is_direct_eval;
     let env_for_call = if is_indirect_eval_call {
-        find_global_environment(env)
+        // Priority 1: check the eval function Object for OriginGlobal (cross-realm eval)
+        if let Value::Object(eval_obj) = &func_val
+            && let Some(og_rc) = slot_get(eval_obj, &InternalSlot::OriginGlobal)
+            && let Value::Object(origin_env) = &*og_rc.borrow()
+        {
+            *origin_env
+        }
+        // Priority 2: check if the receiver is a global environment
+        else if let Some(Value::Object(recv_obj)) = this_val.as_ref()
+            && let Some(gt_rc) = object_get_key_value(recv_obj, "globalThis")
+            && let Value::Object(gt_obj) = &*gt_rc.borrow()
+            && Gc::ptr_eq(*gt_obj, *recv_obj)
+        {
+            *recv_obj
+        } else {
+            find_global_environment(env)
+        }
     } else {
         *env
     };
 
+    // For Object-wrapped eval, unwrap to the inner Value::Function("eval") for dispatch
+    // so that dispatch_with_indirect_eval_marker can detect it.
+    let dispatch_func = if is_eval_value {
+        if let Value::Object(obj) = &func_val {
+            if let Some(cl_ptr) = obj.borrow().get_closure() {
+                cl_ptr.borrow().clone()
+            } else {
+                func_val.clone()
+            }
+        } else {
+            func_val.clone()
+        }
+    } else {
+        func_val.clone()
+    };
+
     // Dispatch, handling indirect `eval` marker on the global env when necessary.
-    dispatch_with_indirect_eval_marker(mc, &env_for_call, &func_val, this_val.as_ref(), &eval_args, is_indirect_eval_call)
+    dispatch_with_indirect_eval_marker(
+        mc,
+        &env_for_call,
+        &dispatch_func,
+        this_val.as_ref(),
+        &eval_args,
+        is_indirect_eval_call,
+    )
 }
 
 fn evaluate_expr_index_call<'gc>(
@@ -18284,6 +18345,34 @@ pub fn call_native_function<'gc>(
                             Some(*obj),
                         )?)),
                         Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, rest_args, None)?)),
+                        // Object wrapping a native function (e.g. eval Object)
+                        Value::Function(func_name) => {
+                            // Detect cross-realm eval via OriginGlobal
+                            let origin_env = if func_name == "eval" {
+                                if let Some(og_rc) = slot_get(obj, &InternalSlot::OriginGlobal)
+                                    && let Value::Object(origin) = &*og_rc.borrow()
+                                {
+                                    Some(*origin)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            let target_env = origin_env.unwrap_or_else(|| find_global_environment(env));
+                            let call_env = crate::core::new_js_object_data(mc);
+                            call_env.borrow_mut(mc).prototype = Some(target_env);
+                            call_env.borrow_mut(mc).is_function_scope = true;
+                            object_set_key_value(mc, &call_env, "this", new_this)?;
+                            if func_name == "eval" {
+                                slot_set(mc, &target_env, InternalSlot::IsIndirectEval, &Value::Boolean(true));
+                            }
+                            let result = handle_global_function(mc, func_name, rest_args, &call_env)?;
+                            if func_name == "eval" {
+                                let _ = slot_remove(mc, &target_env, &InternalSlot::IsIndirectEval);
+                            }
+                            Ok(Some(result))
+                        }
                         _ => Err(raise_type_error!("Not a function").into()),
                     }
                 } else {
@@ -18390,6 +18479,33 @@ pub fn call_native_function<'gc>(
                             Some(*obj),
                         )?)),
                         Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, &rest_args, None)?)),
+                        // Object wrapping a native function (e.g. eval Object)
+                        Value::Function(func_name) => {
+                            let origin_env = if func_name == "eval" {
+                                if let Some(og_rc) = slot_get(obj, &InternalSlot::OriginGlobal)
+                                    && let Value::Object(origin) = &*og_rc.borrow()
+                                {
+                                    Some(*origin)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            let target_env = origin_env.unwrap_or_else(|| find_global_environment(env));
+                            let call_env = crate::core::new_js_object_data(mc);
+                            call_env.borrow_mut(mc).prototype = Some(target_env);
+                            call_env.borrow_mut(mc).is_function_scope = true;
+                            object_set_key_value(mc, &call_env, "this", &new_this)?;
+                            if func_name == "eval" {
+                                slot_set(mc, &target_env, InternalSlot::IsIndirectEval, &Value::Boolean(true));
+                            }
+                            let result = handle_global_function(mc, func_name, &rest_args, &call_env)?;
+                            if func_name == "eval" {
+                                let _ = slot_remove(mc, &target_env, &InternalSlot::IsIndirectEval);
+                            }
+                            Ok(Some(result))
+                        }
                         _ => Err(raise_type_error!("Not a function").into()),
                     }
                 } else {

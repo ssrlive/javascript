@@ -380,6 +380,10 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         InternalSlot::AsyncGeneratorFunctionCtor,
         &Value::Object(async_gen_func_ctor),
     );
+
+    // Stamp with OriginGlobal so evaluate_new can discover the constructor's realm
+    slot_set(mc, &async_gen_func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
+
     Ok(())
 }
 

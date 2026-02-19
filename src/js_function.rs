@@ -103,6 +103,13 @@ pub fn handle_global_function<'gc>(
         "Date" => return handle_date_constructor(mc, args, env),
         "AbstractModuleSource.prototype.@@toStringTag" => return Ok(Value::Undefined),
 
+        "__createRealm__" => {
+            let new_env = crate::core::create_new_realm(mc, env)?;
+            let result = crate::core::new_js_object_data(mc);
+            crate::core::object_set_key_value(mc, &result, "global", &Value::Object(new_env))?;
+            return Ok(Value::Object(result));
+        }
+
         "Object.prototype.valueOf" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -2914,6 +2921,8 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     object_set_key_value(mc, &func_ctor, "name", &Value::String(utf8_to_utf16("Function")))?;
     slot_set(mc, &func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &func_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Function")));
+    // Stamp with OriginGlobal so evaluate_new can discover the constructor's realm
+    slot_set(mc, &func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
 
     let func_proto = new_js_object_data(mc);
 

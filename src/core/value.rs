@@ -451,7 +451,6 @@ pub enum InternalSlot {
 
     // --- Misc ---
     Eof,          // __eof
-    CreateRealm,  // __createRealm__
     LookupGetter, // __lookupGetter__
     LookupSetter, // __lookupSetter__
 
@@ -622,7 +621,6 @@ pub fn str_to_internal_slot(s: &str) -> Option<InternalSlot> {
         "__template_registry" => return Some(InternalSlot::TemplateRegistry),
         // Misc
         "__eof" => return Some(InternalSlot::Eof),
-        "__createRealm__" => return Some(InternalSlot::CreateRealm),
         "__lookupGetter__" => return Some(InternalSlot::LookupGetter),
         "__lookupSetter__" => return Some(InternalSlot::LookupSetter),
         _ => {} // fall through to prefix matching below

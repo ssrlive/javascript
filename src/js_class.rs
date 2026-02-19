@@ -1545,6 +1545,14 @@ pub(crate) fn evaluate_new<'gc>(
                                 cur = o.borrow().prototype;
                             }
 
+                            // 3) Check OriginGlobal slot on the constructor object (set
+                            //    during realm initialization for native constructors).
+                            if let Some(origin_val) = slot_get(class_obj, &InternalSlot::OriginGlobal)
+                                && let Value::Object(origin_global) = &*origin_val.borrow()
+                            {
+                                return Some(*origin_global);
+                            }
+
                             None
                         })();
 
@@ -1555,10 +1563,140 @@ pub(crate) fn evaluate_new<'gc>(
                         return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, env);
                     }
                     "AsyncFunction" => {
-                        return crate::js_function::handle_global_function(mc, "AsyncFunction", evaluated_args, env);
+                        // Find the constructor's realm env from OriginGlobal so the
+                        // dynamic function body is created in the correct realm.
+                        let ctor_realm_env = slot_get(class_obj, &InternalSlot::OriginGlobal)
+                            .and_then(|rc| if let Value::Object(o) = &*rc.borrow() { Some(*o) } else { None })
+                            .unwrap_or(*env);
+
+                        let fn_val = crate::js_function::handle_global_function(mc, "AsyncFunction", evaluated_args, &ctor_realm_env)?;
+
+                        // GetPrototypeFromConstructor(newTarget, "%AsyncFunction.prototype%")
+                        if let Some(nt) = new_target
+                            && let Value::Object(fn_obj) = &fn_val
+                        {
+                            let nt_proto = if let Value::Object(nt_obj) = nt {
+                                object_get_key_value(nt_obj, "prototype").and_then(|rc| match &*rc.borrow() {
+                                    Value::Object(p) => Some(*p),
+                                    Value::Property { value: Some(v), .. } => {
+                                        if let Value::Object(p) = &*v.borrow() {
+                                            Some(*p)
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                })
+                            } else {
+                                None
+                            };
+
+                            if let Some(proto) = nt_proto {
+                                fn_obj.borrow_mut(mc).prototype = Some(proto);
+                            } else {
+                                // Fall back: %AsyncFunction.prototype% from newTarget's realm.
+                                let nt_realm = if let Value::Object(nt_obj) = nt {
+                                    object_get_key_value(nt_obj, "__origin_global")
+                                        .or_else(|| slot_get(nt_obj, &InternalSlot::OriginGlobal))
+                                        .or_else(|| slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
+                                        .and_then(|rc| if let Value::Object(o) = &*rc.borrow() { Some(*o) } else { None })
+                                } else {
+                                    None
+                                };
+
+                                let realm_env = nt_realm.unwrap_or(*env);
+                                if let Some(af_val) = slot_get_chained(&realm_env, &InternalSlot::AsyncFunctionCtor)
+                                    && let Value::Object(af_ctor) = &*af_val.borrow()
+                                    && let Some(proto_val) = object_get_key_value(af_ctor, "prototype")
+                                {
+                                    let proto = match &*proto_val.borrow() {
+                                        Value::Object(p) => Some(*p),
+                                        Value::Property { value: Some(v), .. } => {
+                                            if let Value::Object(p) = &*v.borrow() {
+                                                Some(*p)
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(p) = proto {
+                                        fn_obj.borrow_mut(mc).prototype = Some(p);
+                                    }
+                                }
+                            }
+                        }
+
+                        return Ok(fn_val);
                     }
                     "AsyncGeneratorFunction" => {
-                        return crate::js_function::handle_global_function(mc, "AsyncGeneratorFunction", evaluated_args, env);
+                        // Find the constructor's realm env from OriginGlobal so the
+                        // dynamic function body/prototype is created in the correct realm.
+                        let ctor_realm_env = slot_get(class_obj, &InternalSlot::OriginGlobal)
+                            .and_then(|rc| if let Value::Object(o) = &*rc.borrow() { Some(*o) } else { None })
+                            .unwrap_or(*env);
+
+                        let fn_val =
+                            crate::js_function::handle_global_function(mc, "AsyncGeneratorFunction", evaluated_args, &ctor_realm_env)?;
+
+                        // GetPrototypeFromConstructor(newTarget, "%AsyncGeneratorFunction.prototype%")
+                        if let Some(nt) = new_target
+                            && let Value::Object(fn_obj) = &fn_val
+                        {
+                            // 1) Try newTarget.prototype — if it is an object, use it.
+                            let nt_proto = if let Value::Object(nt_obj) = nt {
+                                object_get_key_value(nt_obj, "prototype").and_then(|rc| match &*rc.borrow() {
+                                    Value::Object(p) => Some(*p),
+                                    Value::Property { value: Some(v), .. } => {
+                                        if let Value::Object(p) = &*v.borrow() {
+                                            Some(*p)
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                })
+                            } else {
+                                None
+                            };
+
+                            if let Some(proto) = nt_proto {
+                                fn_obj.borrow_mut(mc).prototype = Some(proto);
+                            } else {
+                                // 2) Fall back: %AsyncGeneratorFunction.prototype% from newTarget's realm.
+                                let nt_realm = if let Value::Object(nt_obj) = nt {
+                                    object_get_key_value(nt_obj, "__origin_global")
+                                        .or_else(|| slot_get(nt_obj, &InternalSlot::OriginGlobal))
+                                        .or_else(|| slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
+                                        .and_then(|rc| if let Value::Object(o) = &*rc.borrow() { Some(*o) } else { None })
+                                } else {
+                                    None
+                                };
+
+                                let realm_env = nt_realm.unwrap_or(*env);
+                                if let Some(agf_val) = slot_get_chained(&realm_env, &InternalSlot::AsyncGeneratorFunctionCtor)
+                                    && let Value::Object(agf_ctor) = &*agf_val.borrow()
+                                    && let Some(proto_val) = object_get_key_value(agf_ctor, "prototype")
+                                {
+                                    let proto = match &*proto_val.borrow() {
+                                        Value::Object(p) => Some(*p),
+                                        Value::Property { value: Some(v), .. } => {
+                                            if let Value::Object(p) = &*v.borrow() {
+                                                Some(*p)
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(p) = proto {
+                                        fn_obj.borrow_mut(mc).prototype = Some(p);
+                                    }
+                                }
+                            }
+                        }
+
+                        return Ok(fn_val);
                     }
                     "Map" => return Ok(crate::js_map::handle_map_constructor(mc, evaluated_args, env)?),
                     "Set" => return Ok(crate::js_set::handle_set_constructor(mc, evaluated_args, env)?),

@@ -18243,41 +18243,29 @@ pub fn call_native_function<'gc>(
     }
 
     if name == "AsyncGenerator.prototype.next" {
-        let this_v = this_val.unwrap_or(&Value::Undefined);
-        if let Value::Object(obj) = this_v {
-            match crate::js_async_generator::handle_async_generator_prototype_next(mc, Some(Value::Object(*obj)), args, env) {
-                Ok(Some(v)) => return Ok(Some(v)),
-                Ok(None) => return Ok(Some(Value::Undefined)),
-                Err(e) => return Err(e.into()),
-            }
-        } else {
-            return Err(raise_eval_error!("AsyncGenerator.prototype.next called on non-object").into());
+        let this_v = this_val.cloned().unwrap_or(Value::Undefined);
+        match crate::js_async_generator::handle_async_generator_prototype_next(mc, Some(this_v), args, env) {
+            Ok(Some(v)) => return Ok(Some(v)),
+            Ok(None) => return Ok(Some(Value::Undefined)),
+            Err(e) => return Err(e.into()),
         }
     }
 
     if name == "AsyncGenerator.prototype.throw" {
-        let this_v = this_val.unwrap_or(&Value::Undefined);
-        if let Value::Object(obj) = this_v {
-            match crate::js_async_generator::handle_async_generator_prototype_throw(mc, Some(Value::Object(*obj)), args, env) {
-                Ok(Some(v)) => return Ok(Some(v)),
-                Ok(None) => return Ok(Some(Value::Undefined)),
-                Err(e) => return Err(e.into()),
-            }
-        } else {
-            return Err(raise_eval_error!("AsyncGenerator.prototype.throw called on non-object").into());
+        let this_v = this_val.cloned().unwrap_or(Value::Undefined);
+        match crate::js_async_generator::handle_async_generator_prototype_throw(mc, Some(this_v), args, env) {
+            Ok(Some(v)) => return Ok(Some(v)),
+            Ok(None) => return Ok(Some(Value::Undefined)),
+            Err(e) => return Err(e.into()),
         }
     }
 
     if name == "AsyncGenerator.prototype.return" {
-        let this_v = this_val.unwrap_or(&Value::Undefined);
-        if let Value::Object(obj) = this_v {
-            match crate::js_async_generator::handle_async_generator_prototype_return(mc, Some(Value::Object(*obj)), args, env) {
-                Ok(Some(v)) => return Ok(Some(v)),
-                Ok(None) => return Ok(Some(Value::Undefined)),
-                Err(e) => return Err(e.into()),
-            }
-        } else {
-            return Err(raise_eval_error!("AsyncGenerator.prototype.return called on non-object").into());
+        let this_v = this_val.cloned().unwrap_or(Value::Undefined);
+        match crate::js_async_generator::handle_async_generator_prototype_return(mc, Some(this_v), args, env) {
+            Ok(Some(v)) => return Ok(Some(v)),
+            Ok(None) => return Ok(Some(Value::Undefined)),
+            Err(e) => return Err(e.into()),
         }
     }
 
@@ -18391,6 +18379,14 @@ pub fn call_native_function<'gc>(
                         Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, rest_args, None)?)),
                         // Object wrapping a native function (e.g. eval Object)
                         Value::Function(func_name) => {
+                            // Try call_native_function first; it handles protocol
+                            // methods like AsyncGenerator.prototype.{next,throw,return}
+                            // that are not in handle_global_function.
+                            if func_name != "eval"
+                                && let Some(res) = call_native_function(mc, func_name, Some(new_this), rest_args, env)?
+                            {
+                                return Ok(Some(res));
+                            }
                             // Detect cross-realm eval via OriginGlobal
                             let origin_env = if func_name == "eval" {
                                 if let Some(og_rc) = slot_get(obj, &InternalSlot::OriginGlobal)

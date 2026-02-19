@@ -205,15 +205,37 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     let _ = crate::core::set_internal_prototype_from_constructor(mc, &async_iter_proto, env, "Object");
     async_gen_proto.borrow_mut(mc).prototype = Some(async_iter_proto);
 
-    // Attach prototype methods as named functions that dispatch to the async generator handler
-    let val = Value::Function("AsyncGenerator.prototype.next".to_string());
-    object_set_key_value(mc, &async_gen_proto, "next", &val)?;
-
-    let val = Value::Function("AsyncGenerator.prototype.return".to_string());
-    object_set_key_value(mc, &async_gen_proto, "return", &val)?;
-
-    let val = Value::Function("AsyncGenerator.prototype.throw".to_string());
-    object_set_key_value(mc, &async_gen_proto, "throw", &val)?;
+    // Attach prototype methods as proper function objects so they expose
+    // correct `length` and `name` properties with the right descriptors.
+    let func_proto_opt: Option<JSObjectDataPtr<'gc>> = if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*proto_val.borrow()
+    {
+        Some(*func_proto)
+    } else {
+        None
+    };
+    for (method_name, dispatch_name, length) in [
+        ("next", "AsyncGenerator.prototype.next", 1),
+        ("return", "AsyncGenerator.prototype.return", 1),
+        ("throw", "AsyncGenerator.prototype.throw", 1),
+    ] {
+        let fn_obj = new_js_object_data(mc);
+        fn_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name.to_string()))));
+        if let Some(fp) = func_proto_opt {
+            fn_obj.borrow_mut(mc).prototype = Some(fp);
+        }
+        let desc_name =
+            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(method_name)), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(length as f64), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
+        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &async_gen_proto, method_name, &desc_method)?;
+    }
 
     // Register internal helpers for awaits
     crate::core::env_set(
@@ -290,14 +312,11 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         crate::js_object::define_property_internal(mc, &async_gen_proto, *tag_sym, &desc_tag)?;
     }
 
-    // Link prototype to constructor and expose on global env
-    // Set 'constructor' on prototype with proper attributes
-    let desc_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_ctor), true, false, true)?;
-    crate::js_object::define_property_internal(mc, &async_gen_proto, "constructor", &desc_ctor)?;
-    // Set 'prototype' on constructor with proper attributes
+    // Defer setting constructor and env binding until after AsyncGeneratorFunction.prototype
+    // is created, because per spec %AsyncGenerator% IS %AsyncGeneratorFunction%.prototype.
+    // Set 'prototype' on the temporary async_gen_ctor (used internally)
     let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_proto), true, false, false)?;
     crate::js_object::define_property_internal(mc, &async_gen_ctor, "prototype", &desc_proto)?;
-    crate::core::env_set(mc, env, "AsyncGenerator", &Value::Object(async_gen_ctor))?;
 
     // Create AsyncGeneratorFunction constructor/prototype so async generator
     // function objects inherit from a distinct AsyncGeneratorFunction.prototype,
@@ -372,6 +391,14 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     // AsyncGeneratorFunction.prototype: non-writable, non-enumerable, non-configurable
     let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_proto), false, false, false)?;
     crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "prototype", &desc_ctor_proto)?;
+
+    // Per spec, %AsyncGenerator% IS %AsyncGeneratorFunction%.prototype.
+    // Set 'constructor' on AsyncGenerator.prototype → async_gen_func_proto
+    // { [[Writable]]: false, [[Enumerable]]: false, [[Configurable]]: true }
+    let desc_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_proto), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &async_gen_proto, "constructor", &desc_ctor)?;
+    // Expose %AsyncGenerator% on the environment as async_gen_func_proto (not the old async_gen_ctor)
+    crate::core::env_set(mc, env, "AsyncGenerator", &Value::Object(async_gen_func_proto))?;
 
     // Store as hidden intrinsic (NOT a global) via internal slot
     slot_set(
@@ -639,6 +666,9 @@ fn process_one_pending<'gc>(
     use crate::core::GeneratorState;
 
     loop {
+        // Drain any requests that were deferred while the generator was executing.
+        drain_deferred_requests(mc, gen_ptr, env)?;
+
         let mut gen_ptr_mut_guard = gen_ptr.borrow_mut(mc);
         let gen_ptr_mut = &mut *gen_ptr_mut_guard;
 
@@ -1770,6 +1800,101 @@ fn process_one_pending<'gc>(
     }
 }
 
+/// Helper: create a rejected promise with a TypeError for bad `this` values.
+/// Per spec, AsyncGeneratorEnqueue returns a rejected promise (not a thrown error)
+/// when the generator argument is invalid.
+fn reject_with_type_error<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    message: &str,
+) -> Result<Option<Value<'gc>>, JSError> {
+    let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
+    // Build a TypeError value from the current realm's TypeError constructor
+    let err_val = {
+        let msg_val: Value<'gc> = Value::String(crate::unicode::utf8_to_utf16(message));
+        let mut proto_opt: Option<JSObjectDataPtr<'gc>> = None;
+        if let Some(err_ctor_val) = crate::core::env_get(env, "TypeError")
+            && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            proto_opt = Some(*proto);
+        }
+        crate::core::create_error(mc, proto_opt, msg_val).unwrap_or(Value::String(crate::unicode::utf8_to_utf16(message)))
+    };
+    reject_promise(mc, &promise_cell, err_val, env);
+    Ok(Some(promise_obj_val))
+}
+
+/// Helper: enqueue a request on an async generator, using try_borrow_mut to
+/// avoid panicking when the generator is already executing.
+fn enqueue_async_generator_request<'gc>(
+    mc: &MutationContext<'gc>,
+    gen_ptr: GcPtr<'gc, JSAsyncGenerator<'gc>>,
+    promise_cell: GcPtr<'gc, JSPromise<'gc>>,
+    request: AsyncGeneratorRequest<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<(), JSError> {
+    match gen_ptr.try_borrow_mut(mc) {
+        Ok(mut gen_mut) => {
+            gen_mut.pending.push((promise_cell, request));
+            if gen_mut.pending.len() == 1 {
+                drop(gen_mut);
+                process_one_pending(mc, gen_ptr, env)?;
+            }
+        }
+        Err(_) => {
+            // Generator is currently executing (borrow held by process_one_pending).
+            // Park the request in DEFERRED_ASYNC_GEN_REQUESTS; the outer
+            // process_one_pending loop drains it after each step.
+            DEFERRED_ASYNC_GEN_REQUESTS.with(|q| {
+                // Safety: we transmute lifetimes to 'static for thread-local storage.
+                // The values are consumed within the same GC arena epoch — before any
+                // collection can occur — so the underlying Gc pointers remain valid.
+                let entry: DeferredRequest<'static> = unsafe { std::mem::transmute((gen_ptr, promise_cell, request)) };
+                q.borrow_mut().push(entry);
+            });
+        }
+    }
+    Ok(())
+}
+
+type DeferredRequest<'gc> = (
+    GcPtr<'gc, JSAsyncGenerator<'gc>>,
+    GcPtr<'gc, JSPromise<'gc>>,
+    AsyncGeneratorRequest<'gc>,
+);
+
+thread_local! {
+    static DEFERRED_ASYNC_GEN_REQUESTS: std::cell::RefCell<Vec<DeferredRequest<'static>>> =
+       const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Drain any deferred async generator requests that were parked while the
+/// generator was executing. Called from process_one_pending after each step.
+fn drain_deferred_requests<'gc>(
+    mc: &MutationContext<'gc>,
+    target_gen: GcPtr<'gc, JSAsyncGenerator<'gc>>,
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<(), JSError> {
+    let entries: Vec<DeferredRequest<'static>> = DEFERRED_ASYNC_GEN_REQUESTS.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    for entry in entries {
+        let (gen_ptr, promise_cell, request): DeferredRequest<'gc> = unsafe { std::mem::transmute(entry) };
+        // Only process entries for the current generator
+        if Gc::ptr_eq(gen_ptr, target_gen) {
+            let mut gen_mut = gen_ptr.borrow_mut(mc);
+            gen_mut.pending.push((promise_cell, request));
+        } else {
+            // Put back entries for other generators
+            DEFERRED_ASYNC_GEN_REQUESTS.with(|q| {
+                let entry: DeferredRequest<'static> = unsafe { std::mem::transmute((gen_ptr, promise_cell, request)) };
+                q.borrow_mut().push(entry);
+            });
+        }
+    }
+    Ok(())
+}
+
 // Native implementation for AsyncGenerator.prototype.next
 pub fn handle_async_generator_prototype_next<'gc>(
     mc: &MutationContext<'gc>,
@@ -1779,36 +1904,22 @@ pub fn handle_async_generator_prototype_next<'gc>(
 ) -> Result<Option<Value<'gc>>, JSError> {
     let send_value = if !args.is_empty() { args[0].clone() } else { Value::Undefined };
 
-    let this = this_val.ok_or_else(|| crate::raise_eval_error!("AsyncGenerator.prototype.next called without this"))?;
-    if let Value::Object(obj) = this {
-        // Obtain internal async generator struct
-        if let Some(inner) = slot_get_chained(&obj, &InternalSlot::AsyncGeneratorState) {
-            match &*inner.borrow() {
-                Value::AsyncGenerator(gen_ptr) => {
-                    // create a new pending Promise and enqueue it
-                    let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
-                    // push onto pending
-                    {
-                        let mut gen_ptr_mut = gen_ptr.borrow_mut(mc);
-                        gen_ptr_mut
-                            .pending
-                            .push((promise_cell, AsyncGeneratorRequest::Next(send_value.clone())));
-                        // If this is the only pending request, process it immediately
-                        if gen_ptr_mut.pending.len() == 1 {
-                            // process one pending (might settle immediately or suspend)
-                            drop(gen_ptr_mut);
-                            process_one_pending(mc, *gen_ptr, env)?;
-                        }
-                    }
-                    Ok(Some(promise_obj_val))
-                }
-                _ => Err(crate::raise_eval_error!("Async generator internal missing")),
-            }
-        } else {
-            Err(crate::raise_eval_error!("Async generator internal missing"))
+    // Per spec: if this is not an Object or lacks [[AsyncGeneratorState]], reject.
+    let this = match this_val {
+        Some(Value::Object(obj)) => obj,
+        _ => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
+    };
+    let inner = match slot_get_chained(&this, &InternalSlot::AsyncGeneratorState) {
+        Some(v) => v,
+        None => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
+    };
+    match &*inner.borrow() {
+        Value::AsyncGenerator(gen_ptr) => {
+            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
+            enqueue_async_generator_request(mc, *gen_ptr, promise_cell, AsyncGeneratorRequest::Next(send_value), env)?;
+            Ok(Some(promise_obj_val))
         }
-    } else {
-        Err(crate::raise_eval_error!("AsyncGenerator.prototype.next called on non-object"))
+        _ => reject_with_type_error(mc, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
     }
 }
 
@@ -1821,36 +1932,21 @@ pub fn handle_async_generator_prototype_throw<'gc>(
 ) -> Result<Option<Value<'gc>>, JSError> {
     let throw_val = if !args.is_empty() { args[0].clone() } else { Value::Undefined };
 
-    let this = this_val.ok_or_else(|| crate::raise_eval_error!("AsyncGenerator.prototype.throw called without this"))?;
-    if let Value::Object(obj) = this {
-        // Obtain internal async generator struct
-        if let Some(inner) = slot_get_chained(&obj, &InternalSlot::AsyncGeneratorState) {
-            match &*inner.borrow() {
-                Value::AsyncGenerator(gen_ptr) => {
-                    // create a new pending Promise and enqueue it
-                    let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
-                    // push onto pending
-                    {
-                        let mut gen_ptr_mut = gen_ptr.borrow_mut(mc);
-                        gen_ptr_mut
-                            .pending
-                            .push((promise_cell, AsyncGeneratorRequest::Throw(throw_val.clone())));
-                        // If this is the only pending request, process it immediately
-                        if gen_ptr_mut.pending.len() == 1 {
-                            // process one pending (might settle immediately or suspend)
-                            drop(gen_ptr_mut);
-                            process_one_pending(mc, *gen_ptr, env)?;
-                        }
-                    }
-                    Ok(Some(promise_obj_val))
-                }
-                _ => Err(crate::raise_eval_error!("Async generator internal missing")),
-            }
-        } else {
-            Err(crate::raise_eval_error!("Async generator internal missing"))
+    let this = match this_val {
+        Some(Value::Object(obj)) => obj,
+        _ => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
+    };
+    let inner = match slot_get_chained(&this, &InternalSlot::AsyncGeneratorState) {
+        Some(v) => v,
+        None => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
+    };
+    match &*inner.borrow() {
+        Value::AsyncGenerator(gen_ptr) => {
+            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
+            enqueue_async_generator_request(mc, *gen_ptr, promise_cell, AsyncGeneratorRequest::Throw(throw_val), env)?;
+            Ok(Some(promise_obj_val))
         }
-    } else {
-        Err(crate::raise_eval_error!("AsyncGenerator.prototype.throw called on non-object"))
+        _ => reject_with_type_error(mc, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
     }
 }
 
@@ -1863,36 +1959,21 @@ pub fn handle_async_generator_prototype_return<'gc>(
 ) -> Result<Option<Value<'gc>>, JSError> {
     let ret_val = if !args.is_empty() { args[0].clone() } else { Value::Undefined };
 
-    let this = this_val.ok_or_else(|| crate::raise_eval_error!("AsyncGenerator.prototype.return called without this"))?;
-    if let Value::Object(obj) = this {
-        // Obtain internal async generator struct
-        if let Some(inner) = slot_get_chained(&obj, &InternalSlot::AsyncGeneratorState) {
-            match &*inner.borrow() {
-                Value::AsyncGenerator(gen_ptr) => {
-                    // create a new pending Promise and enqueue it
-                    let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
-                    // push onto pending
-                    {
-                        let mut gen_ptr_mut = gen_ptr.borrow_mut(mc);
-                        gen_ptr_mut
-                            .pending
-                            .push((promise_cell, AsyncGeneratorRequest::Return(ret_val.clone())));
-                        // If this is the only pending request, process it immediately
-                        if gen_ptr_mut.pending.len() == 1 {
-                            // process one pending (might settle immediately or suspend)
-                            drop(gen_ptr_mut);
-                            process_one_pending(mc, *gen_ptr, env)?;
-                        }
-                    }
-                    Ok(Some(promise_obj_val))
-                }
-                _ => Err(crate::raise_eval_error!("Async generator internal missing")),
-            }
-        } else {
-            Err(crate::raise_eval_error!("Async generator internal missing"))
+    let this = match this_val {
+        Some(Value::Object(obj)) => obj,
+        _ => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
+    };
+    let inner = match slot_get_chained(&this, &InternalSlot::AsyncGeneratorState) {
+        Some(v) => v,
+        None => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
+    };
+    match &*inner.borrow() {
+        Value::AsyncGenerator(gen_ptr) => {
+            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
+            enqueue_async_generator_request(mc, *gen_ptr, promise_cell, AsyncGeneratorRequest::Return(ret_val), env)?;
+            Ok(Some(promise_obj_val))
         }
-    } else {
-        Err(crate::raise_eval_error!("AsyncGenerator.prototype.return called on non-object"))
+        _ => reject_with_type_error(mc, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
     }
 }
 

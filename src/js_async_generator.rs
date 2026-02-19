@@ -1,6 +1,6 @@
 use crate::core::{
-    AsyncGeneratorRequest, ClosureData, EvalError, Expr, InternalSlot, JSAsyncGenerator, JSObjectDataPtr, JSPromise, PropertyKey,
-    Statement, StatementKind, Value, VarDeclKind, env_set, env_set_recursive, evaluate_call_dispatch, evaluate_expr, evaluate_statements,
+    AsyncGeneratorRequest, ClosureData, EvalError, Expr, InternalSlot, JSAsyncGenerator, JSObjectDataPtr, JSPromise, Statement,
+    StatementKind, Value, VarDeclKind, env_set, env_set_recursive, evaluate_call_dispatch, evaluate_expr, evaluate_statements,
     get_own_property, new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env,
     prepare_function_call_env_with_home, slot_get, slot_get_chained, slot_set,
 };
@@ -277,23 +277,36 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         &Value::Function("__internal_async_gen_yield_star_reject".to_string()),
     )?;
 
-    // Register Symbol.asyncIterator on AsyncGenerator.prototype -> returns the generator object itself
+    // Register Symbol.asyncIterator on %AsyncIteratorPrototype% as a proper function object
+    // Per spec: %AsyncIteratorPrototype% [ @@asyncIterator ] ( ) — returns `this`
+    // name = "[Symbol.asyncIterator]", length = 0
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
         && let Some(async_iter_sym_val) = object_get_key_value(sym_obj, "asyncIterator")
         && let Value::Symbol(async_iter_sym) = &*async_iter_sym_val.borrow()
     {
-        let base_val = Value::Function("AsyncGenerator.prototype.asyncIterator".to_string());
-        object_set_key_value(mc, &async_iter_proto, async_iter_sym, &base_val)?;
-        async_iter_proto
-            .borrow_mut(mc)
-            .set_non_enumerable(PropertyKey::Symbol(*async_iter_sym));
+        let fn_obj = new_js_object_data(mc);
+        fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
+            mc,
+            Value::Function("AsyncGenerator.prototype.asyncIterator".to_string()),
+        )));
+        if let Some(fp) = func_proto_opt {
+            fn_obj.borrow_mut(mc).prototype = Some(fp);
+        }
+        let desc_name = crate::core::create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("[Symbol.asyncIterator]")),
+            false,
+            false,
+            true,
+        )?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
 
-        let val = Value::Function("AsyncGenerator.prototype.asyncIterator".to_string());
-        object_set_key_value(mc, &async_gen_proto, async_iter_sym, &val)?;
-        async_gen_proto
-            .borrow_mut(mc)
-            .set_non_enumerable(PropertyKey::Symbol(*async_iter_sym));
+        // Set on AsyncIteratorPrototype (writable: true, enumerable: false, configurable: true)
+        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &async_iter_proto, *async_iter_sym, &desc_method)?;
     }
 
     // Set AsyncGenerator.prototype[@@toStringTag] = "AsyncGenerator"

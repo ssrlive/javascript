@@ -18298,12 +18298,9 @@ pub fn call_native_function<'gc>(
     }
 
     if name == "AsyncGenerator.prototype.asyncIterator" {
-        let this_v = this_val.unwrap_or(&Value::Undefined);
-        if let Value::Object(obj) = this_v {
-            return Ok(Some(Value::Object(*obj)));
-        } else {
-            return Err(raise_eval_error!("AsyncGenerator.prototype.asyncIterator called on non-object").into());
-        }
+        // Per spec: %AsyncIteratorPrototype% [ @@asyncIterator ] ( ) — just return this
+        let this_v = this_val.cloned().unwrap_or(Value::Undefined);
+        return Ok(Some(this_v));
     }
 
     if name == "call" || name == "Function.prototype.call" {

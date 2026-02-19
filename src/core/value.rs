@@ -366,14 +366,15 @@ pub enum InternalSlot {
     AsyncGeneratorProto, // __async_generator_proto
 
     // --- Iterator ---
-    IteratorIndex,       // __iterator_index__
-    IteratorKind,        // __iterator_kind__
-    IteratorArray,       // __iterator_array__
-    IteratorMap,         // __iterator_map__
-    IteratorSet,         // __iterator_set__
-    IteratorString,      // __iterator_string__
-    PendingIterator,     // __pending_iterator
-    PendingIteratorDone, // __pending_iterator_done
+    IteratorIndex,          // __iterator_index__
+    IteratorKind,           // __iterator_kind__
+    IteratorArray,          // __iterator_array__
+    IteratorMap,            // __iterator_map__
+    IteratorSet,            // __iterator_set__
+    IteratorString,         // __iterator_string__
+    PendingIterator,        // __pending_iterator
+    PendingIteratorDone,    // __pending_iterator_done
+    ArrayIteratorPrototype, // %ArrayIteratorPrototype%
 
     // --- Collections ---
     Map,     // __map__

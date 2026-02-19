@@ -170,6 +170,51 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     let arr_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
     crate::js_object::define_property_internal(mc, &array_ctor, "length", &arr_len_desc)?;
 
+    // --- Create %IteratorPrototype% and %ArrayIteratorPrototype% ---
+    // %IteratorPrototype% has [[Prototype]] = Object.prototype and a
+    // Symbol.iterator method that returns `this`.
+    let iterator_proto = new_js_object_data(mc);
+    if let Some(proto) = object_proto {
+        iterator_proto.borrow_mut(mc).prototype = Some(proto);
+    }
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+        && let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator")
+        && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+    {
+        object_set_key_value(mc, &iterator_proto, iter_sym, &Value::Function("IteratorSelf".to_string()))?;
+        iterator_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
+    }
+
+    // %ArrayIteratorPrototype% has [[Prototype]] = %IteratorPrototype%,
+    // a `next` method, and Symbol.toStringTag = "Array Iterator".
+    let array_iter_proto = new_js_object_data(mc);
+    array_iter_proto.borrow_mut(mc).prototype = Some(iterator_proto);
+
+    // next method (writable, non-enumerable, configurable)
+    object_set_key_value(
+        mc,
+        &array_iter_proto,
+        "next",
+        &Value::Function("ArrayIterator.prototype.next".to_string()),
+    )?;
+    array_iter_proto.borrow_mut(mc).set_non_enumerable("next");
+
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+    {
+        // Symbol.toStringTag = "Array Iterator" (non-writable, non-enumerable, configurable)
+        if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
+            && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+        {
+            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Array Iterator")), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &array_iter_proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+        }
+    }
+
+    // Store %ArrayIteratorPrototype% in env (hidden via internal slot)
+    slot_set(mc, env, InternalSlot::ArrayIteratorPrototype, &Value::Object(array_iter_proto));
+
     env_set(mc, env, "Array", &Value::Object(array_ctor))?;
     Ok(())
 }
@@ -4639,33 +4684,19 @@ pub(crate) fn create_array_iterator<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     let iterator = new_js_object_data(mc);
 
+    // Set [[Prototype]] to %ArrayIteratorPrototype%
+    if let Some(proto_val) = slot_get_chained(env, &InternalSlot::ArrayIteratorPrototype)
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        iterator.borrow_mut(mc).prototype = Some(*proto);
+    }
+
     // Store array
     slot_set(mc, &iterator, InternalSlot::IteratorArray, &Value::Object(object));
     // Store index
     slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
     // Store kind
     slot_set(mc, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
-    // next method
-    object_set_key_value(mc, &iterator, "next", &Value::Function("ArrayIterator.prototype.next".to_string()))?;
-
-    // Register Symbols
-    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
-        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-    {
-        // Symbol.iterator
-        if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
-            && let Value::Symbol(s) = &*iter_sym.borrow()
-        {
-            object_set_key_value(mc, &iterator, s, &Value::Function("IteratorSelf".to_string()))?;
-        }
-
-        // Symbol.toStringTag
-        if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
-            && let Value::Symbol(s) = &*tag_sym.borrow()
-        {
-            object_set_key_value(mc, &iterator, s, &Value::String(utf8_to_utf16("Array Iterator")))?;
-        }
-    }
 
     Ok(Value::Object(iterator))
 }
@@ -4675,9 +4706,12 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Get array
-    let arr_val =
-        slot_get_chained(iterator, &InternalSlot::IteratorArray).ok_or(EvalError::Js(raise_eval_error!("Iterator has no array")))?;
+    // Check own internal slots — if missing, `this` is not a real Array Iterator
+    let arr_val = slot_get(iterator, &InternalSlot::IteratorArray).ok_or_else(|| {
+        EvalError::Js(raise_type_error!(
+            "ArrayIterator.prototype.next requires that 'this' be an Array Iterator"
+        ))
+    })?;
     let arr_ptr = if let Value::Object(o) = &*arr_val.borrow() {
         *o
     } else if matches!(&*arr_val.borrow(), Value::Undefined) {
@@ -4690,8 +4724,11 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     };
 
     // Get index
-    let index_val =
-        slot_get_chained(iterator, &InternalSlot::IteratorIndex).ok_or(EvalError::Js(raise_eval_error!("Iterator has no index")))?;
+    let index_val = slot_get(iterator, &InternalSlot::IteratorIndex).ok_or_else(|| {
+        EvalError::Js(raise_type_error!(
+            "ArrayIterator.prototype.next requires that 'this' be an Array Iterator"
+        ))
+    })?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
@@ -4699,8 +4736,11 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     };
 
     // Get kind
-    let kind_val =
-        slot_get_chained(iterator, &InternalSlot::IteratorKind).ok_or(EvalError::Js(raise_eval_error!("Iterator has no kind")))?;
+    let kind_val = slot_get(iterator, &InternalSlot::IteratorKind).ok_or_else(|| {
+        EvalError::Js(raise_type_error!(
+            "ArrayIterator.prototype.next requires that 'this' be an Array Iterator"
+        ))
+    })?;
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {
@@ -4709,6 +4749,10 @@ pub(crate) fn handle_array_iterator_next<'gc>(
 
     let length = if let Some(ta_cell) = slot_get_chained(&arr_ptr, &InternalSlot::TypedArray) {
         if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+            // Spec step 8: If a has a [[TypedArrayName]], check for detached buffer.
+            if ta.buffer.borrow().detached {
+                return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
+            }
             if ta.length_tracking {
                 let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
                 if ta.byte_offset > 0 && buf_len < ta.byte_offset {

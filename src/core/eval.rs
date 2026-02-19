@@ -18618,7 +18618,7 @@ pub fn call_native_function<'gc>(
 
     if name.starts_with("TypedArray.prototype.")
         && let Some(method) = name.strip_prefix("TypedArray.prototype.")
-        && (method == "values" || method == "set" || method == "subarray")
+        && (method == "values" || method == "keys" || method == "entries" || method == "set" || method == "subarray")
     {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         return Ok(Some(crate::js_typedarray::handle_typedarray_method(mc, this_v, method, args, env)?));

@@ -896,11 +896,20 @@ fn make_typedarray_prototype<'gc>(
         .non_enumerable
         .insert(crate::core::PropertyKey::String("subarray".to_string()));
     object_set_key_value(mc, &proto, "values", &Value::Function("TypedArray.prototype.values".to_string()))?;
-    // values is non-enumerable
     proto
         .borrow_mut(mc)
         .non_enumerable
         .insert(crate::core::PropertyKey::String("values".to_string()));
+    object_set_key_value(mc, &proto, "keys", &Value::Function("TypedArray.prototype.keys".to_string()))?;
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("keys".to_string()));
+    object_set_key_value(mc, &proto, "entries", &Value::Function("TypedArray.prototype.entries".to_string()))?;
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("entries".to_string()));
 
     // Register Symbol.iterator on TypedArray.prototype (alias to TypedArray.prototype.values)
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
@@ -1243,6 +1252,9 @@ pub fn handle_typedarray_constructor<'gc>(
 
     let mut init_values: Option<Vec<Value<'gc>>> = None;
 
+    // Track the source ArrayBuffer wrapper object (if passed), so we can store it as BufferObject.
+    let mut buffer_obj_opt: Option<JSObjectDataPtr<'gc>> = None;
+
     let (buffer, byte_offset, length) = if args.is_empty() {
         // new TypedArray() - create empty array
         let buffer = new_gc_cell_ptr(
@@ -1316,6 +1328,7 @@ pub fn handle_typedarray_constructor<'gc>(
                 } else if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
                     if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                         // new TypedArray(buffer)
+                        buffer_obj_opt = Some(obj);
                         (*ab, 0, (**ab).borrow().data.lock().unwrap().len() / element_size)
                     } else {
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
@@ -1366,6 +1379,7 @@ pub fn handle_typedarray_constructor<'gc>(
                         }
                         let remaining_bytes = (**ab).borrow().data.lock().unwrap().len() - offset;
                         let length = remaining_bytes / element_size;
+                        buffer_obj_opt = Some(obj);
                         (*ab, offset, length)
                     } else {
                         return Err(raise_eval_error!("TypedArray byteOffset must be a number"));
@@ -1397,6 +1411,7 @@ pub fn handle_typedarray_constructor<'gc>(
                         if length * element_size + offset > (**ab).borrow().data.lock().unwrap().len() {
                             return Err(raise_eval_error!("TypedArray length exceeds buffer size"));
                         }
+                        buffer_obj_opt = Some(obj);
                         (*ab, offset, length)
                     } else {
                         return Err(raise_eval_error!("TypedArray byteOffset and length must be numbers"));
@@ -1470,6 +1485,26 @@ pub fn handle_typedarray_constructor<'gc>(
     );
 
     slot_set(mc, &obj, InternalSlot::TypedArray, &Value::TypedArray(typed_array));
+
+    // Store a proper ArrayBuffer wrapper object so `ta.buffer` returns a spec-compliant object.
+    let buf_wrapper = if let Some(existing_buf_obj) = buffer_obj_opt {
+        existing_buf_obj
+    } else {
+        // Create a new wrapper object for the internally-created buffer.
+        let buf_obj = new_js_object_data(mc);
+        // Set prototype to ArrayBuffer.prototype if available.
+        if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
+            && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            buf_obj.borrow_mut(mc).prototype = Some(*proto);
+        }
+        slot_set(mc, &buf_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
+        buf_obj
+    };
+    slot_set(mc, &obj, InternalSlot::BufferObject, &Value::Object(buf_wrapper));
+
     log::debug!(
         "created typedarray instance: obj={:p} kind={:?} length_tracking={}",
         &*obj.borrow(),
@@ -2463,7 +2498,17 @@ pub fn handle_typedarray_accessor<'gc>(
     if let Some(ta_val) = slot_get_chained(object, &InternalSlot::TypedArray) {
         if let Value::TypedArray(ta) = &*ta_val.borrow() {
             match property {
-                "buffer" => Ok(Value::ArrayBuffer(ta.buffer)),
+                "buffer" => {
+                    // Prefer the stored BufferObject wrapper (proper JS object)
+                    if let Some(buf_obj_val) = slot_get_chained(object, &InternalSlot::BufferObject)
+                        && let Value::Object(buf_obj) = &*buf_obj_val.borrow()
+                    {
+                        Ok(Value::Object(*buf_obj))
+                    } else {
+                        // Fallback to raw value (should not happen for properly constructed instances)
+                        Ok(Value::ArrayBuffer(ta.buffer))
+                    }
+                }
                 "byteLength" => {
                     let cur_len = if ta.length_tracking {
                         let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
@@ -2631,22 +2676,19 @@ pub fn handle_typedarray_method<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     if let Value::Object(obj) = this_val {
         if let Some(ta_cell) = slot_get_chained(obj, &InternalSlot::TypedArray)
-            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+            && let Value::TypedArray(_ta) = &*ta_cell.borrow()
         {
             match method {
-                "values" => {
-                    // Return an iterator that yields the values
-                    // For now, create a simple iterator object
-                    let iter_obj = new_js_object_data(mc);
-                    slot_set(mc, &iter_obj, InternalSlot::TypedArrayIterator, &Value::TypedArray(*ta));
-                    slot_set(mc, &iter_obj, InternalSlot::Index, &Value::Number(0.0));
-                    object_set_key_value(
-                        mc,
-                        &iter_obj,
-                        "next",
-                        &Value::Function("TypedArrayIterator.prototype.next".to_string()),
-                    )?;
-                    Ok(Value::Object(iter_obj))
+                "values" | "keys" | "entries" => {
+                    // Reuse the standard Array Iterator infrastructure so that the
+                    // iterator gets the %ArrayIteratorPrototype% chain and the detach
+                    // check inside handle_array_iterator_next fires correctly.
+                    let kind = match method {
+                        "keys" => "keys",
+                        "entries" => "entries",
+                        _ => "values",
+                    };
+                    Ok(crate::js_array::create_array_iterator(mc, _env, *obj, kind)?)
                 }
                 _ => Err(raise_eval_error!(format!("TypedArray.prototype.{} not implemented", method))),
             }

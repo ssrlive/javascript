@@ -185,8 +185,8 @@ jobs:
               FOCUS='built-ins/Object'
               ;;
             29)
-              TITLE='"built-ins/AbstractModuleSource" - "built-ins/AsyncFunction"'
-              FOCUS='built-ins/AbstractModuleSource,built-ins/AggregateError,built-ins/ArrayBuffer,built-ins/ArrayIteratorPrototype,built-ins/AsyncDisposableStack,built-ins/AsyncFromSyncIteratorPrototype,built-ins/AsyncFunction'
+              TITLE='"built-ins/AbstractModuleSource" - "built-ins/AsyncGeneratorFunction"'
+              FOCUS='built-ins/AbstractModuleSource,built-ins/AggregateError,built-ins/ArrayBuffer,built-ins/ArrayIteratorPrototype,built-ins/AsyncDisposableStack,built-ins/AsyncFromSyncIteratorPrototype,built-ins/AsyncFunction,built-ins/AsyncGeneratorFunction'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

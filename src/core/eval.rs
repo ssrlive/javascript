@@ -1510,7 +1510,7 @@ fn hoist_declarations<'gc>(
                 // when available; otherwise fall back to Function.prototype.
                 let mut proto_set = false;
                 if *is_async {
-                    if let Some(async_gen_func_val) = env_get(env, "AsyncGeneratorFunction")
+                    if let Some(async_gen_func_val) = slot_get_chained(env, &InternalSlot::AsyncGeneratorFunctionCtor)
                         && let Value::Object(async_gen_func_ctor) = &*async_gen_func_val.borrow()
                         && let Some(proto_val) = object_get_key_value(async_gen_func_ctor, "prototype")
                     {
@@ -15397,7 +15397,7 @@ fn evaluate_expr_async_generator_function<'gc>(
     // Set __proto__ to AsyncGeneratorFunction.prototype when available,
     // otherwise fall back to Function.prototype.
     let mut proto_set = false;
-    if let Some(async_gen_func_val) = env_get(env, "AsyncGeneratorFunction")
+    if let Some(async_gen_func_val) = slot_get_chained(env, &InternalSlot::AsyncGeneratorFunctionCtor)
         && let Value::Object(async_gen_func_ctor) = &*async_gen_func_val.borrow()
         && let Some(proto_val) = object_get_key_value(async_gen_func_ctor, "prototype")
     {

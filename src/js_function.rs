@@ -1363,6 +1363,17 @@ fn async_generator_function_constructor<'gc>(
         }
     }
 
+    // Spec step 28: If kind is "async generator" and parameters Contains
+    // YieldExpression, throw a SyntaxError.
+    if args.len() > 1 && !params_str.is_empty() {
+        let param_tokens = crate::core::tokenize(&params_str)?;
+        for t in &param_tokens {
+            if matches!(t.token, Token::Yield | Token::YieldStar) {
+                return Err(raise_syntax_error!("YieldExpression not allowed in async generator function parameters").into());
+            }
+        }
+    }
+
     let mut index = 0;
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 

@@ -303,33 +303,54 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     // function objects inherit from a distinct AsyncGeneratorFunction.prototype,
     // whose own "prototype" points to AsyncGenerator.prototype.
     let async_gen_func_ctor = crate::core::new_js_object_data(mc);
+    let async_gen_func_proto = crate::core::new_js_object_data(mc);
+
+    // AsyncGeneratorFunction itself inherits from Function (constructor).
+    // AsyncGeneratorFunction.prototype inherits from Function.prototype.
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-        && let Value::Object(func_proto) = &*proto_val.borrow()
     {
-        async_gen_func_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        // [[Prototype]] of AsyncGeneratorFunction is Function
+        async_gen_func_ctor.borrow_mut(mc).prototype = Some(*func_ctor);
+        // AsyncGeneratorFunction.prototype.[[Prototype]] is Function.prototype
+        if let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            async_gen_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
+        }
     }
+
     slot_set(
         mc,
         &async_gen_func_ctor,
         InternalSlot::NativeCtor,
         &Value::String(crate::unicode::utf8_to_utf16("AsyncGeneratorFunction")),
     );
+    // Mark as constructor so typeof returns "function" and isConstructor is true
+    slot_set(mc, &async_gen_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
 
-    let async_gen_func_proto = crate::core::new_js_object_data(mc);
-    if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
-        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-        && let Value::Object(func_proto) = &*proto_val.borrow()
-    {
-        async_gen_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
-    }
+    // AsyncGeneratorFunction.length = 1 (non-writable, non-enumerable, configurable)
+    let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "length", &desc_len)?;
 
-    let desc_fn_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_proto), true, false, false)?;
+    // AsyncGeneratorFunction.name = "AsyncGeneratorFunction" (non-writable, non-enumerable, configurable)
+    let desc_name = crate::core::create_descriptor_object(
+        mc,
+        &Value::String(crate::unicode::utf8_to_utf16("AsyncGeneratorFunction")),
+        false,
+        false,
+        true,
+    )?;
+    crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "name", &desc_name)?;
+
+    // AsyncGeneratorFunction.prototype.prototype → %AsyncGenerator.prototype%
+    // writable=false, enumerable=false, configurable=true
+    let desc_fn_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_proto), false, false, true)?;
     crate::js_object::define_property_internal(mc, &async_gen_func_proto, "prototype", &desc_fn_proto)?;
 
-    let desc_fn_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_ctor), true, false, true)?;
+    // AsyncGeneratorFunction.prototype.constructor → AsyncGeneratorFunction
+    // writable=false, enumerable=false, configurable=true
+    let desc_fn_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_ctor), false, false, true)?;
     crate::js_object::define_property_internal(mc, &async_gen_func_proto, "constructor", &desc_fn_ctor)?;
 
     // Set AsyncGeneratorFunction.prototype[@@toStringTag] = "AsyncGeneratorFunction"
@@ -348,9 +369,17 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         crate::js_object::define_property_internal(mc, &async_gen_func_proto, *tag_sym, &desc_tag)?;
     }
 
-    let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_proto), true, false, false)?;
+    // AsyncGeneratorFunction.prototype: non-writable, non-enumerable, non-configurable
+    let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_proto), false, false, false)?;
     crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "prototype", &desc_ctor_proto)?;
-    crate::core::env_set(mc, env, "AsyncGeneratorFunction", &Value::Object(async_gen_func_ctor))?;
+
+    // Store as hidden intrinsic (NOT a global) via internal slot
+    slot_set(
+        mc,
+        env,
+        InternalSlot::AsyncGeneratorFunctionCtor,
+        &Value::Object(async_gen_func_ctor),
+    );
     Ok(())
 }
 

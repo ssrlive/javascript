@@ -548,7 +548,7 @@ pub fn handle_global_function<'gc>(
         "console.error" => Ok(crate::js_console::handle_console_method(mc, "error", args, env)?),
         "console.log" => Ok(crate::js_console::handle_console_method(mc, "log", args, env)?),
         "String" => Ok(crate::js_string::string_constructor(mc, args, env)?),
-        "Array" => Ok(handle_array_constructor(mc, args, env)?),
+        "Array" => Ok(handle_array_constructor(mc, args, env, None)?),
 
         name if name.starts_with("Array.prototype.") => {
             let method = name.trim_start_matches("Array.prototype.");

@@ -1423,7 +1423,7 @@ pub(crate) fn evaluate_new<'gc>(
                 let name_desc = utf16_to_utf8(name);
                 match name_desc.as_str() {
                     "Promise" => return crate::js_promise::handle_promise_constructor_val(mc, evaluated_args, env),
-                    "Array" => return crate::js_array::handle_array_constructor(mc, evaluated_args, env),
+                    "Array" => return crate::js_array::handle_array_constructor(mc, evaluated_args, env, new_target),
                     "Date" => return crate::js_date::handle_date_constructor(mc, evaluated_args, env),
                     "RegExp" => return crate::js_regexp::handle_regexp_constructor(mc, evaluated_args),
                     "Object" => {
@@ -1778,7 +1778,7 @@ pub(crate) fn evaluate_new<'gc>(
 
             // Check if this is Array constructor
             if slot_get(class_obj, &InternalSlot::IsArrayConstructor).is_some() {
-                return crate::js_array::handle_array_constructor(mc, evaluated_args, env);
+                return crate::js_array::handle_array_constructor(mc, evaluated_args, env, None);
             }
 
             // Check if this is a TypedArray constructor
@@ -2387,7 +2387,7 @@ pub(crate) fn evaluate_new<'gc>(
                     return crate::js_date::handle_date_constructor(mc, evaluated_args, env);
                 }
                 "Array" => {
-                    return crate::js_array::handle_array_constructor(mc, evaluated_args, env);
+                    return crate::js_array::handle_array_constructor(mc, evaluated_args, env, None);
                 }
                 "RegExp" => {
                     return crate::js_regexp::handle_regexp_constructor(mc, evaluated_args);

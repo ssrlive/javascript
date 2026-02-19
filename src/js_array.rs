@@ -305,7 +305,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             };
 
             let attempt = match tv {
-                Value::Function(name) if name == "Array" => crate::js_array::handle_array_constructor(mc, &ctor_args, env),
+                Value::Function(name) if name == "Array" => crate::js_array::handle_array_constructor(mc, &ctor_args, env, None),
                 Value::Function(name) if name == "Object" => crate::js_class::handle_object_constructor(mc, &ctor_args, env),
                 Value::Function(name) => {
                     if let Some(resolved) = crate::core::env_get(env, name) {
@@ -321,7 +321,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                     {
                         let native_name = utf16_to_utf8(name_u16);
                         if native_name == "Array" {
-                            crate::js_array::handle_array_constructor(mc, &ctor_args, env)
+                            crate::js_array::handle_array_constructor(mc, &ctor_args, env, None)
                         } else if native_name == "Object" {
                             crate::js_class::handle_object_constructor(mc, &ctor_args, env)
                         } else {
@@ -690,15 +690,15 @@ pub(crate) fn handle_array_constructor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
+    new_target: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    if args.is_empty() {
+    let result = if args.is_empty() {
         // Array() - create empty array
         let array_obj = create_array(mc, env)?;
         set_array_length(mc, &array_obj, 0)?;
-        Ok(Value::Object(array_obj))
+        Value::Object(array_obj)
     } else if args.len() == 1 {
         // Array(length) or Array(element)
-        // let arg_val = evaluate_expr(mc, env, &args[0])?;
         let arg_val = args[0].clone();
         match arg_val {
             Value::Number(n) => {
@@ -717,27 +717,110 @@ pub(crate) fn handle_array_constructor<'gc>(
                 // Array(length) - create array with specified length
                 let array_obj = create_array(mc, env)?;
                 set_array_length(mc, &array_obj, n as usize)?;
-                Ok(Value::Object(array_obj))
+                Value::Object(array_obj)
             }
             _ => {
                 // Array(element) - create array with single element
                 let array_obj = create_array(mc, env)?;
                 object_set_key_value(mc, &array_obj, "0", &arg_val)?;
                 set_array_length(mc, &array_obj, 1)?;
-                Ok(Value::Object(array_obj))
+                Value::Object(array_obj)
             }
         }
     } else {
         // Array(element1, element2, ...) - create array with multiple elements
         let array_obj = create_array(mc, env)?;
         for (i, arg) in args.iter().enumerate() {
-            // let arg_val = evaluate_expr(mc, env, arg)?;
             let arg_val = arg.clone();
             object_set_key_value(mc, &array_obj, i, &arg_val)?;
         }
         set_array_length(mc, &array_obj, args.len())?;
-        Ok(Value::Object(array_obj))
+        Value::Object(array_obj)
+    };
+
+    // Apply GetPrototypeFromConstructor when new_target is provided.
+    // Per spec (sec-array-constructor-array step 4):
+    //   Let proto be ? GetPrototypeFromConstructor(newTarget, "%Array.prototype%").
+    // If newTarget.prototype is an Object, use that; otherwise fall back to the
+    // newTarget's realm's Array.prototype intrinsic.
+    if let Some(nt) = new_target
+        && let Value::Object(array_obj) = &result
+        && let Value::Object(nt_obj) = nt
+    {
+        // Check if newTarget.prototype is an Object
+        let nt_proto = object_get_key_value(nt_obj, "prototype").and_then(|rc| match &*rc.borrow() {
+            Value::Object(p) => Some(*p),
+            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                Value::Object(p) => Some(*p),
+                _ => None,
+            },
+            _ => None,
+        });
+
+        if let Some(proto) = nt_proto {
+            // newTarget.prototype is an Object – use it directly
+            array_obj.borrow_mut(mc).prototype = Some(proto);
+            slot_set(mc, array_obj, InternalSlot::Proto, &Value::Object(proto));
+        } else {
+            // newTarget.prototype is not an Object – fall back to
+            // GetFunctionRealm(newTarget)'s Array.prototype intrinsic.
+            // Discover the realm via OriginGlobal on newTarget or its
+            // closure env chain.
+            let realm_array_proto = crate::core::slot_get(nt_obj, &InternalSlot::OriginGlobal)
+                .or_else(|| crate::core::slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
+                .and_then(|origin_rc| {
+                    if let Value::Object(origin_global) = &*origin_rc.borrow()
+                        && let Some(arr_ctor_rc) = object_get_key_value(origin_global, "Array")
+                        && let Value::Object(arr_ctor) = &*arr_ctor_rc.borrow()
+                        && let Some(arr_proto_rc) = object_get_key_value(arr_ctor, "prototype")
+                    {
+                        return match &*arr_proto_rc.borrow() {
+                            Value::Object(p) => Some(*p),
+                            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                                Value::Object(p) => Some(*p),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                    }
+                    None
+                })
+                // Also try closure env to discover realm
+                .or_else(|| {
+                    if let Some(cl_rc) = nt_obj.borrow().get_closure()
+                        && let Value::Closure(data) | Value::AsyncClosure(data) = &*cl_rc.borrow()
+                        && let Some(cl_env) = data.env
+                    {
+                        // Walk to root env
+                        let mut root = cl_env;
+                        while let Some(p) = root.borrow().prototype {
+                            root = p;
+                        }
+                        if let Some(arr_ctor_rc) = object_get_key_value(&root, "Array")
+                            && let Value::Object(arr_ctor) = &*arr_ctor_rc.borrow()
+                            && let Some(arr_proto_rc) = object_get_key_value(arr_ctor, "prototype")
+                        {
+                            return match &*arr_proto_rc.borrow() {
+                                Value::Object(p) => Some(*p),
+                                Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                                    Value::Object(p) => Some(*p),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                        }
+                    }
+                    None
+                });
+
+            if let Some(realm_proto) = realm_array_proto {
+                array_obj.borrow_mut(mc).prototype = Some(realm_proto);
+                slot_set(mc, array_obj, InternalSlot::Proto, &Value::Object(realm_proto));
+            }
+        }
     }
+
+    Ok(result)
 }
 
 /// Handle Array instance method calls

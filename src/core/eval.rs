@@ -2468,6 +2468,13 @@ pub fn evaluate_statements_with_labels<'gc>(
     } else {
         false
     };
+    // Immediately remove the marker so that function calls inside the eval'd
+    // code (e.g. tagged templates, IIFEs) do not inherit the indirect-eval
+    // semantics when their bodies re-enter evaluate_statements.
+    if is_indirect_eval {
+        let global_env = find_global_environment(env);
+        let _ = slot_remove(mc, &global_env, &InternalSlot::IsIndirectEval);
+    }
 
     // Check for 'use strict' directive
     let starts_with_use_strict = if let Some(stmt0) = statements.first()
@@ -2818,6 +2825,12 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
     } else {
         false
     };
+    // Immediately remove the marker so that function calls inside the eval'd
+    // code do not inherit the indirect-eval semantics.
+    if is_indirect_eval {
+        let global_env = find_global_environment(env);
+        let _ = slot_remove(mc, &global_env, &InternalSlot::IsIndirectEval);
+    }
 
     // Check for 'use strict' directive
     let starts_with_use_strict = if let Some(stmt0) = statements.first()
@@ -12538,7 +12551,7 @@ pub fn evaluate_call_dispatch<'gc>(
                         } else if name == crate::unicode::utf8_to_utf16("Symbol") {
                             Ok(crate::js_symbol::handle_symbol_call(mc, eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("Array") {
-                            Ok(crate::js_array::handle_array_constructor(mc, eval_args, env)?)
+                            Ok(crate::js_array::handle_array_constructor(mc, eval_args, env, None)?)
                         } else if name == crate::unicode::utf8_to_utf16("Function") {
                             Ok(crate::js_function::handle_global_function(mc, "Function", eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("GeneratorFunction") {
@@ -16436,8 +16449,39 @@ fn evaluate_expr_optional_call<'gc>(
                             }
                             Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None),
                             Value::Object(o) => {
-                                let call_env = prepare_call_env_with_this(mc, Some(env), None, None, &[], None, Some(env), None)?;
-                                evaluate_call_dispatch(mc, &call_env, &Value::Object(o), None, &eval_args)
+                                // Detect Object-wrapped eval (closure is Value::Function("eval"))
+                                let is_wrapped_eval = if let Some(cl_ptr) = o.borrow().get_closure()
+                                    && let Value::Function(ref n) = *cl_ptr.borrow()
+                                    && n == "eval"
+                                {
+                                    true
+                                } else {
+                                    false
+                                };
+                                if is_wrapped_eval {
+                                    // Optional call to eval is always indirect eval
+                                    let env_for_call = if let Some(og_rc) = slot_get(&o, &InternalSlot::OriginGlobal)
+                                        && let Value::Object(origin_env) = &*og_rc.borrow()
+                                    {
+                                        *origin_env
+                                    } else {
+                                        find_global_environment(env)
+                                    };
+                                    let c_e = prepare_call_env_with_this(
+                                        mc,
+                                        Some(&env_for_call),
+                                        None,
+                                        None,
+                                        &[],
+                                        None,
+                                        Some(&env_for_call),
+                                        None,
+                                    )?;
+                                    call_named_eval_or_dispatch(mc, &env_for_call, &c_e, "eval", None, &eval_args)
+                                } else {
+                                    let call_env = prepare_call_env_with_this(mc, Some(env), None, None, &[], None, Some(env), None)?;
+                                    evaluate_call_dispatch(mc, &call_env, &Value::Object(o), None, &eval_args)
+                                }
                             }
                             _ => Err(raise_type_error!("OptionalCall target is not a function").into()),
                         }
@@ -17428,13 +17472,13 @@ pub(crate) fn get_property_with_accessors<'gc>(
                     } else if let Some(v) = value {
                         return normalize_value(v.borrow().clone());
                     }
-                    return Err(raise_type_error!("Private accessor has no getter").into());
+                    return Err(throw_realm_type_error(mc, env, "Private accessor has no getter"));
                 }
                 Value::Getter(..) => return normalize_value(call_accessor(mc, env, obj, &val)?),
                 _ => return normalize_value(val),
             }
         } else {
-            return Err(raise_type_error!("accessed private field from an ordinary object").into());
+            return Err(throw_realm_type_error(mc, env, "accessed private field from an ordinary object"));
         }
     }
 
@@ -17458,7 +17502,7 @@ pub(crate) fn get_property_with_accessors<'gc>(
                 _ => return normalize_value(val),
             }
         } else {
-            return Err(raise_type_error!("accessed private field from an ordinary object").into());
+            return Err(throw_realm_type_error(mc, env, "accessed private field from an ordinary object"));
         }
     }
 
@@ -17665,7 +17709,7 @@ pub(crate) fn set_property_with_accessors<'gc>(
     if let PropertyKey::Private(..) = key {
         // Check prototype chain for private property (fields are own, methods/accessors on prototype)
         if object_get_key_value(obj, key).is_none() {
-            return Err(raise_type_error!("accessed private field from an ordinary object").into());
+            return Err(throw_realm_type_error(mc, _env, "accessed private field from an ordinary object"));
         }
     }
 
@@ -17673,7 +17717,7 @@ pub(crate) fn set_property_with_accessors<'gc>(
         && s.starts_with('#')
         && object_get_key_value(obj, key).is_none()
     {
-        return Err(raise_type_error!("accessed private field from an ordinary object").into());
+        return Err(throw_realm_type_error(mc, _env, "accessed private field from an ordinary object"));
     }
 
     // Locate owner (object on prototype chain that actually has the property)
@@ -19099,6 +19143,46 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
         }
     }
     err_val
+}
+
+/// Create a TypeError from the current realm's constructor and return it as an
+/// `EvalError::Throw`.  This ensures that cross-realm code gets the correct
+/// `TypeError.prototype` (and thus the correct `.constructor`), because the
+/// error object is created at the throw-site rather than at the catch-site.
+fn throw_realm_type_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str) -> EvalError<'gc> {
+    // Walk the lexical environment chain to find the TypeError constructor.
+    let mut found_proto: Option<JSObjectDataPtr<'gc>> = None;
+    let mut found_ctor: Option<JSObjectDataPtr<'gc>> = None;
+    let mut search = Some(*env);
+    while let Some(cur) = search {
+        if let Some(err_val) = env_get_own(&cur, "TypeError")
+            && let Value::Object(tc) = &*err_val.borrow()
+            && let Some(proto_val) = object_get_key_value(tc, "prototype")
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            found_proto = Some(*proto);
+            found_ctor = Some(*tc);
+            break;
+        }
+        search = cur.borrow().prototype;
+    }
+
+    let err_obj = new_js_object_data(mc);
+    err_obj.borrow_mut(mc).prototype = found_proto;
+    let msg_val: Value<'gc> = message.into();
+    let _ = object_set_key_value(mc, &err_obj, "message", &msg_val);
+    err_obj.borrow_mut(mc).set_non_enumerable("message");
+    let _ = object_set_key_value(mc, &err_obj, "name", &Value::String(utf8_to_utf16("TypeError")));
+    err_obj.borrow_mut(mc).set_non_enumerable("name");
+    let stack_str = format!("TypeError: {message}");
+    let _ = object_set_key_value(mc, &err_obj, "stack", &Value::String(utf8_to_utf16(&stack_str)));
+    err_obj.borrow_mut(mc).set_non_enumerable("stack");
+    if let Some(ctor) = found_ctor {
+        err_obj.borrow_mut(mc).set_property(mc, "constructor", Value::Object(ctor));
+    }
+    slot_set(mc, &err_obj, InternalSlot::IsError, &Value::Boolean(true));
+
+    EvalError::Throw(Value::Object(err_obj), None, None)
 }
 
 pub fn call_closure<'gc>(
@@ -20672,7 +20756,7 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "Date" {
                         return crate::js_date::handle_date_constructor(mc, &eval_args, env);
                     } else if name_str == "Array" {
-                        return crate::js_array::handle_array_constructor(mc, &eval_args, env);
+                        return crate::js_array::handle_array_constructor(mc, &eval_args, env, None);
                     } else if name_str == "RegExp" {
                         return crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), &eval_args);
                     } else if name_str == "Map" {

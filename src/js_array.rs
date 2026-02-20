@@ -738,86 +738,14 @@ pub(crate) fn handle_array_constructor<'gc>(
         Value::Object(array_obj)
     };
 
-    // Apply GetPrototypeFromConstructor when new_target is provided.
-    // Per spec (sec-array-constructor-array step 4):
-    //   Let proto be ? GetPrototypeFromConstructor(newTarget, "%Array.prototype%").
-    // If newTarget.prototype is an Object, use that; otherwise fall back to the
-    // newTarget's realm's Array.prototype intrinsic.
-    if let Some(nt) = new_target
+    // GetPrototypeFromConstructor when new_target is provided.
+    if let Some(_nt) = new_target
         && let Value::Object(array_obj) = &result
-        && let Value::Object(nt_obj) = nt
+        && let Value::Object(nt_obj) = _nt
+        && let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "Array")?
     {
-        // Check if newTarget.prototype is an Object
-        let nt_proto = object_get_key_value(nt_obj, "prototype").and_then(|rc| match &*rc.borrow() {
-            Value::Object(p) => Some(*p),
-            Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                Value::Object(p) => Some(*p),
-                _ => None,
-            },
-            _ => None,
-        });
-
-        if let Some(proto) = nt_proto {
-            // newTarget.prototype is an Object – use it directly
-            array_obj.borrow_mut(mc).prototype = Some(proto);
-            slot_set(mc, array_obj, InternalSlot::Proto, &Value::Object(proto));
-        } else {
-            // newTarget.prototype is not an Object – fall back to
-            // GetFunctionRealm(newTarget)'s Array.prototype intrinsic.
-            // Discover the realm via OriginGlobal on newTarget or its
-            // closure env chain.
-            let realm_array_proto = crate::core::slot_get(nt_obj, &InternalSlot::OriginGlobal)
-                .or_else(|| crate::core::slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
-                .and_then(|origin_rc| {
-                    if let Value::Object(origin_global) = &*origin_rc.borrow()
-                        && let Some(arr_ctor_rc) = object_get_key_value(origin_global, "Array")
-                        && let Value::Object(arr_ctor) = &*arr_ctor_rc.borrow()
-                        && let Some(arr_proto_rc) = object_get_key_value(arr_ctor, "prototype")
-                    {
-                        return match &*arr_proto_rc.borrow() {
-                            Value::Object(p) => Some(*p),
-                            Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                                Value::Object(p) => Some(*p),
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                    }
-                    None
-                })
-                // Also try closure env to discover realm
-                .or_else(|| {
-                    if let Some(cl_rc) = nt_obj.borrow().get_closure()
-                        && let Value::Closure(data) | Value::AsyncClosure(data) = &*cl_rc.borrow()
-                        && let Some(cl_env) = data.env
-                    {
-                        // Walk to root env
-                        let mut root = cl_env;
-                        while let Some(p) = root.borrow().prototype {
-                            root = p;
-                        }
-                        if let Some(arr_ctor_rc) = object_get_key_value(&root, "Array")
-                            && let Value::Object(arr_ctor) = &*arr_ctor_rc.borrow()
-                            && let Some(arr_proto_rc) = object_get_key_value(arr_ctor, "prototype")
-                        {
-                            return match &*arr_proto_rc.borrow() {
-                                Value::Object(p) => Some(*p),
-                                Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                                    Value::Object(p) => Some(*p),
-                                    _ => None,
-                                },
-                                _ => None,
-                            };
-                        }
-                    }
-                    None
-                });
-
-            if let Some(realm_proto) = realm_array_proto {
-                array_obj.borrow_mut(mc).prototype = Some(realm_proto);
-                slot_set(mc, array_obj, InternalSlot::Proto, &Value::Object(realm_proto));
-            }
-        }
+        array_obj.borrow_mut(mc).prototype = Some(proto);
+        slot_set(mc, array_obj, InternalSlot::Proto, &Value::Object(proto));
     }
 
     Ok(result)

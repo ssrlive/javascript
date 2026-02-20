@@ -1264,47 +1264,10 @@ pub fn handle_arraybuffer_constructor<'gc>(
     // Create the ArrayBuffer object first (AllocateArrayBuffer ordering)
     let obj = new_js_object_data(mc);
 
-    // Set prototype from NewTarget.prototype if object; otherwise fallback to ArrayBuffer.prototype
-    let mut proto_from_target: Option<JSObjectDataPtr<'gc>> = None;
-    if let Some(Value::Object(nt_obj)) = new_target {
-        let proto_val = crate::core::get_property_with_accessors(mc, env, nt_obj, "prototype")?;
-        if let Value::Object(proto_obj) = proto_val {
-            proto_from_target = Some(proto_obj);
-        } else {
-            // Check JS-visible string property first, then internal slot.
-            let origin_val = crate::core::get_property_with_accessors(mc, env, nt_obj, "__origin_global")?;
-            let origin_val = if matches!(origin_val, Value::Undefined) {
-                crate::core::slot_get(nt_obj, &InternalSlot::OriginGlobal)
-                    .map(|rc| rc.borrow().clone())
-                    .unwrap_or(origin_val)
-            } else {
-                origin_val
-            };
-            if let Value::Object(origin_global) = origin_val {
-                let origin_ctor = crate::core::get_property_with_accessors(mc, env, &origin_global, "ArrayBuffer")?;
-                if let Value::Object(origin_ctor_obj) = origin_ctor {
-                    let origin_proto = crate::core::get_property_with_accessors(mc, env, &origin_ctor_obj, "prototype")?;
-                    if let Value::Object(origin_proto_obj) = origin_proto {
-                        proto_from_target = Some(origin_proto_obj);
-                    }
-                }
-            }
-        }
-
-        if proto_from_target.is_none()
-            && let Some(cl_rc) = nt_obj.borrow().get_closure()
-            && let Value::Closure(cl) = &*cl_rc.borrow()
-            && let Some(nt_env) = cl.env
-            && let Some(ab_ctor_rc) = crate::core::env_get(&nt_env, "ArrayBuffer")
-            && let Value::Object(ab_ctor_obj) = &*ab_ctor_rc.borrow()
-            && let Some(ab_proto_rc) = object_get_key_value(ab_ctor_obj, "prototype")
-            && let Value::Object(ab_proto_obj) = &*ab_proto_rc.borrow()
-        {
-            proto_from_target = Some(*ab_proto_obj);
-        }
-    }
-
-    let proto = if let Some(p) = proto_from_target {
+    // GetPrototypeFromConstructor for ArrayBuffer
+    let proto = if let Some(Value::Object(nt_obj)) = new_target
+        && let Some(p) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "ArrayBuffer")?
+    {
         p
     } else if let Some(ctor_val) = object_get_key_value(env, "ArrayBuffer")
         && let Value::Object(ctor_obj) = &*ctor_val.borrow()

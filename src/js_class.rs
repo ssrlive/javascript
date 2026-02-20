@@ -9,9 +9,151 @@ use crate::js_boolean::handle_boolean_constructor;
 use crate::js_typedarray::handle_typedarray_constructor;
 use crate::unicode::utf16_to_utf8;
 use crate::{error::JSError, unicode::utf8_to_utf16};
-// use crate::core::error::{create_js_error, raise_type_error};
-// raise_type_error and create_js_error might be macros or in crate::core::error.
-// Based on usage "crate::core::raise_type_error", we should look at existing usage.
+
+// ── Shared realm-discovery helpers ──────────────────────────────────────────
+//
+// These two functions implement the ES spec algorithms that were previously
+// copy-pasted across every NativeCtor branch and both closure/class branches
+// of `evaluate_new`.
+
+/// Extract an `Object` pointer from a property value, unwrapping accessor
+/// descriptors when necessary.  Returns `None` when the value is not an object.
+fn unwrap_object_value<'gc>(val: &Value<'gc>) -> Option<JSObjectDataPtr<'gc>> {
+    match val {
+        Value::Object(p) => Some(*p),
+        Value::Property { value: Some(v), .. } => {
+            if let Value::Object(p) = &*v.borrow() {
+                Some(*p)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// **GetFunctionRealm** (ES2023 §10.2.4 simplified)
+///
+/// Discover the realm (global-environment object) that a function/constructor
+/// belongs to.  Tries, in order:
+///
+/// 1. JS-visible `__origin_global` own property (set by the $262 realm shim)
+/// 2. Engine-internal `OriginGlobal` slot (own, then chained)
+/// 3. Direct closure → `closure.env`
+/// 4. Walk the prototype chain looking for a `constructor` property with
+///    closure data whose `env` points at the originating realm.
+///
+/// Returns `None` when no realm can be determined (caller should fall back to
+/// the current realm).
+pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSObjectDataPtr<'gc>> {
+    // 1-2) __origin_global / OriginGlobal slot
+    if let Some(origin_val) = object_get_key_value(obj, "__origin_global")
+        .or_else(|| slot_get(obj, &InternalSlot::OriginGlobal))
+        .or_else(|| slot_get_chained(obj, &InternalSlot::OriginGlobal))
+        && let Value::Object(origin) = &*origin_val.borrow()
+    {
+        return Some(*origin);
+    }
+
+    // 3) Direct closure on the object
+    if let Some(cl_val_rc) = obj.borrow().get_closure() {
+        match &*cl_val_rc.borrow() {
+            Value::Closure(data) | Value::AsyncClosure(data) => {
+                if data.env.is_some() {
+                    return data.env;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 4) Walk the prototype chain looking for constructor closures
+    let mut cur: Option<JSObjectDataPtr<'gc>> = Some(*obj);
+    while let Some(o) = cur {
+        if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
+            && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
+            && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
+        {
+            match &*c_cl_val_rc.borrow() {
+                Value::Closure(data) | Value::AsyncClosure(data) => {
+                    if data.env.is_some() {
+                        return data.env;
+                    }
+                }
+                _ => {}
+            }
+        }
+        cur = o.borrow().prototype;
+    }
+
+    None
+}
+
+/// Look up `<name>.prototype` in an environment, trying named properties first,
+/// then well-known internal slots for intrinsics that are not global properties
+/// (e.g. AsyncFunction, AsyncGeneratorFunction).
+fn lookup_intrinsic_prototype<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<JSObjectDataPtr<'gc>> {
+    // Try by name (most constructors: Object, Array, Boolean, Error, …)
+    if let Some(ctor_val) = object_get_key_value(env, name).or_else(|| crate::core::env_get(env, name))
+        && let Some(ctor_obj) = unwrap_object_value(&ctor_val.borrow())
+        && let Some(proto_val) = object_get_key_value(&ctor_obj, "prototype")
+    {
+        return unwrap_object_value(&proto_val.borrow());
+    }
+
+    // Intrinsics stored via internal slots rather than as named globals
+    let slot = match name {
+        "AsyncFunction" => Some(InternalSlot::AsyncFunctionCtor),
+        "AsyncGeneratorFunction" => Some(InternalSlot::AsyncGeneratorFunctionCtor),
+        _ => None,
+    };
+    if let Some(slot) = slot
+        && let Some(ctor_val) = slot_get_chained(env, &slot)
+        && let Some(ctor_obj) = unwrap_object_value(&ctor_val.borrow())
+        && let Some(proto_val) = object_get_key_value(&ctor_obj, "prototype")
+    {
+        return unwrap_object_value(&proto_val.borrow());
+    }
+
+    None
+}
+
+/// **GetPrototypeFromConstructor** (ES2023 §10.1.13)
+///
+/// Given a `new_target` object (the constructor from `Reflect.construct` or
+/// `new`), return the prototype to use for the constructed instance.
+///
+/// 1. If `new_target.prototype` is an Object, return it.
+/// 2. Otherwise call `get_function_realm(new_target)` and look up
+///    `<intrinsic_name>.prototype` in that realm.
+/// 3. If all else fails, look up `<intrinsic_name>.prototype` in `fallback_env`.
+///
+/// `intrinsic_name` is the constructor name ("Boolean", "Object", "Array", …).
+///
+/// Uses `get_property_with_accessors` so Proxy traps and accessor getters on
+/// `newTarget.prototype` are properly invoked (spec: `? Get(constructor, "prototype")`).
+pub(crate) fn get_prototype_from_constructor<'gc>(
+    mc: &crate::core::MutationContext<'gc>,
+    new_target_obj: &JSObjectDataPtr<'gc>,
+    fallback_env: &JSObjectDataPtr<'gc>,
+    intrinsic_name: &str,
+) -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
+    // Step 3: Let proto = ? Get(newTarget, "prototype")
+    let proto_val = crate::core::get_property_with_accessors(mc, fallback_env, new_target_obj, "prototype")?;
+    if let Some(proto) = unwrap_object_value(&proto_val) {
+        return Ok(Some(proto));
+    }
+
+    // Step 4: proto is not Object → GetFunctionRealm(newTarget) → realm intrinsic
+    if let Some(realm) = get_function_realm(new_target_obj)
+        && let Some(proto) = lookup_intrinsic_prototype(&realm, intrinsic_name)
+    {
+        return Ok(Some(proto));
+    }
+
+    // Final fallback: look up in the caller's environment
+    Ok(lookup_intrinsic_prototype(fallback_env, intrinsic_name))
+}
 
 #[allow(dead_code)]
 pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> {
@@ -1028,215 +1170,19 @@ pub(crate) fn evaluate_new<'gc>(
                     // Create the instance object
                     let instance = new_js_object_data(mc);
 
-                    // Determine prototype per GetPrototypeFromConstructor semantics.
-                    // If an explicit `new_target` was provided (e.g. via `Reflect.construct`),
-                    // use that as the constructor for prototype selection; otherwise use
-                    // the constructor object itself (`class_obj`). If the chosen
-                    // constructor's `prototype` property is an Object, use that; if it
-                    // exists but is not an object (e.g., `null`) or is absent, fall
-                    // back to the constructor's realm's `Object.prototype` intrinsic.
+                    // GetPrototypeFromConstructor: determine the prototype for the new instance.
                     let prototype_source_obj: Option<crate::core::JSObjectDataPtr<'_>> = if let Some(nt) = new_target {
                         if let Value::Object(o) = nt { Some(*o) } else { None }
                     } else {
                         Some(*class_obj)
                     };
 
-                    let mut assigned_proto: Option<crate::core::JSObjectDataPtr<'_>> = None;
                     if let Some(src_obj) = prototype_source_obj
-                        && let Some(prototype_val) = object_get_key_value(&src_obj, "prototype")
+                        && let Some(proto) = get_prototype_from_constructor(mc, &src_obj, env, "Object")?
                     {
-                        match &*prototype_val.borrow() {
-                            Value::Object(proto_obj) => assigned_proto = Some(*proto_obj),
-                            other => {
-                                let _ = other;
-                            }
-                        }
-                    }
-
-                    if let Some(proto_obj) = assigned_proto {
-                        // Defer actual assignment; remember it for finalization below.
-                        computed_proto = Some(proto_obj);
-                        instance.borrow_mut(mc).prototype = Some(proto_obj);
-                        slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto_obj));
-                        log::debug!("evaluate_new: computed prototype (deferred) -> proto={:p}", Gc::as_ptr(proto_obj));
-                    } else {
-                        // Fall back to the realm's Object.prototype for the
-                        // prototype_source_obj's realm (if available). First try to
-                        // directly inspect the prototype_source_obj for an 'Object'
-                        // binding when available.
-                        let obj_proto_from_src = prototype_source_obj.and_then(|src_obj| {
-                            if let Some(obj_val) = get_own_property(&src_obj, "Object")
-                                && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
-                            {
-                                log::warn!(
-                                    "evaluate_new: found Object.prototype on source obj ptr={:p} proto={:p}",
-                                    Gc::as_ptr(src_obj),
-                                    Gc::as_ptr(*obj_proto)
-                                );
-                                return Some(*obj_proto);
-                            }
-                            None
-                        });
-
-                        if let Some(obj_proto) = obj_proto_from_src {
-                            // Defer assignment to final instance
-                            computed_proto = Some(obj_proto);
-                            instance.borrow_mut(mc).prototype = Some(obj_proto);
-                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(obj_proto));
-                            log::warn!(
-                                "evaluate_new: computed fallback (from source obj) realm prototype (deferred) -> proto={:p}",
-                                Gc::as_ptr(obj_proto)
-                            );
-                        } else {
-                            // If the source object came from a Function constructor, it may
-                            // carry an internal marker pointing to its origin global. Use
-                            // that to find the realm's Object.prototype.
-                            // Check JS-visible string property first (realm shim writes
-                            // `f.__origin_global = g`), then fall back to the engine
-                            // internal slot.  The JS-set property takes priority because
-                            // the realm shim explicitly overrides it to point at the
-                            // emulated realm's global object.
-                            if let Some(src_obj) = prototype_source_obj
-                                && let Some(origin_val) = object_get_key_value(&src_obj, "__origin_global")
-                                    .or_else(|| slot_get(&src_obj, &InternalSlot::OriginGlobal))
-                                    .or_else(|| slot_get_chained(&src_obj, &InternalSlot::OriginGlobal))
-                                && let Value::Object(origin_global) = &*origin_val.borrow()
-                                && let Some(obj_val) = object_get_key_value(origin_global, "Object")
-                                && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                            {
-                                let proto_opt: Option<crate::core::JSObjectDataPtr<'_>> = match &*obj_proto_val.borrow() {
-                                    Value::Object(p) => Some(*p),
-                                    Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                                        Value::Object(p) => Some(*p),
-                                        _ => None,
-                                    },
-                                    _ => None,
-                                };
-                                if let Some(obj_proto) = proto_opt {
-                                    // Defer assignment to final instance
-                                    computed_proto = Some(obj_proto);
-                                    instance.borrow_mut(mc).prototype = Some(obj_proto);
-                                    slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(obj_proto));
-                                }
-                            }
-                            // Only fall back to closure-env realm discovery if __origin_global
-                            // did not already provide a prototype.
-                            if computed_proto.is_none() {
-                                // Try multiple strategies to discover the constructor's realm:
-                                // 1. If the constructor object itself wraps a closure, use its
-                                //    closure.env.
-                                // 2. Walk the constructor/prototype chain and inspect any
-                                //    `constructor` property or prototype objects for a closure
-                                //    whose `env` points at the originating realm.
-                                let realm_env_opt = prototype_source_obj.and_then(|src_obj| {
-                                    // 1) direct closure on the constructor object
-                                    if let Some(cl_val_rc) = src_obj.borrow().get_closure() {
-                                        match &*cl_val_rc.borrow() {
-                                            Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
-                                            _ => {}
-                                        }
-                                    }
-
-                                    // 2) walk the constructor/prototype chain looking for a
-                                    // closure on either a `constructor` property or on the
-                                    // prototype objects themselves.
-                                    let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(src_obj);
-                                    while let Some(o) = cur {
-                                        // Check for a `constructor` property that may point to
-                                        // a function object with closure data.
-                                        if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
-                                            && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
-                                            && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
-                                        {
-                                            match &*c_cl_val_rc.borrow() {
-                                                Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
-                                                _ => {}
-                                            }
-                                        }
-
-                                        // Advance up the prototype chain and continue searching.
-                                        cur = o.borrow().prototype;
-                                    }
-
-                                    None
-                                });
-
-                                // DIAG: report the computed realm_env_opt and extract its Object.prototype if present
-                                let obj_proto_opt = if let Some(re_env) = realm_env_opt {
-                                    log::warn!("evaluate_new: computed realm_env_opt ptr={:p}", Gc::as_ptr(re_env));
-                                    if let Some(obj_val) = crate::core::env_get(&re_env, "Object") {
-                                        log::warn!("evaluate_new: realm env Object binding = {:?}", obj_val.borrow());
-                                        if let Value::Object(obj_ctor) = &*obj_val.borrow() {
-                                            if let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype") {
-                                                match &*obj_proto_val.borrow() {
-                                                    Value::Object(p) => {
-                                                        log::warn!("evaluate_new: realm Object.prototype ptr = {:p}", Gc::as_ptr(*p));
-                                                        Some(*p)
-                                                    }
-                                                    other => {
-                                                        log::warn!("evaluate_new: realm Object.prototype not object: {:?}", other);
-                                                        None
-                                                    }
-                                                }
-                                            } else {
-                                                log::warn!("evaluate_new: realm Object binding has no prototype property");
-                                                None
-                                            }
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        log::warn!("evaluate_new: computed realm_env_opt but no Object binding found in that env");
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-
-                                if let Some(obj_proto) = obj_proto_opt {
-                                    // Defer assignment to final instance
-                                    computed_proto = Some(obj_proto);
-                                    instance.borrow_mut(mc).prototype = Some(obj_proto);
-                                    slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(obj_proto));
-                                    log::debug!(
-                                        "evaluate_new: computed fallback realm prototype (deferred) -> proto={:p}",
-                                        Gc::as_ptr(obj_proto)
-                                    );
-                                } else if let Some(src_obj) = prototype_source_obj {
-                                    // As a final fallback, walk the prototype chain of the
-                                    // prototype_source_obj to find the top-most prototype
-                                    // (the object whose [[Prototype]] is null). That object
-                                    // is the realm-specific Object.prototype intrinsic for
-                                    // the realm which originally created `src_obj`.
-                                    let mut cur = Some(src_obj);
-                                    while let Some(o) = cur {
-                                        let next_ptr = o.borrow().prototype.map(Gc::as_ptr);
-                                        log::debug!(
-                                            "evaluate_new: walking prototype chain: at obj ptr={:p} proto={:?}",
-                                            Gc::as_ptr(o),
-                                            next_ptr
-                                        );
-                                        if let Some(p) = o.borrow().prototype {
-                                            cur = Some(p);
-                                            continue;
-                                        } else {
-                                            // `o` is the top-most prototype (Object.prototype)
-                                            instance.borrow_mut(mc).prototype = Some(o);
-                                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(o));
-                                            log::warn!(
-                                                "evaluate_new: assigned fallback by walking prototype chain -> instance={:p} proto={:p}",
-                                                Gc::as_ptr(instance),
-                                                Gc::as_ptr(o)
-                                            );
-                                            break;
-                                        }
-                                    }
-                                }
-                            } // end if computed_proto.is_none() (closure-env realm fallback)
-                        }
+                        computed_proto = Some(proto);
+                        instance.borrow_mut(mc).prototype = Some(proto);
+                        slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto));
                     }
 
                     // Prepare function environment with 'this' bound to the instance.
@@ -1429,7 +1375,6 @@ pub(crate) fn evaluate_new<'gc>(
                     "Object" => {
                         // Per spec: If NewTarget is neither undefined nor the active function (Object),
                         // return OrdinaryCreateFromConstructor(NewTarget, "%ObjectPrototype%").
-                        // Check if new_target differs from the Object constructor itself.
                         let is_subclass = if let Some(nt) = new_target {
                             if let Value::Object(nt_obj) = nt {
                                 !Gc::ptr_eq(*nt_obj, *class_obj)
@@ -1440,45 +1385,11 @@ pub(crate) fn evaluate_new<'gc>(
                             false
                         };
                         if is_subclass {
-                            // NewTarget is not Object: create empty object with NewTarget.prototype
                             let instance = new_js_object_data(mc);
-                            crate::core::set_internal_prototype_from_constructor(mc, &instance, env, "Object")?;
                             if let Some(Value::Object(nt_obj)) = new_target
-                                && let Some(proto_val_rc) = object_get_key_value(nt_obj, "prototype")
+                                && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, env, "Object")?
                             {
-                                let proto_val = match &*proto_val_rc.borrow() {
-                                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                                    other => other.clone(),
-                                };
-                                if let Value::Object(proto_obj) = proto_val {
-                                    instance.borrow_mut(mc).prototype = Some(proto_obj);
-                                } else {
-                                    // C.prototype is not an Object (e.g., null).
-                                    // Per spec, fall back to GetFunctionRealm(C) to find
-                                    // the realm's Object.prototype intrinsic.
-                                    // Use __origin_global if available (set by realm emulation).
-                                    // Check JS-visible string property first, then internal slot.
-                                    if let Some(origin_rc) = object_get_key_value(nt_obj, "__origin_global")
-                                        .or_else(|| slot_get(nt_obj, &InternalSlot::OriginGlobal))
-                                        .or_else(|| slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
-                                        && let Value::Object(origin_global) = &*origin_rc.borrow()
-                                        && let Some(obj_ctor_rc) = object_get_key_value(origin_global, "Object")
-                                        && let Value::Object(obj_ctor) = &*obj_ctor_rc.borrow()
-                                        && let Some(obj_proto_rc) = object_get_key_value(obj_ctor, "prototype")
-                                    {
-                                        let realm_proto = match &*obj_proto_rc.borrow() {
-                                            Value::Object(p) => Some(*p),
-                                            Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                                                Value::Object(p) => Some(*p),
-                                                _ => None,
-                                            },
-                                            _ => None,
-                                        };
-                                        if let Some(rp) = realm_proto {
-                                            instance.borrow_mut(mc).prototype = Some(rp);
-                                        }
-                                    }
-                                }
+                                instance.borrow_mut(mc).prototype = Some(proto);
                             }
                             return Ok(Value::Object(instance));
                         }
@@ -1487,53 +1398,12 @@ pub(crate) fn evaluate_new<'gc>(
                     "Number" => return handle_number_constructor(mc, evaluated_args, env),
                     "Boolean" => {
                         let result = handle_boolean_constructor(mc, evaluated_args, env)?;
-                        // GetPrototypeFromConstructor: if new_target is provided,
-                        // override the prototype based on newTarget.prototype per spec.
-                        if let Some(nt) = new_target
+                        // GetPrototypeFromConstructor: override prototype from newTarget
+                        if let Some(Value::Object(nt_obj)) = new_target
                             && let Value::Object(result_obj) = &result
-                            && let Value::Object(nt_obj) = nt
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, env, "Boolean")?
                         {
-                            // Step 3: Let proto be ? Get(constructor, "prototype").
-                            let nt_proto = object_get_key_value(nt_obj, "prototype").and_then(|rc| match &*rc.borrow() {
-                                Value::Object(p) => Some(*p),
-                                Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                                    Value::Object(p) => Some(*p),
-                                    _ => None,
-                                },
-                                _ => None,
-                            });
-                            if let Some(proto) = nt_proto {
-                                // Step 3: Type(proto) is Object → use it.
-                                result_obj.borrow_mut(mc).prototype = Some(proto);
-                            } else {
-                                // Step 4: Type(proto) is not Object →
-                                // GetFunctionRealm(newTarget) → realm's %BooleanPrototype%.
-                                let realm_bool_proto = object_get_key_value(nt_obj, "__origin_global")
-                                    .or_else(|| slot_get(nt_obj, &InternalSlot::OriginGlobal))
-                                    .or_else(|| slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
-                                    .and_then(|rc| match &*rc.borrow() {
-                                        Value::Object(origin) => {
-                                            // Look up Boolean.prototype in the realm
-                                            object_get_key_value(origin, "Boolean").and_then(|bc| match &*bc.borrow() {
-                                                Value::Object(bool_ctor) => {
-                                                    object_get_key_value(bool_ctor, "prototype").and_then(|pc| match &*pc.borrow() {
-                                                        Value::Object(p) => Some(*p),
-                                                        Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                                                            Value::Object(p) => Some(*p),
-                                                            _ => None,
-                                                        },
-                                                        _ => None,
-                                                    })
-                                                }
-                                                _ => None,
-                                            })
-                                        }
-                                        _ => None,
-                                    });
-                                if let Some(rp) = realm_bool_proto {
-                                    result_obj.borrow_mut(mc).prototype = Some(rp);
-                                }
-                            }
+                            result_obj.borrow_mut(mc).prototype = Some(proto);
                         }
                         return Ok(result);
                     }
@@ -1546,207 +1416,36 @@ pub(crate) fn evaluate_new<'gc>(
                         return handle_object_constructor(mc, &[str_val], env);
                     }
                     "Function" => {
-                        // Prefer to execute Function constructor logic in the realm of the constructor
-                        // object (class_obj) if we can discover one, otherwise fall back to the
-                        // current call env. This ensures `new other.Function()` creates functions
-                        // in the `other` realm rather than in the caller's realm.
-                        let ctor_re_env = (|| {
-                            // 1) direct closure on the constructor object
-                            if let Some(cl_val_rc) = class_obj.borrow().get_closure() {
-                                match &*cl_val_rc.borrow() {
-                                    Value::Closure(data) | Value::AsyncClosure(data) => {
-                                        let env_ptr = if let Some(e) = data.env {
-                                            Gc::as_ptr(e) as *const _
-                                        } else {
-                                            std::ptr::null()
-                                        };
-                                        log::warn!("evaluate_new: ctor direct closure found - closure.env ptr={:p}", env_ptr);
-                                        return data.env;
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            // 2) walk the constructor/prototype chain looking for a closure on a
-                            //    `constructor` property or prototype object
-                            let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(*class_obj);
-                            while let Some(o) = cur {
-                                if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
-                                    && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
-                                {
-                                    log::warn!(
-                                        "evaluate_new: walking chain - found 'constructor' property pointing to ctor_obj ptr={:p}",
-                                        Gc::as_ptr(*ctor_obj)
-                                    );
-                                    if let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure() {
-                                        match &*c_cl_val_rc.borrow() {
-                                            Value::Closure(data) | Value::AsyncClosure(data) => {
-                                                let env_ptr = if let Some(e) = data.env {
-                                                    Gc::as_ptr(e) as *const _
-                                                } else {
-                                                    std::ptr::null()
-                                                };
-                                                log::warn!("evaluate_new: ctor chain closure found - closure.env ptr={:p}", env_ptr);
-                                                return data.env;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                cur = o.borrow().prototype;
-                            }
-
-                            // 3) Check OriginGlobal slot on the constructor object (set
-                            //    during realm initialization for native constructors).
-                            if let Some(origin_val) = slot_get(class_obj, &InternalSlot::OriginGlobal)
-                                && let Value::Object(origin_global) = &*origin_val.borrow()
-                            {
-                                return Some(*origin_global);
-                            }
-
-                            None
-                        })();
-
-                        let call_env_for_function = if let Some(re) = ctor_re_env { re } else { *env };
+                        // Execute Function constructor in the constructor's realm.
+                        let call_env_for_function = get_function_realm(class_obj).unwrap_or(*env);
                         return crate::js_function::handle_global_function(mc, "Function", evaluated_args, &call_env_for_function);
                     }
                     "GeneratorFunction" => {
                         return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, env);
                     }
                     "AsyncFunction" => {
-                        // Find the constructor's realm env from OriginGlobal so the
-                        // dynamic function body is created in the correct realm.
-                        let ctor_realm_env = slot_get(class_obj, &InternalSlot::OriginGlobal)
-                            .and_then(|rc| if let Value::Object(o) = &*rc.borrow() { Some(*o) } else { None })
-                            .unwrap_or(*env);
-
+                        let ctor_realm_env = get_function_realm(class_obj).unwrap_or(*env);
                         let fn_val = crate::js_function::handle_global_function(mc, "AsyncFunction", evaluated_args, &ctor_realm_env)?;
-
                         // GetPrototypeFromConstructor(newTarget, "%AsyncFunction.prototype%")
-                        if let Some(nt) = new_target
+                        if let Some(Value::Object(nt_obj)) = new_target
                             && let Value::Object(fn_obj) = &fn_val
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, env, "AsyncFunction")?
                         {
-                            let nt_proto = if let Value::Object(nt_obj) = nt {
-                                object_get_key_value(nt_obj, "prototype").and_then(|rc| match &*rc.borrow() {
-                                    Value::Object(p) => Some(*p),
-                                    Value::Property { value: Some(v), .. } => {
-                                        if let Value::Object(p) = &*v.borrow() {
-                                            Some(*p)
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    _ => None,
-                                })
-                            } else {
-                                None
-                            };
-
-                            if let Some(proto) = nt_proto {
-                                fn_obj.borrow_mut(mc).prototype = Some(proto);
-                            } else {
-                                // Fall back: %AsyncFunction.prototype% from newTarget's realm.
-                                let nt_realm = if let Value::Object(nt_obj) = nt {
-                                    object_get_key_value(nt_obj, "__origin_global")
-                                        .or_else(|| slot_get(nt_obj, &InternalSlot::OriginGlobal))
-                                        .or_else(|| slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
-                                        .and_then(|rc| if let Value::Object(o) = &*rc.borrow() { Some(*o) } else { None })
-                                } else {
-                                    None
-                                };
-
-                                let realm_env = nt_realm.unwrap_or(*env);
-                                if let Some(af_val) = slot_get_chained(&realm_env, &InternalSlot::AsyncFunctionCtor)
-                                    && let Value::Object(af_ctor) = &*af_val.borrow()
-                                    && let Some(proto_val) = object_get_key_value(af_ctor, "prototype")
-                                {
-                                    let proto = match &*proto_val.borrow() {
-                                        Value::Object(p) => Some(*p),
-                                        Value::Property { value: Some(v), .. } => {
-                                            if let Value::Object(p) = &*v.borrow() {
-                                                Some(*p)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        _ => None,
-                                    };
-                                    if let Some(p) = proto {
-                                        fn_obj.borrow_mut(mc).prototype = Some(p);
-                                    }
-                                }
-                            }
+                            fn_obj.borrow_mut(mc).prototype = Some(proto);
                         }
-
                         return Ok(fn_val);
                     }
                     "AsyncGeneratorFunction" => {
-                        // Find the constructor's realm env from OriginGlobal so the
-                        // dynamic function body/prototype is created in the correct realm.
-                        let ctor_realm_env = slot_get(class_obj, &InternalSlot::OriginGlobal)
-                            .and_then(|rc| if let Value::Object(o) = &*rc.borrow() { Some(*o) } else { None })
-                            .unwrap_or(*env);
-
+                        let ctor_realm_env = get_function_realm(class_obj).unwrap_or(*env);
                         let fn_val =
                             crate::js_function::handle_global_function(mc, "AsyncGeneratorFunction", evaluated_args, &ctor_realm_env)?;
-
                         // GetPrototypeFromConstructor(newTarget, "%AsyncGeneratorFunction.prototype%")
-                        if let Some(nt) = new_target
+                        if let Some(Value::Object(nt_obj)) = new_target
                             && let Value::Object(fn_obj) = &fn_val
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, env, "AsyncGeneratorFunction")?
                         {
-                            // 1) Try newTarget.prototype — if it is an object, use it.
-                            let nt_proto = if let Value::Object(nt_obj) = nt {
-                                object_get_key_value(nt_obj, "prototype").and_then(|rc| match &*rc.borrow() {
-                                    Value::Object(p) => Some(*p),
-                                    Value::Property { value: Some(v), .. } => {
-                                        if let Value::Object(p) = &*v.borrow() {
-                                            Some(*p)
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    _ => None,
-                                })
-                            } else {
-                                None
-                            };
-
-                            if let Some(proto) = nt_proto {
-                                fn_obj.borrow_mut(mc).prototype = Some(proto);
-                            } else {
-                                // 2) Fall back: %AsyncGeneratorFunction.prototype% from newTarget's realm.
-                                let nt_realm = if let Value::Object(nt_obj) = nt {
-                                    object_get_key_value(nt_obj, "__origin_global")
-                                        .or_else(|| slot_get(nt_obj, &InternalSlot::OriginGlobal))
-                                        .or_else(|| slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
-                                        .and_then(|rc| if let Value::Object(o) = &*rc.borrow() { Some(*o) } else { None })
-                                } else {
-                                    None
-                                };
-
-                                let realm_env = nt_realm.unwrap_or(*env);
-                                if let Some(agf_val) = slot_get_chained(&realm_env, &InternalSlot::AsyncGeneratorFunctionCtor)
-                                    && let Value::Object(agf_ctor) = &*agf_val.borrow()
-                                    && let Some(proto_val) = object_get_key_value(agf_ctor, "prototype")
-                                {
-                                    let proto = match &*proto_val.borrow() {
-                                        Value::Object(p) => Some(*p),
-                                        Value::Property { value: Some(v), .. } => {
-                                            if let Value::Object(p) = &*v.borrow() {
-                                                Some(*p)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        _ => None,
-                                    };
-                                    if let Some(p) = proto {
-                                        fn_obj.borrow_mut(mc).prototype = Some(p);
-                                    }
-                                }
-                            }
+                            fn_obj.borrow_mut(mc).prototype = Some(proto);
                         }
-
                         return Ok(fn_val);
                     }
                     "Map" => return Ok(crate::js_map::handle_map_constructor(mc, evaluated_args, env)?),
@@ -1762,53 +1461,15 @@ pub(crate) fn evaluate_new<'gc>(
                     "DataView" => return Ok(crate::js_typedarray::handle_dataview_constructor(mc, evaluated_args, env)?),
                     "Error" | "TypeError" | "ReferenceError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError"
                     | "AggregateError" => {
-                        let mut prototype: Option<JSObjectDataPtr<'_>> = None;
-                        let mut had_new_target = false;
-                        let mut new_target_obj_for_realm: Option<JSObjectDataPtr<'_>> = None;
-                        if let Some(Value::Object(new_target_obj)) = new_target {
-                            had_new_target = true;
-                            new_target_obj_for_realm = Some(*new_target_obj);
-                            let prototype_val = crate::core::get_property_with_accessors(mc, env, new_target_obj, "prototype")?;
-                            if let Value::Object(proto_ptr) = prototype_val {
-                                prototype = Some(proto_ptr);
-                            }
-                        }
-
-                        if prototype.is_none()
-                            && had_new_target
-                            && let Some(new_target_obj) = new_target_obj_for_realm
-                        {
-                            let origin_global_val = crate::core::get_property_with_accessors(mc, env, &new_target_obj, "__origin_global")?;
-                            // Also check the internal slot if the JS-visible property is absent.
-                            let origin_global_val = if matches!(origin_global_val, Value::Undefined) {
-                                slot_get(&new_target_obj, &InternalSlot::OriginGlobal)
-                                    .map(|rc| rc.borrow().clone())
-                                    .unwrap_or(origin_global_val)
-                            } else {
-                                origin_global_val
-                            };
-                            if let Value::Object(origin_global) = origin_global_val {
-                                let ctor_val = crate::core::get_property_with_accessors(mc, env, &origin_global, "AggregateError")?;
-                                let ctor_val = match ctor_val {
-                                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                                    other => other,
-                                };
-                                if let Value::Object(origin_agg_ctor) = ctor_val {
-                                    let origin_proto_val =
-                                        crate::core::get_property_with_accessors(mc, env, &origin_agg_ctor, "prototype")?;
-                                    if let Value::Object(origin_proto_obj) = origin_proto_val {
-                                        prototype = Some(origin_proto_obj);
-                                    }
-                                }
-                            }
-                        }
-
-                        if prototype.is_none() {
-                            let prototype_val = crate::core::get_property_with_accessors(mc, env, class_obj, "prototype")?;
-                            if let Value::Object(proto_ptr) = prototype_val {
-                                prototype = Some(proto_ptr);
-                            }
-                        }
+                        // GetPrototypeFromConstructor for Error types
+                        let prototype: Option<JSObjectDataPtr<'_>> = if let Some(Value::Object(nt_obj)) = new_target {
+                            get_prototype_from_constructor(mc, nt_obj, env, &name_desc)?
+                        } else {
+                            // No newTarget — use the constructor's own prototype
+                            crate::core::get_property_with_accessors(mc, env, class_obj, "prototype")
+                                .ok()
+                                .and_then(|v| if let Value::Object(p) = v { Some(p) } else { None })
+                        };
 
                         if name_desc == "AggregateError" {
                             let errors_val = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
@@ -1857,7 +1518,7 @@ pub(crate) fn evaluate_new<'gc>(
                 // Create instance
                 let instance = new_js_object_data(mc);
 
-                // Set prototype (respect `new_target` if provided per spec - GetPrototypeFromConstructor)
+                // GetPrototypeFromConstructor: determine the prototype for the new instance.
                 let prototype_source_obj: Option<JSObjectDataPtr<'_>> = if let Some(nt) = new_target
                     && let Value::Object(o) = nt
                 {
@@ -1866,129 +1527,11 @@ pub(crate) fn evaluate_new<'gc>(
                     Some(*class_obj)
                 };
 
-                // DIAG: print where we source prototype from
-                if let Some(src) = prototype_source_obj {
-                    log::warn!(
-                        "evaluate_new (class): prototype_source obj ptr = {:p}, class_obj ptr = {:p}",
-                        Gc::as_ptr(src),
-                        Gc::as_ptr(*class_obj)
-                    );
-                }
-
-                // Try to fetch the 'prototype' property on the source object first
-                let mut assigned_proto: Option<JSObjectDataPtr<'_>> = None;
                 if let Some(src_obj) = prototype_source_obj
-                    && let Some(prototype_val) = object_get_key_value(&src_obj, "prototype")
+                    && let Some(proto) = get_prototype_from_constructor(mc, &src_obj, env, "Object")?
                 {
-                    let proto_value = match &*prototype_val.borrow() {
-                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                        other => other.clone(),
-                    };
-                    match proto_value {
-                        Value::Object(proto_obj) => assigned_proto = Some(proto_obj),
-                        other => log::debug!("evaluate_new (class): prototype property present but not object (val={:?})", other),
-                    }
-                }
-
-                if let Some(proto_obj) = assigned_proto {
-                    instance.borrow_mut(mc).prototype = Some(proto_obj);
-                    slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto_obj));
-                    let assigned_ptr = instance.borrow().prototype.map(Gc::as_ptr);
-                    log::debug!(
-                        "evaluate_new (class): assigned explicit prototype -> instance={:p} proto={:p} after assign ptr={:?}",
-                        Gc::as_ptr(instance),
-                        Gc::as_ptr(proto_obj),
-                        assigned_ptr
-                    );
-                } else {
-                    // Fallback to the realm intrinsic Object.prototype for the
-                    // prototype_source_obj's realm.
-
-                    // First try `__origin_global` — the realm shim sets this on
-                    // functions created by another realm's Function constructor.
-                    // Check JS-visible string property first, then internal slot.
-                    let mut found_via_origin = false;
-                    if let Some(src_obj) = prototype_source_obj
-                        && let Some(origin_val) = object_get_key_value(&src_obj, "__origin_global")
-                            .or_else(|| slot_get(&src_obj, &InternalSlot::OriginGlobal))
-                            .or_else(|| slot_get_chained(&src_obj, &InternalSlot::OriginGlobal))
-                        && let Value::Object(origin_global) = &*origin_val.borrow()
-                        && let Some(obj_val) = object_get_key_value(origin_global, "Object")
-                        && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                    {
-                        let proto_opt: Option<JSObjectDataPtr<'_>> = match &*obj_proto_val.borrow() {
-                            Value::Object(p) => Some(*p),
-                            Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                                Value::Object(p) => Some(*p),
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                        if let Some(obj_proto) = proto_opt {
-                            instance.borrow_mut(mc).prototype = Some(obj_proto);
-                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(obj_proto));
-                            found_via_origin = true;
-                        }
-                    }
-
-                    if !found_via_origin {
-                        // Fall back to discovering the realm via the closure env chain.
-                        let realm_env_opt = prototype_source_obj.and_then(|src_obj| {
-                            // 1) direct closure on the constructor object
-                            if let Some(cl_val_rc) = src_obj.borrow().get_closure() {
-                                match &*cl_val_rc.borrow() {
-                                    Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
-                                    _ => {}
-                                }
-                            }
-
-                            // 2) walk the constructor/prototype chain looking for a
-                            // closure on either a `constructor` property or on the
-                            // prototype objects themselves.
-                            let mut cur: Option<crate::core::JSObjectDataPtr<'_>> = Some(src_obj);
-                            while let Some(o) = cur {
-                                // Check for a `constructor` property that may point to
-                                // a function object with closure data.
-                                if let Some(ctor_val_rc) = object_get_key_value(&o, "constructor")
-                                    && let Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
-                                    && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
-                                {
-                                    match &*c_cl_val_rc.borrow() {
-                                        Value::Closure(data) | Value::AsyncClosure(data) => return data.env,
-                                        _ => {}
-                                    }
-                                }
-
-                                // Advance up the prototype chain and continue searching.
-                                cur = o.borrow().prototype;
-                            }
-
-                            None
-                        });
-
-                        // DIAG: log what realm we found (if any)
-                        if let Some(re_env) = realm_env_opt {
-                            log::warn!("evaluate_new (class): found realm env ptr={:p}", Gc::as_ptr(re_env));
-                        }
-
-                        if let Some(re_env) = realm_env_opt
-                            && let Some(obj_val) = crate::core::env_get(&re_env, "Object")
-                            && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                            && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                            && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
-                        {
-                            instance.borrow_mut(mc).prototype = Some(*obj_proto);
-                            slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(*obj_proto));
-                            let assigned_ptr = instance.borrow().prototype.map(Gc::as_ptr);
-                            log::warn!(
-                                "evaluate_new: assigned fallback realm prototype -> instance={:p} proto={:p}",
-                                Gc::as_ptr(instance),
-                                Gc::as_ptr(*obj_proto)
-                            );
-                            log::warn!("evaluate_new: after assignment instance.prototype ptr = {:?}", assigned_ptr);
-                        }
-                    } // end if !found_via_origin
+                    instance.borrow_mut(mc).prototype = Some(proto);
+                    slot_set(mc, &instance, InternalSlot::Proto, &Value::Object(proto));
                 }
 
                 // Set instance properties block removed - moved to constructor logic

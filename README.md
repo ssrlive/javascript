@@ -92,8 +92,8 @@ assert_eq!(result, "94");
 // The "os" module is only available when the "os" feature is enabled
 #[cfg(feature = "os")]
 {
-    use javascript::evaluate_script;
-    let result = evaluate_script(r#"
+    use javascript::evaluate_module;
+    let result = evaluate_module(r#"
         import * as console from "console";
         import * as os from "os";
 
@@ -231,7 +231,7 @@ While the engine supports most modern JavaScript features, some areas are still 
 
 - **Web APIs**: No DOM, Fetch, WebSocket, or browser-specific APIs
 - **WebAssembly**: No WASM support
-- **SharedArrayBuffer**: No shared memory support
+- **Workers**: No multi-threaded worker/agent support (SharedArrayBuffer and Atomics work on the main thread)
 - **JIT Compilation**: Interpreted only (no just-in-time compilation)
 - **TypeScript**: No type checking or compilation
 - **Source Maps**: No source map support for debugging
@@ -241,7 +241,7 @@ While the engine supports most modern JavaScript features, some areas are still 
 Contributions are welcome! Areas for potential improvement:
 
 - **Performance**: JIT compilation, optimization passes
-- **Compatibility**: Additional Web APIs, SharedArrayBuffer
+- **Compatibility**: Additional Web APIs, Worker threads
 - **Tooling**: TypeScript support, source maps, debugger
 - **Testing**: More comprehensive test coverage, fuzzing
 - **Documentation**: API docs, tutorials, examples

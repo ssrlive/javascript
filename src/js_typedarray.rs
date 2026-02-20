@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::Condvar;
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 // Global waiters registry keyed by (buffer_arc_ptr, byte_index). Each waiter
 // is an Arc containing a (Mutex<bool>, Condvar) pair the waiting thread blocks on.
@@ -80,21 +79,65 @@ pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
 }
 
 /// Create the Atomics object with basic atomic methods
-pub fn make_atomics_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_atomics_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
-    object_set_key_value(mc, &obj, "load", &Value::Function("Atomics.load".to_string()))?;
-    object_set_key_value(mc, &obj, "store", &Value::Function("Atomics.store".to_string()))?;
-    object_set_key_value(mc, &obj, "compareExchange", &Value::Function("Atomics.compareExchange".to_string()))?;
-    object_set_key_value(mc, &obj, "exchange", &Value::Function("Atomics.exchange".to_string()))?;
-    object_set_key_value(mc, &obj, "add", &Value::Function("Atomics.add".to_string()))?;
-    object_set_key_value(mc, &obj, "sub", &Value::Function("Atomics.sub".to_string()))?;
-    object_set_key_value(mc, &obj, "and", &Value::Function("Atomics.and".to_string()))?;
-    object_set_key_value(mc, &obj, "or", &Value::Function("Atomics.or".to_string()))?;
-    object_set_key_value(mc, &obj, "xor", &Value::Function("Atomics.xor".to_string()))?;
-    object_set_key_value(mc, &obj, "wait", &Value::Function("Atomics.wait".to_string()))?;
-    object_set_key_value(mc, &obj, "notify", &Value::Function("Atomics.notify".to_string()))?;
-    object_set_key_value(mc, &obj, "isLockFree", &Value::Function("Atomics.isLockFree".to_string()))?;
+    // Set __proto__ to Object.prototype
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object");
+
+    // Get Function.prototype for method objects
+    let func_proto_opt: Option<JSObjectDataPtr<'gc>> = if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*proto_val.borrow()
+    {
+        Some(*func_proto)
+    } else {
+        None
+    };
+
+    // Helper: install a method as a proper function object with name/length
+    let methods: &[(&str, &str, usize)] = &[
+        ("load", "Atomics.load", 2),
+        ("store", "Atomics.store", 3),
+        ("compareExchange", "Atomics.compareExchange", 4),
+        ("exchange", "Atomics.exchange", 3),
+        ("add", "Atomics.add", 3),
+        ("sub", "Atomics.sub", 3),
+        ("and", "Atomics.and", 3),
+        ("or", "Atomics.or", 3),
+        ("xor", "Atomics.xor", 3),
+        ("wait", "Atomics.wait", 4),
+        ("notify", "Atomics.notify", 3),
+        ("isLockFree", "Atomics.isLockFree", 1),
+    ];
+
+    for &(method_name, dispatch_name, length) in methods {
+        let fn_obj = new_js_object_data(mc);
+        fn_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name.to_string()))));
+        if let Some(fp) = func_proto_opt {
+            fn_obj.borrow_mut(mc).prototype = Some(fp);
+        }
+        let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method_name)), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(length as f64), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
+        // writable: true, enumerable: false, configurable: true
+        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &obj, method_name, &desc_method)?;
+    }
+
+    // Set Symbol.toStringTag = "Atomics" { writable: false, enumerable: false, configurable: true }
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        let desc_tag = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Atomics")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &obj, *tag_sym, &desc_tag)?;
+    }
 
     Ok(obj)
 }
@@ -181,27 +224,210 @@ pub(crate) fn ensure_typedarray_in_bounds<'gc>(
     Ok(())
 }
 
+/// ToBigInt coercion: convert a Value to BigInt per spec.
+/// Handles BigInt, Boolean, String, and Object (via ToPrimitive).
+fn to_bigint_i64<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i64, EvalError<'gc>> {
+    let prim = match val {
+        Value::Object(_) => crate::core::to_primitive(mc, val, "number", env)?,
+        other => other.clone(),
+    };
+    match &prim {
+        Value::BigInt(b) => Ok(b.to_i64().unwrap_or(0)),
+        Value::Boolean(b) => Ok(if *b { 1 } else { 0 }),
+        Value::String(s) => {
+            let s_str = crate::unicode::utf16_to_utf8(s);
+            let s_str = s_str.trim();
+            if s_str.is_empty() {
+                Ok(0)
+            } else {
+                match s_str.parse::<i64>() {
+                    Ok(n) => Ok(n),
+                    Err(_) => Err(throw_type_error(mc, env, &format!("Cannot convert {} to a BigInt", s_str))),
+                }
+            }
+        }
+        Value::Number(_) => Err(throw_type_error(mc, env, "Cannot convert a Number value to a BigInt")),
+        Value::Symbol(_) => Err(throw_type_error(mc, env, "Cannot convert a Symbol value to a BigInt")),
+        _ => Err(throw_type_error(mc, env, "Cannot convert value to a BigInt")),
+    }
+}
+
+/// Returns true if a TypedArrayKind is valid for Atomics operations
+/// (integer types only — not Float32, Float64, or Uint8Clamped).
+fn is_valid_atomic_type(kind: &TypedArrayKind) -> bool {
+    matches!(
+        kind,
+        TypedArrayKind::Int8
+            | TypedArrayKind::Uint8
+            | TypedArrayKind::Int16
+            | TypedArrayKind::Uint16
+            | TypedArrayKind::Int32
+            | TypedArrayKind::Uint32
+            | TypedArrayKind::BigInt64
+            | TypedArrayKind::BigUint64
+    )
+}
+
+/// Returns true if a TypedArrayKind is BigInt64 or BigUint64.
+fn is_bigint_typed_array(kind: &TypedArrayKind) -> bool {
+    matches!(kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64)
+}
+
+/// Throw a TypeError as EvalError::Throw using env's TypeError constructor.
+fn throw_type_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
+    let js_err = raise_type_error!(msg);
+    let val = crate::core::js_error_to_value(mc, env, &js_err);
+    EvalError::Throw(val, None, None)
+}
+
+/// Throw a RangeError as EvalError::Throw using env's RangeError constructor.
+fn throw_range_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
+    let js_err = raise_range_error!(msg);
+    let val = crate::core::js_error_to_value(mc, env, &js_err);
+    EvalError::Throw(val, None, None)
+}
+
+/// ValidateIntegerTypedArray (spec 25.4.1.1)
+/// Extracts the TypedArray, validates it is an integer typed array and not detached.
+/// Returns the JSTypedArray copy.
+fn validate_integer_typed_array<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    arg: &Value<'gc>,
+) -> Result<(Gc<'gc, JSTypedArray<'gc>>, JSObjectDataPtr<'gc>), EvalError<'gc>> {
+    let object = match arg {
+        Value::Object(o) => *o,
+        _ => return Err(throw_type_error(mc, env, "Atomics: first argument must be a TypedArray")),
+    };
+    let ta_obj = if let Some(ta_rc) = slot_get_chained(&object, &InternalSlot::TypedArray)
+        && let Value::TypedArray(ta) = &*ta_rc.borrow()
+    {
+        *ta
+    } else {
+        return Err(throw_type_error(mc, env, "Atomics: first argument must be a TypedArray"));
+    };
+    if !is_valid_atomic_type(&ta_obj.kind) {
+        return Err(throw_type_error(
+            mc,
+            env,
+            "Atomics: TypedArray must be an integer type (not Float32, Float64, or Uint8Clamped)",
+        ));
+    }
+    if ta_obj.buffer.borrow().detached {
+        return Err(throw_type_error(mc, env, "Atomics: TypedArray buffer is detached"));
+    }
+    Ok((ta_obj, object))
+}
+
+/// ValidateAtomicAccess (spec 25.4.1.2)
+/// Coerces index arg to integer and validates it is within bounds.
+fn validate_atomic_access<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    ta: &JSTypedArray<'gc>,
+    index_arg: &Value<'gc>,
+) -> Result<usize, EvalError<'gc>> {
+    // Spec: ValidateAtomicAccess(taRecord, requestIndex)
+    // 1. Let length = TypedArrayLength(taRecord)   ← read length FIRST
+    // 2. Let accessIndex = ToIndex(requestIndex)     ← coerce index SECOND
+    // 3. If accessIndex ≥ length, throw RangeError
+
+    // Step 1: capture length BEFORE index coercion (valueOf may resize buffer)
+    let length = if ta.length_tracking {
+        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+        (buf_len.saturating_sub(ta.byte_offset)) / ta.element_size()
+    } else {
+        ta.length
+    };
+
+    // Step 2: ToIndex(requestIndex)
+    let idx = match index_arg {
+        Value::Undefined => 0usize,
+        Value::BigInt(_) => return Err(throw_type_error(mc, env, "Cannot convert a BigInt value to a number")),
+        Value::Symbol(_) => return Err(throw_type_error(mc, env, "Cannot convert a Symbol value to a number")),
+        _ => {
+            // ToIntegerOrInfinity: ToNumber first, then NaN/±0 → 0, ±∞ stays, else truncate
+            let n = match index_arg {
+                Value::Number(n) => *n,
+                Value::Boolean(b) => {
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                _ => crate::core::to_number_with_env(mc, env, index_arg)?,
+            };
+            let integer_index = if n.is_nan() || n == 0.0 {
+                0.0
+            } else if n.is_infinite() {
+                n // +∞ or -∞
+            } else {
+                n.trunc()
+            };
+            // If integerIndex < 0, throw RangeError
+            if integer_index < 0.0 {
+                return Err(throw_range_error(mc, env, "Atomics: index out of range"));
+            }
+            // ToLength — clamp to [0, 2^53-1]
+            const MAX_SAFE: f64 = 9007199254740991.0; // 2^53-1
+            let index = if integer_index > MAX_SAFE { MAX_SAFE } else { integer_index };
+            // SameValue(integerIndex, index) - catches +∞ since ToLength caps it
+            if integer_index != index {
+                return Err(throw_range_error(mc, env, "Atomics: index out of range"));
+            }
+            index as usize
+        }
+    };
+
+    // Step 3: bounds check against the ORIGINAL length
+    if idx >= length {
+        return Err(throw_range_error(mc, env, "Atomics: index out of range"));
+    }
+    Ok(idx)
+}
+
 /// Handle Atomics.* calls (minimal mutex-backed implementations)
 pub fn handle_atomics_method<'gc>(
     mc: &MutationContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Helper to extract TypedArray from first argument
-    if args.is_empty() {
-        return Err(raise_eval_error!("Atomics method requires arguments").into());
-    }
     // Special-case Atomics.isLockFree which accepts a size (in bytes)
     // and does not require a TypedArray as the first argument.
     if method == "isLockFree" {
-        if args.len() != 1 {
-            return Err(raise_eval_error!("Atomics.isLockFree requires 1 argument").into());
-        }
-        let size_val = args[0].clone();
-        let size = match size_val {
-            Value::Number(n) => n as usize,
-            _ => return Err(raise_eval_error!("Atomics.isLockFree argument must be a number").into()),
+        let size_val = args.first().cloned().unwrap_or(Value::Undefined);
+        // Spec: ToIntegerOrInfinity(size)
+        let size = match &size_val {
+            Value::Number(n) => {
+                let n = *n;
+                #[allow(clippy::if_same_then_else)]
+                if n.is_nan() || n == 0.0 {
+                    0
+                } else if n.is_infinite() {
+                    0
+                } else {
+                    n.trunc() as i64
+                }
+            }
+            Value::Undefined => 0,
+            Value::Boolean(b) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
+            Value::String(_) | Value::Object(_) => {
+                let n = crate::core::to_number_with_env(mc, env, &size_val).unwrap_or(f64::NAN);
+                if n.is_nan() || n == 0.0 || n.is_infinite() {
+                    0
+                } else {
+                    n.trunc() as i64
+                }
+            }
+            _ => 0,
         };
 
         #[allow(clippy::match_like_matches_macro, clippy::needless_bool)]
@@ -214,220 +440,258 @@ pub fn handle_atomics_method<'gc>(
         };
         return Ok(Value::Boolean(res));
     }
-    let ta_val = args[0].clone();
-    let ta_obj = if let Value::Object(object) = ta_val {
-        if let Some(ta_rc) = slot_get_chained(&object, &InternalSlot::TypedArray) {
-            if let Value::TypedArray(ta) = &*ta_rc.borrow() {
-                *ta
-            } else {
-                return Err(raise_eval_error!("First argument to Atomics must be a TypedArray").into());
-            }
-        } else {
-            return Err(raise_eval_error!("First argument to Atomics must be a TypedArray").into());
-        }
-    } else {
-        return Err(raise_eval_error!("First argument to Atomics must be a TypedArray").into());
-    };
+
+    // All remaining methods: validate typed array type FIRST (before index coercion)
+    let ta_arg = args.first().cloned().unwrap_or(Value::Undefined);
+    let (ta_obj, _ta_js_obj) = validate_integer_typed_array(mc, env, &ta_arg)?;
+    let is_bigint = is_bigint_typed_array(&ta_obj.kind);
+    let is_shared = ta_obj.buffer.borrow().shared;
 
     match method {
         "load" => {
-            if args.len() != 2 {
-                return Err(raise_eval_error!("Atomics.load requires 2 arguments").into());
-            }
-            let idx_val = args[1].clone();
-            let idx = match idx_val {
-                Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
-            };
+            let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
             let v = ta_obj.get(idx)?;
-            Ok(Value::Number(v as f64))
+            if is_bigint {
+                Ok(Value::BigInt(Box::new(num_bigint::BigInt::from(v as i64))))
+            } else {
+                Ok(Value::Number(v))
+            }
         }
         "store" => {
-            if args.len() != 3 {
-                return Err(raise_eval_error!("Atomics.store requires 3 arguments").into());
-            }
-            let idx_val = args[1].clone();
-            let val_val = args[2].clone();
-            let idx = match idx_val {
-                Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
+            let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let val_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+            // Per spec: coerce value BEFORE validating index
+            let (store_val_f64, return_val) = if is_bigint {
+                let v = to_bigint_i64(mc, env, &val_arg)?;
+                (v as f64, Value::BigInt(Box::new(num_bigint::BigInt::from(v))))
+            } else {
+                let n = crate::core::to_number_with_env(mc, env, &val_arg)?;
+                // Spec: return ToIntegerOrInfinity(v) which normalizes -0 to +0
+                // and truncates. For integer types the return value is ToInteger.
+                let int_n = if n.is_nan() || n == 0.0 { 0.0 } else { n.trunc() };
+                // Normalize: -0.0 → +0.0
+                let int_n = if int_n == 0.0 { 0.0 } else { int_n };
+                (n, Value::Number(int_n))
             };
-            let v = match val_val {
-                Value::Number(n) => n as i64,
-                Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(raise_eval_error!("Atomics value must be a number or BigInt").into()),
-            };
-            let old = ta_obj.get(idx)?;
-            ta_obj.set(mc, idx, v as f64)?;
-            Ok(Value::Number(old as f64))
+            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            ta_obj.set(mc, idx, store_val_f64)?;
+            Ok(return_val)
         }
         "compareExchange" => {
-            if args.len() != 4 {
-                return Err(raise_eval_error!("Atomics.compareExchange requires 4 arguments").into());
-            }
-            let idx_val = args[1].clone();
-            let expected_val = args[2].clone();
-            let replacement_val = args[3].clone();
-            let idx = match idx_val {
-                Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
-            };
-            let expected = match expected_val {
-                Value::Number(n) => n as i64,
-                Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt").into()),
-            };
-            let replacement = match replacement_val {
-                Value::Number(n) => n as i64,
-                Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(raise_eval_error!("Atomics replacement must be a number or BigInt").into()),
+            let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let expected_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+            let replacement_arg = args.get(3).cloned().unwrap_or(Value::Undefined);
+            // Spec order: ValidateAtomicAccess THEN coerce values
+            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            let (expected_f64, replacement_f64) = if is_bigint {
+                let e = to_bigint_i64(mc, env, &expected_arg)? as f64;
+                let r = to_bigint_i64(mc, env, &replacement_arg)? as f64;
+                (e, r)
+            } else {
+                let e = crate::core::to_number_with_env(mc, env, &expected_arg)?;
+                let r = crate::core::to_number_with_env(mc, env, &replacement_arg)?;
+                (e, r)
             };
             let old = ta_obj.get(idx)?;
-            if (old as i64) == (expected as i64) {
-                ta_obj.set(mc, idx, replacement as f64)?;
+            // Compare at element-type width: convert expected through the same
+            // NumericToRawBytes truncation as the stored value for proper modular comparison.
+            let matches = match ta_obj.kind {
+                TypedArrayKind::Int8 => (js_to_int32(old) as i8) == (js_to_int32(expected_f64) as i8),
+                TypedArrayKind::Uint8 => (js_to_int32(old) as u8) == (js_to_int32(expected_f64) as u8),
+                TypedArrayKind::Int16 => (js_to_int32(old) as i16) == (js_to_int32(expected_f64) as i16),
+                TypedArrayKind::Uint16 => (js_to_int32(old) as u16) == (js_to_int32(expected_f64) as u16),
+                TypedArrayKind::Int32 => js_to_int32(old) == js_to_int32(expected_f64),
+                TypedArrayKind::Uint32 => (js_to_int32(old) as u32) == (js_to_int32(expected_f64) as u32),
+                TypedArrayKind::BigInt64 => (old as i64) == (expected_f64 as i64),
+                TypedArrayKind::BigUint64 => (old as u64) == (expected_f64 as u64),
+                _ => old == expected_f64,
+            };
+            if matches {
+                ta_obj.set(mc, idx, replacement_f64)?;
             }
-            Ok(Value::Number(old as f64))
+            if is_bigint {
+                Ok(Value::BigInt(Box::new(num_bigint::BigInt::from(old as i64))))
+            } else {
+                Ok(Value::Number(old))
+            }
         }
         "add" | "sub" | "and" | "or" | "xor" | "exchange" => {
-            if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!(format!("Atomics.{} invalid args", method)).into());
-            }
-            let idx_val = args[1].clone();
-            let idx = match idx_val {
-                Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
-            };
-            let operand = if args.len() == 3 {
-                let v = args[2].clone();
-                match v {
-                    Value::Number(n) => n as i64,
-                    Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                    _ => return Err(raise_eval_error!("Atomics operand must be a number or BigInt").into()),
-                }
+            let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let val_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+            // Spec order: ValidateAtomicAccess THEN coerce value
+            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            let operand = if is_bigint {
+                to_bigint_i64(mc, env, &val_arg)?
             } else {
-                0
+                crate::core::to_number_with_env(mc, env, &val_arg)? as i64
             };
             let old = ta_obj.get(idx)?;
-            let new = match method {
-                "add" => (old as i64).wrapping_add(operand as i64) as f64,
-                "sub" => (old as i64).wrapping_sub(operand as i64) as f64,
-                "and" => ((old as i64) & (operand as i64)) as f64,
-                "or" => ((old as i64) | (operand as i64)) as f64,
-                "xor" => ((old as i64) ^ (operand as i64)) as f64,
+            let new_val = match method {
+                "add" => (old as i64).wrapping_add(operand) as f64,
+                "sub" => (old as i64).wrapping_sub(operand) as f64,
+                "and" => ((old as i64) & operand) as f64,
+                "or" => ((old as i64) | operand) as f64,
+                "xor" => ((old as i64) ^ operand) as f64,
                 "exchange" => operand as f64,
                 _ => old,
             };
-            ta_obj.set(mc, idx, new)?;
-            Ok(Value::Number(old as f64))
+            ta_obj.set(mc, idx, new_val)?;
+            if is_bigint {
+                Ok(Value::BigInt(Box::new(num_bigint::BigInt::from(old as i64))))
+            } else {
+                Ok(Value::Number(old))
+            }
         }
         "wait" => {
             // Atomics.wait(typedArray, index, value[, timeout])
-            if args.len() < 3 || args.len() > 4 {
-                return Err(raise_eval_error!("Atomics.wait requires 3 or 4 arguments").into());
+            // Must be Int32Array or BigInt64Array on SharedArrayBuffer
+            if !matches!(ta_obj.kind, TypedArrayKind::Int32 | TypedArrayKind::BigInt64) {
+                return Err(throw_type_error(
+                    mc,
+                    env,
+                    "Atomics.wait: TypedArray must be Int32Array or BigInt64Array",
+                ));
             }
-            let idx_val = args[1].clone();
-            let idx = match idx_val {
-                Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
-            };
-            let expected_val = args[2].clone();
-            let expected = match expected_val {
-                Value::Number(n) => n as i64,
-                Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt").into()),
+            if !is_shared {
+                return Err(throw_type_error(
+                    mc,
+                    env,
+                    "Atomics.wait: TypedArray must be backed by a SharedArrayBuffer",
+                ));
+            }
+            // Spec order: index → value → timeout → AgentCanSuspend
+            let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+
+            let expected_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+            // Coerce expected value
+            let expected = if is_bigint {
+                to_bigint_i64(mc, env, &expected_arg)?
+            } else {
+                crate::core::to_number_with_env(mc, env, &expected_arg)? as i64
             };
 
-            // Check current value
-            let current = ta_obj.get(idx)?;
-            if (current as i64) != (expected as i64) {
-                return Ok(Value::String(utf8_to_utf16("not-equal")));
-            }
-
-            // Determine timeout (milliseconds)
-            let timeout_ms_opt = if args.len() == 4 {
+            // Coerce timeout
+            let timeout_ms_opt = if args.len() > 3 {
                 let tval = args[3].clone();
                 match tval {
-                    Value::Number(n) => Some(n as i64),
-                    _ => None,
+                    Value::Undefined => None, // +Infinity
+                    _ => {
+                        let n = crate::core::to_number_with_env(mc, env, &tval)?;
+                        if n.is_nan() { None } else { Some(n) }
+                    }
                 }
             } else {
                 None
             };
 
-            // Compute key for waiters: (arc_ptr, byte_index)
+            // Read the current value at the index and compare with expected
+            let byte_index = ta_obj.byte_offset + idx * ta_obj.element_size();
+            let current = {
+                let buf = ta_obj.buffer.borrow();
+                let data = buf.data.lock().unwrap();
+                if is_bigint {
+                    let mut b = [0u8; 8];
+                    b.copy_from_slice(&data[byte_index..byte_index + 8]);
+                    i64::from_le_bytes(b)
+                } else {
+                    let mut b = [0u8; 4];
+                    b.copy_from_slice(&data[byte_index..byte_index + 4]);
+                    i32::from_le_bytes(b) as i64
+                }
+            };
+
+            if current != expected {
+                return Ok(Value::String(utf8_to_utf16("not-equal")));
+            }
+
+            // Value matches — block until notified or timeout
+            let timeout_dur = match timeout_ms_opt {
+                Some(ms) if ms <= 0.0 => {
+                    // Timeout of 0 or negative → immediate timeout
+                    return Ok(Value::String(utf8_to_utf16("timed-out")));
+                }
+                Some(ms) => Some(std::time::Duration::from_millis(ms as u64)),
+                None => None, // wait forever
+            };
+
             let buffer_rc = ta_obj.buffer;
             let arc_ptr = Arc::as_ptr(&buffer_rc.borrow().data) as usize;
-            let byte_index = ta_obj.byte_offset + idx * ta_obj.element_size();
-
-            // Create waiter and register
             let waiter = Arc::new((Mutex::new(false), Condvar::new()));
             {
                 let mut map = WAITERS.lock().unwrap();
-                let entry = map.entry((arc_ptr, byte_index)).or_default();
-                entry.push(waiter.clone());
+                map.entry((arc_ptr, byte_index)).or_default().push(waiter.clone());
             }
 
-            // Block on the condvar
-            let (m, cv) = &*waiter;
-            let mut signaled = m.lock().unwrap();
-            if let Some(ms) = timeout_ms_opt {
-                let dur = if ms <= 0 {
-                    Duration::from_millis(0)
+            let (lock, cvar) = &*waiter;
+            let mut notified = lock.lock().unwrap();
+            let result = if let Some(dur) = timeout_dur {
+                let (guard, timeout_result) = cvar.wait_timeout(notified, dur).unwrap();
+                notified = guard;
+                if *notified {
+                    "ok"
+                } else if timeout_result.timed_out() {
+                    "timed-out"
                 } else {
-                    Duration::from_millis(ms as u64)
-                };
-                let (guard, res) = cv.wait_timeout(signaled, dur).unwrap();
-                signaled = guard;
-                if *signaled {
-                    Ok(Value::String(utf8_to_utf16("ok")))
-                } else if res.timed_out() {
-                    // remove self from WAITERS
-                    let mut map = WAITERS.lock().unwrap();
-                    if let Some(v) = map.get_mut(&(arc_ptr, byte_index)) {
-                        v.retain(|h| !Arc::ptr_eq(h, &waiter));
-                        if v.is_empty() {
-                            map.remove(&(arc_ptr, byte_index));
-                        }
-                    }
-                    Ok(Value::String(utf8_to_utf16("timed-out")))
-                } else {
-                    // Spurious wake, treat as timed-out
-                    let mut map = WAITERS.lock().unwrap();
-                    if let Some(v) = map.get_mut(&(arc_ptr, byte_index)) {
-                        v.retain(|h| !Arc::ptr_eq(h, &waiter));
-                        if v.is_empty() {
-                            map.remove(&(arc_ptr, byte_index));
-                        }
-                    }
-                    Ok(Value::String(utf8_to_utf16("timed-out")))
+                    "ok"
                 }
             } else {
                 // Wait indefinitely
-                while !*signaled {
-                    signaled = cv.wait(signaled).unwrap();
+                while !*notified {
+                    notified = cvar.wait(notified).unwrap();
                 }
-                Ok(Value::String(utf8_to_utf16("ok")))
+                "ok"
+            };
+
+            // Clean up: remove this waiter from the registry
+            {
+                let mut map = WAITERS.lock().unwrap();
+                if let Some(vec) = map.get_mut(&(arc_ptr, byte_index)) {
+                    vec.retain(|w| !Arc::ptr_eq(w, &waiter));
+                    if vec.is_empty() {
+                        map.remove(&(arc_ptr, byte_index));
+                    }
+                }
             }
+
+            Ok(Value::String(utf8_to_utf16(result)))
         }
         "notify" => {
             // Atomics.notify(typedArray, index[, count])
-            if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!("Atomics.notify requires 2 or 3 arguments").into());
+            // Must be Int32Array or BigInt64Array
+            if !matches!(ta_obj.kind, TypedArrayKind::Int32 | TypedArrayKind::BigInt64) {
+                return Err(throw_type_error(
+                    mc,
+                    env,
+                    "Atomics.notify: TypedArray must be Int32Array or BigInt64Array",
+                ));
             }
-            let idx_val = args[1].clone();
-            let idx = match idx_val {
-                Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number").into()),
-            };
-            let count = if args.len() == 3 {
-                let cval = args[2].clone();
-                match cval {
-                    Value::Number(n) => n as usize,
-                    _ => return Err(raise_eval_error!("Atomics count must be a number").into()),
+            let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let count_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+            // Spec order: ValidateAtomicAccess THEN coerce count
+            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            // Spec: IntegerOrInfinity(count), then max(intCount, 0)
+            // Undefined → +∞ (notify all). Negative → clamp to 0.
+            let count = match &count_arg {
+                Value::Undefined => usize::MAX,
+                _ => {
+                    let n = crate::core::to_number_with_env(mc, env, &count_arg)?;
+                    if n.is_nan() || n == 0.0 {
+                        0usize
+                    } else if n.is_infinite() && n > 0.0 {
+                        usize::MAX
+                    } else {
+                        let int_count = n.trunc() as i64;
+                        std::cmp::max(int_count, 0) as usize
+                    }
                 }
-            } else {
-                usize::MAX
             };
+
+            // For non-shared buffers, Atomics.notify just returns 0
+            if !is_shared {
+                return Ok(Value::Number(0.0));
+            }
 
             let buffer_rc = ta_obj.buffer;
             let arc_ptr = Arc::as_ptr(&buffer_rc.borrow().data) as usize;
@@ -438,7 +702,6 @@ pub fn handle_atomics_method<'gc>(
             if let Some(vec) = map.get_mut(&(arc_ptr, byte_index)) {
                 let to_awake = std::cmp::min(count, vec.len());
                 for _ in 0..to_awake {
-                    // wake oldest
                     if vec.is_empty() {
                         break;
                     }
@@ -455,7 +718,7 @@ pub fn handle_atomics_method<'gc>(
             }
             Ok(Value::Number(awakened as f64))
         }
-        _ => Err(raise_eval_error!(format!("Atomics method '{method}' not implemented")).into()),
+        _ => Err(throw_type_error(mc, env, &format!("Atomics.{} is not a function", method))),
     }
 }
 
@@ -911,6 +1174,12 @@ fn make_typedarray_prototype<'gc>(
         .non_enumerable
         .insert(crate::core::PropertyKey::String("entries".to_string()));
 
+    object_set_key_value(mc, &proto, "fill", &Value::Function("TypedArray.prototype.fill".to_string()))?;
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("fill".to_string()));
+
     // Register Symbol.iterator on TypedArray.prototype (alias to TypedArray.prototype.values)
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_val.borrow()
@@ -1071,9 +1340,11 @@ pub fn handle_arraybuffer_static_method<'gc>(method: &str, args: &[Value<'gc>]) 
     match method {
         "isView" => {
             if let Some(Value::Object(obj)) = args.first() {
-                let is_view =
-                    slot_get_chained(obj, &InternalSlot::TypedArray).is_some() || slot_get_chained(obj, &InternalSlot::DataView).is_some();
-                Ok(Value::Boolean(is_view))
+                let is_typed_array = slot_get_chained(obj, &InternalSlot::TypedArray).is_some();
+                let is_dataview_instance = slot_get_chained(obj, &InternalSlot::DataView)
+                    .map(|rc| matches!(&*rc.borrow(), Value::DataView(_)))
+                    .unwrap_or(false);
+                Ok(Value::Boolean(is_typed_array || is_dataview_instance))
             } else {
                 Ok(Value::Boolean(false))
             }
@@ -1087,17 +1358,79 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    // SharedArrayBuffer(length)
-    if args.is_empty() {
-        return Err(raise_eval_error!("SharedArrayBuffer constructor requires a length argument"));
+    new_target: Option<&Value<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // ToIndex(length) – same logic as ArrayBuffer
+    let to_index = |v: &Value<'gc>| -> Result<usize, EvalError<'gc>> {
+        let prim = if let Value::Object(_) = v {
+            crate::core::to_primitive(mc, v, "number", env)?
+        } else {
+            v.clone()
+        };
+
+        if matches!(prim, Value::Undefined) {
+            return Ok(0);
+        }
+        if matches!(prim, Value::Symbol(_) | Value::BigInt(_)) {
+            return Err(raise_type_error!("Cannot convert value to index").into());
+        }
+
+        let n = crate::core::to_number(&prim)?;
+        let integer_index = if n.is_nan() || n == 0.0 {
+            0.0
+        } else if !n.is_finite() {
+            n
+        } else {
+            n.trunc()
+        };
+
+        if integer_index < 0.0 {
+            return Err(raise_range_error!("SharedArrayBuffer length must be a non-negative integer").into());
+        }
+
+        let to_length = if !integer_index.is_finite() {
+            (1u64 << 53) as f64 - 1.0
+        } else {
+            integer_index.min((1u64 << 53) as f64 - 1.0)
+        };
+        if (integer_index - to_length).abs() > 0.0 {
+            return Err(raise_range_error!("SharedArrayBuffer length is too large").into());
+        }
+
+        Ok(integer_index as usize)
+    };
+
+    let length = if let Some(v) = args.first() { to_index(v)? } else { 0 };
+
+    // Create the SharedArrayBuffer object first
+    let obj = new_js_object_data(mc);
+
+    // Set prototype from NewTarget.prototype if present; otherwise fallback to SharedArrayBuffer.prototype
+    let mut proto_from_target: Option<JSObjectDataPtr<'gc>> = None;
+    if let Some(Value::Object(nt_obj)) = new_target {
+        let proto_val = crate::core::get_property_with_accessors(mc, env, nt_obj, "prototype")?;
+        if let Value::Object(proto_obj) = proto_val {
+            proto_from_target = Some(proto_obj);
+        }
     }
 
-    let length_val = args[0].clone();
-    let length = match length_val {
-        Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
-        _ => return Err(raise_eval_error!("SharedArrayBuffer length must be a non-negative integer")),
+    let proto = if let Some(p) = proto_from_target {
+        p
+    } else if let Some(ctor_val) = object_get_key_value(env, "SharedArrayBuffer")
+        && let Value::Object(ctor_obj) = &*ctor_val.borrow()
+        && let Some(p_val) = object_get_key_value(ctor_obj, "prototype")
+        && let Value::Object(p_obj) = &*p_val.borrow()
+    {
+        *p_obj
+    } else {
+        make_sharedarraybuffer_prototype(mc)?
     };
+    obj.borrow_mut(mc).prototype = Some(proto);
+
+    // Guard against unsupported large allocation
+    if length > (u32::MAX as usize) {
+        return Err(raise_range_error!("SharedArrayBuffer length is too large").into());
+    }
 
     // Create SharedArrayBuffer instance (mark shared: true)
     let buffer = new_gc_cell_ptr(
@@ -1108,28 +1441,7 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
             ..JSArrayBuffer::default()
         },
     );
-
-    // Create the SharedArrayBuffer object wrapper
-    let obj = new_js_object_data(mc);
     slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
-
-    // Set prototype
-    let mut proto_ptr = None;
-    if let Some(ctor_val) = object_get_key_value(env, "SharedArrayBuffer")
-        && let Value::Object(ctor_obj) = &*ctor_val.borrow()
-        && let Some(p_val) = object_get_key_value(ctor_obj, "prototype")
-        && let Value::Object(p_obj) = &*p_val.borrow()
-    {
-        proto_ptr = Some(*p_obj);
-    }
-
-    let proto = if let Some(p) = proto_ptr {
-        p
-    } else {
-        // Fallback if constructor not found in env
-        make_sharedarraybuffer_prototype(mc)?
-    };
-    obj.borrow_mut(mc).prototype = Some(proto);
 
     Ok(Value::Object(obj))
 }
@@ -2169,6 +2481,23 @@ impl<'gc> JSDataView<'gc> {
     }
 }
 
+/// JavaScript ToInt32: modular conversion from f64 to i32.
+/// Handles NaN, Infinity, and wraps via mod 2^32.
+pub(crate) fn js_to_int32(val: f64) -> i32 {
+    if val.is_nan() || val.is_infinite() || val == 0.0 {
+        return 0;
+    }
+    let n = val.trunc();
+    let two32: f64 = 4294967296.0; // 2^32
+    let mut int32bit = n % two32;
+    if int32bit < 0.0 {
+        int32bit += two32;
+    }
+    // int32bit is in [0, 2^32)
+    let int32bit = int32bit as u32;
+    int32bit as i32
+}
+
 impl<'gc> crate::core::JSTypedArray<'gc> {
     pub fn element_size(&self) -> usize {
         match self.kind {
@@ -2235,7 +2564,16 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
                 b.copy_from_slice(&data[byte_offset..byte_offset + 8]);
                 Ok(f64::from_le_bytes(b))
             }
-            _ => Ok(0.0), // BigInt not supported in this helper yet
+            TypedArrayKind::BigInt64 => {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&data[byte_offset..byte_offset + 8]);
+                Ok(i64::from_le_bytes(b) as f64)
+            }
+            TypedArrayKind::BigUint64 => {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&data[byte_offset..byte_offset + 8]);
+                Ok(u64::from_le_bytes(b) as f64)
+            }
         }
     }
 
@@ -2251,29 +2589,43 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
 
         match self.kind {
             TypedArrayKind::Int8 => {
-                let b = (val as i8).to_le_bytes();
+                let b = (js_to_int32(val) as i8).to_le_bytes();
                 data[byte_offset] = b[0];
             }
-            TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => {
-                let b = (val as u8).to_le_bytes();
+            TypedArrayKind::Uint8 => {
+                let b = (js_to_int32(val) as u8).to_le_bytes();
                 data[byte_offset] = b[0];
+            }
+            TypedArrayKind::Uint8Clamped => {
+                // Uint8ClampedArray clamps to [0, 255]
+                #[allow(clippy::if_same_then_else)]
+                let v = if val.is_nan() {
+                    0u8
+                } else if val <= 0.0 {
+                    0u8
+                } else if val >= 255.0 {
+                    255u8
+                } else {
+                    val.round() as u8
+                };
+                data[byte_offset] = v;
             }
             TypedArrayKind::Int16 => {
-                let b = (val as i16).to_le_bytes();
+                let b = (js_to_int32(val) as i16).to_le_bytes();
                 data[byte_offset] = b[0];
                 data[byte_offset + 1] = b[1];
             }
             TypedArrayKind::Uint16 => {
-                let b = (val as u16).to_le_bytes();
+                let b = (js_to_int32(val) as u16).to_le_bytes();
                 data[byte_offset] = b[0];
                 data[byte_offset + 1] = b[1];
             }
             TypedArrayKind::Int32 => {
-                let b = (val as i32).to_le_bytes();
+                let b = js_to_int32(val).to_le_bytes();
                 data[byte_offset..byte_offset + 4].copy_from_slice(&b);
             }
             TypedArrayKind::Uint32 => {
-                let b = (val as u32).to_le_bytes();
+                let b = (js_to_int32(val) as u32).to_le_bytes();
                 data[byte_offset..byte_offset + 4].copy_from_slice(&b);
             }
             TypedArrayKind::Float32 => {
@@ -2284,7 +2636,14 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
                 let b = val.to_le_bytes();
                 data[byte_offset..byte_offset + 8].copy_from_slice(&b);
             }
-            _ => {}
+            TypedArrayKind::BigInt64 => {
+                let b = (val as i64).to_le_bytes();
+                data[byte_offset..byte_offset + 8].copy_from_slice(&b);
+            }
+            TypedArrayKind::BigUint64 => {
+                let b = (val as u64).to_le_bytes();
+                data[byte_offset..byte_offset + 8].copy_from_slice(&b);
+            }
         }
         Ok(())
     }
@@ -2690,6 +3049,70 @@ pub fn handle_typedarray_method<'gc>(
                     };
                     Ok(crate::js_array::create_array_iterator(mc, _env, *obj, kind)?)
                 }
+                "fill" => {
+                    let ta = *_ta;
+                    let len = if ta.length_tracking {
+                        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                        (buf_len.saturating_sub(ta.byte_offset)) / ta.element_size()
+                    } else {
+                        ta.length
+                    };
+                    // Coerce fill value
+                    let fill_val = _args.first().cloned().unwrap_or(Value::Undefined);
+                    let fill_f64 = if is_bigint_typed_array(&ta.kind) {
+                        match &fill_val {
+                            Value::BigInt(b) => b.to_i64().unwrap_or(0) as f64,
+                            _ => 0.0,
+                        }
+                    } else {
+                        match &fill_val {
+                            Value::Number(n) => *n,
+                            Value::Undefined => f64::NAN,
+                            _ => crate::core::to_number_with_env(mc, _env, &fill_val).unwrap_or(0.0),
+                        }
+                    };
+                    // start/end
+                    let start = if let Some(s) = _args.get(1) {
+                        match s {
+                            Value::Number(n) => {
+                                let n = *n;
+                                if n.is_nan() || n == 0.0 {
+                                    0usize
+                                } else if n < 0.0 {
+                                    (len as i64 + n as i64).max(0) as usize
+                                } else {
+                                    (n as usize).min(len)
+                                }
+                            }
+                            Value::Undefined => 0,
+                            _ => 0,
+                        }
+                    } else {
+                        0
+                    };
+                    let end = if let Some(e) = _args.get(2) {
+                        match e {
+                            Value::Number(n) => {
+                                let n = *n;
+                                if n.is_nan() || n == 0.0 {
+                                    0usize
+                                } else if n < 0.0 {
+                                    (len as i64 + n as i64).max(0) as usize
+                                } else {
+                                    (n as usize).min(len)
+                                }
+                            }
+                            Value::Undefined => len,
+                            _ => len,
+                        }
+                    } else {
+                        len
+                    };
+                    for i in start..end {
+                        ta.set(mc, i, fill_f64)?;
+                    }
+                    Ok(Value::Object(*obj))
+                }
                 _ => Err(raise_eval_error!(format!("TypedArray.prototype.{} not implemented", method))),
             }
         } else {
@@ -2712,7 +3135,7 @@ pub fn initialize_typedarray<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataP
         crate::core::env_set(mc, env, &name, &Value::Object(ctor))?;
     }
 
-    let atomics = make_atomics_object(mc)?;
+    let atomics = make_atomics_object(mc, env)?;
     crate::core::env_set(mc, env, "Atomics", &Value::Object(atomics))?;
 
     let shared_ab = make_sharedarraybuffer_constructor(mc)?;

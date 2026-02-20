@@ -385,6 +385,30 @@ where
         crate::core::parser::pop_await_context();
         res?
     };
+
+    // In script mode, reject import/export declarations (they are only valid in module code).
+    if kind == ProgramKind::Script {
+        for stmt in &statements {
+            match &*stmt.kind {
+                StatementKind::Export(..) => {
+                    return Err(crate::raise_syntax_error!(format!(
+                        "Unexpected token 'export' (line {}:{}). export declarations may only appear at top level of a module. \
+                         Use --module flag or .mjs extension to run as an ES module",
+                        stmt.line, stmt.column
+                    )));
+                }
+                StatementKind::Import(..) => {
+                    return Err(crate::raise_syntax_error!(format!(
+                        "Cannot use import statement outside a module (line {}:{}). \
+                         Use --module flag or .mjs extension to run as an ES module",
+                        stmt.line, stmt.column
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+
     // DEBUG: show parsed statements for troubleshooting
     log::trace!("DEBUG: PARSED STATEMENTS: {:#?}", statements);
 

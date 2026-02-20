@@ -2525,7 +2525,13 @@ pub(crate) fn handle_value_of_method<'gc>(
                         let result = crate::core::evaluate_statements(mc, &func_env, &body)?;
                         if matches!(
                             result,
-                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                            Value::Number(_)
+                                | Value::String(_)
+                                | Value::Boolean(_)
+                                | Value::BigInt(_)
+                                | Value::Symbol(_)
+                                | Value::Null
+                                | Value::Undefined
                         ) {
                             return Ok(result);
                         }
@@ -2567,7 +2573,13 @@ pub(crate) fn handle_value_of_method<'gc>(
                         )?;
                         if matches!(
                             res,
-                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                            Value::Number(_)
+                                | Value::String(_)
+                                | Value::Boolean(_)
+                                | Value::BigInt(_)
+                                | Value::Symbol(_)
+                                | Value::Null
+                                | Value::Undefined
                         ) {
                             return Ok(res);
                         }
@@ -2595,7 +2607,13 @@ pub(crate) fn handle_value_of_method<'gc>(
                             let result = crate::core::evaluate_statements(mc, &func_env, &body)?;
                             if matches!(
                                 result,
-                                Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                                Value::Number(_)
+                                    | Value::String(_)
+                                    | Value::Boolean(_)
+                                    | Value::BigInt(_)
+                                    | Value::Symbol(_)
+                                    | Value::Null
+                                    | Value::Undefined
                             ) {
                                 return Ok(result);
                             }

@@ -48,7 +48,7 @@ jobs:
         shopt -s nullglob
 
         # Run every JS test in js-scripts/ with cargo. Stops on first failure due to set -e.
-        examples=(js-scripts/*.js)
+        examples=(js-scripts/*.js js-scripts/*.mjs)
         if [[ ${#examples[@]} -eq 0 ]]; then
           echo "No tests found in js-scripts/" >&2
           exit 1
@@ -56,7 +56,11 @@ jobs:
 
         for f in "${examples[@]}"; do
           printf '\n🔧 Running %s\n' "$f"
-          cargo run --all-features --package js -- "$f"
+          if [[ "$f" == *.mjs ]] || [[ "$f" == *es6_module*.js ]]; then
+            cargo run --all-features --package js -- --module "$f"
+          else
+            cargo run --all-features --package js -- "$f"
+          fi
         done
 
         printf '\n✅ All tests passed\n'

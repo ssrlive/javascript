@@ -204,6 +204,15 @@ pub(crate) fn number_constructor<'gc>(
                         Ok(Value::Number(string_to_f64(str_val.trim()).unwrap_or(f64::NAN)))
                     }
                     Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                    Value::Null => Ok(Value::Number(0.0)),
+                    Value::Undefined => Ok(Value::Number(f64::NAN)),
+                    Value::BigInt(b) => {
+                        if let Some(n) = b.to_f64() {
+                            Ok(Value::Number(n))
+                        } else {
+                            Ok(Value::Number(f64::NAN))
+                        }
+                    }
                     _ => Ok(Value::Number(f64::NAN)),
                 }
             }

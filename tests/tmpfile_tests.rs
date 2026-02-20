@@ -12,7 +12,7 @@ fn __init_test_logger() {
 #[test]
 #[cfg(feature = "std")]
 fn test_tmpfile_puts_tell() {
-    // use evaluate_script to inspect Value-level results
+    // use evaluate_module to inspect Value-level results
     let src = r#"
         import * as std from "std";
         let f = std.tmpfile();
@@ -22,7 +22,7 @@ fn test_tmpfile_puts_tell() {
         let s = f.readAsString();
         s
     "#;
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"hello\\nworld\"");
 }
 
@@ -38,7 +38,7 @@ fn test_tmpfile_getline() {
         let l1 = f.getline();
         l1
     "#;
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"a\"");
 }
 
@@ -46,7 +46,7 @@ fn test_tmpfile_getline() {
 #[cfg(feature = "std")]
 fn test_sprintf_basic() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"a=%d s=%s\", 123, \"abc\")";
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"a=123 s=abc\"");
 }
 
@@ -54,7 +54,7 @@ fn test_sprintf_basic() {
 #[cfg(feature = "std")]
 fn test_sprintf_zero_pad() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%010d\", 123)";
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"0000000123\"");
 }
 
@@ -62,7 +62,7 @@ fn test_sprintf_zero_pad() {
 #[cfg(feature = "std")]
 fn test_sprintf_hex() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%x\", -2)";
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"fffffffe\"");
 }
 
@@ -70,7 +70,7 @@ fn test_sprintf_hex() {
 #[cfg(feature = "std")]
 fn test_sprintf_float() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%10.1f\", 2.1)";
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"       2.1\"");
 }
 
@@ -78,7 +78,7 @@ fn test_sprintf_float() {
 #[cfg(feature = "std")]
 fn test_sprintf_dynamic_width() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%*.*f\", 10, 2, -2.13)";
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"     -2.13\"");
 }
 
@@ -86,7 +86,7 @@ fn test_sprintf_dynamic_width() {
 #[cfg(feature = "std")]
 fn test_sprintf_long_hex() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%lx\", -2)";
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"fffffffffffffffe\"");
 }
 
@@ -94,6 +94,6 @@ fn test_sprintf_long_hex() {
 #[cfg(feature = "std")]
 fn test_sprintf_hex_with_prefix() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%#lx\", 123)";
-    let result = evaluate_script(src, None::<&std::path::Path>).unwrap();
+    let result = evaluate_module(src, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"0x7b\"");
 }

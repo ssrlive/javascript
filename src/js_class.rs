@@ -1706,7 +1706,7 @@ pub(crate) fn evaluate_new<'gc>(
                         return crate::js_typedarray::handle_arraybuffer_constructor(mc, evaluated_args, env, new_target);
                     }
                     "SharedArrayBuffer" => {
-                        return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, evaluated_args, env)?);
+                        return crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, evaluated_args, env, new_target);
                     }
                     "DataView" => return Ok(crate::js_typedarray::handle_dataview_constructor(mc, evaluated_args, env)?),
                     "Error" | "TypeError" | "ReferenceError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError"

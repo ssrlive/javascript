@@ -17,7 +17,7 @@ mod std_tests {
     #[cfg(feature = "std")]
     fn test_sprintf() {
         let script = "import * as std from 'std'; std.sprintf('a=%d s=%s', 123, 'abc')";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"a=123 s=abc\"");
     }
 
@@ -25,7 +25,7 @@ mod std_tests {
     #[cfg(feature = "std")]
     fn test_tmpfile_puts_read() {
         let script = "import * as std from 'std'; let f = std.tmpfile(); f.puts('hello'); f.readAsString();";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"hello\"");
     }
 

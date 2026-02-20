@@ -26,7 +26,7 @@ mod os_tests {
                 -1;
             }
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "0");
         // Clean up
         std::fs::remove_file("test.txt").ok();
@@ -48,7 +48,7 @@ mod os_tests {
                 "";
             }
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"Hello World\"");
         // Clean up
         std::fs::remove_file("test_write.txt").ok();
@@ -61,7 +61,7 @@ mod os_tests {
             import * as os from "os";
             os.getcwd();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         let expected_cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
         // Use JSON stringification for the expected value so platform-specific escaping (e.g. backslashes on Windows) matches
         assert_eq!(result, serde_json::to_string(&expected_cwd).unwrap());
@@ -74,7 +74,7 @@ mod os_tests {
             import * as os from "os";
             os.getpid();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         assert!(result.parse::<i32>().unwrap() > 0);
     }
 
@@ -85,7 +85,7 @@ mod os_tests {
             import * as os from "os";
             os.path.join("a", "b", "c");
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         let expected = format!("a{}b{}c", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR);
         assert_eq!(result, serde_json::to_string(&expected).unwrap());
     }
@@ -97,7 +97,7 @@ mod os_tests {
             import * as os from "os";
             os.path.basename("path/to/file.txt");
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"file.txt\"");
     }
 
@@ -108,7 +108,7 @@ mod os_tests {
             import * as os from "os";
             os.path.extname("file.txt");
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\".txt\"");
     }
 
@@ -119,7 +119,7 @@ mod os_tests {
             import * as os from "os";
             os.getppid();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
         // Just check that it doesn't crash and returns some number
         assert!(result.parse::<i32>().unwrap() > 0);
     }

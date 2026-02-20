@@ -1502,6 +1502,44 @@ pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value
     }
 }
 
+/// SameValueZero comparison (like SameValue but treats +0 and -0 as equal).
+/// Used by Array.prototype.includes, Map, Set, etc.
+pub fn same_value_zero<'gc>(v1: &Value<'gc>, v2: &Value<'gc>) -> bool {
+    match (v1, v2) {
+        (Value::Number(n1), Value::Number(n2)) => {
+            if n1.is_nan() && n2.is_nan() {
+                true
+            } else {
+                // SameValueZero: +0 and -0 ARE equal (unlike SameValue)
+                *n1 == *n2
+            }
+        }
+        (Value::String(s1), Value::String(s2)) => s1 == s2,
+        (Value::BigInt(b1), Value::BigInt(b2)) => **b1 == **b2,
+        (Value::Boolean(b1), Value::Boolean(b2)) => b1 == b2,
+        (Value::Function(f1), Value::Function(f2)) => f1 == f2,
+        (Value::Undefined, Value::Undefined) => true,
+        (Value::Null, Value::Null) => true,
+        (Value::Object(o1), Value::Object(o2)) => Gc::ptr_eq(*o1, *o2),
+        (Value::Closure(c1), Value::Closure(c2)) => Gc::ptr_eq(*c1, *c2),
+        (Value::AsyncClosure(c1), Value::AsyncClosure(c2)) => Gc::ptr_eq(*c1, *c2),
+        (Value::GeneratorFunction(_, c1), Value::GeneratorFunction(_, c2)) => Gc::ptr_eq(*c1, *c2),
+        (Value::ClassDefinition(c1), Value::ClassDefinition(c2)) => Gc::ptr_eq(*c1, *c2),
+        (Value::Promise(p1), Value::Promise(p2)) => Gc::ptr_eq(*p1, *p2),
+        (Value::Map(m1), Value::Map(m2)) => Gc::ptr_eq(*m1, *m2),
+        (Value::Set(s1), Value::Set(s2)) => Gc::ptr_eq(*s1, *s2),
+        (Value::WeakMap(m1), Value::WeakMap(m2)) => Gc::ptr_eq(*m1, *m2),
+        (Value::WeakSet(s1), Value::WeakSet(s2)) => Gc::ptr_eq(*s1, *s2),
+        (Value::Generator(g1), Value::Generator(g2)) => Gc::ptr_eq(*g1, *g2),
+        (Value::Proxy(p1), Value::Proxy(p2)) => Gc::ptr_eq(*p1, *p2),
+        (Value::ArrayBuffer(b1), Value::ArrayBuffer(b2)) => Gc::ptr_eq(*b1, *b2),
+        (Value::DataView(d1), Value::DataView(d2)) => Gc::ptr_eq(*d1, *d2),
+        (Value::Symbol(s1), Value::Symbol(s2)) => Gc::ptr_eq(*s1, *s2),
+        (Value::TypedArray(t1), Value::TypedArray(t2)) => Gc::ptr_eq(*t1, *t2),
+        _ => false,
+    }
+}
+
 pub fn object_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<PropertyKey<'gc>>) -> Option<GcPtr<'gc, Value<'gc>>> {
     let key = key.into();
 
@@ -1796,21 +1834,36 @@ pub fn object_set_key_value<'gc>(
                     if let Ok(n) = crate::core::eval::to_number(val) {
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
-                        data[byte_offset] = n as i8 as u8;
+                        data[byte_offset] = crate::js_typedarray::js_to_int32(n) as i8 as u8;
                     }
                 }
-                crate::core::TypedArrayKind::Uint8 | crate::core::TypedArrayKind::Uint8Clamped => {
+                crate::core::TypedArrayKind::Uint8 => {
                     if let Ok(n) = crate::core::eval::to_number(val) {
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
-                        let v = n as i32;
-                        let v = if v < 0 { 0 } else { v } as u8; // clamp
+                        data[byte_offset] = crate::js_typedarray::js_to_int32(n) as u8;
+                    }
+                }
+                crate::core::TypedArrayKind::Uint8Clamped => {
+                    if let Ok(n) = crate::core::eval::to_number(val) {
+                        let buffer_guard = ta.buffer.borrow();
+                        let mut data = buffer_guard.data.lock().unwrap();
+                        #[allow(clippy::if_same_then_else)]
+                        let v = if n.is_nan() {
+                            0u8
+                        } else if n <= 0.0 {
+                            0u8
+                        } else if n >= 255.0 {
+                            255u8
+                        } else {
+                            n.round() as u8
+                        };
                         data[byte_offset] = v;
                     }
                 }
                 crate::core::TypedArrayKind::Int16 => {
                     if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = (n as i16).to_le_bytes();
+                        let bytes = (crate::js_typedarray::js_to_int32(n) as i16).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
                         data[byte_offset] = bytes[0];
@@ -1819,7 +1872,7 @@ pub fn object_set_key_value<'gc>(
                 }
                 crate::core::TypedArrayKind::Uint16 => {
                     if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = (n as u16).to_le_bytes();
+                        let bytes = (crate::js_typedarray::js_to_int32(n) as u16).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
                         data[byte_offset] = bytes[0];
@@ -1828,7 +1881,7 @@ pub fn object_set_key_value<'gc>(
                 }
                 crate::core::TypedArrayKind::Int32 => {
                     if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = (n as i32).to_le_bytes();
+                        let bytes = crate::js_typedarray::js_to_int32(n).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
                         data[byte_offset] = bytes[0];
@@ -1839,7 +1892,7 @@ pub fn object_set_key_value<'gc>(
                 }
                 crate::core::TypedArrayKind::Uint32 => {
                     if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = (n as u32).to_le_bytes();
+                        let bytes = (crate::js_typedarray::js_to_int32(n) as u32).to_le_bytes();
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
                         data[byte_offset] = bytes[0];

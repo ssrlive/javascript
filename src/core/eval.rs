@@ -242,7 +242,11 @@ fn loose_equal<'gc>(mc: &MutationContext<'gc>, l: &Value<'gc>, r: &Value<'gc>, e
     }
 }
 
-fn to_number_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
+pub(crate) fn to_number_with_env<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    val: &Value<'gc>,
+) -> Result<f64, EvalError<'gc>> {
     match val {
         Value::Object(_) => {
             let prim = to_primitive(mc, val, "number", env)?;
@@ -18773,7 +18777,7 @@ pub fn call_native_function<'gc>(
 
     if name.starts_with("TypedArray.prototype.")
         && let Some(method) = name.strip_prefix("TypedArray.prototype.")
-        && (method == "values" || method == "keys" || method == "entries" || method == "set" || method == "subarray")
+        && (method == "values" || method == "keys" || method == "entries" || method == "set" || method == "subarray" || method == "fill")
     {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         return Ok(Some(crate::js_typedarray::handle_typedarray_method(mc, this_v, method, args, env)?));
@@ -20765,7 +20769,7 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "ArrayBuffer" {
                         return crate::js_typedarray::handle_arraybuffer_constructor(mc, &eval_args, env, None);
                     } else if name_str == "SharedArrayBuffer" {
-                        return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, &eval_args, env)?);
+                        return crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, &eval_args, env, None);
                     } else if name_str == "DataView" {
                         return Ok(crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env)?);
                     } else if name_str == "TypedArray" {

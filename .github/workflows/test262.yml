@@ -185,8 +185,8 @@ jobs:
               FOCUS='built-ins/Object'
               ;;
             29)
-              TITLE='"built-ins/AbstractModuleSource" - "built-ins/AsyncIteratorPrototype"'
-              FOCUS='node ci/runner.js --limit 10000 --focus built-ins/AbstractModuleSource,built-ins/AggregateError,built-ins/ArrayBuffer,built-ins/ArrayIteratorPrototype,built-ins/AsyncDisposableStack,built-ins/AsyncFromSyncIteratorPrototype,built-ins/AsyncFunction,built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype'
+              TITLE='"built-ins/AbstractModuleSource" - "built-ins/Atomics"'
+              FOCUS='node ci/runner.js --limit 10000 --focus built-ins/AbstractModuleSource,built-ins/AggregateError,built-ins/ArrayBuffer,built-ins/ArrayIteratorPrototype,built-ins/AsyncDisposableStack,built-ins/AsyncFromSyncIteratorPrototype,built-ins/AsyncFunction,built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype,built-ins/Atomics'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

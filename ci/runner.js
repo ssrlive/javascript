@@ -300,6 +300,10 @@ async function runAll(){
     // Skip raw tests (they require special raw-source handling)
     if (flagsBlock && flagsBlock.includes('raw')) { skip++; log(`SKIP (raw) ${f}`); continue; }
 
+    // Skip tests tagged CanBlockIsFalse – they require a non-blocking host (browser).
+    // Our engine is a standalone runtime where [[CanBlock]] is true.
+    if (flagsBlock && flagsBlock.includes('CanBlockIsFalse')) { skip++; log(`SKIP (CanBlockIsFalse) ${f}`); continue; }
+
     // Skip tests marked as pending via esid: pending, except tests under specific directories we are focusing on
     if (shouldSkipPendingTest(meta, f)) { skip++; log(`SKIP (esid pending) ${f}`); continue; }
 
@@ -324,6 +328,12 @@ async function runAll(){
     // fast skip for Intl
     if (/features:/.test(meta) && /Intl/.test(meta)) { skip++; log(`SKIP (feature: Intl) ${f}`); continue; }
     if (/\bIntl\b/.test(fs.readFileSync(f,'utf8'))) { skip++; log(`SKIP (contains Intl) ${f}`); continue; }
+
+    // Skip tests that require $262.agent (multi-threaded worker support)
+    {
+      const src = fs.readFileSync(f, 'utf8');
+      if (/\$262\.agent\b/.test(src)) { skip++; log(`SKIP ($262.agent) ${f}`); continue; }
+    }
 
     // handle includes
     const includes = parseIncludes(meta);

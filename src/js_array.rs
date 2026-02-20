@@ -2685,15 +2685,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Number(-1.0))
         }
         "includes" => {
+            // ToLength: cap at 2^53-1
+            const MAX_SAFE_LEN: usize = (1u64 << 53) as usize - 1; // 9007199254740991
             let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
             let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
             } else if !len_num.is_finite() {
-                if len_num.is_sign_negative() { 0usize } else { usize::MAX }
+                if len_num.is_sign_negative() { 0usize } else { MAX_SAFE_LEN }
             } else {
-                len_num.floor() as usize
+                (len_num.floor() as usize).min(MAX_SAFE_LEN)
             };
 
             if current_len == 0 {
@@ -2723,7 +2725,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             for i in start..current_len {
                 let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                if values_equal(mc, &element, &search_element) {
+                // Array.prototype.includes uses SameValueZero (not SameValue)
+                if crate::core::same_value_zero(&element, &search_element) {
                     return Ok(Value::Boolean(true));
                 }
             }

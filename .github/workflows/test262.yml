@@ -40,6 +40,7 @@ jobs:
           - id: 27
           - id: 28
           - id: 29
+          - id: 30
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -187,6 +188,11 @@ jobs:
             29)
               TITLE='"built-ins/AbstractModuleSource" - "built-ins/Boolean"'
               FOCUS='built-ins/AbstractModuleSource,built-ins/AggregateError,built-ins/ArrayBuffer,built-ins/ArrayIteratorPrototype,built-ins/AsyncDisposableStack,built-ins/AsyncFromSyncIteratorPrototype,built-ins/AsyncFunction,built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype,built-ins/Atomics,built-ins/BigInt,built-ins/Boolean'
+              ;;
+            30)
+              TITLE='"built-ins/DataView" - "built-ins/TypedArray"'
+              FOCUS='built-ins/DataView,built-ins/TypedArray'
+              TIMEOUT='200'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

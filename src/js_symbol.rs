@@ -49,6 +49,11 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let to_string_tag_sym = Value::Symbol(to_string_tag_data);
     object_set_key_value(mc, &symbol_ctor, "toStringTag", &to_string_tag_sym)?;
 
+    // Symbol.species
+    let species_data = Gc::new(mc, SymbolData::new(Some("Symbol.species")));
+    let species_sym = Value::Symbol(species_data);
+    object_set_key_value(mc, &symbol_ctor, "species", &species_sym)?;
+
     // Symbol.hasInstance
     let has_instance_data = Gc::new(mc, SymbolData::new(Some("Symbol.hasInstance")));
     let has_instance_sym = Value::Symbol(has_instance_data);

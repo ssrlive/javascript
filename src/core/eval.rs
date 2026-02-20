@@ -12621,6 +12621,10 @@ pub fn evaluate_call_dispatch<'gc>(
                                 let err = crate::core::create_error(mc, None, msg_val)?;
                                 Ok(err)
                             }
+                        } else if name == crate::unicode::utf8_to_utf16("TypedArray") {
+                            // TypedArray constructors (Int8Array, Uint8Array, etc.) called as function
+                            // via %TypedArray%.from / %TypedArray%.of construct path
+                            Ok(crate::js_typedarray::handle_typedarray_constructor(mc, obj, eval_args, env)?)
                         } else {
                             Err(raise_type_error!("Not a function").into())
                         }
@@ -15968,9 +15972,25 @@ fn evaluate_expr_property<'gc>(
             | "Object.groupBy"
             | "Object.hasOwn"
             | "Object.is"
-            | "Object.setPrototypeOf" => 2.0,
+            | "Object.setPrototypeOf"
+            | "DataView.prototype.setInt8"
+            | "DataView.prototype.setUint8"
+            | "DataView.prototype.setInt16"
+            | "DataView.prototype.setUint16"
+            | "DataView.prototype.setInt32"
+            | "DataView.prototype.setUint32"
+            | "DataView.prototype.setFloat32"
+            | "DataView.prototype.setFloat64"
+            | "DataView.prototype.setBigInt64"
+            | "DataView.prototype.setBigUint64" => 2.0,
             "Object.defineProperty" => 3.0,
-            _ => 0.0,
+            _ => {
+                if func_name.starts_with("DataView.prototype.get") {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
         };
         Ok(Value::Number(len))
     } else if let Value::Function(func_name) = &obj_val
@@ -17265,9 +17285,25 @@ fn evaluate_expr_index<'gc>(
                     | "Object.groupBy"
                     | "Object.hasOwn"
                     | "Object.is"
-                    | "Object.setPrototypeOf" => 2.0,
+                    | "Object.setPrototypeOf"
+                    | "DataView.prototype.setInt8"
+                    | "DataView.prototype.setUint8"
+                    | "DataView.prototype.setInt16"
+                    | "DataView.prototype.setUint16"
+                    | "DataView.prototype.setInt32"
+                    | "DataView.prototype.setUint32"
+                    | "DataView.prototype.setFloat32"
+                    | "DataView.prototype.setFloat64"
+                    | "DataView.prototype.setBigInt64"
+                    | "DataView.prototype.setBigUint64" => 2.0,
                     "Object.defineProperty" => 3.0,
-                    _ => 0.0,
+                    _ => {
+                        if func_name.starts_with("DataView.prototype.get") {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                 };
                 return Ok(Value::Number(len));
             }
@@ -18723,7 +18759,7 @@ pub fn call_native_function<'gc>(
         if let Value::Object(obj) = this_v {
             return Ok(Some(crate::js_typedarray::handle_dataview_method(mc, obj, method, args, env)?));
         } else {
-            return Err(raise_eval_error!("TypeError: DataView method called on non-object").into());
+            return Err(raise_type_error!("Method requires that 'this' be a DataView object").into());
         }
     }
 
@@ -18799,10 +18835,33 @@ pub fn call_native_function<'gc>(
 
     if name.starts_with("TypedArray.prototype.")
         && let Some(method) = name.strip_prefix("TypedArray.prototype.")
-        && (method == "values" || method == "keys" || method == "entries" || method == "set" || method == "subarray" || method == "fill")
     {
+        // Accessor getters (no args)
+        let is_accessor = matches!(method, "buffer" | "byteLength" | "byteOffset" | "length" | "toStringTag");
+        if !is_accessor {
+            // Method call — route to handle_typedarray_method
+            let this_v = this_val.unwrap_or(&Value::Undefined);
+            return Ok(Some(crate::js_typedarray::handle_typedarray_method(mc, this_v, method, args, env)?));
+        }
+    }
+
+    // %TypedArray%.species — get [Symbol.species]() { return this; }
+    if name == "TypedArray.species" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
-        return Ok(Some(crate::js_typedarray::handle_typedarray_method(mc, this_v, method, args, env)?));
+        return Ok(Some(this_v.clone()));
+    }
+
+    // %TypedArray%.from and %TypedArray%.of
+    if name == "TypedArray.from" || name == "TypedArray.of" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        let method_name = if name == "TypedArray.from" { "from" } else { "of" };
+        return Ok(Some(crate::js_typedarray::handle_typedarray_static_method(
+            mc,
+            this_v,
+            method_name,
+            args,
+            env,
+        )?));
     }
 
     if let Some(prop) = name.strip_prefix("TypedArray.prototype.") {
@@ -18810,7 +18869,11 @@ pub fn call_native_function<'gc>(
         if let Value::Object(obj) = this_v {
             return Ok(Some(crate::js_typedarray::handle_typedarray_accessor(mc, obj, prop)?));
         } else {
-            return Err(raise_eval_error!("TypeError: TypedArray accessor called on non-object").into());
+            // For toStringTag, return undefined for non-TypedArray receivers per spec
+            if prop == "toStringTag" {
+                return Ok(Some(Value::Undefined));
+            }
+            return Err(raise_type_error!("TypedArray accessor called on non-object").into());
         }
     }
 
@@ -18887,10 +18950,19 @@ pub(crate) fn call_accessor<'gc>(
         Value::Object(obj) => {
             // Check for internal closure
             let cl_val_opt = obj.borrow().get_closure();
-            if let Some(cl_val) = cl_val_opt
-                && let Value::Closure(cl) = &*cl_val.borrow()
-            {
-                return crate::core::call_closure(mc, cl, Some(&Value::Object(*receiver)), &[], env, Some(*obj));
+            if let Some(cl_val) = cl_val_opt {
+                match &*cl_val.borrow() {
+                    Value::Closure(cl) => {
+                        return crate::core::call_closure(mc, cl, Some(&Value::Object(*receiver)), &[], env, Some(*obj));
+                    }
+                    Value::Function(name) => {
+                        // Native function used as accessor (e.g., DataView.prototype.buffer getter)
+                        if let Some(res) = call_native_function(mc, name, Some(&Value::Object(*receiver)), &[], env)? {
+                            return Ok(res);
+                        }
+                    }
+                    _ => {}
+                }
             }
             Err(raise_type_error!("Accessor is not a function").into())
         }
@@ -20793,7 +20865,7 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "SharedArrayBuffer" {
                         return crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, &eval_args, env, None);
                     } else if name_str == "DataView" {
-                        return Ok(crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env)?);
+                        return crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env, None);
                     } else if name_str == "TypedArray" {
                         return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
                     } else if name_str == "Function" {

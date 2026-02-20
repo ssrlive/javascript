@@ -79,16 +79,13 @@ fn bigint_asintn_conversion_cases() {
         other => panic!("expected BigInt result for asUintN string input, got {:?}", other),
     }
 
-    // Number input (integer float)
+    // Number input (integer float) — ToBigInt(Number) always throws TypeError per spec
     let r2 = evaluate_script("BigInt.asUintN(3, 7.0)", None::<&std::path::Path>);
-    match r2 {
-        Ok(h) => assert_eq!(h, "7"),
-        other => panic!("expected BigInt result for asUintN numeric integer input, got {:?}", other),
-    }
+    assert!(r2.is_err(), "expected TypeError for numeric input to ToBigInt");
 
-    // Number input (non-integer) should fail
+    // Number input (non-integer) should also fail
     let r3 = evaluate_script("BigInt.asUintN(3, 7.5)", None::<&std::path::Path>);
-    assert!(r3.is_err(), "expected error for non-integer numeric input");
+    assert!(r3.is_err(), "expected TypeError for non-integer numeric input");
 
     // Boolean inputs
     let r4 = evaluate_script("BigInt.asUintN(4, true)", None::<&std::path::Path>);
@@ -109,14 +106,14 @@ fn bigint_asintn_conversion_cases() {
         other => panic!("expected BigInt result for asUintN object valueOf BigInt, got {:?}", other),
     }
 
-    // Object with valueOf returning Number
+    // Object with valueOf returning Number — ToBigInt(Number) throws TypeError
     let r6b = evaluate_script("BigInt.asUintN(4, { valueOf: function(){ return 7; } })", None::<&std::path::Path>);
-    match r6b {
-        Ok(h) => assert_eq!(h, "7"),
-        other => panic!("expected BigInt result for asUintN object valueOf Number, got {:?}", other),
-    }
+    assert!(r6b.is_err(), "expected TypeError for object valueOf returning Number");
 
-    // bits not integer -> error
+    // bits as float — ToIndex(3.5) truncates to 3, so this succeeds
     let r7 = evaluate_script("BigInt.asUintN(3.5, 7n)", None::<&std::path::Path>);
-    assert!(r7.is_err(), "expected error for non-integer bits argument");
+    match r7 {
+        Ok(h) => assert_eq!(h, "7"),
+        other => panic!("expected BigInt result for asUintN with float bits (truncated), got {:?}", other),
+    }
 }

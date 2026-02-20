@@ -201,11 +201,20 @@ pub fn handle_reflect_method<'gc>(
                             return is_constructor_value(&bound_target.borrow());
                         }
 
-                        if obj.borrow().class_def.is_some()
-                            || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
-                            || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
-                        {
+                        if obj.borrow().class_def.is_some() || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some() {
                             return true;
+                        }
+
+                        // NativeCtor alone implies constructor, unless the object
+                        // is explicitly marked as callable-only (Callable = true
+                        // without IsConstructor).
+                        if crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some() {
+                            let is_callable_only = crate::core::slot_get_chained(obj, &InternalSlot::Callable)
+                                .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+                                .unwrap_or(false);
+                            if !is_callable_only {
+                                return true;
+                            }
                         }
 
                         if let Some(cl_ptr) = obj.borrow().get_closure() {

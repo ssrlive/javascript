@@ -1296,17 +1296,17 @@ pub fn to_primitive<'gc>(
                     return Ok(to_s);
                 }
                 log::debug!("DBG to_primitive: trying valueOf for obj={:p}", Gc::as_ptr(*obj));
-                let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(*obj), &[], env)?;
+                let val_of = call_value_of_strict(mc, env, obj)?;
                 log::debug!("DBG to_primitive: valueOf result = {:?}", val_of);
-                if is_primitive(&val_of) {
+                if !matches!(val_of, crate::core::Value::Uninitialized) && is_primitive(&val_of) {
                     return Ok(val_of);
                 }
             } else {
                 // number/default: valueOf -> toString
                 log::debug!("DBG to_primitive: trying valueOf for obj={:p}", Gc::as_ptr(*obj));
-                let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(*obj), &[], env)?;
+                let val_of = call_value_of_strict(mc, env, obj)?;
                 log::debug!("DBG to_primitive: valueOf result = {:?}", val_of);
-                if is_primitive(&val_of) {
+                if !matches!(val_of, crate::core::Value::Uninitialized) && is_primitive(&val_of) {
                     return Ok(val_of);
                 }
                 log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
@@ -1339,6 +1339,39 @@ fn call_to_string_strict<'gc>(
         method_val,
         Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
     ) {
+        evaluate_call_dispatch(mc, env, &method_val, Some(&Value::Object(*obj_ptr)), &Vec::new())
+    } else {
+        Ok(Value::Uninitialized)
+    }
+}
+
+// Helper to call valueOf without fallback (mirrors call_to_string_strict)
+// Uses get_property_with_accessors to trigger getter descriptors (e.g. when
+// valueOf has been overridden via Object.defineProperty with a getter).
+fn call_value_of_strict<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_ptr: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let method_val = crate::core::get_property_with_accessors(mc, env, obj_ptr, "valueOf")?;
+    if matches!(method_val, Value::Undefined | Value::Null) {
+        return Ok(Value::Uninitialized);
+    }
+    // Only call if the value is actually callable
+    let is_callable = match &method_val {
+        Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) => true,
+        Value::Object(func_obj) => {
+            func_obj.borrow().get_closure().is_some()
+                || func_obj.borrow().class_def.is_some()
+                || crate::core::slot_get_chained(func_obj, &InternalSlot::IsConstructor).is_some()
+                || crate::core::slot_get_chained(func_obj, &InternalSlot::NativeCtor).is_some()
+                || crate::core::slot_get_chained(func_obj, &InternalSlot::Callable)
+                    .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+                    .unwrap_or(false)
+        }
+        _ => false,
+    };
+    if is_callable {
         evaluate_call_dispatch(mc, env, &method_val, Some(&Value::Object(*obj_ptr)), &Vec::new())
     } else {
         Ok(Value::Uninitialized)

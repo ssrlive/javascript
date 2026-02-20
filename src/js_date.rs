@@ -310,9 +310,27 @@ pub(crate) fn handle_date_constructor<'gc>(
                 // new Date(timestamp)
                 *n
             }
-            _ => {
-                return Err(raise_type_error!("Invalid date").into());
+            Value::Object(obj) => {
+                // If the argument is a Date object, get the timestamp directly
+                if is_date_object(obj) {
+                    if let Some(ts_ptr) = internal_get_time_stamp_value(obj) {
+                        if let Value::Number(n) = &*ts_ptr.borrow() { *n } else { f64::NAN }
+                    } else {
+                        f64::NAN
+                    }
+                } else {
+                    // ToPrimitive with no preferred type (uses "default" hint)
+                    let prim = crate::core::to_primitive(mc, arg_val, "default", env)?;
+                    match &prim {
+                        Value::String(s) => {
+                            let date_str = utf16_to_utf8(s);
+                            parse_date_string(&date_str).unwrap_or(f64::NAN)
+                        }
+                        _ => crate::core::to_number(&prim)?,
+                    }
+                }
             }
+            _ => crate::core::to_number(arg_val)?,
         }
     } else {
         // new Date(year, month, day, hours, minutes, seconds, milliseconds)

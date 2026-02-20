@@ -190,7 +190,11 @@ pub fn handle_global_function<'gc>(
         "encodeURIComponent" => return encode_uri_component(args),
         "decodeURIComponent" => return decode_uri_component(args),
         "Object" => return crate::js_class::handle_object_constructor(mc, args, env),
-        "BigInt" => return Ok(crate::js_bigint::bigint_constructor(mc, args, env)?),
+        "BigInt" => return crate::js_bigint::bigint_constructor(mc, args, env),
+        "BigInt.asIntN" | "BigInt.asUintN" => {
+            let method = if func_name == "BigInt.asIntN" { "asIntN" } else { "asUintN" };
+            return crate::js_bigint::handle_bigint_static_method(mc, method, args, env);
+        }
         "Number" => return Ok(crate::js_number::number_constructor(mc, args, env)?),
         "Boolean" => return boolean_constructor(args),
         "Proxy.revocable" => return crate::js_proxy::handle_proxy_revocable(mc, args, env),

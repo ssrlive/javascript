@@ -12552,6 +12552,10 @@ pub fn evaluate_call_dispatch<'gc>(
                             Ok(number_constructor(mc, eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("BigInt") {
                             Ok(bigint_constructor(mc, eval_args, env)?)
+                        } else if name == crate::unicode::utf8_to_utf16("BigInt.asIntN") {
+                            Ok(crate::js_bigint::handle_bigint_static_method(mc, "asIntN", eval_args, env)?)
+                        } else if name == crate::unicode::utf8_to_utf16("BigInt.asUintN") {
+                            Ok(crate::js_bigint::handle_bigint_static_method(mc, "asUintN", eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("Symbol") {
                             Ok(crate::js_symbol::handle_symbol_call(mc, eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("Array") {
@@ -16061,6 +16065,14 @@ fn is_callable_for_typeof<'gc>(value: &Value<'gc>) -> bool {
             {
                 return true;
             }
+            if let Some(callable) = slot_get_chained(obj, &InternalSlot::Callable)
+                && matches!(*callable.borrow(), Value::Boolean(true))
+            {
+                return true;
+            }
+            if slot_get_chained(obj, &InternalSlot::NativeCtor).is_some() {
+                return true;
+            }
             false
         }
         _ => false,
@@ -18145,6 +18157,16 @@ pub fn call_native_function<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    // BigInt.prototype.toString / BigInt.prototype.valueOf
+    if let Some(method) = name.strip_prefix("BigInt.prototype.") {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(crate::js_bigint::handle_bigint_object_method(this_v, method, args)?));
+    }
+    // BigInt.asIntN / BigInt.asUintN
+    if let Some(method) = name.strip_prefix("BigInt.") {
+        return Ok(Some(crate::js_bigint::handle_bigint_static_method(mc, method, args, env)?));
+    }
+
     if name == "Object.prototype.toLocaleString" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         let v = call_object_prototype_to_locale_string(mc, env, this_v)?;

@@ -231,7 +231,7 @@ pub fn handle_string_method<'gc>(
         "endsWith" => string_ends_with_method(s, args),
         "includes" => string_includes_method(s, args),
         "repeat" => string_repeat_method(s, args),
-        "concat" => string_concat_method(s, args),
+        "concat" => string_concat_method(mc, s, args, env),
         "padStart" => string_pad_start_method(s, args),
         "padEnd" => string_pad_end_method(s, args),
         "at" => string_at_method(s, args),
@@ -1276,24 +1276,37 @@ fn string_repeat_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc
     }
 }
 
-fn string_concat_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_concat_method<'gc>(
+    mc: &MutationContext<'gc>,
+    s: &[u16],
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut result = s.to_vec();
     for arg in args {
-        let arg_val = arg.clone();
-        if let Value::String(arg_str) = arg_val {
-            result.extend(arg_str);
-        } else {
-            // Convert to string
-            let str_val = match arg_val {
-                Value::Number(n) => utf8_to_utf16(&n.to_string()),
-                Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
-                Value::Undefined => utf8_to_utf16("undefined"),
-                _ => utf8_to_utf16("[object Object]"),
-            };
-            result.extend(str_val);
-        }
+        let str_val = spec_to_string(mc, arg, env)?;
+        result.extend(str_val);
     }
     Ok(Value::String(result))
+}
+
+/// Spec-compliant ToString: for objects, calls ToPrimitive(hint: "string") first,
+/// then converts the resulting primitive to a string.
+fn spec_to_string<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Vec<u16>, EvalError<'gc>> {
+    match val {
+        Value::String(s) => Ok(s.clone()),
+        Value::Number(_n) => Ok(utf8_to_utf16(&value_to_string(val))),
+        Value::BigInt(b) => Ok(utf8_to_utf16(&b.to_string())),
+        Value::Boolean(b) => Ok(utf8_to_utf16(&b.to_string())),
+        Value::Undefined => Ok(utf8_to_utf16("undefined")),
+        Value::Null => Ok(utf8_to_utf16("null")),
+        Value::Symbol(_) => Err(crate::raise_type_error!("Cannot convert a Symbol value to a string").into()),
+        Value::Object(_) => {
+            let prim = to_primitive(mc, val, "string", env)?;
+            spec_to_string(mc, &prim, env)
+        }
+        _ => Ok(utf8_to_utf16(&value_to_string(val))),
+    }
 }
 
 fn string_pad_start_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {

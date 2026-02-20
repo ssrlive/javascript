@@ -31,6 +31,8 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     if let Some(proto) = object_proto {
         boolean_proto.borrow_mut(mc).prototype = Some(proto);
     }
+    // Per spec, Boolean.prototype has [[BooleanData]] internal slot with value false
+    slot_set(mc, &boolean_proto, InternalSlot::PrimitiveValue, &Value::Boolean(false));
 
     object_set_key_value(mc, &boolean_ctor, "prototype", &Value::Object(boolean_proto))?;
     object_set_key_value(mc, &boolean_proto, "constructor", &Value::Object(boolean_ctor))?;

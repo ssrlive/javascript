@@ -1485,7 +1485,58 @@ pub(crate) fn evaluate_new<'gc>(
                         return handle_object_constructor(mc, evaluated_args, env);
                     }
                     "Number" => return handle_number_constructor(mc, evaluated_args, env),
-                    "Boolean" => return handle_boolean_constructor(mc, evaluated_args, env),
+                    "Boolean" => {
+                        let result = handle_boolean_constructor(mc, evaluated_args, env)?;
+                        // GetPrototypeFromConstructor: if new_target is provided,
+                        // override the prototype based on newTarget.prototype per spec.
+                        if let Some(nt) = new_target
+                            && let Value::Object(result_obj) = &result
+                            && let Value::Object(nt_obj) = nt
+                        {
+                            // Step 3: Let proto be ? Get(constructor, "prototype").
+                            let nt_proto = object_get_key_value(nt_obj, "prototype").and_then(|rc| match &*rc.borrow() {
+                                Value::Object(p) => Some(*p),
+                                Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                                    Value::Object(p) => Some(*p),
+                                    _ => None,
+                                },
+                                _ => None,
+                            });
+                            if let Some(proto) = nt_proto {
+                                // Step 3: Type(proto) is Object → use it.
+                                result_obj.borrow_mut(mc).prototype = Some(proto);
+                            } else {
+                                // Step 4: Type(proto) is not Object →
+                                // GetFunctionRealm(newTarget) → realm's %BooleanPrototype%.
+                                let realm_bool_proto = object_get_key_value(nt_obj, "__origin_global")
+                                    .or_else(|| slot_get(nt_obj, &InternalSlot::OriginGlobal))
+                                    .or_else(|| slot_get_chained(nt_obj, &InternalSlot::OriginGlobal))
+                                    .and_then(|rc| match &*rc.borrow() {
+                                        Value::Object(origin) => {
+                                            // Look up Boolean.prototype in the realm
+                                            object_get_key_value(origin, "Boolean").and_then(|bc| match &*bc.borrow() {
+                                                Value::Object(bool_ctor) => {
+                                                    object_get_key_value(bool_ctor, "prototype").and_then(|pc| match &*pc.borrow() {
+                                                        Value::Object(p) => Some(*p),
+                                                        Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                                                            Value::Object(p) => Some(*p),
+                                                            _ => None,
+                                                        },
+                                                        _ => None,
+                                                    })
+                                                }
+                                                _ => None,
+                                            })
+                                        }
+                                        _ => None,
+                                    });
+                                if let Some(rp) = realm_bool_proto {
+                                    result_obj.borrow_mut(mc).prototype = Some(rp);
+                                }
+                            }
+                        }
+                        return Ok(result);
+                    }
                     "String" => {
                         let str_val = if evaluated_args.is_empty() {
                             Value::String(utf8_to_utf16(""))

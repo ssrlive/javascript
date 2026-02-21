@@ -88,6 +88,12 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     slot_set(mc, &error_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Error")));
     object_set_key_value(mc, &error_ctor, "name", &Value::String(utf8_to_utf16("Error")))?;
 
+    // Error.length = 1 (non-enumerable, non-writable, configurable)
+    let len_desc = create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &error_ctor, "length", &len_desc)?;
+    let name_desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16("Error")), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &error_ctor, "name", &name_desc)?;
+
     // We need Object.prototype to set as the prototype of Error.prototype
     // If Object is not yet initialized, we might have an issue, but usually Object is init first.
     // However, in the current core.rs, Object is initialized right before Error.
@@ -185,15 +191,14 @@ fn initialize_native_error<'gc>(
     proto.borrow_mut(mc).set_non_enumerable("name");
     proto.borrow_mut(mc).set_non_enumerable("message");
 
-    if name == "AggregateError" {
-        let len_desc = create_descriptor_object(mc, &Value::Number(2.0), false, false, true)?;
+    // Set length, name as non-enumerable/non-writable/configurable data properties
+    {
+        let length_val = if name == "AggregateError" { 2.0 } else { 1.0 };
+        let len_desc = create_descriptor_object(mc, &Value::Number(length_val), false, false, true)?;
         crate::js_object::define_property_internal(mc, &ctor, "length", &len_desc)?;
 
-        let name_desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16("AggregateError")), false, false, true)?;
+        let name_desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(name)), false, false, true)?;
         crate::js_object::define_property_internal(mc, &ctor, "name", &name_desc)?;
-
-        let proto_desc = create_descriptor_object(mc, &Value::Object(proto), false, false, false)?;
-        crate::js_object::define_property_internal(mc, &ctor, "prototype", &proto_desc)?;
     }
 
     env_set(mc, env, name, &Value::Object(ctor))?;

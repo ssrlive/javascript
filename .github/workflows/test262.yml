@@ -42,6 +42,7 @@ jobs:
           - id: 29
           - id: 30
           - id: 31
+          - id: 32
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -198,6 +199,10 @@ jobs:
             31)
               TITLE='"built-ins/Date" - "built-ins/encodeURIComponent"'
               FOCUS='built-ins/Date,built-ins/decodeURI,built-ins/decodeURIComponent,built-ins/encodeURI,built-ins/encodeURIComponent'
+              ;;
+            32)
+              TITLE='"built-ins/DisposableStack" - "built-ins/Error"'
+              FOCUS='built-ins/DisposableStack,built-ins/Error'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

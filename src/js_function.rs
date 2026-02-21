@@ -648,6 +648,13 @@ pub fn handle_global_function<'gc>(
         }
 
         _ => {
+            if func_name == "Error.prototype.toString" {
+                if let Some(this_rc) = crate::core::env_get(env, "this") {
+                    let this_val = this_rc.borrow().clone();
+                    return crate::js_object::handle_error_to_string_method(mc, &this_val, args, env);
+                }
+                return Err(raise_type_error!("Error.prototype.toString called on non-object").into());
+            }
             if func_name.starts_with("Object.") && !func_name.contains(".prototype.") {
                 let method = &func_name["Object.".len()..];
                 return crate::js_object::handle_object_method(mc, method, args, env);

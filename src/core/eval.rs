@@ -12098,7 +12098,7 @@ pub fn evaluate_call_dispatch<'gc>(
             } else if name == "Error.prototype.toString" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 // Delegate to Error.prototype.toString implementation
-                Ok(crate::js_object::handle_error_to_string_method(mc, this_v, eval_args)?)
+                Ok(crate::js_object::handle_error_to_string_method(mc, this_v, eval_args, env)?)
             } else if let Some(method) = name.strip_prefix("BigInt.") {
                 Ok(crate::js_bigint::handle_bigint_static_method(mc, method, eval_args, env)?)
             } else if let Some(method) = name.strip_prefix("Number.prototype.") {
@@ -12611,7 +12611,17 @@ pub fn evaluate_call_dispatch<'gc>(
                         {
                             // For native Error constructors, calling them as a function
                             // should produce a new Error object with the provided message.
-                            let msg_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                            // ToString(message) per spec: ToPrimitive then check Symbol.
+                            let raw_msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                            let msg_val = if matches!(raw_msg, Value::Undefined) {
+                                Value::Undefined
+                            } else {
+                                let prim = crate::core::to_primitive(mc, &raw_msg, "string", env)?;
+                                if matches!(prim, Value::Symbol(_)) {
+                                    return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                                }
+                                Value::String(crate::unicode::utf8_to_utf16(&value_to_string(&prim)))
+                            };
                             // The constructor's "prototype" property points to the error prototype
                             if let Some(prototype_rc) = object_get_key_value(obj, "prototype")
                                 && let Value::Object(proto_ptr) = &*prototype_rc.borrow()

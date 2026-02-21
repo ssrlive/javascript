@@ -1480,7 +1480,16 @@ pub(crate) fn evaluate_new<'gc>(
                             return crate::core::js_error::create_aggregate_error(mc, env, prototype, errors_val, message_val, options_val);
                         }
 
-                        let msg_val = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
+                        let raw_msg = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
+                        let msg_val = if matches!(raw_msg, Value::Undefined) {
+                            Value::Undefined
+                        } else {
+                            let prim = crate::core::to_primitive(mc, &raw_msg, "string", env)?;
+                            if matches!(prim, Value::Symbol(_)) {
+                                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                            }
+                            Value::String(crate::unicode::utf8_to_utf16(&crate::core::value_to_string(&prim)))
+                        };
                         return Ok(crate::core::create_error(mc, prototype, msg_val)?);
                     }
                     "BigInt" | "Symbol" => {

@@ -2320,7 +2320,7 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::Object(object) => {
             // If this is an Error object, use Error.prototype.toString behavior
             if crate::core::js_error::is_error(&Value::Object(*object)) {
-                return handle_error_to_string_method(mc, &Value::Object(*object), args);
+                return handle_error_to_string_method(mc, &Value::Object(*object), args, env);
             }
 
             // Check if this is a wrapped primitive object
@@ -2408,46 +2408,61 @@ pub(crate) fn handle_to_string_method<'gc>(
 }
 
 pub(crate) fn handle_error_to_string_method<'gc>(
-    _mc: &MutationContext<'gc>,
+    mc: &MutationContext<'gc>,
     obj_val: &Value<'gc>,
-    args: &[Value<'gc>],
+    _args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    if !args.is_empty() {
-        return Err(raise_type_error!("Error.prototype.toString takes no arguments").into());
-    }
+    // 1. Let O be the this value.
+    // 2. If Type(O) is not Object, throw a TypeError exception.
+    let object = match obj_val {
+        Value::Object(o) => *o,
+        _ => return Err(raise_type_error!("Error.prototype.toString called on non-object").into()),
+    };
 
-    // Expect an object receiver
-    if let Value::Object(object) = obj_val {
-        // name default to "Error"
-        let name = if let Some(n_rc) = object_get_key_value(object, "name") {
-            if let Value::String(s) = &*n_rc.borrow() {
-                utf16_to_utf8(s)
-            } else {
-                "Error".to_string()
-            }
-        } else {
-            "Error".to_string()
-        };
-
-        // message default to empty
-        let message = if let Some(m_rc) = object_get_key_value(object, "message") {
-            if let Value::String(s) = &*m_rc.borrow() {
-                utf16_to_utf8(s)
-            } else {
-                "".to_string()
-            }
-        } else {
-            "".to_string()
-        };
-
-        if message.is_empty() {
-            Ok(Value::String(utf8_to_utf16(&name)))
-        } else {
-            Ok(Value::String(utf8_to_utf16(&format!("{}: {}", name, message))))
-        }
+    // 3. Let name be ? Get(O, "name").
+    let name_val = crate::core::get_property_with_accessors(mc, env, &object, "name")?;
+    // 4. If name is undefined, set name to "Error"; otherwise set name to ? ToString(name).
+    let name = if matches!(name_val, Value::Undefined) {
+        "Error".to_string()
     } else {
-        Err(raise_type_error!("Error.prototype.toString called on non-object").into())
+        if matches!(name_val, Value::Symbol(_)) {
+            return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+        }
+        let prim = crate::core::to_primitive(mc, &name_val, "string", env)?;
+        if matches!(prim, Value::Symbol(_)) {
+            return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+        }
+        crate::core::value_to_string(&prim)
+    };
+
+    // 5. Let msg be ? Get(O, "message").
+    let msg_val = crate::core::get_property_with_accessors(mc, env, &object, "message")?;
+    // 6. If msg is undefined, set msg to the empty String; otherwise set msg to ? ToString(msg).
+    let message = if matches!(msg_val, Value::Undefined) {
+        String::new()
+    } else {
+        if matches!(msg_val, Value::Symbol(_)) {
+            return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+        }
+        let prim = crate::core::to_primitive(mc, &msg_val, "string", env)?;
+        if matches!(prim, Value::Symbol(_)) {
+            return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+        }
+        crate::core::value_to_string(&prim)
+    };
+
+    // 7. If name is the empty String, return msg.
+    if name.is_empty() {
+        return Ok(Value::String(utf8_to_utf16(&message)));
     }
+    // 8. If msg is the empty String, return name.
+    if message.is_empty() {
+        return Ok(Value::String(utf8_to_utf16(&name)));
+    }
+    // 9. Return the string-concatenation of name, the code unit 0x003A (COLON),
+    //    the code unit 0x0020 (SPACE), and msg.
+    Ok(Value::String(utf8_to_utf16(&format!("{}: {}", name, message))))
 }
 
 pub(crate) fn handle_value_of_method<'gc>(

@@ -129,6 +129,11 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     object_set_key_value(mc, &error_proto, "toString", &val)?;
     error_proto.borrow_mut(mc).set_non_enumerable("toString");
 
+    // Provide Error.isError static method
+    let is_error_fn = Value::Function("Error.isError".to_string());
+    object_set_key_value(mc, &error_ctor, "isError", &is_error_fn)?;
+    error_ctor.borrow_mut(mc).set_non_enumerable("isError");
+
     env_set(mc, env, "Error", &Value::Object(error_ctor))?;
 
     let error_ctor_val = Value::Object(error_ctor);

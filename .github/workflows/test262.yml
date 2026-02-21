@@ -41,6 +41,7 @@ jobs:
           - id: 28
           - id: 29
           - id: 30
+          - id: 31
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -193,6 +194,10 @@ jobs:
               TITLE='"built-ins/DataView" - "built-ins/TypedArray"'
               FOCUS='built-ins/DataView,built-ins/TypedArray'
               TIMEOUT='200'
+              ;;
+            31)
+              TITLE='"built-ins/Date"'
+              FOCUS='built-ins/Date'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

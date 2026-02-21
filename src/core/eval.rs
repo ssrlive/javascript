@@ -12118,7 +12118,7 @@ pub fn evaluate_call_dispatch<'gc>(
                     Err(raise_eval_error!("TypeError: Date method called on incompatible receiver").into())
                 }
             } else if let Some(method) = name.strip_prefix("Date.") {
-                Ok(handle_date_static_method(method, eval_args)?)
+                Ok(handle_date_static_method(mc, method, eval_args, env)?)
             } else if name.starts_with("String.") {
                 if name == "String.fromCharCode" {
                     Ok(string_from_char_code(eval_args)?)
@@ -12540,7 +12540,9 @@ pub fn evaluate_call_dispatch<'gc>(
                         if name == crate::unicode::utf8_to_utf16("Object") {
                             Ok(crate::js_class::handle_object_constructor(mc, eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("Date") {
-                            let date_obj = crate::js_date::handle_date_constructor(mc, eval_args, env)?;
+                            // Date() called as a function (without new) always returns
+                            // a string representing the current time, ignoring arguments.
+                            let date_obj = crate::js_date::handle_date_constructor(mc, &[], env, None)?;
                             crate::js_date::handle_date_method(mc, &date_obj, "toString", &[], env)
                         } else if name == crate::unicode::utf8_to_utf16("RegExp") {
                             Ok(crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), eval_args)?)
@@ -18227,6 +18229,16 @@ pub fn call_native_function<'gc>(
         return Ok(Some(Value::Undefined));
     }
 
+    // Date.prototype.* instance methods
+    if let Some(method) = name.strip_prefix("Date.prototype.") {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(crate::js_date::handle_date_method(mc, this_v, method, args, env)?));
+    }
+    // Date static methods (now, parse, UTC)
+    if let Some(method) = name.strip_prefix("Date.") {
+        return Ok(Some(crate::js_date::handle_date_static_method(mc, method, args, env)?));
+    }
+
     if name == "__detachArrayBuffer__" {
         if let Some(Value::Object(obj)) = args.first()
             && let Some(ab_val) = slot_get_chained(obj, &InternalSlot::ArrayBuffer)
@@ -20854,7 +20866,7 @@ fn evaluate_expr_new<'gc>(
 
                         return Ok(Value::Object(new_obj));
                     } else if name_str == "Date" {
-                        return crate::js_date::handle_date_constructor(mc, &eval_args, env);
+                        return crate::js_date::handle_date_constructor(mc, &eval_args, env, None);
                     } else if name_str == "Array" {
                         return crate::js_array::handle_array_constructor(mc, &eval_args, env, None);
                     } else if name_str == "RegExp" {

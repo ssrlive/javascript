@@ -1255,10 +1255,18 @@ pub fn to_primitive<'gc>(
                         ),
                         Value::Object(func_obj) => {
                             if let Some(cl_ptr) = func_obj.borrow().get_closure() {
-                                if let Value::Closure(cl) = &*cl_ptr.borrow() {
-                                    call_closure(mc, cl, Some(&Value::Object(*obj)), from_ref(&arg), env, Some(func_obj))
-                                } else {
-                                    return Err(raise_type_error!("@@toPrimitive is not a function").into());
+                                match &*cl_ptr.borrow() {
+                                    Value::Closure(cl) => {
+                                        call_closure(mc, cl, Some(&Value::Object(*obj)), from_ref(&arg), env, Some(func_obj))
+                                    }
+                                    Value::Function(name) => evaluate_call_dispatch(
+                                        mc,
+                                        env,
+                                        &Value::Function(name.clone()),
+                                        Some(&Value::Object(*obj)),
+                                        std::slice::from_ref(&arg),
+                                    ),
+                                    _ => return Err(raise_type_error!("@@toPrimitive is not a function").into()),
                                 }
                             } else {
                                 return Err(raise_type_error!("@@toPrimitive is not a function").into());

@@ -100,7 +100,7 @@ pub fn handle_global_function<'gc>(
         "AsyncGeneratorFunction" => return async_generator_function_constructor(mc, args, env),
         "new" => return evaluate_new_expression(mc, args, env),
         "eval" => return evalute_eval_function(mc, args, env),
-        "Date" => return handle_date_constructor(mc, args, env),
+        "Date" => return handle_date_constructor(mc, args, env, None),
         "AbstractModuleSource.prototype.@@toStringTag" => return Ok(Value::Undefined),
 
         "__createRealm__" => {

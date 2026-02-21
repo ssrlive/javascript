@@ -1370,7 +1370,7 @@ pub(crate) fn evaluate_new<'gc>(
                 match name_desc.as_str() {
                     "Promise" => return crate::js_promise::handle_promise_constructor_val(mc, evaluated_args, env),
                     "Array" => return crate::js_array::handle_array_constructor(mc, evaluated_args, env, new_target),
-                    "Date" => return crate::js_date::handle_date_constructor(mc, evaluated_args, env),
+                    "Date" => return crate::js_date::handle_date_constructor(mc, evaluated_args, env, new_target),
                     "RegExp" => return crate::js_regexp::handle_regexp_constructor(mc, evaluated_args),
                     "Object" => {
                         // Per spec: If NewTarget is neither undefined nor the active function (Object),
@@ -1823,7 +1823,7 @@ pub(crate) fn evaluate_new<'gc>(
                 return handle_boolean_constructor(mc, evaluated_args, env);
             }
             if slot_get(class_obj, &InternalSlot::IsDateConstructor).is_some() {
-                return crate::js_date::handle_date_constructor(mc, evaluated_args, env);
+                return crate::js_date::handle_date_constructor(mc, evaluated_args, env, new_target);
             }
             // Error-like constructors (Error) created via ensure_constructor_object
             if slot_get(class_obj, &InternalSlot::IsErrorConstructor).is_some() {
@@ -1980,7 +1980,7 @@ pub(crate) fn evaluate_new<'gc>(
             // Handle built-in constructors
             match func_name.as_str() {
                 "Date" => {
-                    return crate::js_date::handle_date_constructor(mc, evaluated_args, env);
+                    return crate::js_date::handle_date_constructor(mc, evaluated_args, env, None);
                 }
                 "Array" => {
                     return crate::js_array::handle_array_constructor(mc, evaluated_args, env, None);

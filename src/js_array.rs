@@ -10,6 +10,158 @@ use crate::{
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
 
+/// CreateDataPropertyOrThrow(O, P, V) — defines P on O with
+/// {value: V, writable: true, enumerable: true, configurable: true}.
+/// Throws TypeError if the define fails (non-extensible or non-configurable property).
+fn create_data_property_or_throw<'gc>(
+    mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    key: impl Into<PropertyKey<'gc>>,
+    val: &Value<'gc>,
+) -> Result<(), EvalError<'gc>> {
+    let key: PropertyKey<'gc> = key.into();
+    // If obj is a Proxy, invoke the [[DefineOwnProperty]] trap (CreateDataPropertyOrThrow spec step)
+    if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
+        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+    {
+        let ok = crate::js_proxy::proxy_define_data_property(mc, proxy, &key, val)?;
+        if !ok {
+            return Err(raise_type_error!("Cannot define property on proxy").into());
+        }
+        return Ok(());
+    }
+    let desc = crate::core::create_descriptor_object(mc, val, true, true, true).map_err(EvalError::from)?;
+    crate::js_object::define_property_internal(mc, obj, key, &desc).map_err(EvalError::from)
+}
+
+/// Checks whether a value is a constructor (can be called with `new`).
+fn is_constructor_val<'gc>(v: &Value<'gc>) -> bool {
+    match v {
+        Value::Object(obj) => {
+            obj.borrow().class_def.is_some()
+                || crate::core::slot_get_chained(obj, &crate::core::InternalSlot::IsConstructor).is_some()
+                || crate::core::slot_get_chained(obj, &crate::core::InternalSlot::NativeCtor).is_some()
+                || obj.borrow().get_closure().is_some()
+        }
+        Value::Closure(cl) | Value::AsyncClosure(cl) => !cl.is_arrow,
+        _ => false,
+    }
+}
+
+/// IsArray(argument) — spec 7.2.2, with recursive Proxy support.
+/// Returns true if argument is an Array (directly or through proxy chain).
+fn is_array_spec<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
+    // Direct array?
+    if is_array(mc, obj) {
+        return Ok(true);
+    }
+    // Proxy exotic object — recurse into target
+    if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
+        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+    {
+        if proxy.revoked {
+            return Err(raise_type_error!("Cannot perform 'IsArray' on a revoked proxy").into());
+        }
+        if let Value::Object(target) = &*proxy.target {
+            return is_array_spec(mc, target);
+        }
+    }
+    Ok(false)
+}
+
+/// ArraySpeciesCreate(originalArray, length) — ECMAScript spec 9.4.2.3.
+/// Returns a new array-like object created via the array's @@species constructor,
+/// falling back to a plain Array if no species is found.
+pub(crate) fn array_species_create_impl<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    receiver: &JSObjectDataPtr<'gc>,
+    length: f64,
+) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+    // Step 1-2: If IsArray(receiver) is false, just create a plain array.
+    if !is_array_spec(mc, receiver)? {
+        let arr = create_array(mc, env)?;
+        set_array_length(mc, &arr, length as usize)?;
+        return Ok(arr);
+    }
+
+    // Step 3: Let C = receiver.constructor
+    let ctor_val = crate::core::get_property_with_accessors(mc, env, receiver, "constructor")?;
+
+    // Step 6: If C is undefined, return ArrayCreate(length)
+    if matches!(ctor_val, Value::Undefined) {
+        let arr = create_array(mc, env)?;
+        set_array_length(mc, &arr, length as usize)?;
+        return Ok(arr);
+    }
+
+    let mut c = ctor_val.clone();
+
+    // Step 4 (cross-realm): if C is a constructor with NativeCtor="Array" but is NOT the
+    // current realm's Array constructor, treat it as undefined (fall back to ArrayCreate).
+    // This implements: "If C is a constructor and GetFunctionRealm(C) ≠ currentRealm, and
+    // SameValue(C, realmC.Array) is true, set C to undefined."
+    if let Value::Object(ctor_obj) = &c {
+        let is_foreign_array = if let Some(nc_rc) = crate::core::slot_get_chained(ctor_obj, &InternalSlot::NativeCtor)
+            && let Value::String(nc_name) = &*nc_rc.borrow()
+            && crate::unicode::utf16_to_utf8(nc_name) == "Array"
+        {
+            // Check if it's the same Array as in the current env
+            if let Some(cur_array_rc) = object_get_key_value(env, "Array")
+                && let Value::Object(cur_array) = &*cur_array_rc.borrow()
+            {
+                cur_array.as_ptr() != ctor_obj.as_ptr()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if is_foreign_array {
+            let arr = create_array(mc, env)?;
+            set_array_length(mc, &arr, length as usize)?;
+            return Ok(arr);
+        }
+    }
+
+    // Step 5: If Type(C) is Object, get C[@@species]
+    if let Value::Object(ctor_obj) = &ctor_val
+        && let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_val.borrow()
+        && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
+        && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+    {
+        let species = crate::core::get_property_with_accessors(mc, env, ctor_obj, *species_sym)?;
+        match species {
+            Value::Null | Value::Undefined => {
+                let arr = create_array(mc, env)?;
+                set_array_length(mc, &arr, length as usize)?;
+                return Ok(arr);
+            }
+            other => c = other,
+        }
+    }
+
+    // Step 6: If C is still undefined after species lookup, return ArrayCreate(length)
+    if matches!(c, Value::Undefined) {
+        let arr = create_array(mc, env)?;
+        set_array_length(mc, &arr, length as usize)?;
+        return Ok(arr);
+    }
+
+    // Step 7: If IsConstructor(C) is false, throw TypeError
+    if !is_constructor_val(&c) {
+        return Err(raise_type_error!("Array species constructor is not a constructor").into());
+    }
+
+    // Step 8: Return Construct(C, «length»)
+    let constructed = crate::js_class::evaluate_new(mc, env, &c, &[Value::Number(length)], None)?;
+    match constructed {
+        Value::Object(obj) => Ok(obj),
+        _ => Err(raise_type_error!("Array species constructor must return an object").into()),
+    }
+}
+
 pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let array_ctor = new_js_object_data(mc);
     slot_set(mc, &array_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
@@ -161,6 +313,40 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
 
             let unscopables_desc = crate::core::create_descriptor_object(mc, &Value::Object(unscopables_obj), false, false, true)?;
             crate::js_object::define_property_internal(mc, &array_proto, PropertyKey::Symbol(*unscopables_sym), &unscopables_desc)?;
+        }
+
+        // Array[Symbol.species] — accessor getter returning `this`, non-enumerable, configurable
+        if let Some(species_sym_val) = object_get_key_value(sym_ctor, "species")
+            && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+        {
+            let getter_fn = new_js_object_data(mc);
+            if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+                && let Value::Object(func_proto) = &*proto_val.borrow()
+            {
+                getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+            }
+            let getter_closure = ClosureData {
+                env: Some(*env),
+                native_target: Some("Array.species".to_string()),
+                enforce_strictness_inheritance: true,
+                ..ClosureData::default()
+            };
+            getter_fn
+                .borrow_mut(mc)
+                .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, getter_closure)))));
+            let gname_desc =
+                crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &getter_fn, "name", &gname_desc)?;
+            let glen_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &getter_fn, "length", &glen_desc)?;
+
+            let species_desc_obj = new_js_object_data(mc);
+            object_set_key_value(mc, &species_desc_obj, "get", &Value::Object(getter_fn))?;
+            object_set_key_value(mc, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
+            object_set_key_value(mc, &species_desc_obj, "configurable", &Value::Boolean(true))?;
+            crate::js_object::define_property_internal(mc, &array_ctor, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
         }
     }
 
@@ -1089,41 +1275,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
             };
 
-            let receiver_is_array = if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
-                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                    if proxy.revoked {
-                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
-                    }
-                    if let Value::Object(target_obj) = &*proxy.target {
-                        is_array(mc, target_obj)
-                    } else {
-                        false
-                    }
-                } else {
-                    is_array(mc, object)
-                }
-            } else {
-                is_array(mc, object)
-            };
-
-            if receiver_is_array {
-                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor")?;
-                if !matches!(ctor_val, Value::Undefined) {
-                    let ctor_is_constructor = match &ctor_val {
-                        Value::Object(obj) => {
-                            obj.borrow().class_def.is_some()
-                                || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
-                                || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
-                                || obj.borrow().get_closure().is_some()
-                        }
-                        _ => false,
-                    };
-                    if !ctor_is_constructor {
-                        return Err(raise_type_error!("Array species constructor is not a constructor").into());
-                    }
-                }
-            }
-
             let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
                 let prim = crate::core::to_primitive(mc, value, "number", env)?;
                 if matches!(prim, Value::Symbol(_)) {
@@ -1180,7 +1331,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_range_error!("Invalid array length").into());
             }
 
-            let new_array = create_array(mc, env)?;
+            let new_array = array_species_create_impl(mc, env, object, count as f64)?;
             let mut n = 0usize;
             let mut k = start;
             while k < end {
@@ -1210,7 +1361,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 if has_property {
                     let val = crate::core::get_property_with_accessors(mc, env, object, k.to_string())?;
-                    object_set_key_value(mc, &new_array, n, &val)?;
+                    create_data_property_or_throw(mc, &new_array, n, &val)?;
                 }
 
                 n += 1;
@@ -1350,49 +1501,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_range_error!("Invalid array length").into());
             }
 
-            // ArraySpeciesCreate pre-checks for Array receivers.
-            // This intentionally implements the subset required by current Test262 map failures:
-            // - revoked proxy receiver should throw TypeError before constructor access
-            // - abrupt completion while reading `constructor` should propagate
-            // - primitive/non-undefined constructor on arrays should throw TypeError
-            let receiver_is_array = if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
-                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                    if proxy.revoked {
-                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
-                    }
-                    if let Value::Object(target_obj) = &*proxy.target {
-                        is_array(mc, target_obj)
-                    } else {
-                        false
-                    }
-                } else {
-                    is_array(mc, object)
-                }
-            } else {
-                is_array(mc, object)
-            };
-
-            if receiver_is_array {
-                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor")?;
-                if !matches!(ctor_val, Value::Undefined) {
-                    let ctor_is_constructor = match &ctor_val {
-                        Value::Object(obj) => {
-                            obj.borrow().class_def.is_some()
-                                || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
-                                || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
-                                || obj.borrow().get_closure().is_some()
-                        }
-                        _ => false,
-                    };
-                    if !ctor_is_constructor {
-                        return Err(raise_type_error!("Array species constructor is not a constructor").into());
-                    }
-                }
-            }
-
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let new_array = create_array(mc, env)?;
-            set_array_length(mc, &new_array, current_len)?;
+            let new_array = array_species_create_impl(mc, env, object, current_len as f64)?;
 
             let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
@@ -1440,7 +1550,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     }
 
                     let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
-                    object_set_key_value(mc, &new_array, i, &res)?;
+                    create_data_property_or_throw(mc, &new_array, i, &res)?;
                 }
             }
 
@@ -1488,43 +1598,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_range_error!("Invalid array length").into());
             }
 
-            let receiver_is_array = if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
-                if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                    if proxy.revoked {
-                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
-                    }
-                    if let Value::Object(target_obj) = &*proxy.target {
-                        is_array(mc, target_obj)
-                    } else {
-                        false
-                    }
-                } else {
-                    is_array(mc, object)
-                }
-            } else {
-                is_array(mc, object)
-            };
-
-            if receiver_is_array {
-                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor")?;
-                if !matches!(ctor_val, Value::Undefined) {
-                    let ctor_is_constructor = match &ctor_val {
-                        Value::Object(obj) => {
-                            obj.borrow().class_def.is_some()
-                                || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
-                                || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
-                                || obj.borrow().get_closure().is_some()
-                        }
-                        _ => false,
-                    };
-                    if !ctor_is_constructor {
-                        return Err(raise_type_error!("Array species constructor is not a constructor").into());
-                    }
-                }
-            }
-
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let new_array = create_array(mc, env)?;
+            let new_array = array_species_create_impl(mc, env, object, 0.0)?;
             let mut idx = 0usize;
 
             let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
@@ -1574,7 +1649,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                     let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                     if res.to_truthy() {
-                        object_set_key_value(mc, &new_array, idx, &element_val)?;
+                        create_data_property_or_throw(mc, &new_array, idx, &element_val)?;
                         idx += 1;
                     }
                 }
@@ -2137,23 +2212,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Boolean(true))
         }
         "concat" => {
-            let is_constructor_value = |v: &Value<'gc>| -> bool {
-                match v {
-                    Value::Object(obj) => {
-                        obj.borrow().class_def.is_some()
-                            || slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
-                            || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
-                            || obj.borrow().get_closure().is_some()
-                    }
-                    Value::Function(name) => matches!(
-                        name.as_str(),
-                        "Date" | "Array" | "RegExp" | "Object" | "Number" | "Boolean" | "String" | "GeneratorFunction"
-                    ),
-                    Value::Closure(cl) | Value::AsyncClosure(cl) => !cl.is_arrow,
-                    _ => false,
-                }
-            };
-
             let is_array_or_throw = |obj: &JSObjectDataPtr<'gc>| -> Result<bool, EvalError<'gc>> {
                 if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
@@ -2183,50 +2241,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 Ok(len)
             };
 
-            let array_species_create = |receiver: &JSObjectDataPtr<'gc>| -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
-                if !is_array_or_throw(receiver)? {
-                    return create_array(mc, env).map_err(EvalError::from);
-                }
-
-                let ctor_val = crate::core::get_property_with_accessors(mc, env, receiver, "constructor")?;
-                if matches!(ctor_val, Value::Undefined) {
-                    return create_array(mc, env).map_err(EvalError::from);
-                }
-
-                if !matches!(ctor_val, Value::Object(_)) {
-                    return Err(raise_type_error!("Array species constructor is not a constructor").into());
-                }
-
-                let mut ctor_candidate = ctor_val.clone();
-                if let Value::Object(ctor_obj) = &ctor_val
-                    && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
-                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                    && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
-                    && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
-                {
-                    let species = crate::core::get_property_with_accessors(mc, env, ctor_obj, *species_sym)?;
-                    if !matches!(species, Value::Undefined | Value::Null) {
-                        ctor_candidate = species;
-                    } else {
-                        return create_array(mc, env).map_err(EvalError::from);
-                    }
-                }
-
-                if matches!(ctor_candidate, Value::Undefined | Value::Null) {
-                    return create_array(mc, env).map_err(EvalError::from);
-                }
-
-                if !is_constructor_value(&ctor_candidate) {
-                    return Err(raise_type_error!("Array species constructor is not a constructor").into());
-                }
-
-                let constructed = crate::js_class::evaluate_new(mc, env, &ctor_candidate, &[Value::Number(0.0)], None)?;
-                match constructed {
-                    Value::Object(obj) => Ok(obj),
-                    _ => Err(raise_type_error!("Array species constructor must return an object").into()),
-                }
-            };
-
             let is_concat_spreadable = |value: &Value<'gc>| -> Result<bool, EvalError<'gc>> {
                 let Value::Object(obj) = value else {
                     return Ok(false);
@@ -2246,7 +2260,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 is_array_or_throw(obj)
             };
 
-            let out = array_species_create(object)?;
+            let out = array_species_create_impl(mc, env, object, 0.0)?;
             let mut n = 0usize;
             let mut items: Vec<Value<'gc>> = Vec::with_capacity(args.len() + 1);
             items.push(Value::Object(*object));
@@ -2262,12 +2276,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let has_property = object_get_key_value(&src_obj, k.to_string()).is_some();
                         if has_property {
                             let sub = crate::core::get_property_with_accessors(mc, env, &src_obj, k.to_string())?;
-                            object_set_key_value(mc, &out, n, &sub)?;
+                            create_data_property_or_throw(mc, &out, n, &sub)?;
                         }
                         n += 1;
                     }
                 } else {
-                    object_set_key_value(mc, &out, n, &item)?;
+                    create_data_property_or_throw(mc, &out, n, &item)?;
                     n += 1;
                 }
             }
@@ -3011,23 +3025,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
             }
 
-            let is_constructor_value = |v: &Value<'gc>| -> bool {
-                match v {
-                    Value::Object(obj) => {
-                        obj.borrow().class_def.is_some()
-                            || slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
-                            || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
-                            || obj.borrow().get_closure().is_some()
-                    }
-                    Value::Function(name) => matches!(
-                        name.as_str(),
-                        "Date" | "Array" | "RegExp" | "Object" | "Number" | "Boolean" | "String" | "GeneratorFunction"
-                    ),
-                    Value::Closure(cl) | Value::AsyncClosure(cl) => !cl.is_arrow,
-                    _ => false,
-                }
-            };
-
             let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
             let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
@@ -3082,62 +3079,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     (dc as i128).max(0)
                 };
                 dc_i.min((current_len - actual_start) as i128) as usize
-            };
-
-            let array_species_create = |delete_count: usize| -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
-                if !is_array(mc, object) {
-                    if delete_count > u32::MAX as usize {
-                        return Err(raise_range_error!("Invalid array length").into());
-                    }
-                    let out = create_array(mc, env).map_err(EvalError::from)?;
-                    set_array_length(mc, &out, delete_count).map_err(EvalError::from)?;
-                    return Ok(out);
-                }
-
-                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor")?;
-                if matches!(ctor_val, Value::Undefined) {
-                    let out = create_array(mc, env).map_err(EvalError::from)?;
-                    set_array_length(mc, &out, delete_count).map_err(EvalError::from)?;
-                    return Ok(out);
-                }
-
-                if !matches!(ctor_val, Value::Object(_)) {
-                    return Err(raise_type_error!("Array species constructor is not a constructor").into());
-                }
-
-                let mut ctor_candidate = ctor_val.clone();
-                if let Value::Object(ctor_obj) = &ctor_val
-                    && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
-                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                    && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
-                    && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
-                {
-                    let species = crate::core::get_property_with_accessors(mc, env, ctor_obj, *species_sym)?;
-                    if !matches!(species, Value::Undefined | Value::Null) {
-                        ctor_candidate = species;
-                    } else {
-                        let out = create_array(mc, env).map_err(EvalError::from)?;
-                        set_array_length(mc, &out, delete_count).map_err(EvalError::from)?;
-                        return Ok(out);
-                    }
-                }
-
-                if matches!(ctor_candidate, Value::Undefined | Value::Null) {
-                    let out = create_array(mc, env).map_err(EvalError::from)?;
-                    set_array_length(mc, &out, delete_count).map_err(EvalError::from)?;
-                    return Ok(out);
-                }
-
-                if !is_constructor_value(&ctor_candidate) {
-                    return Err(raise_type_error!("Array species constructor is not a constructor").into());
-                }
-
-                let constructed = crate::js_class::evaluate_new(mc, env, &ctor_candidate, &[Value::Number(delete_count as f64)], None)?;
-
-                match constructed {
-                    Value::Object(obj) => Ok(obj),
-                    _ => Err(raise_type_error!("Array species constructor must return an object").into()),
-                }
             };
 
             let set_length_or_throw = |new_len: usize| -> Result<(), EvalError<'gc>> {
@@ -3284,15 +3225,24 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 Ok(())
             };
 
-            let deleted_array = array_species_create(actual_delete_count)?;
+            let deleted_array = array_species_create_impl(mc, env, object, actual_delete_count as f64)?;
             for k in 0..actual_delete_count {
                 let from = actual_start + k;
                 if has_property_at(from)? {
                     let from_val = crate::core::get_property_with_accessors(mc, env, object, from.to_string())?;
-                    object_set_key_value(mc, &deleted_array, k, &from_val)?;
+                    create_data_property_or_throw(mc, &deleted_array, k, &from_val)?;
                 }
             }
-            if is_array(mc, &deleted_array) {
+            // Step 12: Perform ? Set(A, "length", actualDeleteCount, true) — must go through [[Set]] for proxy support
+            if let Some(proxy_cell) = crate::core::slot_get(&deleted_array, &InternalSlot::Proxy)
+                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+            {
+                let key = PropertyKey::from("length");
+                let ok = crate::js_proxy::proxy_set_property(mc, proxy, &key, &Value::Number(actual_delete_count as f64))?;
+                if !ok {
+                    return Err(raise_type_error!("Cannot set property 'length' on proxy").into());
+                }
+            } else if is_array(mc, &deleted_array) {
                 set_array_length(mc, &deleted_array, actual_delete_count)?;
             } else {
                 object_set_key_value(mc, &deleted_array, "length", &Value::Number(actual_delete_count as f64))?;
@@ -4193,11 +4143,11 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut result = Vec::new();
             flatten_array(mc, object, &mut result, depth)?;
 
-            let new_array = create_array(mc, env)?;
-            set_array_length(mc, &new_array, result.len())?;
+            let new_array = array_species_create_impl(mc, env, object, 0.0)?;
             for (i, val) in result.iter().enumerate() {
-                object_set_key_value(mc, &new_array, i, val)?;
+                create_data_property_or_throw(mc, &new_array, i, val)?;
             }
+            set_array_length(mc, &new_array, result.len())?;
             Ok(Value::Object(new_array))
         }
         "flatMap" => {
@@ -4234,11 +4184,11 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
             }
 
-            let new_array = create_array(mc, env)?;
-            set_array_length(mc, &new_array, result.len())?;
+            let new_array = array_species_create_impl(mc, env, object, 0.0)?;
             for (i, val) in result.iter().enumerate() {
-                object_set_key_value(mc, &new_array, i, val)?;
+                create_data_property_or_throw(mc, &new_array, i, val)?;
             }
+            set_array_length(mc, &new_array, result.len())?;
             Ok(Value::Object(new_array))
         }
         "copyWithin" => {

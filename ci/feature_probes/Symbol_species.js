@@ -1,10 +1,10 @@
 // feature probe for 'Symbol.species'
 try {
   if (typeof Symbol !== 'function') throw new Error('Symbol missing');
-  if (typeof Symbol.species === 'undefined') throw new Error('Symbol.species missing');
+  if (typeof Symbol.species !== 'symbol') throw new Error('Symbol.species missing');
   const desc = Object.getOwnPropertyDescriptor(Symbol, 'species');
-  if (!desc || typeof desc.get !== 'function') throw new Error('Symbol.species descriptor missing');
+  if (!desc || desc.writable || desc.enumerable || desc.configurable) throw new Error('Symbol.species descriptor incorrect');
   console.log('OK');
-} catch (_) {
-  console.log('NO');
+} catch (e) {
+  console.log('NO: ' + e.message);
 }

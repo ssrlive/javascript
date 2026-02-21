@@ -433,19 +433,84 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
     value: &Value<'gc>,
     receiver: Option<&Value<'gc>>,
 ) -> Result<bool, EvalError<'gc>> {
+    let proxy_gc = *proxy;
+    let key_clone = key.clone();
+    let value_clone = value.clone();
+
     let mut trap_args = vec![(*proxy.target).clone(), property_key_to_value(key), value.clone()];
     if let Some(r) = receiver {
         trap_args.push(r.clone());
     }
 
     let result = apply_proxy_trap(mc, proxy, "set", trap_args, || {
-        // Default behavior: set property on target
-        match &*proxy.target {
-            Value::Object(obj) => {
-                object_set_key_value(mc, obj, key, value)?;
-                Ok(Value::Boolean(true))
+        // Default behavior: target.[[Set]](P, V, Receiver) — OrdinarySet
+        // Per spec 10.5.9 step 5: If trap is undefined, return ? target.[[Set]](P, V, Receiver).
+        // OrdinarySet (10.1.2.2) delegates back through Receiver for
+        // [[GetOwnPropertyDescriptor]] and [[DefineOwnProperty]].
+        match &*proxy_gc.target {
+            Value::Object(target_obj) => {
+                // OrdinarySet step 1: ownDesc = target.[[GetOwnPropertyDescriptor]](P)
+                let own_prop = crate::core::get_own_property(target_obj, &key_clone);
+
+                if let Some(own_val_rc) = own_prop {
+                    let own_val = own_val_rc.borrow().clone();
+
+                    // Check if accessor descriptor on the target
+                    let is_accessor = matches!(
+                        &own_val,
+                        Value::Getter(..)
+                            | Value::Setter(..)
+                            | Value::Property {
+                                getter: Some(_),
+                                value: None,
+                                ..
+                            }
+                            | Value::Property {
+                                setter: Some(_),
+                                value: None,
+                                ..
+                            }
+                    );
+
+                    if is_accessor {
+                        // Accessor on target: call setter directly on target
+                        object_set_key_value(mc, target_obj, &key_clone, &value_clone)?;
+                        Ok(Value::Boolean(true))
+                    } else {
+                        // Data descriptor on target
+                        if !target_obj.borrow().is_writable(&key_clone) {
+                            return Ok(Value::Boolean(false));
+                        }
+
+                        // OrdinarySetWithOwnDescriptor step 2.c:
+                        // existingDescriptor = Receiver.[[GetOwnPropertyDescriptor]](P)
+                        let receiver_has = proxy_get_own_property_descriptor(mc, &proxy_gc, &key_clone)?;
+
+                        if receiver_has.is_some() {
+                            // Step 2.d.iv: Receiver.[[DefineOwnProperty]](P, {[[Value]]: V})
+                            let ok = proxy_define_property_value_only(mc, &proxy_gc, &key_clone, &value_clone)?;
+                            Ok(Value::Boolean(ok))
+                        } else {
+                            // Step 2.e: CreateDataProperty(Receiver, P, V)
+                            let ok = proxy_define_data_property(mc, &proxy_gc, &key_clone, &value_clone)?;
+                            Ok(Value::Boolean(ok))
+                        }
+                    }
+                } else {
+                    // Property not found on target; check prototype chain
+                    let parent = target_obj.borrow().prototype;
+                    if let Some(_parent_obj) = parent {
+                        // Fallback: set directly on target for prototype-inherited properties
+                        object_set_key_value(mc, target_obj, &key_clone, &value_clone)?;
+                        Ok(Value::Boolean(true))
+                    } else {
+                        // No prototype: CreateDataProperty(Receiver, P, V)
+                        let ok = proxy_define_data_property(mc, &proxy_gc, &key_clone, &value_clone)?;
+                        Ok(Value::Boolean(ok))
+                    }
+                }
             }
-            _ => Ok(Value::Boolean(false)), // Non-objects can't have properties set
+            _ => Ok(Value::Boolean(false)),
         }
     })?;
 
@@ -489,6 +554,38 @@ pub(crate) fn proxy_define_data_property<'gc>(
     }
 }
 
+/// Define only the [[Value]] of an existing property on a proxy target
+/// (OrdinarySetWithOwnDescriptor step 2.d.iv: descriptor is {[[Value]]: V} only).
+pub(crate) fn proxy_define_property_value_only<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
+    key: &PropertyKey<'gc>,
+    value: &Value<'gc>,
+) -> Result<bool, EvalError<'gc>> {
+    let desc_obj = new_js_object_data(mc);
+    object_set_key_value(mc, &desc_obj, "value", value)?;
+
+    let result = apply_proxy_trap(
+        mc,
+        proxy,
+        "defineProperty",
+        vec![(*proxy.target).clone(), property_key_to_value(key), Value::Object(desc_obj)],
+        || match &*proxy.target {
+            Value::Object(obj) => {
+                // Default: just update the value on the target
+                object_set_key_value(mc, obj, key, value)?;
+                Ok(Value::Boolean(true))
+            }
+            _ => Ok(Value::Boolean(false)),
+        },
+    )?;
+
+    match result {
+        Value::Boolean(b) => Ok(b),
+        _ => Ok(true),
+    }
+}
+
 /// Check if property exists on proxy target, applying has trap if available
 pub(crate) fn proxy_has_property<'gc>(
     mc: &MutationContext<'gc>,
@@ -504,10 +601,8 @@ pub(crate) fn proxy_has_property<'gc>(
         }
     })?;
 
-    match result {
-        Value::Boolean(b) => Ok(b),
-        _ => Ok(false), // Non-boolean return from trap is treated as false
-    }
+    // Per spec, the trap result is coerced to Boolean via ToBoolean.
+    Ok(result.to_truthy())
 }
 
 /// Delete property from proxy target, applying deleteProperty trap if available

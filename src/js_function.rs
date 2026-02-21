@@ -267,6 +267,7 @@ pub fn handle_global_function<'gc>(
         "Promise.any" => return Ok(crate::js_promise::handle_promise_static_method_val(mc, "any", args, env)?),
         "Promise.allSettled" => return Ok(crate::js_promise::handle_promise_static_method_val(mc, "allSettled", args, env)?),
 
+        "__internal_capability_executor" => return Ok(crate::js_promise::__internal_capability_executor(mc, args, env)?),
         "__internal_promise_resolve_captured" => return Ok(crate::js_promise::__internal_promise_resolve_captured(mc, args, env)?),
         "__internal_promise_reject_captured" => return Ok(crate::js_promise::__internal_promise_reject_captured(mc, args, env)?),
 

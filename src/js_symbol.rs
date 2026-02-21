@@ -64,6 +64,22 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let unscopables_sym = Value::Symbol(unscopables_data);
     object_set_key_value(mc, &symbol_ctor, "unscopables", &unscopables_sym)?;
 
+    // All well-known symbol properties on Symbol are non-writable, non-enumerable, non-configurable
+    // per the ECMAScript spec (they are immutable values, not methods).
+    for wk in &[
+        "iterator",
+        "asyncIterator",
+        "toPrimitive",
+        "toStringTag",
+        "species",
+        "hasInstance",
+        "unscopables",
+    ] {
+        symbol_ctor.borrow_mut(mc).set_non_enumerable(*wk);
+        symbol_ctor.borrow_mut(mc).set_non_writable(*wk);
+        symbol_ctor.borrow_mut(mc).set_non_configurable(*wk);
+    }
+
     // toString method
     let val = Value::Function("Symbol.prototype.toString".to_string());
     object_set_key_value(mc, &symbol_proto, "toString", &val)?;

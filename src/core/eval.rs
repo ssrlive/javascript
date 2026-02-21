@@ -18209,6 +18209,15 @@ pub fn call_native_function<'gc>(
         return Ok(Some(v));
     }
 
+    // @@species getters: return `this`
+    if matches!(
+        name,
+        "Promise.species" | "Array.species" | "ArrayBuffer.species" | "RegExp.species" | "Map.species" | "Set.species"
+    ) {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(this_v.clone()));
+    }
+
     // RegExp.prototype accessor getters (dispatched via call_accessor)
     if let Some(prop) = name.strip_prefix("RegExp.prototype.get ") {
         let this_v = this_val.unwrap_or(&Value::Undefined);

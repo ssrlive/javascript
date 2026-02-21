@@ -145,6 +145,10 @@ pub fn call_function<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Unwrap Value::Property to its inner value before dispatch
+    if let Value::Property { value: Some(v), .. } = func {
+        return call_function(mc, &v.borrow(), args, env);
+    }
     match func {
         Value::Closure(cl) => crate::core::call_closure(mc, cl, None, args, env, None),
         Value::Function(name) => {
@@ -155,10 +159,22 @@ pub fn call_function<'gc>(
             }
         }
         Value::Object(obj) => {
-            if let Some(cl_ptr) = obj.borrow().get_closure()
-                && let Value::Closure(cl) = &*cl_ptr.borrow()
-            {
-                return crate::core::call_closure(mc, cl, None, args, env, None);
+            if let Some(cl_ptr) = obj.borrow().get_closure() {
+                match &*cl_ptr.borrow() {
+                    Value::Closure(cl) => {
+                        return crate::core::call_closure(mc, cl, None, args, env, None);
+                    }
+                    Value::Function(name) => {
+                        if let Some(res) = crate::core::call_native_function(mc, name, None, args, env)? {
+                            return Ok(res);
+                        }
+                        return crate::js_function::handle_global_function(mc, name, args, env);
+                    }
+                    Value::AsyncClosure(cl) => {
+                        return Ok(crate::js_async::handle_async_closure_call(mc, cl, None, args, env, None)?);
+                    }
+                    _ => {}
+                }
             }
             Err(raise_type_error!("Not a function").into())
         }
@@ -173,6 +189,10 @@ pub fn call_function_with_this<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Unwrap Value::Property to its inner value before dispatch
+    if let Value::Property { value: Some(v), .. } = func {
+        return call_function_with_this(mc, &v.borrow(), this_val, args, env);
+    }
     match func {
         Value::Closure(cl) => crate::core::call_closure(mc, cl, this_val, args, env, None),
         Value::Function(name) => {
@@ -180,7 +200,6 @@ pub fn call_function_with_this<'gc>(
                 Ok(res)
             } else if let Some(this) = this_val {
                 let call_env = crate::core::new_js_object_data(mc);
-                // Use the existing env as the parent scope loop up
                 call_env.borrow_mut(mc).prototype = Some(*env);
                 call_env.borrow_mut(mc).is_function_scope = true;
                 object_set_key_value(mc, &call_env, "this", this)?;
@@ -190,10 +209,30 @@ pub fn call_function_with_this<'gc>(
             }
         }
         Value::Object(obj) => {
-            if let Some(cl_ptr) = obj.borrow().get_closure()
-                && let Value::Closure(cl) = &*cl_ptr.borrow()
-            {
-                return crate::core::call_closure(mc, cl, this_val, args, env, None);
+            if let Some(cl_ptr) = obj.borrow().get_closure() {
+                match &*cl_ptr.borrow() {
+                    Value::Closure(cl) => {
+                        return crate::core::call_closure(mc, cl, this_val, args, env, None);
+                    }
+                    Value::Function(name) => {
+                        if let Some(res) = crate::core::call_native_function(mc, name, this_val, args, env)? {
+                            return Ok(res);
+                        }
+                        if let Some(this) = this_val {
+                            let call_env = crate::core::new_js_object_data(mc);
+                            call_env.borrow_mut(mc).prototype = Some(*env);
+                            call_env.borrow_mut(mc).is_function_scope = true;
+                            crate::core::object_set_key_value(mc, &call_env, "this", this)?;
+                            return crate::js_function::handle_global_function(mc, name, args, &call_env);
+                        } else {
+                            return crate::js_function::handle_global_function(mc, name, args, env);
+                        }
+                    }
+                    Value::AsyncClosure(cl) => {
+                        return Ok(crate::js_async::handle_async_closure_call(mc, cl, this_val, args, env, None)?);
+                    }
+                    _ => {}
+                }
             }
             Err(raise_type_error!("Not a function").into())
         }
@@ -2953,6 +2992,243 @@ pub fn handle_clear_interval_val<'gc>(
 }
 
 /// Initialize Promise constructor and prototype
+/// Helper: get Function.prototype from the global env
+fn get_function_proto<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<JSObjectDataPtr<'gc>> {
+    if let Some(func_rc) = object_get_key_value(env, "Function")
+        && let Value::Object(func_obj) = &*func_rc.borrow()
+        && let Some(proto_rc) = object_get_key_value(func_obj, "prototype")
+        && let Value::Object(proto_obj) = &*proto_rc.borrow()
+    {
+        Some(*proto_obj)
+    } else {
+        None
+    }
+}
+
+/// Helper: create a proper native function object (Value::Object with closure)
+/// with spec-compliant length, name, and [[Prototype]] = Function.prototype.
+fn make_native_fn_obj<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    display_name: &str,
+    length: f64,
+    internal_dispatch: &str,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let fn_obj = new_js_object_data(mc);
+    fn_obj
+        .borrow_mut(mc)
+        .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(internal_dispatch.to_string()))));
+    if let Some(fp) = get_function_proto(env) {
+        fn_obj.borrow_mut(mc).prototype = Some(fp);
+    }
+    // name property: non-writable, non-enumerable, configurable
+    let name_d = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(display_name)), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &fn_obj, "name", &name_d)?;
+    // length property: non-writable, non-enumerable, configurable
+    let len_d = crate::core::create_descriptor_object(mc, &Value::Number(length), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &fn_obj, "length", &len_d)?;
+    Ok(fn_obj)
+}
+
+/// Helper: wrap an arbitrary closure in a function object with length and name.
+#[allow(dead_code)]
+fn wrap_closure_as_fn_obj<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    closure: Value<'gc>,
+    display_name: &str,
+    length: f64,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let fn_obj = new_js_object_data(mc);
+    slot_set(mc, &fn_obj, InternalSlot::Callable, &Value::Boolean(true));
+    fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure)));
+    if let Some(fp) = get_function_proto(env) {
+        fn_obj.borrow_mut(mc).prototype = Some(fp);
+    }
+    // name and length — spec order is: length first, then name
+    let len_d = crate::core::create_descriptor_object(mc, &Value::Number(length), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &fn_obj, "length", &len_d)?;
+    let name_d = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(display_name)), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &fn_obj, "name", &name_d)?;
+    Ok(fn_obj)
+}
+
+/// Check whether a Value is callable (function, closure, or callable object).
+#[allow(dead_code)]
+fn is_callable_val<'gc>(v: &Value<'gc>) -> bool {
+    match v {
+        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) => true,
+        Value::Object(o) => {
+            o.borrow().get_closure().is_some()
+                || slot_get_chained(o, &InternalSlot::Callable).is_some()
+                || slot_get_chained(o, &InternalSlot::IsConstructor).is_some()
+                || o.borrow().class_def.is_some()
+                || slot_get_chained(o, &InternalSlot::NativeCtor).is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Check whether a Value is a constructor.
+#[allow(dead_code)]
+fn is_constructor_val<'gc>(v: &Value<'gc>) -> bool {
+    match v {
+        Value::Object(o) => {
+            slot_get_chained(o, &InternalSlot::IsConstructor).is_some()
+                || o.borrow().class_def.is_some()
+                || slot_get_chained(o, &InternalSlot::NativeCtor).is_some()
+        }
+        _ => false,
+    }
+}
+
+/// NewPromiseCapability(C) per ECMAScript spec §27.2.1.5.
+/// Creates a GetCapabilitiesExecutor, calls `new C(executor)`, and returns
+/// (promiseObj, resolveFunction, rejectFunction).
+#[allow(dead_code)]
+pub fn new_promise_capability<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    constructor: &Value<'gc>,
+) -> Result<(Value<'gc>, Value<'gc>, Value<'gc>), JSError> {
+    // Step 1: Check IsConstructor(C)
+    if !is_constructor_val(constructor) {
+        return Err(raise_type_error!("Promise.all/resolve/etc: this is not a constructor"));
+    }
+
+    // Step 2: Create the PromiseCapability record (as an env object)
+    let cap_env = new_js_object_data(mc);
+    cap_env.borrow_mut(mc).prototype = Some(*env); // inherit globals for __internal_capability_executor lookup
+    // Self-reference so the executor closure's body can find it via env chain lookup
+    object_set_key_value(mc, &cap_env, "__cap_env_ref", &Value::Object(cap_env))?;
+
+    // Step 3: Create the GetCapabilitiesExecutor function
+    // Body: calls __internal_capability_executor(__cap_res_arg, __cap_rej_arg)
+    let executor_closure = Value::Closure(Gc::new(
+        mc,
+        ClosureData::new(
+            &[
+                DestructuringElement::Variable("__cap_res_arg".to_string(), None),
+                DestructuringElement::Variable("__cap_rej_arg".to_string(), None),
+            ],
+            &[stmt_expr(Expr::Call(
+                Box::new(Expr::Var("__internal_capability_executor".to_string(), None, None)),
+                vec![
+                    Expr::Var("__cap_res_arg".to_string(), None, None),
+                    Expr::Var("__cap_rej_arg".to_string(), None, None),
+                ],
+            ))],
+            Some(cap_env),
+            None,
+        ),
+    ));
+    // Wrap as a function object with length=2, name=""
+    let executor_fn = wrap_closure_as_fn_obj(mc, env, executor_closure, "", 2.0)?;
+
+    // Step 4: Call new C(executor)
+    let promise_obj = crate::js_class::evaluate_new(mc, env, constructor, &[Value::Object(executor_fn)], None)?;
+
+    // Steps 5-6: Retrieve captured resolve/reject
+    let resolve = object_get_key_value(&cap_env, "__cap_resolve")
+        .map(|rc| rc.borrow().clone())
+        .unwrap_or(Value::Undefined);
+    let reject = object_get_key_value(&cap_env, "__cap_reject")
+        .map(|rc| rc.borrow().clone())
+        .unwrap_or(Value::Undefined);
+
+    // Steps 7-8: Validate callability
+    if !is_callable_val(&resolve) {
+        return Err(raise_type_error!("Promise capability: resolve is not callable"));
+    }
+    if !is_callable_val(&reject) {
+        return Err(raise_type_error!("Promise capability: reject is not callable"));
+    }
+
+    Ok((promise_obj, resolve, reject))
+}
+
+/// Handler for the GetCapabilitiesExecutor internal function.
+/// Called when the capability executor closure body runs.
+/// Reads args[0]=resolve, args[1]=reject and stores them into the cap_env object
+/// found via `__cap_env_ref` in the current env chain.
+pub fn __internal_capability_executor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    let resolve_arg = args.first().cloned().unwrap_or(Value::Undefined);
+    let reject_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+    if let Some(cap_ref_rc) = crate::core::env_get(env, "__cap_env_ref") {
+        let cap_val = cap_ref_rc.borrow().clone();
+        if let Value::Object(cap_obj) = cap_val {
+            // Check: if [[Resolve]] is already non-undefined, throw
+            let resolve_already_non_undef = object_get_key_value(&cap_obj, "__cap_resolve")
+                .map(|rc| !matches!(*rc.borrow(), Value::Undefined))
+                .unwrap_or(false);
+            if resolve_already_non_undef {
+                return Err(raise_type_error!("GetCapabilitiesExecutor: [[Resolve]] already set"));
+            }
+            // Check: if [[Reject]] is already non-undefined, throw
+            let reject_already_non_undef = object_get_key_value(&cap_obj, "__cap_reject")
+                .map(|rc| !matches!(*rc.borrow(), Value::Undefined))
+                .unwrap_or(false);
+            if reject_already_non_undef {
+                return Err(raise_type_error!("GetCapabilitiesExecutor: [[Reject]] already set"));
+            }
+            // Set both (even if undefined)
+            object_set_key_value(mc, &cap_obj, "__cap_resolve", &resolve_arg)?;
+            object_set_key_value(mc, &cap_obj, "__cap_reject", &reject_arg)?;
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+/// Get the `this` value from the current execution environment.
+#[allow(dead_code)]
+fn get_static_this<'gc>(env: &JSObjectDataPtr<'gc>) -> Value<'gc> {
+    crate::core::env_get(env, "this")
+        .map(|rc| rc.borrow().clone())
+        .unwrap_or(Value::Undefined)
+}
+
+/// Get the default Promise constructor from the global env.
+#[allow(dead_code)]
+fn get_default_promise_ctor<'gc>(env: &JSObjectDataPtr<'gc>) -> Value<'gc> {
+    if let Some(rc) = slot_get_chained(env, &InternalSlot::IntrinsicPromiseCtor) {
+        rc.borrow().clone()
+    } else {
+        object_get_key_value(env, "Promise")
+            .map(|rc| rc.borrow().clone())
+            .unwrap_or(Value::Undefined)
+    }
+}
+
+/// Call `.then(onFulfilled, onRejected)` on a thenable value.
+/// Falls back to native perform_promise_then if it's a native JSPromise.
+#[allow(dead_code)]
+fn call_then_on_thenable<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    thenable: &Value<'gc>,
+    on_fulfilled: Value<'gc>,
+    on_rejected: Value<'gc>,
+) -> Result<(), JSError> {
+    if let Value::Object(obj) = thenable {
+        if let Some(promise_ref) = get_promise_from_js_object(obj) {
+            // Fast path: native JSPromise
+            perform_promise_then(mc, promise_ref, Some(on_fulfilled), Some(on_rejected), None, env)?;
+            return Ok(());
+        }
+        // Slow path: dynamic .then() call
+        let then_fn = crate::core::get_property_with_accessors(mc, env, obj, "then")?;
+        if is_callable_val(&then_fn) {
+            let _ = call_function_with_this(mc, &then_fn, Some(thenable), &[on_fulfilled, on_rejected], env)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let promise_ctor = new_js_object_data(mc);
     slot_set(mc, &promise_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
@@ -2962,89 +3238,103 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("Promise")),
     );
-    object_set_key_value(mc, &promise_ctor, "name", &Value::String(utf8_to_utf16("Promise")))?;
+    // Set [[Prototype]] = Function.prototype
+    if let Some(fp) = get_function_proto(env) {
+        promise_ctor.borrow_mut(mc).prototype = Some(fp);
+    }
 
-    // Setup prototype
+    // Setup prototype (inherits from Object.prototype)
     let promise_proto = new_js_object_data(mc);
-    // Ensure Promise.prototype inherits from Object.prototype so ToPrimitive works.
     let _ = crate::core::set_internal_prototype_from_constructor(mc, &promise_proto, env, "Object");
-    object_set_key_value(mc, &promise_ctor, "prototype", &Value::Object(promise_proto))?;
-    object_set_key_value(mc, &promise_proto, "constructor", &Value::Object(promise_ctor))?;
 
-    // Static methods
-    let static_methods = vec!["all", "race", "any", "allSettled", "resolve", "reject"];
-    for method in static_methods {
-        object_set_key_value(mc, &promise_ctor, method, &Value::Function(format!("Promise.{}", method)))?;
-    }
-
-    // Prototype methods
-    let methods = vec!["then", "catch", "finally"];
-    for method in methods {
-        object_set_key_value(
-            mc,
-            &promise_proto,
-            method,
-            &Value::Function(format!("Promise.prototype.{}", method)),
-        )?;
-    }
-
-    // Symbol.toStringTag
-    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
-        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-        && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
-        && let Value::Symbol(s) = &*tag_sym.borrow()
+    // Promise.prototype — non-writable, non-enumerable, non-configurable
     {
-        object_set_key_value(mc, &promise_proto, s, &Value::String(utf8_to_utf16("Promise")))?;
+        let desc = crate::core::create_descriptor_object(mc, &Value::Object(promise_proto), false, false, false)?;
+        crate::js_object::define_property_internal(mc, &promise_ctor, "prototype", &desc)?;
+    }
+    // Promise.prototype.constructor — writable, non-enumerable, configurable
+    {
+        let desc = crate::core::create_descriptor_object(mc, &Value::Object(promise_ctor), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &promise_proto, "constructor", &desc)?;
+    }
+
+    // Promise.length = 1 — non-writable, non-enumerable, configurable
+    {
+        let desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &promise_ctor, "length", &desc)?;
+    }
+    // Promise.name = "Promise" — non-writable, non-enumerable, configurable
+    {
+        let desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Promise")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &promise_ctor, "name", &desc)?;
+    }
+
+    // Static methods — writable, non-enumerable, configurable
+    let static_methods: &[(&str, f64)] = &[
+        ("all", 1.0),
+        ("allSettled", 1.0),
+        ("any", 1.0),
+        ("race", 1.0),
+        ("resolve", 1.0),
+        ("reject", 1.0),
+    ];
+    for (method, arity) in static_methods {
+        let fn_obj = make_native_fn_obj(mc, env, method, *arity, &format!("Promise.{}", method))?;
+        let desc = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &promise_ctor, *method, &desc)?;
+    }
+
+    // Symbol.species accessor on the constructor — get [Symbol.species]() { return this; }
+    if let Some(sym_rc) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_rc.borrow()
+        && let Some(species_rc) = object_get_key_value(sym_obj, "species")
+        && let Value::Symbol(species_sym) = &*species_rc.borrow()
+    {
+        let getter_fn = make_native_fn_obj(mc, env, "get [Symbol.species]", 0.0, "Promise.species")?;
+        let desc = new_js_object_data(mc);
+        object_set_key_value(mc, &desc, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(mc, &desc, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(mc, &desc, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(mc, &promise_ctor, crate::core::PropertyKey::Symbol(*species_sym), &desc)?;
+    }
+
+    // Prototype methods — writable, non-enumerable, configurable
+    let proto_methods: &[(&str, f64)] = &[("then", 2.0), ("catch", 1.0), ("finally", 1.0)];
+    for (method, arity) in proto_methods {
+        let fn_obj = make_native_fn_obj(mc, env, method, *arity, &format!("Promise.prototype.{}", method))?;
+        let desc = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &promise_proto, *method, &desc)?;
+    }
+
+    // Promise.prototype[Symbol.toStringTag] = "Promise" — non-writable, non-enumerable, configurable
+    if let Some(sym_rc) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_rc.borrow()
+        && let Some(tag_rc) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_rc.borrow()
+    {
+        let desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Promise")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &promise_proto, crate::core::PropertyKey::Symbol(*tag_sym), &desc)?;
     }
 
     crate::core::env_set(mc, env, "Promise", &Value::Object(promise_ctor))?;
 
-    // Preserve the intrinsic Promise constructor/prototype for internal uses
-    // like dynamic import, even if the global Promise binding is later replaced.
+    // Preserve intrinsic references for internal use
     slot_set(mc, env, InternalSlot::IntrinsicPromiseCtor, &Value::Object(promise_ctor));
     slot_set(mc, env, InternalSlot::IntrinsicPromiseProto, &Value::Object(promise_proto));
 
-    // Internal helpers for resolution/rejection captures
-    crate::core::env_set(
-        mc,
-        env,
+    // Internal helpers registered in global env
+    let helpers = [
         "__internal_promise_resolve_captured",
-        &Value::Function("__internal_promise_resolve_captured".to_string()),
-    )?;
-    crate::core::env_set(
-        mc,
-        env,
         "__internal_promise_reject_captured",
-        &Value::Function("__internal_promise_reject_captured".to_string()),
-    )?;
-
-    // Register finally internal helpers so closures can call into them by name
-    crate::core::env_set(
-        mc,
-        env,
         "__internal_promise_finally_resolve",
-        &Value::Function("__internal_promise_finally_resolve".to_string()),
-    )?;
-    crate::core::env_set(
-        mc,
-        env,
         "__internal_promise_finally_reject",
-        &Value::Function("__internal_promise_finally_reject".to_string()),
-    )?;
-
-    // Register Promise.all internal helpers
-    crate::core::env_set(
-        mc,
-        env,
         "__internal_promise_all_resolve",
-        &Value::Function("__internal_promise_all_resolve".to_string()),
-    )?;
-    crate::core::env_set(
-        mc,
-        env,
         "__internal_promise_all_reject",
-        &Value::Function("__internal_promise_all_reject".to_string()),
-    )?;
+        "__internal_capability_executor",
+    ];
+    for h in helpers {
+        crate::core::env_set(mc, env, h, &Value::Function(h.to_string()))?;
+    }
 
     Ok(())
 }

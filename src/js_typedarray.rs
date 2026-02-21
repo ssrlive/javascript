@@ -75,6 +75,42 @@ pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::Boolean(true));
     slot_set(mc, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("ArrayBuffer")));
 
+    // ArrayBuffer[Symbol.species] — accessor getter returning `this`, non-enumerable, configurable
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_val.borrow()
+        && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
+        && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+    {
+        let getter_fn = new_js_object_data(mc);
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        let getter_closure = ClosureData {
+            env: Some(*env),
+            native_target: Some("ArrayBuffer.species".to_string()),
+            enforce_strictness_inheritance: true,
+            ..ClosureData::default()
+        };
+        getter_fn
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, getter_closure)))));
+        let gname_desc =
+            crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "name", &gname_desc)?;
+        let glen_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "length", &glen_desc)?;
+
+        let species_desc_obj = new_js_object_data(mc);
+        object_set_key_value(mc, &species_desc_obj, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(mc, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(mc, &species_desc_obj, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(mc, &obj, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
+    }
+
     Ok(obj)
 }
 
@@ -1959,24 +1995,48 @@ pub fn handle_typedarray_constructor<'gc>(
         if let Value::Object(obj) = buffer_val {
             if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
-                    if let (Value::Number(offset_num), Value::Number(length_num)) = (offset_val, length_val) {
-                        let offset = offset_num as usize;
-                        let length = length_num as usize;
-                        if !offset.is_multiple_of(element_size) {
-                            return Err(raise_range_error!("TypedArray byteOffset must be multiple of element size"));
-                        }
-                        // Step 11: If IsDetachedBuffer(buffer) is true, throw a TypeError.
-                        if (**ab).borrow().detached {
-                            return Err(raise_type_error!("Cannot construct TypedArray on a detached ArrayBuffer"));
-                        }
-                        if length * element_size + offset > (**ab).borrow().data.lock().unwrap().len() {
-                            return Err(raise_range_error!("TypedArray length exceeds buffer size"));
-                        }
-                        buffer_obj_opt = Some(obj);
-                        (*ab, offset, length)
-                    } else {
-                        return Err(raise_type_error!("TypedArray byteOffset and length must be numbers"));
+                    let offset_num = match &offset_val {
+                        Value::Number(n) => *n,
+                        Value::Undefined | Value::Null => 0.0,
+                        other => match crate::core::to_number(other) {
+                            Ok(n) => n,
+                            Err(_) => return Err(raise_type_error!("TypedArray byteOffset must be a number")),
+                        },
+                    };
+                    let offset = offset_num as usize;
+                    if !offset.is_multiple_of(element_size) {
+                        return Err(raise_range_error!("TypedArray byteOffset must be multiple of element size"));
                     }
+                    // Step 11: If IsDetachedBuffer(buffer) is true, throw a TypeError.
+                    if (**ab).borrow().detached {
+                        return Err(raise_type_error!("Cannot construct TypedArray on a detached ArrayBuffer"));
+                    }
+                    let length = match &length_val {
+                        Value::Undefined | Value::Null => {
+                            let buf_len = (**ab).borrow().data.lock().unwrap().len();
+                            if buf_len < offset || !(buf_len - offset).is_multiple_of(element_size) {
+                                return Err(raise_range_error!("TypedArray byte length must be a multiple of element size"));
+                            }
+                            (buf_len - offset) / element_size
+                        }
+                        Value::Number(n) => {
+                            let l = *n as usize;
+                            if l * element_size + offset > (**ab).borrow().data.lock().unwrap().len() {
+                                return Err(raise_range_error!("TypedArray length exceeds buffer size"));
+                            }
+                            l
+                        }
+                        other => {
+                            let n = crate::core::to_number(other).unwrap_or(0.0);
+                            let l = n as usize;
+                            if l * element_size + offset > (**ab).borrow().data.lock().unwrap().len() {
+                                return Err(raise_range_error!("TypedArray length exceeds buffer size"));
+                            }
+                            l
+                        }
+                    };
+                    buffer_obj_opt = Some(obj);
+                    (*ab, offset, length)
                 } else {
                     return Err(raise_type_error!("First argument must be an ArrayBuffer"));
                 }
@@ -2028,14 +2088,24 @@ pub fn handle_typedarray_constructor<'gc>(
         }
     }
 
-    // Determine if this TypedArray should be length-tracking (no explicit length argument)
+    // Determine if this TypedArray should be length-tracking.
+    // Per spec, [[ArrayLength]] is "auto" only when:
+    //   1. The first arg is an ArrayBuffer (not an array-like/TypedArray), AND
+    //   2. No explicit length argument is given (args.len() <= 2), AND
+    //   3. The buffer is resizable (max_byte_length.is_some()).
     let length_tracking = match args.len() {
-        1 => match &args[0] {
-            Value::Object(obj) => slot_get_chained(obj, &InternalSlot::ArrayBuffer).is_some(),
-            _ => false,
-        },
-        2 => match &args[0] {
-            Value::Object(obj) => slot_get_chained(obj, &InternalSlot::ArrayBuffer).is_some(),
+        1 | 2 => match &args[0] {
+            Value::Object(obj) => {
+                if let Some(ab_val) = slot_get_chained(obj, &InternalSlot::ArrayBuffer) {
+                    if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                        ab.borrow().max_byte_length.is_some()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
             _ => false,
         },
         _ => false,
@@ -2896,11 +2966,6 @@ pub fn handle_arraybuffer_method<'gc>(
             if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
                 && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
             {
-                let ctor_val = crate::core::get_property_with_accessors(mc, env, object, "constructor").map_err(JSError::from)?;
-                if !matches!(ctor_val, Value::Undefined | Value::Object(_)) {
-                    return Err(raise_type_error!("constructor value is not an object"));
-                }
-
                 let data = (**ab).borrow().data.lock().unwrap().clone();
                 let len = data.len() as i64;
 
@@ -2934,21 +2999,82 @@ pub fn handle_arraybuffer_method<'gc>(
                 };
                 let end = if end_raw < 0 { (len + end_raw).max(0) } else { end_raw.min(len) };
                 let final_end = end.max(start);
+                let new_len = (final_end - start) as usize;
+
+                // Step 13: Let ctor be ? SpeciesConstructor(O, %ArrayBuffer%).
+                let species_ctor = get_species_constructor(mc, env, object).map_err(JSError::from)?;
+
+                let new_obj = if let Some(ctor) = species_ctor {
+                    // Step 15: Let new be ? Construct(ctor, «newLen»).
+                    let new_val =
+                        crate::js_class::evaluate_new(mc, env, &ctor, &[Value::Number(new_len as f64)], None).map_err(JSError::from)?;
+                    let new_obj = match new_val {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Species constructor must return an object")),
+                    };
+
+                    // Step 17: If new does not have [[ArrayBufferData]], throw TypeError.
+                    if slot_get_chained(&new_obj, &InternalSlot::ArrayBuffer).is_none() {
+                        return Err(raise_type_error!(
+                            "ArrayBuffer species constructor returned a non-ArrayBuffer object"
+                        ));
+                    }
+
+                    // Step 19: If SameValue(new, O) is true, throw TypeError.
+                    if Gc::ptr_eq(new_obj, *object) {
+                        return Err(raise_type_error!("ArrayBuffer species constructor returned the same buffer"));
+                    }
+
+                    // Step 20: If new.[[ArrayBufferByteLength]] < newLen, throw TypeError.
+                    if let Some(new_ab_val) = slot_get_chained(&new_obj, &InternalSlot::ArrayBuffer)
+                        && let Value::ArrayBuffer(new_ab) = &*new_ab_val.borrow()
+                    {
+                        let new_byte_len = new_ab.borrow().data.lock().unwrap().len();
+                        if new_byte_len < new_len {
+                            return Err(raise_type_error!(
+                                "ArrayBuffer species constructor returned a buffer that is too small"
+                            ));
+                        }
+                    }
+
+                    new_obj
+                } else {
+                    // Default: create a new ArrayBuffer with newLen bytes
+                    let new_ab = new_gc_cell_ptr(
+                        mc,
+                        JSArrayBuffer {
+                            data: Arc::new(Mutex::new(vec![0u8; new_len])),
+                            ..JSArrayBuffer::default()
+                        },
+                    );
+                    let new_obj = new_js_object_data(mc);
+                    slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+                    // Set prototype from ArrayBuffer.prototype
+                    if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
+                        && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
+                        && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
+                        && let Value::Object(proto) = &*proto_val.borrow()
+                    {
+                        new_obj.borrow_mut(mc).prototype = Some(*proto);
+                    } else {
+                        new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                    }
+                    new_obj
+                };
+
+                // Step 24-25: Copy bytes from source to new buffer.
                 let start_usize = start as usize;
                 let end_usize = final_end as usize;
-                let slice_bytes = data[start_usize..end_usize].to_vec();
+                let slice_bytes = &data[start_usize..end_usize];
 
-                let new_ab = new_gc_cell_ptr(
-                    mc,
-                    JSArrayBuffer {
-                        data: Arc::new(Mutex::new(slice_bytes)),
-                        ..JSArrayBuffer::default()
-                    },
-                );
-
-                let new_obj = new_js_object_data(mc);
-                slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
-                new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                if let Some(new_ab_val) = slot_get_chained(&new_obj, &InternalSlot::ArrayBuffer)
+                    && let Value::ArrayBuffer(new_ab) = &*new_ab_val.borrow()
+                {
+                    let new_ab_ref = new_ab.borrow();
+                    let mut new_data = new_ab_ref.data.lock().unwrap();
+                    let copy_len = slice_bytes.len().min(new_data.len());
+                    new_data[..copy_len].copy_from_slice(&slice_bytes[..copy_len]);
+                }
 
                 return Ok(Value::Object(new_obj));
             }
@@ -3054,6 +3180,22 @@ fn get_species_constructor<'gc>(
         if matches!(species, Value::Undefined | Value::Null) {
             return Ok(None); // use default constructor
         }
+        // Step 9: If IsConstructor(S) is true, return S.
+        // Step 10: Throw a TypeError exception.
+        let is_ctor = match &species {
+            Value::Object(o) => {
+                o.borrow().class_def.is_some()
+                    || slot_get_chained(o, &InternalSlot::IsConstructor).is_some()
+                    || slot_get_chained(o, &InternalSlot::NativeCtor).is_some()
+                    || o.borrow().get_closure().is_some()
+            }
+            Value::Closure(cl) | Value::AsyncClosure(cl) => !cl.is_arrow,
+            Value::Function(_) => true,
+            _ => false,
+        };
+        if !is_ctor {
+            return Err(raise_type_error!("Species constructor is not a constructor").into());
+        }
         return Ok(Some(species));
     }
 
@@ -3070,11 +3212,26 @@ fn typed_array_species_create<'gc>(
 ) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
     let species = get_species_constructor(mc, env, exemplar)?;
     if let Some(ctor) = species {
-        let new_val = crate::core::evaluate_call_dispatch(mc, env, &ctor, None, &[Value::Number(length as f64)])?;
-        match new_val {
-            Value::Object(o) => Ok(o),
-            _ => Err(raise_type_error!("Species constructor did not return an object").into()),
+        // TypedArrayCreate(constructor, « length »)
+        // Step 1: Let newTypedArray be ? Construct(constructor, argumentList).
+        let new_val = crate::js_class::evaluate_new(mc, env, &ctor, &[Value::Number(length as f64)], None)?;
+        let new_obj = match new_val {
+            Value::Object(o) => o,
+            _ => return Err(raise_type_error!("Species constructor did not return an object").into()),
+        };
+        // Step 2: Perform ? ValidateTypedArray(newTypedArray).
+        if slot_get_chained(&new_obj, &InternalSlot::TypedArray).is_none() {
+            return Err(raise_type_error!("TypedArray species constructor did not return a TypedArray").into());
         }
+        // Step 3: If argumentList is a List of a single Number, then
+        //   a. If newTypedArray.[[ArrayLength]] < argumentList[0], throw TypeError.
+        if let Some(ta_cell) = slot_get_chained(&new_obj, &InternalSlot::TypedArray)
+            && let Value::TypedArray(rta) = &*ta_cell.borrow()
+            && rta.length < length
+        {
+            return Err(raise_type_error!("TypedArray species constructor returned a TypedArray that is too small").into());
+        }
+        Ok(new_obj)
     } else {
         create_same_type_typedarray(mc, env, exemplar, length).map_err(|e| e.into())
     }
@@ -4321,7 +4478,13 @@ pub fn handle_typedarray_method<'gc>(
                 "subarray" => {
                     let len = get_len();
                     let begin_rel = relative_index(_args.first(), 0, len)?;
-                    let end_rel = relative_index(_args.get(1), len as i64, len)?;
+                    let end_arg = _args.get(1);
+                    let end_is_undefined = end_arg.is_none() || matches!(end_arg, Some(Value::Undefined));
+                    let end_rel = if end_is_undefined {
+                        len as i64
+                    } else {
+                        relative_index(end_arg, len as i64, len)?
+                    };
                     let begin = resolve_index(begin_rel, len);
                     let end = resolve_index(end_rel, len);
                     let new_len = end.saturating_sub(begin);
@@ -4330,22 +4493,29 @@ pub fn handle_typedarray_method<'gc>(
                     let species = get_species_constructor(mc, _env, obj)?;
 
                     if let Some(ctor) = species {
-                        // Use species constructor with (buffer, byteOffset, newLength)
                         let new_byte_offset = ta.byte_offset + begin * ta.element_size();
                         let buf_val = if let Some(buf_obj_val) = slot_get_chained(obj, &InternalSlot::BufferObject) {
                             buf_obj_val.borrow().clone()
                         } else {
                             Value::ArrayBuffer(ta.buffer)
                         };
-                        let new_val = crate::core::evaluate_call_dispatch(
-                            mc,
-                            _env,
-                            &ctor,
-                            None,
-                            &[buf_val, Value::Number(new_byte_offset as f64), Value::Number(new_len as f64)],
-                        )?;
+                        // Per spec step 15-16: If O.[[ArrayLength]] is auto and end is undefined,
+                        // argumentsList is « buffer, beginByteOffset » (2 args);
+                        // otherwise « buffer, beginByteOffset, newLength » (3 args).
+                        let args: Vec<Value<'gc>> = if ta.length_tracking && end_is_undefined {
+                            vec![buf_val, Value::Number(new_byte_offset as f64)]
+                        } else {
+                            vec![buf_val, Value::Number(new_byte_offset as f64), Value::Number(new_len as f64)]
+                        };
+                        let new_val = crate::js_class::evaluate_new(mc, _env, &ctor, &args, None)?;
                         match new_val {
-                            Value::Object(o) => Ok(Value::Object(o)),
+                            Value::Object(o) => {
+                                // ValidateTypedArray: result must have [[TypedArrayName]]
+                                if slot_get_chained(&o, &InternalSlot::TypedArray).is_none() {
+                                    return Err(raise_type_error!("TypedArray species constructor did not return a TypedArray").into());
+                                }
+                                Ok(Value::Object(o))
+                            }
                             _ => Err(raise_type_error!("Species constructor did not return an object").into()),
                         }
                     } else {

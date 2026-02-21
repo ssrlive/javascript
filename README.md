@@ -70,6 +70,15 @@ Add this to your `Cargo.toml` (latest published version shown here):
 javascript = "0.1.14"
 ```
 
+### Install cli binary
+```bash
+cargo install js --git https://github.com/ssrlive/javascript.git
+```
+or
+```bash
+cargo install js --path /path/to/your/local/javascript/js
+```
+
 ## Usage
 
 ### Basic Evaluation

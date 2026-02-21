@@ -196,8 +196,8 @@ jobs:
               TIMEOUT='200'
               ;;
             31)
-              TITLE='"built-ins/Date"'
-              FOCUS='built-ins/Date'
+              TITLE='"built-ins/Date" - "built-ins/encodeURIComponent"'
+              FOCUS='built-ins/Date,built-ins/decodeURI,built-ins/decodeURIComponent,built-ins/encodeURI,built-ins/encodeURIComponent'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

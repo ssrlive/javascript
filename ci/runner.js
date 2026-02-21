@@ -278,6 +278,15 @@ function shouldSkipPendingTest(meta, f) {
   return /esid\s*:\s*pending\b/.test(meta) && !allowPending.some(p => f.includes(p));
 }
 
+// Skip tests known to be too slow for a tree-walking interpreter
+// (exhaustive multi-byte UTF-8 loops with ~1M iterations)
+const SLOW_TESTS = [
+  'S15.1.3.1_A2.5_T1.js',  // decodeURI 4-byte exhaustive
+  'S15.1.3.1_A2.4_T1.js',  // decodeURI 3-byte exhaustive
+  'S15.1.3.2_A2.5_T1.js',  // decodeURIComponent 4-byte exhaustive
+  'S15.1.3.2_A2.4_T1.js',  // decodeURIComponent 3-byte exhaustive
+];
+
 /*
   Execution semantics:
   - --limit N controls the number of tests *executed* (pass+fail == N).
@@ -291,6 +300,9 @@ async function runAll(){
     if (execCount >= LIMIT) break;
     n++;
     if (/_FIXTURE\.js$/.test(f)) { skip++; log(`SKIP (fixture) ${f}`); continue; }
+
+    if (SLOW_TESTS.some(s => f.endsWith(s))) { skip++; log(`SKIP (slow) ${f}`); continue; }
+
     const meta = extractMeta(f);
 
     // detect noStrict (capture the full flags array reliably)

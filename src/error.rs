@@ -30,6 +30,9 @@ pub enum JSErrorKind {
     #[error("Runtime error: {message}")]
     RuntimeError { message: String },
 
+    #[error("URI error: {message}")]
+    URIError { message: String },
+
     #[error("Thrown value: {0}")]
     Throw(String),
 
@@ -124,6 +127,7 @@ impl JSError {
             JSErrorKind::SyntaxError { message } => format!("SyntaxError: {message}"),
             JSErrorKind::ReferenceError { message } => format!("ReferenceError: {message}"),
             JSErrorKind::RuntimeError { message } => format!("Error: {message}"),
+            JSErrorKind::URIError { message } => format!("URIError: {message}"),
             JSErrorKind::Throw(msg) => msg.clone(),
             JSErrorKind::IoError(e) => format!("IOError: {e}"),
             JSErrorKind::ParseIntError(e) => format!("ParseIntError: {e}"),
@@ -343,6 +347,14 @@ macro_rules! raise_syntax_error {
 macro_rules! raise_reference_error {
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::ReferenceError { message: $msg.to_string() })
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! raise_uri_error {
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::URIError { message: $msg.to_string() })
     };
 }
 

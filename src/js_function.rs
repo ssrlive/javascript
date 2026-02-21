@@ -187,8 +187,8 @@ pub fn handle_global_function<'gc>(
         "parseFloat" => return parse_float_function(args),
         "isNaN" => return is_nan_function(args),
         "isFinite" => return is_finite_function(args),
-        "encodeURIComponent" => return encode_uri_component(args),
-        "decodeURIComponent" => return decode_uri_component(args),
+        "encodeURIComponent" => return encode_uri_component(mc, args, env),
+        "decodeURIComponent" => return decode_uri_component(mc, args, env),
         "Object" => return crate::js_class::handle_object_constructor(mc, args, env),
         "BigInt" => return crate::js_bigint::bigint_constructor(mc, args, env),
         "BigInt.asIntN" | "BigInt.asUintN" => {
@@ -231,8 +231,8 @@ pub fn handle_global_function<'gc>(
         "Symbol" => return symbol_constructor(mc, args),
         "Symbol_valueOf" => return symbol_prototype_value_of(mc, args, env),
         "Symbol_toString" => return symbol_prototype_to_string(mc, args, env),
-        "encodeURI" => return encode_uri(args),
-        "decodeURI" => return decode_uri(args),
+        "encodeURI" => return encode_uri(mc, args, env),
+        "decodeURI" => return decode_uri(mc, args, env),
         "IteratorSelf" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -1407,48 +1407,279 @@ fn async_generator_function_constructor<'gc>(
     Err(raise_type_error!("Failed to parse async generator function body").into())
 }
 
-fn encode_uri_component<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Evaluate all arguments for side effects
+// =========================================================================
+// URI encode / decode  (§19.2.6.2 – §19.2.6.5)
+// =========================================================================
 
-    let arg_val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+/// Characters that are never percent-encoded by encodeURIComponent
+/// uriUnescaped = uriAlpha | DecimalDigit | uriMark
+const URI_UNESCAPED: [u8; 71] = {
+    let mut t = [0u8; 71];
+    let src = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()";
+    let mut i = 0;
+    while i < 71 {
+        t[i] = src[i];
+        i += 1;
+    }
+    t
+};
 
-    let str_val = match arg_val {
-        Value::String(s) => utf16_to_utf8(&s),
-        _ => crate::core::value_to_string(&arg_val),
-    };
+/// Additional reserved + '#' characters preserved by encodeURI
+/// uriReserved = ; / ? : @ & = + $ ,   plus '#'
+const URI_RESERVED: [u8; 11] = *b";/?:@&=+$,#";
 
-    // Simple URI encoding - replace spaces with %20 and some special chars
-    let encoded = str_val
-        .replace("%", "%25")
-        .replace(" ", "%20")
-        .replace("\"", "%22")
-        .replace("'", "%27")
-        .replace("<", "%3C")
-        .replace(">", "%3E")
-        .replace("&", "%26");
-    Ok(Value::String(utf8_to_utf16(&encoded)))
+/// For encodeURI: uriUnescaped ∪ uriReserved ∪ '#'
+const URI_UNESCAPED_WITH_RESERVED: [u8; 82] = {
+    let mut t = [0u8; 82];
+    let mut i = 0;
+    while i < 71 {
+        t[i] = URI_UNESCAPED[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < 11 {
+        t[71 + j] = URI_RESERVED[j];
+        j += 1;
+    }
+    t
+};
+
+/// Reserved characters that decodeURI must NOT decode
+/// (uriReserved + '#')
+const URI_RESERVED_PLUS_HASH: [u8; 11] = *b";/?:@&=+$,#";
+
+fn hex_digit(b: u8) -> u8 {
+    let table = b"0123456789ABCDEF";
+    table[b as usize]
 }
 
-fn decode_uri_component<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Evaluate all arguments for side effects
+fn unhex(ch: u16) -> Option<u8> {
+    match ch {
+        0x30..=0x39 => Some((ch - 0x30) as u8),      // '0'-'9'
+        0x41..=0x46 => Some((ch - 0x41 + 10) as u8), // 'A'-'F'
+        0x61..=0x66 => Some((ch - 0x61 + 10) as u8), // 'a'-'f'
+        _ => None,
+    }
+}
 
-    let arg_val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+/// Spec §19.2.6.4 Encode ( string, unescapedSet )
+fn uri_encode<'gc>(code_units: &[u16], unescaped_set: &[u8]) -> Result<Value<'gc>, EvalError<'gc>> {
+    let len = code_units.len();
+    let mut result: Vec<u16> = Vec::new();
+    let mut k = 0;
+    while k < len {
+        let c = code_units[k];
+        if c <= 0x7F && unescaped_set.contains(&(c as u8)) {
+            // Character is in the unescaped set — pass through
+            result.push(c);
+        } else {
+            // Need to percent-encode
+            let cp: u32;
+            if !(0xD800..=0xDBFF).contains(&c) && !(0xDC00..=0xDFFF).contains(&c) {
+                // BMP, not a surrogate
+                cp = c as u32;
+            } else if (0xDC00..=0xDFFF).contains(&c) {
+                // Lone trailing surrogate
+                return Err(raise_uri_error!("URIError: URI malformed").into());
+            } else {
+                // Leading surrogate
+                k += 1;
+                if k >= len {
+                    return Err(raise_uri_error!("URIError: URI malformed").into());
+                }
+                let c2 = code_units[k];
+                if !(0xDC00..=0xDFFF).contains(&c2) {
+                    return Err(raise_uri_error!("URIError: URI malformed").into());
+                }
+                cp = 0x10000 + ((c as u32 - 0xD800) << 10) + (c2 as u32 - 0xDC00);
+            }
+            // Encode the code point as UTF-8, then percent-encode each byte
+            let mut buf = [0u8; 4];
+            let utf8 = char::from_u32(cp).unwrap().encode_utf8(&mut buf);
+            for &byte in utf8.as_bytes() {
+                result.push(b'%' as u16);
+                result.push(hex_digit(byte >> 4) as u16);
+                result.push(hex_digit(byte & 0xF) as u16);
+            }
+        }
+        k += 1;
+    }
+    Ok(Value::String(result))
+}
 
-    let str_val = match arg_val {
-        Value::String(s) => utf16_to_utf8(&s),
-        _ => crate::core::value_to_string(&arg_val),
-    };
+/// Helper: expected number of continuation bytes from the leading UTF-8 byte
+fn utf8_seq_len(b: u8) -> Option<usize> {
+    if b < 0x80 {
+        Some(1)
+    } else if b < 0xC2 {
+        None
+    }
+    // 80..C1 are invalid leading bytes
+    else if b < 0xE0 {
+        Some(2)
+    } else if b < 0xF0 {
+        Some(3)
+    } else if b < 0xF5 {
+        Some(4)
+    } else {
+        None
+    }
+}
 
-    // Simple URI decoding - replace %20 with spaces and some special chars
-    let decoded = str_val
-        .replace("%20", " ")
-        .replace("%22", "\"")
-        .replace("%27", "'")
-        .replace("%3C", "<")
-        .replace("%3E", ">")
-        .replace("%26", "&")
-        .replace("%25", "%");
-    Ok(Value::String(utf8_to_utf16(&decoded)))
+/// Spec §19.2.6.3 Decode ( string, reservedSet )
+fn uri_decode<'gc>(code_units: &[u16], reserved_set: &[u8]) -> Result<Value<'gc>, EvalError<'gc>> {
+    let len = code_units.len();
+    let mut result: Vec<u16> = Vec::new();
+    let mut k = 0;
+    while k < len {
+        let c = code_units[k];
+        if c == b'%' as u16 {
+            // Read one percent-encoded byte
+            if k + 2 >= len {
+                return Err(raise_uri_error!("URIError: URI malformed").into());
+            }
+            let hi = unhex(code_units[k + 1]);
+            let lo = unhex(code_units[k + 2]);
+            let (hi, lo) = match (hi, lo) {
+                (Some(h), Some(l)) => (h, l),
+                _ => return Err(raise_uri_error!("URIError: URI malformed").into()),
+            };
+            let b0 = (hi << 4) | lo;
+            if b0 < 0x80 {
+                // Single-byte: if it's in reservedSet, keep the percent-encoding
+                if reserved_set.contains(&b0) {
+                    result.push(code_units[k]);
+                    result.push(code_units[k + 1]);
+                    result.push(code_units[k + 2]);
+                } else {
+                    result.push(b0 as u16);
+                }
+                k += 3;
+            } else {
+                // Multi-byte UTF-8 sequence
+                let n = match utf8_seq_len(b0) {
+                    Some(n) => n,
+                    None => return Err(raise_uri_error!("URIError: URI malformed").into()),
+                };
+                // We need n percent-encoded bytes total
+                if k + (3 * n) > len {
+                    return Err(raise_uri_error!("URIError: URI malformed").into());
+                }
+                let mut octets = vec![b0];
+                for j in 1..n {
+                    let base = k + j * 3;
+                    if code_units[base] != b'%' as u16 {
+                        return Err(raise_uri_error!("URIError: URI malformed").into());
+                    }
+                    let h = unhex(code_units[base + 1]);
+                    let l = unhex(code_units[base + 2]);
+                    let (h, l) = match (h, l) {
+                        (Some(h), Some(l)) => (h, l),
+                        _ => return Err(raise_uri_error!("URIError: URI malformed").into()),
+                    };
+                    let bj = (h << 4) | l;
+                    // Must be a continuation byte: 10xxxxxx
+                    if bj & 0xC0 != 0x80 {
+                        return Err(raise_uri_error!("URIError: URI malformed").into());
+                    }
+                    octets.push(bj);
+                }
+                // Decode UTF-8 to code point
+                let cp = match n {
+                    2 => {
+                        let v = ((octets[0] as u32 & 0x1F) << 6) | (octets[1] as u32 & 0x3F);
+                        if v < 0x80 {
+                            return Err(raise_uri_error!("URIError: URI malformed").into());
+                        }
+                        v
+                    }
+                    3 => {
+                        let v = ((octets[0] as u32 & 0x0F) << 12) | ((octets[1] as u32 & 0x3F) << 6) | (octets[2] as u32 & 0x3F);
+                        if v < 0x800 {
+                            return Err(raise_uri_error!("URIError: URI malformed").into());
+                        }
+                        // Surrogates are not valid Unicode scalar values
+                        if (0xD800..=0xDFFF).contains(&v) {
+                            return Err(raise_uri_error!("URIError: URI malformed").into());
+                        }
+                        v
+                    }
+                    4 => {
+                        let v = ((octets[0] as u32 & 0x07) << 18)
+                            | ((octets[1] as u32 & 0x3F) << 12)
+                            | ((octets[2] as u32 & 0x3F) << 6)
+                            | (octets[3] as u32 & 0x3F);
+                        if !(0x10000..=0x10FFFF).contains(&v) {
+                            return Err(raise_uri_error!("URIError: URI malformed").into());
+                        }
+                        v
+                    }
+                    _ => return Err(raise_uri_error!("URIError: URI malformed").into()),
+                };
+                // Check if the decoded character should stay encoded (reservedSet check for BMP)
+                if cp <= 0xFFFF {
+                    let ch = cp as u8; // only meaningful if cp < 128 and in reservedSet
+                    if cp < 0x80 && reserved_set.contains(&ch) {
+                        // Keep the percent-encoded sequence as-is
+                        for j in 0..n {
+                            let base = k + j * 3;
+                            result.push(code_units[base]);
+                            result.push(code_units[base + 1]);
+                            result.push(code_units[base + 2]);
+                        }
+                    } else {
+                        result.push(cp as u16);
+                    }
+                } else {
+                    // Supplementary: encode as surrogate pair
+                    let v = cp - 0x10000;
+                    result.push(((v >> 10) + 0xD800) as u16);
+                    result.push(((v & 0x3FF) + 0xDC00) as u16);
+                }
+                k += n * 3;
+            }
+        } else {
+            result.push(c);
+            k += 1;
+        }
+    }
+    Ok(Value::String(result))
+}
+
+/// Convert the first argument of a URI function to a Vec<u16> (ToString per spec).
+/// Uses ToPrimitive(string) for objects, which calls toString() before valueOf().
+fn uri_to_string<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Vec<u16>, EvalError<'gc>> {
+    let arg_val = if args.is_empty() { &Value::Undefined } else { &args[0] };
+    match arg_val {
+        Value::String(s) => Ok(s.clone()),
+        _ => {
+            // ToPrimitive(value, "string") → then ToString
+            let prim = crate::core::to_primitive(mc, arg_val, "string", env)?;
+            match &prim {
+                Value::String(s) => Ok(s.clone()),
+                _ => Ok(utf8_to_utf16(&crate::core::value_to_string(&prim))),
+            }
+        }
+    }
+}
+
+fn encode_uri_component<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let code_units = uri_to_string(mc, args, env)?;
+    uri_encode(&code_units, &URI_UNESCAPED)
+}
+
+fn decode_uri_component<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let code_units = uri_to_string(mc, args, env)?;
+    // decodeURIComponent: no reserved set — decode everything
+    uri_decode(&code_units, &[])
 }
 
 fn boolean_constructor<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2216,52 +2447,15 @@ fn evalute_eval_function<'gc>(
     }
 }
 
-fn encode_uri<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
-    if !args.is_empty() {
-        let arg_val = args[0].clone();
-        match arg_val {
-            Value::String(s) => {
-                let str_val = utf16_to_utf8(&s);
-                // Simple URI encoding - replace spaces with %20
-                let encoded = str_val.replace(" ", "%20");
-                Ok(Value::String(utf8_to_utf16(&encoded)))
-            }
-            _ => {
-                let str_val = match arg_val {
-                    Value::Number(n) => n.to_string(),
-                    Value::Boolean(b) => b.to_string(),
-                    _ => "[object Object]".to_string(),
-                };
-                Ok(Value::String(utf8_to_utf16(&str_val)))
-            }
-        }
-    } else {
-        Ok(Value::String(Vec::new()))
-    }
+fn encode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let code_units = uri_to_string(mc, args, env)?;
+    uri_encode(&code_units, &URI_UNESCAPED_WITH_RESERVED)
 }
 
-fn decode_uri<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
-    if !args.is_empty() {
-        let arg_val = args[0].clone();
-        match arg_val {
-            Value::String(s) => {
-                let str_val = utf16_to_utf8(&s);
-                // Simple URI decoding - replace %20 with spaces
-                let decoded = str_val.replace("%20", " ");
-                Ok(Value::String(utf8_to_utf16(&decoded)))
-            }
-            _ => {
-                let str_val = match arg_val {
-                    Value::Number(n) => n.to_string(),
-                    Value::Boolean(b) => b.to_string(),
-                    _ => "[object Object]".to_string(),
-                };
-                Ok(Value::String(utf8_to_utf16(&str_val)))
-            }
-        }
-    } else {
-        Ok(Value::String(Vec::new()))
-    }
+fn decode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let code_units = uri_to_string(mc, args, env)?;
+    // decodeURI: reserved chars + '#' are NOT decoded
+    uri_decode(&code_units, &URI_RESERVED_PLUS_HASH)
 }
 
 #[allow(dead_code)]

@@ -15922,7 +15922,8 @@ fn evaluate_expr_property<'gc>(
         && key == "length"
     {
         if is_builtin_function_virtual_prop_deleted(env, func_name, "length") {
-            return Ok(Value::Undefined);
+            // Own length was deleted; fall through to Function.prototype.length
+            return get_primitive_prototype_property(mc, env, &obj_val, "length");
         }
         let len = match func_name.as_str() {
             "Array.prototype.push"
@@ -15963,7 +15964,15 @@ fn evaluate_expr_property<'gc>(
             | "Object.prototype.propertyIsEnumerable"
             | "Object.prototype.__lookupGetter__"
             | "Object.prototype.__lookupSetter__"
-            | "Array.prototype.sort" => 1.0,
+            | "Array.prototype.sort"
+            | "encodeURI"
+            | "encodeURIComponent"
+            | "decodeURI"
+            | "decodeURIComponent"
+            | "isNaN"
+            | "isFinite"
+            | "parseInt"
+            | "parseFloat" => 1.0,
             "Array.prototype.slice"
             | "Array.prototype.splice"
             | "Array.prototype.copyWithin"
@@ -17232,7 +17241,8 @@ fn evaluate_expr_index<'gc>(
         if let PropertyKey::String(k_str) = &key {
             if k_str == "length" {
                 if is_builtin_function_virtual_prop_deleted(env, func_name, "length") {
-                    return Ok(Value::Undefined);
+                    // Own length was deleted; fall through to Function.prototype.length
+                    return get_primitive_prototype_property(mc, env, &obj_val, &key);
                 }
                 let len = match func_name.as_str() {
                     "Array.prototype.push"
@@ -17275,7 +17285,15 @@ fn evaluate_expr_index<'gc>(
                     | "Object.prototype.__lookupSetter__"
                     | "ArrayBuffer.isView"
                     | "ArrayBuffer.prototype.resize"
-                    | "Array.prototype.sort" => 1.0,
+                    | "Array.prototype.sort"
+                    | "encodeURI"
+                    | "encodeURIComponent"
+                    | "decodeURI"
+                    | "decodeURIComponent"
+                    | "isNaN"
+                    | "isFinite"
+                    | "parseInt"
+                    | "parseFloat" => 1.0,
                     "Array.prototype.slice"
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
@@ -19169,6 +19187,7 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
         JSErrorKind::VariableNotFound { name } => ("ReferenceError", format!("{} is not defined", name)),
         JSErrorKind::TokenizationError { message } => ("SyntaxError", message.clone()),
         JSErrorKind::ParseError { message } => ("SyntaxError", message.clone()),
+        JSErrorKind::URIError { message } => ("URIError", message.clone()),
         JSErrorKind::EvaluationError { message } => ("Error", message.clone()),
         JSErrorKind::RuntimeError { message } => ("Error", message.clone()),
         JSErrorKind::Throw(_) => ("Error", full_msg.clone()),

@@ -12028,14 +12028,13 @@ pub fn evaluate_call_dispatch<'gc>(
                     let b = this_obj.borrow();
                     b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
                 };
-                if is_module_namespace {
-                    if let PropertyKey::String(ref key_str) = key {
-                        if get_own_property(&this_obj, &key).is_some() {
-                            let val = get_property_with_accessors(mc, env, &this_obj, key_str)?;
-                            if matches!(val, Value::Uninitialized) {
-                                return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", key_str)).into());
-                            }
-                        }
+                if is_module_namespace
+                    && let PropertyKey::String(ref key_str) = key
+                    && get_own_property(&this_obj, &key).is_some()
+                {
+                    let val = get_property_with_accessors(mc, env, &this_obj, key_str)?;
+                    if matches!(val, Value::Uninitialized) {
+                        return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", key_str)).into());
                     }
                 }
                 Ok(Value::Boolean(get_own_property(&this_obj, &key).is_some()))
@@ -12066,14 +12065,13 @@ pub fn evaluate_call_dispatch<'gc>(
                     let b = this_obj.borrow();
                     b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
                 };
-                if is_module_namespace {
-                    if let PropertyKey::String(ref key_str) = key {
-                        if get_own_property(&this_obj, &key).is_some() {
-                            let val = get_property_with_accessors(mc, env, &this_obj, key_str)?;
-                            if matches!(val, Value::Uninitialized) {
-                                return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", key_str)).into());
-                            }
-                        }
+                if is_module_namespace
+                    && let PropertyKey::String(ref key_str) = key
+                    && get_own_property(&this_obj, &key).is_some()
+                {
+                    let val = get_property_with_accessors(mc, env, &this_obj, key_str)?;
+                    if matches!(val, Value::Uninitialized) {
+                        return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", key_str)).into());
                     }
                 }
                 Ok(Value::Boolean(
@@ -12227,6 +12225,10 @@ pub fn evaluate_call_dispatch<'gc>(
                                 let call_env = prepare_call_env_with_this(mc, Some(env), Some(this_v), None, &[], None, Some(env), None)?;
                                 Ok(crate::js_function::handle_global_function(mc, name, eval_args, &call_env)?)
                             }
+                        }
+                        "get __proto__" | "set __proto__" => {
+                            let call_env = prepare_call_env_with_this(mc, Some(env), Some(this_v), None, eval_args, None, Some(env), None)?;
+                            Ok(crate::js_function::handle_global_function(mc, name, eval_args, &call_env)?)
                         }
                         _ => Err(raise_eval_error!(format!("Unknown Object function: {}", name)).into()),
                     }
@@ -13133,7 +13135,9 @@ fn evaluate_expr_call<'gc>(
                                         Value::Object(o) => {
                                             if let Some(cl_ptr) = o.borrow().get_closure() {
                                                 match &*cl_ptr.borrow() {
-                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?,
+                                                    Value::Closure(cl) => {
+                                                        call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?
+                                                    }
                                                     Value::Function(name) => {
                                                         let call_env = crate::js_class::prepare_call_env_with_this(
                                                             mc,
@@ -13649,7 +13653,9 @@ fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                         Value::Object(o) => {
                                             if let Some(cl_ptr) = o.borrow().get_closure() {
                                                 match &*cl_ptr.borrow() {
-                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?,
+                                                    Value::Closure(cl) => {
+                                                        call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?
+                                                    }
                                                     Value::Function(name) => {
                                                         let call_env = crate::js_class::prepare_call_env_with_this(
                                                             mc,
@@ -20654,7 +20660,9 @@ fn evaluate_expr_new<'gc>(
                                         Value::Object(o) => {
                                             if let Some(cl_ptr) = o.borrow().get_closure() {
                                                 match &*cl_ptr.borrow() {
-                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?,
+                                                    Value::Closure(cl) => {
+                                                        call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?
+                                                    }
                                                     Value::Function(name) => {
                                                         let call_env = prepare_call_env_with_this(
                                                             mc,

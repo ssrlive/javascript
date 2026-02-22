@@ -2332,6 +2332,15 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
                     key
                 )));
             }
+            // Check non-writable bindings (e.g. global NaN, undefined, Infinity).
+            // In strict mode this is a TypeError; in sloppy mode the assignment
+            // is silently ignored per ECMAScript SetMutableBinding semantics.
+            if !current.borrow().is_writable(&pk) {
+                if env_get_strictness(env) {
+                    return Err(raise_type_error!(format!("Cannot assign to read only property '{key}'")));
+                }
+                return Ok(());
+            }
             return env_set(mc, &current, key, val);
         }
         let parent_opt = current.borrow().prototype;

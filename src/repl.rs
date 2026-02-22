@@ -41,6 +41,7 @@ impl Repl {
         arena.mutate(|mc, root| {
             initialize_global_constructors(mc, &root.global_env).unwrap();
             env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env)).unwrap();
+            root.global_env.borrow_mut(mc).set_non_enumerable("globalThis");
         });
 
         Repl { arena }

@@ -322,6 +322,7 @@ pub fn create_new_realm<'gc>(mc: &MutationContext<'gc>, _parent_env: &JSObjectDa
     initialize_global_constructors(mc, &new_env)?;
 
     env_set(mc, &new_env, "globalThis", &Value::Object(new_env))?;
+    new_env.borrow_mut(mc).set_non_enumerable("globalThis");
     object_set_key_value(mc, &new_env, "this", &Value::Object(new_env))?;
 
     // Copy `print` from the parent realm so test harnesses have access.
@@ -426,6 +427,7 @@ where
         initialize_global_constructors(mc, &root.global_env)?;
 
         env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
+        root.global_env.borrow_mut(mc).set_non_enumerable("globalThis");
         object_set_key_value(mc, &root.global_env, "this", &Value::Object(root.global_env))?;
 
         let mut entry_module_exports: Option<JSObjectDataPtr<'_>> = None;

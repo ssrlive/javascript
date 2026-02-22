@@ -1498,6 +1498,17 @@ fn generator_function_constructor<'gc>(
         }
     }
 
+    // Spec: If kind is "generator" and parameters Contains YieldExpression,
+    // throw a SyntaxError.
+    if args.len() > 1 && !params_str.is_empty() {
+        let param_tokens = crate::core::tokenize(&params_str)?;
+        for t in &param_tokens {
+            if matches!(t.token, Token::Yield | Token::YieldStar) {
+                return Err(raise_syntax_error!("YieldExpression not allowed in generator function parameters").into());
+            }
+        }
+    }
+
     let allow_comment_fallback =
         params_str.contains("/*") || params_str.contains("//") || body_str.contains("/*") || body_str.contains("//");
     let mut index = 0;

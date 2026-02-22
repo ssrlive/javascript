@@ -3954,14 +3954,29 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
         InternalSlot::NativeCtor,
         &Value::String(crate::unicode::utf8_to_utf16("GeneratorFunction")),
     );
-    // Set internal prototype of constructor to Function.prototype when available
+    // Set internal prototype of constructor to Function when available
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
-        && let Value::Object(func_proto) = &*proto_val.borrow()
     {
-        gen_func_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        gen_func_ctor.borrow_mut(mc).prototype = Some(*func_ctor);
     }
+
+    // Mark constructor as constructable
+    slot_set(mc, &gen_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+
+    // GeneratorFunction.length = 1 (non-writable, non-enumerable, configurable)
+    let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_func_ctor, "length", &desc_len)?;
+
+    // GeneratorFunction.name = "GeneratorFunction" (non-writable, non-enumerable, configurable)
+    let desc_name = crate::core::create_descriptor_object(
+        mc,
+        &Value::String(crate::unicode::utf8_to_utf16("GeneratorFunction")),
+        false,
+        false,
+        true,
+    )?;
+    crate::js_object::define_property_internal(mc, &gen_func_ctor, "name", &desc_name)?;
 
     let gen_func_proto = crate::core::new_js_object_data(mc);
     // GeneratorFunction.prototype should inherit from Function.prototype
@@ -3973,10 +3988,14 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
         gen_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
     }
 
-    // Link gen_func_proto.prototype -> gen_proto (Generator.prototype)
-    let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(gen_proto), true, false, false)?;
+    // GeneratorFunction.prototype.prototype -> %Generator.prototype%
+    // writable=false, enumerable=false, configurable=true
+    let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(gen_proto), false, false, true)?;
     crate::js_object::define_property_internal(mc, &gen_func_proto, "prototype", &desc_proto)?;
-    let desc_proto_ctor = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_ctor), true, false, true)?;
+
+    // GeneratorFunction.prototype.constructor -> GeneratorFunction
+    // writable=false, enumerable=false, configurable=true
+    let desc_proto_ctor = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_ctor), false, false, true)?;
     crate::js_object::define_property_internal(mc, &gen_func_proto, "constructor", &desc_proto_ctor)?;
     // DEBUG: report whether `gen_func_proto` now has a 'prototype' property and where it points
     if let Some(proto_rc) = crate::core::object_get_key_value(&gen_func_proto, "prototype") {
@@ -4033,8 +4052,9 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
         crate::js_object::define_property_internal(mc, &gen_func_proto, *tag_sym, &desc_tag)?;
     }
 
-    // Link constructor on the constructor object (non-enumerable prototype property)
-    let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_proto), true, false, false)?;
+    // GeneratorFunction.prototype property descriptor:
+    // writable=false, enumerable=false, configurable=false
+    let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_proto), false, false, false)?;
     crate::js_object::define_property_internal(mc, &gen_func_ctor, "prototype", &desc_ctor_proto)?;
     // Expose GeneratorFunction in the global environment
     crate::core::env_set(mc, env, "GeneratorFunction", &Value::Object(gen_func_ctor))?;

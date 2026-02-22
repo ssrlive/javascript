@@ -1496,7 +1496,15 @@ pub(crate) fn evaluate_new<'gc>(
                         return Ok(fn_val);
                     }
                     "GeneratorFunction" => {
-                        return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, &ctor_realm_env);
+                        let fn_val = crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, &ctor_realm_env)?;
+                        // GetPrototypeFromConstructor(newTarget, "%GeneratorFunction.prototype%")
+                        if let Some(Value::Object(nt_obj)) = new_target
+                            && let Value::Object(fn_obj) = &fn_val
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "GeneratorFunction")?
+                        {
+                            fn_obj.borrow_mut(mc).prototype = Some(proto);
+                        }
+                        return Ok(fn_val);
                     }
                     "AsyncFunction" => {
                         let fn_val = crate::js_function::handle_global_function(mc, "AsyncFunction", evaluated_args, &ctor_realm_env)?;

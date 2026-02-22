@@ -259,7 +259,7 @@ pub fn handle_global_function<'gc>(
         }
         "parseInt" => return parse_int_function(args),
         "parseFloat" => return parse_float_function(args),
-        "isNaN" => return is_nan_function(args),
+        "isNaN" => return is_nan_function(mc, args, env),
         "isFinite" => return is_finite_function(mc, args, env),
         "encodeURIComponent" => return encode_uri_component(mc, args, env),
         "decodeURIComponent" => return decode_uri_component(mc, args, env),
@@ -1155,24 +1155,10 @@ fn parse_float_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalErro
     Ok(Value::Number(f64::NAN))
 }
 
-fn is_nan_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Evaluate all arguments for side effects
-
+fn is_nan_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let arg_val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
-
-    match arg_val {
-        Value::Number(n) => Ok(Value::Boolean(n.is_nan())),
-        Value::String(s) => {
-            let str_val = utf16_to_utf8(&s);
-            match str_val.trim().parse::<f64>() {
-                Ok(n) => Ok(Value::Boolean(n.is_nan())),
-                Err(_) => Ok(Value::Boolean(true)), // Non-numeric strings are NaN when parsed
-            }
-        }
-        Value::Boolean(_) => Ok(Value::Boolean(false)), // Booleans are never NaN
-        Value::Undefined => Ok(Value::Boolean(true)),   // undefined is NaN
-        _ => Ok(Value::Boolean(true)),                  // Objects are usually NaN (simplified)
-    }
+    let num = crate::core::to_number_with_env(mc, env, &arg_val)?;
+    Ok(Value::Boolean(num.is_nan()))
 }
 
 fn is_finite_function<'gc>(

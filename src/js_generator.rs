@@ -3899,18 +3899,40 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     // DEBUG: report gen_proto and later when GeneratorFunction.prototype is linked
     log::debug!("init_generator: gen_proto created at {:p}", Gc::as_ptr(gen_proto));
 
-    // Attach prototype methods as named functions that dispatch to the generator handler
-    let val = Value::Function("Generator.prototype.next".to_string());
-    object_set_key_value(mc, &gen_proto, "next", &val)?;
-    gen_proto.borrow_mut(mc).set_non_enumerable("next");
+    // Attach prototype methods as built-in function objects with proper name/length.
+    let create_builtin_method_obj = |native_name: &str, display_name: &str, length: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
+        let method_obj = crate::core::new_js_object_data(mc);
+        if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            method_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        method_obj
+            .borrow_mut(mc)
+            .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function(native_name.to_string()))));
 
-    let val = Value::Function("Generator.prototype.return".to_string());
-    object_set_key_value(mc, &gen_proto, "return", &val)?;
-    gen_proto.borrow_mut(mc).set_non_enumerable("return");
+        let name_desc =
+            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(display_name)), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &method_obj, "name", &name_desc)?;
 
-    let val = Value::Function("Generator.prototype.throw".to_string());
-    object_set_key_value(mc, &gen_proto, "throw", &val)?;
-    gen_proto.borrow_mut(mc).set_non_enumerable("throw");
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(length), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &method_obj, "length", &len_desc)?;
+        Ok(method_obj)
+    };
+
+    let next_obj = create_builtin_method_obj("Generator.prototype.next", "next", 1.0)?;
+    let next_desc = crate::core::create_descriptor_object(mc, &Value::Object(next_obj), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_proto, "next", &next_desc)?;
+
+    let return_obj = create_builtin_method_obj("Generator.prototype.return", "return", 1.0)?;
+    let return_desc = crate::core::create_descriptor_object(mc, &Value::Object(return_obj), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_proto, "return", &return_desc)?;
+
+    let throw_obj = create_builtin_method_obj("Generator.prototype.throw", "throw", 1.0)?;
+    let throw_desc = crate::core::create_descriptor_object(mc, &Value::Object(throw_obj), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_proto, "throw", &throw_desc)?;
 
     // Register Symbol.iterator on Generator.prototype -> returns the generator object itself
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -3919,9 +3941,10 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
     {
         // Create a function name recognized by the call dispatcher
-        let val = Value::Function("Generator.prototype.iterator".to_string());
+        let iter_obj = create_builtin_method_obj("Generator.prototype.iterator", "[Symbol.iterator]", 0.0)?;
         log::debug!("js_generator::init: registering Symbol.iterator ptr = {:p}", Gc::as_ptr(*iter_sym));
-        object_set_key_value(mc, &gen_proto, iter_sym, &val)?;
+        let iter_desc = crate::core::create_descriptor_object(mc, &Value::Object(iter_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &gen_proto, *iter_sym, &iter_desc)?;
         gen_proto
             .borrow_mut(mc)
             .set_non_enumerable(crate::core::PropertyKey::Symbol(*iter_sym));
@@ -3997,6 +4020,11 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     // writable=false, enumerable=false, configurable=true
     let desc_proto_ctor = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_ctor), false, false, true)?;
     crate::js_object::define_property_internal(mc, &gen_func_proto, "constructor", &desc_proto_ctor)?;
+
+    // %GeneratorPrototype%.constructor -> %GeneratorFunction.prototype%
+    // writable=false, enumerable=false, configurable=true
+    let gen_proto_ctor_desc = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_proto), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_proto, "constructor", &gen_proto_ctor_desc)?;
     // DEBUG: report whether `gen_func_proto` now has a 'prototype' property and where it points
     if let Some(proto_rc) = crate::core::object_get_key_value(&gen_func_proto, "prototype") {
         let proto_val = proto_rc.borrow().clone();

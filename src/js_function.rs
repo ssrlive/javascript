@@ -445,7 +445,13 @@ pub fn handle_global_function<'gc>(
                     }
 
                     let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
-                    return handle_global_function(mc, func_name, &evaluated_args, &call_env);
+                    return crate::core::evaluate_call_dispatch(
+                        mc,
+                        &call_env,
+                        &Value::Function(func_name.clone()),
+                        Some(&receiver_val),
+                        &evaluated_args,
+                    );
                 }
                 if let Value::Object(obj) = &this_val
                     && let Some(cl_prop) = obj.borrow().get_closure()
@@ -453,6 +459,16 @@ pub fn handle_global_function<'gc>(
                     let cl_val = cl_prop.borrow().clone();
                     if let Value::Closure(cl) = cl_val {
                         return crate::core::call_closure(mc, &cl, Some(&receiver_val), &evaluated_args, env, Some(*obj));
+                    }
+                    if let Value::Function(name) = cl_val {
+                        let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
+                        return crate::core::evaluate_call_dispatch(
+                            mc,
+                            &call_env,
+                            &Value::Function(name),
+                            Some(&receiver_val),
+                            &evaluated_args,
+                        );
                     }
                 }
                 if let Value::Object(obj) = &this_val
@@ -465,7 +481,13 @@ pub fn handle_global_function<'gc>(
                     if let Value::String(name) = native_ctor_val {
                         let ctor_name = crate::unicode::utf16_to_utf8(&name);
                         let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
-                        return handle_global_function(mc, &ctor_name, &evaluated_args, &call_env);
+                        return crate::core::evaluate_call_dispatch(
+                            mc,
+                            &call_env,
+                            &Value::Function(ctor_name),
+                            Some(&receiver_val),
+                            &evaluated_args,
+                        );
                     }
                 }
                 return crate::core::evaluate_call_dispatch(mc, env, &this_val, Some(&receiver_val), &evaluated_args);

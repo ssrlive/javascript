@@ -4964,16 +4964,22 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     };
 
     let next_obj = create_builtin_method_obj("Generator.prototype.next", "next", 1.0)?;
-    let next_desc = crate::core::create_descriptor_object(mc, &Value::Object(next_obj), true, false, true)?;
-    crate::js_object::define_property_internal(mc, &gen_proto, "next", &next_desc)?;
+    crate::core::object_set_key_value(mc, &gen_proto, "next", &Value::Object(next_obj))?;
+    gen_proto
+        .borrow_mut(mc)
+        .set_non_enumerable(crate::core::PropertyKey::String("next".to_string()));
 
     let return_obj = create_builtin_method_obj("Generator.prototype.return", "return", 1.0)?;
-    let return_desc = crate::core::create_descriptor_object(mc, &Value::Object(return_obj), true, false, true)?;
-    crate::js_object::define_property_internal(mc, &gen_proto, "return", &return_desc)?;
+    crate::core::object_set_key_value(mc, &gen_proto, "return", &Value::Object(return_obj))?;
+    gen_proto
+        .borrow_mut(mc)
+        .set_non_enumerable(crate::core::PropertyKey::String("return".to_string()));
 
     let throw_obj = create_builtin_method_obj("Generator.prototype.throw", "throw", 1.0)?;
-    let throw_desc = crate::core::create_descriptor_object(mc, &Value::Object(throw_obj), true, false, true)?;
-    crate::js_object::define_property_internal(mc, &gen_proto, "throw", &throw_desc)?;
+    crate::core::object_set_key_value(mc, &gen_proto, "throw", &Value::Object(throw_obj))?;
+    gen_proto
+        .borrow_mut(mc)
+        .set_non_enumerable(crate::core::PropertyKey::String("throw".to_string()));
 
     // Register Symbol.iterator on Generator.prototype -> returns the generator object itself
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -4984,8 +4990,7 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
         // Create a function name recognized by the call dispatcher
         let iter_obj = create_builtin_method_obj("Generator.prototype.iterator", "[Symbol.iterator]", 0.0)?;
         log::debug!("js_generator::init: registering Symbol.iterator ptr = {:p}", Gc::as_ptr(*iter_sym));
-        let iter_desc = crate::core::create_descriptor_object(mc, &Value::Object(iter_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &gen_proto, *iter_sym, &iter_desc)?;
+        crate::core::object_set_key_value(mc, &gen_proto, *iter_sym, &Value::Object(iter_obj))?;
         gen_proto
             .borrow_mut(mc)
             .set_non_enumerable(crate::core::PropertyKey::Symbol(*iter_sym));

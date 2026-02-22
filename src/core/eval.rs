@@ -13070,12 +13070,12 @@ fn evaluate_expr_call<'gc>(
                                 // Support function objects that wrap a closure (get_closure)
                                 if let Some(cl_ptr) = o.borrow().get_closure() {
                                     match &*cl_ptr.borrow() {
-                                        Value::Closure(cl) => crate::core::call_closure(mc, cl, Some(&Value::Object(*o)), &[], env, None)?,
+                                        Value::Closure(cl) => crate::core::call_closure(mc, cl, Some(&Value::Object(obj)), &[], env, None)?,
                                         Value::Function(name) => {
                                             let call_env = crate::js_class::prepare_call_env_with_this(
                                                 mc,
                                                 Some(env),
-                                                Some(&Value::Object(*o)),
+                                                Some(&Value::Object(obj)),
                                                 None,
                                                 &[],
                                                 None,
@@ -13086,7 +13086,7 @@ fn evaluate_expr_call<'gc>(
                                                 mc,
                                                 &call_env,
                                                 &Value::Function(name.clone()),
-                                                Some(&Value::Object(*o)),
+                                                Some(&Value::Object(obj)),
                                                 &[],
                                             )?
                                         }
@@ -13133,12 +13133,12 @@ fn evaluate_expr_call<'gc>(
                                         Value::Object(o) => {
                                             if let Some(cl_ptr) = o.borrow().get_closure() {
                                                 match &*cl_ptr.borrow() {
-                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(*o)), &[], env, None)?,
+                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?,
                                                     Value::Function(name) => {
                                                         let call_env = crate::js_class::prepare_call_env_with_this(
                                                             mc,
                                                             Some(env),
-                                                            Some(&Value::Object(*o)),
+                                                            Some(&Value::Object(iter_obj)),
                                                             None,
                                                             &[],
                                                             None,
@@ -13149,7 +13149,7 @@ fn evaluate_expr_call<'gc>(
                                                             mc,
                                                             &call_env,
                                                             &Value::Function(name.clone()),
-                                                            Some(&Value::Object(*o)),
+                                                            Some(&Value::Object(iter_obj)),
                                                             &[],
                                                         )?
                                                     }
@@ -13586,12 +13586,12 @@ fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 // Support function objects that wrap a closure (get_closure)
                                 if let Some(cl_ptr) = o.borrow().get_closure() {
                                     match &*cl_ptr.borrow() {
-                                        Value::Closure(cl) => crate::core::call_closure(mc, cl, Some(&Value::Object(*o)), &[], env, None)?,
+                                        Value::Closure(cl) => crate::core::call_closure(mc, cl, Some(&Value::Object(obj)), &[], env, None)?,
                                         Value::Function(name) => {
                                             let call_env = crate::js_class::prepare_call_env_with_this(
                                                 mc,
                                                 Some(env),
-                                                Some(&Value::Object(*o)),
+                                                Some(&Value::Object(obj)),
                                                 None,
                                                 &[],
                                                 None,
@@ -13602,7 +13602,7 @@ fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                                 mc,
                                                 &call_env,
                                                 &Value::Function(name.clone()),
-                                                Some(&Value::Object(*o)),
+                                                Some(&Value::Object(obj)),
                                                 &[],
                                             )?
                                         }
@@ -13649,12 +13649,12 @@ fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                         Value::Object(o) => {
                                             if let Some(cl_ptr) = o.borrow().get_closure() {
                                                 match &*cl_ptr.borrow() {
-                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(*o)), &[], env, None)?,
+                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?,
                                                     Value::Function(name) => {
                                                         let call_env = crate::js_class::prepare_call_env_with_this(
                                                             mc,
                                                             Some(env),
-                                                            Some(&Value::Object(*o)),
+                                                            Some(&Value::Object(iter_obj)),
                                                             None,
                                                             &[],
                                                             None,
@@ -13665,7 +13665,7 @@ fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                                             mc,
                                                             &call_env,
                                                             &Value::Function(name.clone()),
-                                                            Some(&Value::Object(*o)),
+                                                            Some(&Value::Object(iter_obj)),
                                                             &[],
                                                         )?
                                                     }
@@ -20596,12 +20596,12 @@ fn evaluate_expr_new<'gc>(
                                 // Function objects are represented as objects with an internal closure; unwrap and call if possible
                                 if let Some(cl_ptr) = o.borrow().get_closure() {
                                     match &*cl_ptr.borrow() {
-                                        Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(*o)), &[], env, None)?,
+                                        Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(obj)), &[], env, None)?,
                                         Value::Function(name) => {
                                             let call_env = prepare_call_env_with_this(
                                                 mc,
                                                 Some(env),
-                                                Some(&Value::Object(*o)),
+                                                Some(&Value::Object(obj)),
                                                 None,
                                                 &[],
                                                 None,
@@ -20612,7 +20612,7 @@ fn evaluate_expr_new<'gc>(
                                                 mc,
                                                 &call_env,
                                                 &Value::Function(name.clone()),
-                                                Some(&Value::Object(*o)),
+                                                Some(&Value::Object(obj)),
                                                 &[],
                                             )?
                                         }
@@ -20654,12 +20654,12 @@ fn evaluate_expr_new<'gc>(
                                         Value::Object(o) => {
                                             if let Some(cl_ptr) = o.borrow().get_closure() {
                                                 match &*cl_ptr.borrow() {
-                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(*o)), &[], env, None)?,
+                                                    Value::Closure(cl) => call_closure(mc, cl, Some(&Value::Object(iter_obj)), &[], env, None)?,
                                                     Value::Function(name) => {
                                                         let call_env = prepare_call_env_with_this(
                                                             mc,
                                                             Some(env),
-                                                            Some(&Value::Object(*o)),
+                                                            Some(&Value::Object(iter_obj)),
                                                             None,
                                                             &[],
                                                             None,
@@ -20670,7 +20670,7 @@ fn evaluate_expr_new<'gc>(
                                                             mc,
                                                             &call_env,
                                                             &Value::Function(name.clone()),
-                                                            Some(&Value::Object(*o)),
+                                                            Some(&Value::Object(iter_obj)),
                                                             &[],
                                                         )?
                                                     }

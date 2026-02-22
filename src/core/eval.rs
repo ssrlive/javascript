@@ -12021,6 +12021,23 @@ pub fn evaluate_call_dispatch<'gc>(
                         _ => return Err(raise_type_error!("Cannot convert value to object").into()),
                     },
                 };
+                // Module namespace exotic [[GetOwnProperty]]: if the binding exists but is
+                // uninitialized (TDZ), the spec requires throwing a ReferenceError (step 4:
+                // "Let value be ? O.[[Get]](P, O)").
+                let is_module_namespace = {
+                    let b = this_obj.borrow();
+                    b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                };
+                if is_module_namespace {
+                    if let PropertyKey::String(ref key_str) = key {
+                        if get_own_property(&this_obj, &key).is_some() {
+                            let val = get_property_with_accessors(mc, env, &this_obj, key_str)?;
+                            if matches!(val, Value::Uninitialized) {
+                                return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", key_str)).into());
+                            }
+                        }
+                    }
+                }
                 Ok(Value::Boolean(get_own_property(&this_obj, &key).is_some()))
             } else if name == "Object.prototype.propertyIsEnumerable" {
                 if eval_args.len() != 1 {
@@ -12044,6 +12061,21 @@ pub fn evaluate_call_dispatch<'gc>(
                         _ => return Err(raise_type_error!("Cannot convert value to object").into()),
                     },
                 };
+                // Module namespace exotic [[GetOwnProperty]]: TDZ check (same as hasOwnProperty above)
+                let is_module_namespace = {
+                    let b = this_obj.borrow();
+                    b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible())
+                };
+                if is_module_namespace {
+                    if let PropertyKey::String(ref key_str) = key {
+                        if get_own_property(&this_obj, &key).is_some() {
+                            let val = get_property_with_accessors(mc, env, &this_obj, key_str)?;
+                            if matches!(val, Value::Uninitialized) {
+                                return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", key_str)).into());
+                            }
+                        }
+                    }
+                }
                 Ok(Value::Boolean(
                     get_own_property(&this_obj, &key).is_some() && this_obj.borrow().is_enumerable(&key),
                 ))

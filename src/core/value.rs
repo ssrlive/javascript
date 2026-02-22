@@ -55,6 +55,19 @@ pub struct JSGenerator<'gc> {
     pub yield_star_iterator: Option<JSObjectDataPtr<'gc>>,
     pub pending_for_await: Option<GeneratorForAwaitState<'gc>>,
     pub pending_for_of: Option<GeneratorForOfState<'gc>>,
+    /// When a generator is suspended inside a `finally` block that was entered
+    /// due to a throw or return, this holds the pending completion that should
+    /// be executed after the finally block finishes.
+    pub pending_completion: Option<GeneratorPendingCompletion<'gc>>,
+}
+
+/// Represents a deferred completion (throw or return) that is waiting for a
+/// `finally` block to finish before being applied.
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub enum GeneratorPendingCompletion<'gc> {
+    Throw(Value<'gc>),
+    Return(Value<'gc>),
 }
 
 #[derive(Clone, Collect)]

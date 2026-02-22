@@ -12324,9 +12324,17 @@ pub fn evaluate_call_dispatch<'gc>(
                                 return crate::js_generator::handle_generator_instance_method(mc, &gen_ptr, method, eval_args, env);
                             }
                         }
-                        Err(raise_eval_error!("TypeError: Generator.prototype method called on incompatible receiver").into())
+                        Err(throw_realm_type_error(
+                            mc,
+                            env,
+                            "Generator.prototype method called on incompatible receiver",
+                        ))
                     } else {
-                        Err(raise_eval_error!("TypeError: Generator.prototype method called on incompatible receiver").into())
+                        Err(throw_realm_type_error(
+                            mc,
+                            env,
+                            "Generator.prototype method called on incompatible receiver",
+                        ))
                     }
                 } else {
                     Err(raise_eval_error!(format!("Unknown Generator function: {}", name)).into())
@@ -18499,7 +18507,13 @@ pub fn call_native_function<'gc>(
                     } else {
                         call_env
                     };
-                    let result = handle_global_function(mc, func_name, rest_args, &target_env_for_call)?;
+                    let result = evaluate_call_dispatch(
+                        mc,
+                        &target_env_for_call,
+                        &Value::Function(func_name.clone()),
+                        Some(new_this),
+                        rest_args,
+                    )?;
                     if func_name == "eval" {
                         let _ = slot_remove(mc, &target_env_for_call, &InternalSlot::IsIndirectEval);
                     }
@@ -18518,7 +18532,7 @@ pub fn call_native_function<'gc>(
                         call_env.borrow_mut(mc).prototype = Some(*env);
                         call_env.borrow_mut(mc).is_function_scope = true;
                         object_set_key_value(mc, &call_env, "this", new_this)?;
-                        let result = handle_global_function(mc, &ctor_name, rest_args, &call_env)?;
+                        let result = evaluate_call_dispatch(mc, &call_env, &Value::Function(ctor_name), Some(new_this), rest_args)?;
                         return Ok(Some(result));
                     }
                 }
@@ -18560,7 +18574,8 @@ pub fn call_native_function<'gc>(
                             if func_name == "eval" {
                                 slot_set(mc, &target_env, InternalSlot::IsIndirectEval, &Value::Boolean(true));
                             }
-                            let result = handle_global_function(mc, func_name, rest_args, &call_env)?;
+                            let result =
+                                evaluate_call_dispatch(mc, &call_env, &Value::Function(func_name.clone()), Some(new_this), rest_args)?;
                             if func_name == "eval" {
                                 let _ = slot_remove(mc, &target_env, &InternalSlot::IsIndirectEval);
                             }
@@ -18647,7 +18662,13 @@ pub fn call_native_function<'gc>(
                     } else {
                         call_env
                     };
-                    let result = crate::js_function::handle_global_function(mc, func_name, &rest_args, &target_env_for_call)?;
+                    let result = evaluate_call_dispatch(
+                        mc,
+                        &target_env_for_call,
+                        &Value::Function(func_name.clone()),
+                        Some(&new_this),
+                        &rest_args,
+                    )?;
                     if func_name == "eval" {
                         let _ = slot_remove(mc, &target_env_for_call, &InternalSlot::IsIndirectEval);
                     }
@@ -18666,7 +18687,7 @@ pub fn call_native_function<'gc>(
                         call_env.borrow_mut(mc).prototype = Some(*env);
                         call_env.borrow_mut(mc).is_function_scope = true;
                         object_set_key_value(mc, &call_env, "this", &new_this)?;
-                        let result = crate::js_function::handle_global_function(mc, &ctor_name, &rest_args, &call_env)?;
+                        let result = evaluate_call_dispatch(mc, &call_env, &Value::Function(ctor_name), Some(&new_this), &rest_args)?;
                         return Ok(Some(result));
                     }
                 }
@@ -19277,30 +19298,47 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     // prototype chain which may bypass the lexical/global environment.
     let mut found_proto: Option<JSObjectDataPtr<'gc>> = None;
     let mut found_ctor: Option<JSObjectDataPtr<'gc>> = None;
+    let resolve_ctor_proto = |ctor_val: &Value<'gc>| -> Option<(JSObjectDataPtr<'gc>, JSObjectDataPtr<'gc>)> {
+        let ctor_obj = match ctor_val {
+            Value::Object(obj) => Some(*obj),
+            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                Value::Object(obj) => Some(*obj),
+                _ => None,
+            },
+            _ => None,
+        }?;
+
+        let proto_obj = object_get_key_value(&ctor_obj, "prototype").and_then(|proto_val| match &*proto_val.borrow() {
+            Value::Object(proto) => Some(*proto),
+            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                Value::Object(proto) => Some(*proto),
+                _ => None,
+            },
+            _ => None,
+        })?;
+
+        Some((ctor_obj, proto_obj))
+    };
     let mut search_env: Option<JSObjectDataPtr<'gc>> = Some(*env);
     while let Some(cur) = search_env {
         if let Some(err_ctor_val) = env_get_own(&cur, name)
-            && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-            && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
-            && let Value::Object(proto) = &*proto_val.borrow()
+            && let Some((err_ctor, proto)) = resolve_ctor_proto(&err_ctor_val.borrow())
         {
-            found_proto = Some(*proto);
-            found_ctor = Some(*err_ctor);
+            found_proto = Some(proto);
+            found_ctor = Some(err_ctor);
             break;
         }
         search_env = cur.borrow().prototype;
     }
 
-    // If not found in lexical chain, fallback to Error constructor's prototype via env or root
+    // If not found in lexical chain, fallback to the requested constructor
+    // via env lookup (which may return descriptor-wrapped values).
     if found_proto.is_none() {
-        // try env's Error
-        if let Some(err_ctor_val) = env_get(env, "Error")
-            && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-            && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
-            && let Value::Object(proto) = &*proto_val.borrow()
+        if let Some(err_ctor_val) = env_get(env, name)
+            && let Some((err_ctor, proto)) = resolve_ctor_proto(&err_ctor_val.borrow())
         {
-            found_proto = Some(*proto);
-            found_ctor = Some(*err_ctor);
+            found_proto = Some(proto);
+            found_ctor = Some(err_ctor);
         } else {
             found_proto = None;
         }
@@ -19359,21 +19397,57 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 /// `TypeError.prototype` (and thus the correct `.constructor`), because the
 /// error object is created at the throw-site rather than at the catch-site.
 fn throw_realm_type_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str) -> EvalError<'gc> {
+    if let Some(tc_val) = env_get(env, "TypeError")
+        && let Some(tc_obj) = match &*tc_val.borrow() {
+            Value::Object(tc) => Some(*tc),
+            Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                Value::Object(tc) => Some(*tc),
+                _ => None,
+            },
+            _ => None,
+        }
+    {
+        let msg_val = Value::String(utf8_to_utf16(message));
+        if let Ok(err_val) = crate::js_class::evaluate_new(mc, env, &Value::Object(tc_obj), &[msg_val], None)
+            && let Value::Object(err_obj) = err_val
+        {
+            return EvalError::Throw(Value::Object(err_obj), None, None);
+        }
+    }
+
     // Walk the lexical environment chain to find the TypeError constructor.
     let mut found_proto: Option<JSObjectDataPtr<'gc>> = None;
     let mut found_ctor: Option<JSObjectDataPtr<'gc>> = None;
     let mut search = Some(*env);
     while let Some(cur) = search {
-        if let Some(err_val) = env_get_own(&cur, "TypeError")
-            && let Value::Object(tc) = &*err_val.borrow()
-            && let Some(proto_val) = object_get_key_value(tc, "prototype")
-            && let Value::Object(proto) = &*proto_val.borrow()
+        if let Some(err_val) = env_get(&cur, "TypeError")
+            && let Some(tc) = match &*err_val.borrow() {
+                Value::Object(tc) => Some(*tc),
+                Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                    Value::Object(tc) => Some(*tc),
+                    _ => None,
+                },
+                _ => None,
+            }
+            && let Some(proto_val) = object_get_key_value(&tc, "prototype")
+            && let Some(proto) = match &*proto_val.borrow() {
+                Value::Object(proto) => Some(*proto),
+                Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                    Value::Object(proto) => Some(*proto),
+                    _ => None,
+                },
+                _ => None,
+            }
         {
-            found_proto = Some(*proto);
-            found_ctor = Some(*tc);
+            found_proto = Some(proto);
+            found_ctor = Some(tc);
             break;
         }
         search = cur.borrow().prototype;
+    }
+
+    if found_proto.is_none() {
+        return EvalError::Js(raise_type_error!(message));
     }
 
     let err_obj = new_js_object_data(mc);

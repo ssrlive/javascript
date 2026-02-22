@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell, GcPtr, GeneratorState, InternalSlot, MutationContext, slot_set};
+use crate::core::{Gc, GcCell, GcPtr, GeneratorPendingCompletion, GeneratorState, InternalSlot, MutationContext, slot_set};
 use crate::{
     core::{
         CatchParamPattern, ClassDefinition, ClassMember, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectDataPtr,
@@ -373,6 +373,7 @@ pub fn handle_generator_function_call<'gc>(
             yield_star_iterator: None,
             pending_for_await: None,
             pending_for_of: None,
+            pending_completion: None,
         }),
     );
 
@@ -2001,7 +2002,14 @@ pub fn generator_next<'gc>(
     generator: &GcPtr<'gc, JSGenerator<'gc>>,
     send_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let mut gen_obj = generator.borrow_mut(mc);
+    let mut gen_obj = match generator.try_borrow_mut(mc) {
+        Ok(g) => g,
+        Err(_) => return Err(raise_type_error!("Generator is already running").into()),
+    };
+
+    if matches!(gen_obj.state, GeneratorState::Running { .. }) {
+        return Err(raise_type_error!("Generator is already running").into());
+    }
 
     // Take ownership of the generator state so we don't hold a long-lived
     // mutable borrow while we clone/prepare the execution tail and env.
@@ -2052,7 +2060,7 @@ pub fn generator_next<'gc>(
                     pre_env: Some(func_env),
                 };
 
-                return Ok(create_iterator_result(mc, &next_res_val, false)?);
+                return Ok(create_iterator_result(mc, &func_env, &next_res_val, false)?);
             }
 
             if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = find_first_yield_in_statements(&gen_obj.body) {
@@ -2120,7 +2128,7 @@ pub fn generator_next<'gc>(
                     if let Some(inner_expr_box) = effective_inner {
                         if effective_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
                             gen_obj.cached_initial_yield = Some(Value::Undefined);
-                            return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                            return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
                         }
 
                         match crate::core::evaluate_expr(mc, &iter_env, &inner_expr_box) {
@@ -2149,7 +2157,7 @@ pub fn generator_next<'gc>(
                                                     Value::Undefined
                                                 };
                                                 gen_obj.cached_initial_yield = Some(yielded.clone());
-                                                return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                                                return Ok(create_iterator_result_with_done(mc, &func_env, &yielded, &done_val)?);
                                             }
                                             let value = crate::core::get_property_with_accessors(mc, &iter_env, &res_obj, "value")?;
                                             Ok(value)
@@ -2175,7 +2183,7 @@ pub fn generator_next<'gc>(
                                 }
 
                                 gen_obj.cached_initial_yield = Some(val.clone());
-                                return Ok(create_iterator_result(mc, &val, false)?);
+                                return Ok(create_iterator_result(mc, &func_env, &val, false)?);
                             }
                             Err(e) => {
                                 let throw_val = eval_error_to_value(mc, &iter_env, e);
@@ -2186,7 +2194,7 @@ pub fn generator_next<'gc>(
                     }
 
                     gen_obj.cached_initial_yield = Some(Value::Undefined);
-                    return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                    return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
                 }
 
                 if let Some(stmt) = gen_obj.body.get(idx)
@@ -2251,9 +2259,77 @@ pub fn generator_next<'gc>(
                                     let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
                                 }
                                 StatementKind::TryCatch(tc_stmt) => {
-                                    let pre_stmts = tc_stmt.try_body[0..inner_idx].to_vec();
-                                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
-                                    seed_simple_decl_bindings(mc, &func_env, &pre_stmts)?;
+                                    // Determine which sub-body the yield is in
+                                    let yield_in_try = find_first_yield_in_statements(&tc_stmt.try_body).is_some();
+                                    let yield_in_catch = !yield_in_try
+                                        && tc_stmt
+                                            .catch_body
+                                            .as_ref()
+                                            .is_some_and(|cb| find_first_yield_in_statements(cb).is_some());
+                                    let yield_in_finally = !yield_in_try
+                                        && !yield_in_catch
+                                        && tc_stmt
+                                            .finally_body
+                                            .as_ref()
+                                            .is_some_and(|fb| find_first_yield_in_statements(fb).is_some());
+
+                                    if yield_in_try && inner_idx <= tc_stmt.try_body.len() {
+                                        let pre_stmts = tc_stmt.try_body[0..inner_idx].to_vec();
+                                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                        seed_simple_decl_bindings(mc, &func_env, &pre_stmts)?;
+                                    } else if yield_in_catch || yield_in_finally {
+                                        // Yield is in catch or finally body.
+                                        // Run the entire try body within TryCatch semantics first.
+                                        if !tc_stmt.try_body.is_empty() {
+                                            let try_result = crate::core::evaluate_statements_with_context_and_last_value(
+                                                mc,
+                                                &func_env,
+                                                &tc_stmt.try_body,
+                                                &[],
+                                            );
+                                            match try_result {
+                                                Ok((crate::core::ControlFlow::Throw(v, _, _), _)) | Err(EvalError::Throw(v, _, _)) => {
+                                                    if let Some(cb) = &tc_stmt.catch_body {
+                                                        if let Some(CatchParamPattern::Identifier(name)) = &tc_stmt.catch_param {
+                                                            let _ = env_set(mc, &func_env, name, &v);
+                                                        }
+                                                        if !yield_in_catch {
+                                                            let _ = crate::core::evaluate_statements(mc, &func_env, cb);
+                                                        }
+                                                    }
+                                                }
+                                                Err(EvalError::Js(js_err)) => {
+                                                    let v = crate::core::js_error_to_value(mc, &func_env, &js_err);
+                                                    if let Some(cb) = &tc_stmt.catch_body {
+                                                        if let Some(CatchParamPattern::Identifier(name)) = &tc_stmt.catch_param {
+                                                            let _ = env_set(mc, &func_env, name, &v);
+                                                        }
+                                                        if !yield_in_catch {
+                                                            let _ = crate::core::evaluate_statements(mc, &func_env, cb);
+                                                        }
+                                                    }
+                                                }
+                                                _ => {} // try completed normally
+                                            }
+                                        }
+                                        // Run pre-yield stmts from the appropriate body
+                                        if yield_in_finally {
+                                            if let Some(fb) = &tc_stmt.finally_body
+                                                && inner_idx > 0
+                                                && inner_idx <= fb.len()
+                                            {
+                                                let pre_fin = fb[0..inner_idx].to_vec();
+                                                let _ = crate::core::evaluate_statements(mc, &func_env, &pre_fin)?;
+                                            }
+                                        } else if yield_in_catch
+                                            && let Some(cb) = &tc_stmt.catch_body
+                                            && inner_idx > 0
+                                            && inner_idx <= cb.len()
+                                        {
+                                            let pre_stmts = cb[0..inner_idx].to_vec();
+                                            let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                        }
+                                    }
                                 }
                                 StatementKind::ForOf(_, _, _, body)
                                 | StatementKind::ForIn(_, _, _, body)
@@ -2281,6 +2357,64 @@ pub fn generator_next<'gc>(
                             }
                         }
                     }
+
+                    // ---- Nested TryCatch pre-execution ----
+                    // If the yield is inside a nested TryCatch (within the
+                    // outer TryCatch's try body), run the inner TryCatch's
+                    // try body and/or catch pre-yield stmts. This is needed
+                    // regardless of inner_idx value.
+                    if let StatementKind::TryCatch(tc_stmt) = &*gen_obj.body[idx].kind
+                        && let Some(inner_stmt) = tc_stmt.try_body.get(inner_idx)
+                        && let StatementKind::TryCatch(inner_tc) = &*inner_stmt.kind
+                    {
+                        let nested_key = format!("__gen_nested_tc_{}_{}", idx, inner_idx);
+                        if env_get_own(&func_env, &nested_key).is_none() {
+                            let yield_in_inner_try = find_first_yield_in_statements(&inner_tc.try_body).is_some();
+                            let yield_in_inner_catch = !yield_in_inner_try
+                                && inner_tc
+                                    .catch_body
+                                    .as_ref()
+                                    .is_some_and(|cb| find_first_yield_in_statements(cb).is_some());
+
+                            if yield_in_inner_catch {
+                                // Run inner try body (which throws), bind catch param
+                                let inner_try_result =
+                                    crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &inner_tc.try_body, &[]);
+                                match inner_try_result {
+                                    Ok((crate::core::ControlFlow::Throw(v, _, _), _)) | Err(EvalError::Throw(v, _, _)) => {
+                                        if let Some(CatchParamPattern::Identifier(name)) = &inner_tc.catch_param {
+                                            env_set(mc, &func_env, name, &v)?;
+                                        }
+                                    }
+                                    Err(EvalError::Js(js_err)) => {
+                                        let v = crate::core::js_error_to_value(mc, &func_env, &js_err);
+                                        if let Some(CatchParamPattern::Identifier(name)) = &inner_tc.catch_param {
+                                            env_set(mc, &func_env, name, &v)?;
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                }
+                                // Run catch pre-yield stmts
+                                if let Some(cb) = &inner_tc.catch_body
+                                    && let Some((cyi, _, _, _)) = find_first_yield_in_statements(cb)
+                                    && cyi > 0
+                                {
+                                    let pre_catch = cb[0..cyi].to_vec();
+                                    crate::core::evaluate_statements(mc, &func_env, &pre_catch)?;
+                                }
+                            } else if yield_in_inner_try {
+                                // Run inner try body pre-yield stmts
+                                if let Some((inner_try_idx, _, _, _)) = find_first_yield_in_statements(&inner_tc.try_body)
+                                    && inner_try_idx > 0
+                                {
+                                    let pre_stmts = inner_tc.try_body[0..inner_try_idx].to_vec();
+                                    crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                }
+                            }
+                            let _ = env_set(mc, &func_env, &nested_key, &Value::Boolean(true));
+                        }
+                    }
+
                     Some(func_env)
                 } else {
                     // Even when there are no pre-statements, we need the function
@@ -2342,7 +2476,7 @@ pub fn generator_next<'gc>(
                     slot_set(mc, &func_env, InternalSlot::GenThrowVal, &Value::Undefined);
                     if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
                         gen_obj.cached_initial_yield = Some(Value::Undefined);
-                        return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                        return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
                     }
 
                     let func_home = func_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
@@ -2380,7 +2514,7 @@ pub fn generator_next<'gc>(
                                                 Value::Undefined
                                             };
                                             gen_obj.cached_initial_yield = Some(yielded.clone());
-                                            return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                                            return Ok(create_iterator_result_with_done(mc, &func_env, &yielded, &done_val)?);
                                         }
                                         let value = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "value")?;
                                         Ok(value)
@@ -2407,7 +2541,7 @@ pub fn generator_next<'gc>(
 
                             // Cache the value so re-entry/resume paths can use it
                             gen_obj.cached_initial_yield = Some(val.clone());
-                            return Ok(create_iterator_result(mc, &val, false)?);
+                            return Ok(create_iterator_result(mc, &func_env, &val, false)?);
                         }
                         Err(e) => {
                             let throw_val = eval_error_to_value(mc, &func_env, e);
@@ -2418,7 +2552,7 @@ pub fn generator_next<'gc>(
                 }
 
                 // No inner expression -> yield undefined
-                Ok(create_iterator_result(mc, &Value::Undefined, false)?)
+                Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?)
             } else {
                 // No yields found: execute the whole function body in a freshly
                 // prepared function activation environment using the captured
@@ -2427,9 +2561,11 @@ pub fn generator_next<'gc>(
                 // NOTE: We now create the environment eagerly in handle_generator_function_call,
                 // so we just use the stored environment.
                 let func_env = gen_obj.env;
+                let body = gen_obj.body.clone();
+                let args = gen_obj.args.clone();
 
                 // Ensure `arguments` exists for the no-yield completion path too.
-                crate::js_class::create_arguments_object(mc, &func_env, &gen_obj.args, None)?;
+                crate::js_class::create_arguments_object(mc, &func_env, &args, None)?;
                 slot_set(mc, &func_env, InternalSlot::InGenerator, &Value::Boolean(true));
 
                 // Evaluate the function body and interpret completion per spec:
@@ -2443,11 +2579,21 @@ pub fn generator_next<'gc>(
                     func_home,
                     Gc::as_ptr(*generator)
                 );
-                let (cf, _last) = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &gen_obj.body, &[])?;
-                gen_obj.state = GeneratorState::Completed;
+                // Set state back to Running before releasing the lock so that
+                // re-entrant calls (from within the body) observe "executing" state
+                // and correctly throw TypeError per spec.
+                gen_obj.state = GeneratorState::Running { pc: 0, stack: vec![] };
+                // Drop the borrow before evaluating user code so that re-entrant
+                // calls to generator_next (from within the body) can borrow again
+                // and correctly observe the generator as "running" (spec: throw TypeError).
+                drop(gen_obj);
+                let cf_result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &body, &[]);
+                // After execution, mark generator as completed.
+                generator.borrow_mut(mc).state = GeneratorState::Completed;
+                let (cf, _last) = cf_result?;
                 match cf {
-                    crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &v, true)?),
-                    crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &Value::Undefined, true)?),
+                    crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &func_env, &v, true)?),
+                    crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?),
                     crate::core::ControlFlow::Throw(v, l, c) => Err(crate::core::EvalError::Throw(v, l, c)),
                     _ => Err(raise_eval_error!("Unexpected control flow after evaluating generator body").into()),
                 }
@@ -2464,6 +2610,74 @@ pub fn generator_next<'gc>(
                 pre_env: saved_pre_env,
             };
             log::trace!("generator_next: restored Suspended state pc={}", pc);
+
+            // ---- Pending completion from finally-body yield ----
+            // When the generator was suspended at a yield inside a finally
+            // block (from generator_throw or generator_return), the remaining
+            // finally statements were flattened into body[pc]. Execute them
+            // and then fire the parked completion (throw or return).
+            if gen_obj.pending_completion.is_some() {
+                let func_env = if let GeneratorState::Suspended { pre_env: Some(env), .. } = &gen_obj.state {
+                    *env
+                } else {
+                    gen_obj.env
+                };
+                let pc_val = pc;
+
+                // Bind the send_value — the result of `yield` in the finally
+                // body is not typically used but we bind it for correctness.
+                env_set(mc, &func_env, "__gen_finally_send", send_value)?;
+
+                // Execute remaining finally statements at body[pc]
+                if pc_val < gen_obj.body.len() {
+                    let remaining_stmt = gen_obj.body[pc_val].clone();
+                    let result = crate::core::evaluate_statements_with_context_and_last_value(
+                        mc,
+                        &func_env,
+                        std::slice::from_ref(&remaining_stmt),
+                        &[],
+                    );
+                    match result {
+                        Ok((cf, _)) => match cf {
+                            crate::core::ControlFlow::Normal(_) => {
+                                let pending = gen_obj.pending_completion.take().unwrap();
+                                gen_obj.state = GeneratorState::Completed;
+                                match pending {
+                                    GeneratorPendingCompletion::Throw(v) => return Err(EvalError::Throw(v, None, None)),
+                                    GeneratorPendingCompletion::Return(v) => return Ok(create_iterator_result(mc, &func_env, &v, true)?),
+                                }
+                            }
+                            crate::core::ControlFlow::Throw(v, l, c) => {
+                                gen_obj.pending_completion = None;
+                                gen_obj.state = GeneratorState::Completed;
+                                return Err(EvalError::Throw(v, l, c));
+                            }
+                            crate::core::ControlFlow::Return(v) => {
+                                gen_obj.pending_completion = None;
+                                gen_obj.state = GeneratorState::Completed;
+                                return Ok(create_iterator_result(mc, &func_env, &v, true)?);
+                            }
+                            _ => {
+                                gen_obj.pending_completion = None;
+                                gen_obj.state = GeneratorState::Completed;
+                                return Err(raise_eval_error!("Unexpected control flow after finally body").into());
+                            }
+                        },
+                        Err(e) => {
+                            gen_obj.pending_completion = None;
+                            gen_obj.state = GeneratorState::Completed;
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    let pending = gen_obj.pending_completion.take().unwrap();
+                    gen_obj.state = GeneratorState::Completed;
+                    match pending {
+                        GeneratorPendingCompletion::Throw(v) => return Err(EvalError::Throw(v, None, None)),
+                        GeneratorPendingCompletion::Return(v) => return Ok(create_iterator_result(mc, &func_env, &v, true)?),
+                    }
+                }
+            }
 
             if let Some(mut for_await) = gen_obj.pending_for_await.take() {
                 let func_env = gen_obj.env;
@@ -2497,7 +2711,7 @@ pub fn generator_next<'gc>(
                         pre_env,
                     };
 
-                    return Ok(create_iterator_result(mc, &next_res_val, false)?);
+                    return Ok(create_iterator_result(mc, &func_env, &next_res_val, false)?);
                 }
 
                 let next_res = if let Value::Object(obj) = send_value {
@@ -2516,7 +2730,7 @@ pub fn generator_next<'gc>(
                     gen_obj.pending_for_await = None;
                     if for_await.resume_pc >= gen_obj.body.len() {
                         gen_obj.state = GeneratorState::Completed;
-                        return Ok(create_iterator_result(mc, &Value::Undefined, true)?);
+                        return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?);
                     }
                     gen_obj.state = GeneratorState::Suspended {
                         pc: for_await.resume_pc,
@@ -2541,7 +2755,7 @@ pub fn generator_next<'gc>(
                     pre_env,
                 };
 
-                return Ok(create_iterator_result(mc, &value, false)?);
+                return Ok(create_iterator_result(mc, &func_env, &value, false)?);
             }
 
             if let Some(iter) = gen_obj.yield_star_iterator {
@@ -2570,7 +2784,7 @@ pub fn generator_next<'gc>(
                         } else {
                             Value::Undefined
                         };
-                        return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                        return Ok(create_iterator_result_with_done(mc, &gen_obj.env, &yielded, &done_val)?);
                     } else {
                         let value = crate::core::get_property_with_accessors(mc, &gen_obj.env, &res_obj, "value")?;
                         gen_obj.yield_star_iterator = None;
@@ -2606,7 +2820,7 @@ pub fn generator_next<'gc>(
                     crate::core::ControlFlow::Normal(_) => {}
                     crate::core::ControlFlow::Return(v) => {
                         gen_obj.state = GeneratorState::Completed;
-                        return Ok(create_iterator_result(mc, &v, true)?);
+                        return Ok(create_iterator_result(mc, &func_env, &v, true)?);
                     }
                     crate::core::ControlFlow::Throw(v, l, c) => {
                         return Err(crate::core::EvalError::Throw(v, l, c));
@@ -2659,7 +2873,7 @@ pub fn generator_next<'gc>(
                 if let Some(inner_expr_box) = yield_inner {
                     if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
                         gen_obj.cached_initial_yield = Some(Value::Undefined);
-                        return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                        return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
                     }
 
                     match crate::core::evaluate_expr(mc, &iter_env, &inner_expr_box) {
@@ -2688,7 +2902,7 @@ pub fn generator_next<'gc>(
                                                 Value::Undefined
                                             };
                                             gen_obj.cached_initial_yield = Some(yielded.clone());
-                                            return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                                            return Ok(create_iterator_result_with_done(mc, &func_env, &yielded, &done_val)?);
                                         }
 
                                         let value = crate::core::get_property_with_accessors(mc, &iter_env, &res_obj, "value")?;
@@ -2715,7 +2929,7 @@ pub fn generator_next<'gc>(
                             }
 
                             gen_obj.cached_initial_yield = Some(val.clone());
-                            return Ok(create_iterator_result(mc, &val, false)?);
+                            return Ok(create_iterator_result(mc, &func_env, &val, false)?);
                         }
                         Err(e) => {
                             let throw_val = eval_error_to_value(mc, &iter_env, e);
@@ -2726,7 +2940,7 @@ pub fn generator_next<'gc>(
                 }
 
                 gen_obj.cached_initial_yield = Some(Value::Undefined);
-                return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
             }
 
             // On resume, execute from the suspended statement index. If a
@@ -2739,7 +2953,7 @@ pub fn generator_next<'gc>(
             gen_obj.pending_iterator_done = false;
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = GeneratorState::Completed;
-                return Ok(create_iterator_result(mc, &Value::Undefined, true)?);
+                return Ok(create_iterator_result(mc, &gen_obj.env, &Value::Undefined, true)?);
             }
             let mut for_stmt_snapshot = if let Some(stmt) = gen_obj.body.get(pc_val) {
                 if matches!(&*stmt.kind, StatementKind::For(_)) {
@@ -2784,7 +2998,7 @@ pub fn generator_next<'gc>(
                     let test_val = crate::core::evaluate_expr(mc, &func_env, test_expr)?;
                     if !test_val.to_truthy() {
                         gen_obj.state = GeneratorState::Completed;
-                        return Ok(create_iterator_result(mc, &Value::Undefined, true)?);
+                        return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?);
                     }
                 }
 
@@ -2800,7 +3014,7 @@ pub fn generator_next<'gc>(
                     pre_env: Some(func_env),
                 };
                 gen_obj.cached_initial_yield = Some(yielded.clone());
-                return Ok(create_iterator_result(mc, &yielded, false)?);
+                return Ok(create_iterator_result(mc, &func_env, &yielded, false)?);
             }
 
             // Special-case: precompute conditional branch inner yield's operand
@@ -2977,7 +3191,7 @@ pub fn generator_next<'gc>(
                                         }
 
                                         gen_obj.cached_initial_yield = Some(Value::Undefined);
-                                        return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                                        return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
                                     } else if let Some(inner_expr) = chosen_inner {
                                         // Evaluate the chosen branch's inner expression and
                                         // return it as the yielded value, while also
@@ -3009,7 +3223,7 @@ pub fn generator_next<'gc>(
                                                 }
 
                                                 gen_obj.cached_initial_yield = Some(val.clone());
-                                                return Ok(create_iterator_result(mc, &val, false)?);
+                                                return Ok(create_iterator_result(mc, &func_env, &val, false)?);
                                             }
                                             Err(e) => return Err(e),
                                         }
@@ -3093,12 +3307,12 @@ pub fn generator_next<'gc>(
                             // immediately as the yielded value so later resumes won't re-yield.
                             if chosen_inner.is_none() {
                                 gen_obj.cached_initial_yield = Some(Value::Undefined);
-                                return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                                return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
                             } else if let Some(inner_expr) = chosen_inner {
                                 match crate::core::evaluate_expr(mc, &func_env, &inner_expr) {
                                     Ok(val) => {
                                         gen_obj.cached_initial_yield = Some(val.clone());
-                                        return Ok(create_iterator_result(mc, &val, false)?);
+                                        return Ok(create_iterator_result(mc, &func_env, &val, false)?);
                                     }
                                     Err(e) => return Err(e),
                                 }
@@ -3156,10 +3370,97 @@ pub fn generator_next<'gc>(
             // installed for subsequent resumes.
             if let Some(val) = precomputed_yield {
                 gen_obj.cached_initial_yield = Some(val.clone());
-                return Ok(create_iterator_result(mc, &val, false)?);
+                return Ok(create_iterator_result(mc, &func_env, &val, false)?);
             }
 
             if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = find_first_yield_in_statements(&tail) {
+                // ---- Catch-body yield special case ----
+                // When the yield found by find_first_yield is inside the catch
+                // body of a TryCatch whose try_body no longer contains yields
+                // (they were replaced by placeholders), we must run the try body
+                // first so that the throw fires, the catch param is bound, and
+                // then the yield's inner expression (e.g., `e`) can be evaluated.
+                let is_catch_body_yield = if let StatementKind::TryCatch(tc) = &*tail[idx].kind {
+                    find_first_yield_in_statements(&tc.try_body).is_none()
+                        && tc
+                            .catch_body
+                            .as_ref()
+                            .is_some_and(|cb| find_first_yield_in_statements(cb).is_some())
+                } else {
+                    false
+                };
+                if is_catch_body_yield {
+                    let tc = if let StatementKind::TryCatch(tc) = &*tail[idx].kind {
+                        tc.clone()
+                    } else {
+                        unreachable!()
+                    };
+
+                    // Run pre-TryCatch statements
+                    if idx > 0 {
+                        let pre_stmts = tail[0..idx].to_vec();
+                        crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    }
+
+                    // Run the try body (should throw due to remaining throw stmts
+                    // or previously-injected throw from generator_throw)
+                    let try_result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tc.try_body, &[]);
+
+                    let thrown_value = match try_result {
+                        Ok((crate::core::ControlFlow::Throw(v, _, _), _)) => Some(v),
+                        Err(EvalError::Throw(v, _, _)) => Some(v),
+                        Err(EvalError::Js(js_err)) => Some(crate::core::js_error_to_value(mc, &func_env, &js_err)),
+                        Ok(_) => None, // try completed normally
+                    };
+
+                    if let Some(thrown) = thrown_value {
+                        // Bind catch parameter in func_env
+                        if let Some(CatchParamPattern::Identifier(name)) = &tc.catch_param {
+                            env_set(mc, &func_env, name, &thrown)?;
+                        }
+
+                        let catch_body = tc.catch_body.as_ref().unwrap();
+                        let (catch_yield_idx, _, _, catch_yield_inner) = find_first_yield_in_statements(catch_body).unwrap();
+
+                        // Run pre-yield catch body statements
+                        if catch_yield_idx > 0 {
+                            let pre_catch = catch_body[0..catch_yield_idx].to_vec();
+                            crate::core::evaluate_statements(mc, &func_env, &pre_catch)?;
+                        }
+
+                        // Evaluate the yield's inner expression
+                        let yield_val = if let Some(inner) = catch_yield_inner {
+                            crate::core::evaluate_expr(mc, &func_env, &inner)?
+                        } else {
+                            Value::Undefined
+                        };
+
+                        // Suspend at the TryCatch position. The yield in catch is
+                        // NOT replaced yet -- on the next resume, replace_first_yield
+                        // will replace it with a placeholder, then the TryCatch runs
+                        // as a pre-stmt for the subsequent yield.
+                        gen_obj.state = GeneratorState::Suspended {
+                            pc: pc_val + idx,
+                            stack: vec![],
+                            pre_env: Some(func_env),
+                        };
+                        gen_obj.cached_initial_yield = Some(yield_val.clone());
+                        return Ok(create_iterator_result(mc, &func_env, &yield_val, false)?);
+                    } else {
+                        // Try completed normally, catch not entered
+                        if let Some(finally_stmts) = &tc.finally_body {
+                            crate::core::evaluate_statements(mc, &func_env, finally_stmts)?;
+                        }
+                        gen_obj.state = GeneratorState::Suspended {
+                            pc: pc_val + idx + 1,
+                            stack: vec![],
+                            pre_env: Some(func_env),
+                        };
+                        drop(gen_obj);
+                        return generator_next(mc, generator, &Value::Undefined);
+                    }
+                }
+
                 if let StatementKind::If(if_stmt) = &*tail[idx].kind
                     && !expr_contains_yield(&if_stmt.condition)
                 {
@@ -3196,14 +3497,199 @@ pub fn generator_next<'gc>(
                                     let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
                                 }
                                 StatementKind::TryCatch(tc_stmt) => {
-                                    let pre_stmts = tc_stmt.try_body[0..inner_idx].to_vec();
-                                    let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
-                                    seed_simple_decl_bindings(mc, &func_env, &pre_stmts)?;
+                                    // Determine which sub-body has the yield
+                                    let yield_in_try = find_first_yield_in_statements(&tc_stmt.try_body).is_some();
+                                    let yield_in_catch = !yield_in_try
+                                        && tc_stmt
+                                            .catch_body
+                                            .as_ref()
+                                            .is_some_and(|cb| find_first_yield_in_statements(cb).is_some());
+                                    let yield_in_finally = !yield_in_try
+                                        && !yield_in_catch
+                                        && tc_stmt
+                                            .finally_body
+                                            .as_ref()
+                                            .is_some_and(|fb| find_first_yield_in_statements(fb).is_some());
+
+                                    if yield_in_try && inner_idx <= tc_stmt.try_body.len() {
+                                        let pre_stmts = tc_stmt.try_body[0..inner_idx].to_vec();
+                                        // Use evaluate_statements_with_context to catch throws
+                                        // that should be handled by the TryCatch's catch/finally.
+                                        let pre_result =
+                                            crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &pre_stmts, &[]);
+                                        match pre_result {
+                                            Ok((crate::core::ControlFlow::Normal(_), _)) => {
+                                                seed_simple_decl_bindings(mc, &func_env, &pre_stmts)?;
+                                            }
+                                            Ok((crate::core::ControlFlow::Throw(v, _, _), _)) | Err(EvalError::Throw(v, _, _)) => {
+                                                // Pre-stmts threw inside try body. Handle via finally.
+                                                if let Some(fb) = &tc_stmt.finally_body
+                                                    && let Some((fin_idx, _, _, fin_inner)) = find_first_yield_in_statements(fb)
+                                                {
+                                                    if fin_idx > 0 {
+                                                        crate::core::evaluate_statements(mc, &func_env, &fb[0..fin_idx])?;
+                                                    }
+                                                    let yield_val = if let Some(inner) = fin_inner {
+                                                        crate::core::evaluate_expr(mc, &func_env, &inner)?
+                                                    } else {
+                                                        Value::Undefined
+                                                    };
+                                                    gen_obj.pending_completion = Some(GeneratorPendingCompletion::Throw(v));
+                                                    let remaining_finally = if fin_idx + 1 < fb.len() {
+                                                        fb[fin_idx + 1..].to_vec()
+                                                    } else {
+                                                        vec![]
+                                                    };
+                                                    gen_obj.body[pc_val + idx] = StatementKind::Block(remaining_finally).into();
+                                                    gen_obj.state = GeneratorState::Suspended {
+                                                        pc: pc_val + idx,
+                                                        stack: vec![],
+                                                        pre_env: Some(func_env),
+                                                    };
+                                                    gen_obj.cached_initial_yield = Some(yield_val.clone());
+                                                    return Ok(create_iterator_result(mc, &func_env, &yield_val, false)?);
+                                                }
+                                                return Err(EvalError::Throw(v, None, None));
+                                            }
+                                            Err(EvalError::Js(js_err)) => {
+                                                let v = crate::core::js_error_to_value(mc, &func_env, &js_err);
+                                                if let Some(fb) = &tc_stmt.finally_body
+                                                    && let Some((fin_idx, _, _, fin_inner)) = find_first_yield_in_statements(fb)
+                                                {
+                                                    if fin_idx > 0 {
+                                                        crate::core::evaluate_statements(mc, &func_env, &fb[0..fin_idx])?;
+                                                    }
+                                                    let yield_val = if let Some(inner) = fin_inner {
+                                                        crate::core::evaluate_expr(mc, &func_env, &inner)?
+                                                    } else {
+                                                        Value::Undefined
+                                                    };
+                                                    gen_obj.pending_completion = Some(GeneratorPendingCompletion::Throw(v));
+                                                    let remaining_finally = if fin_idx + 1 < fb.len() {
+                                                        fb[fin_idx + 1..].to_vec()
+                                                    } else {
+                                                        vec![]
+                                                    };
+                                                    gen_obj.body[pc_val + idx] = StatementKind::Block(remaining_finally).into();
+                                                    gen_obj.state = GeneratorState::Suspended {
+                                                        pc: pc_val + idx,
+                                                        stack: vec![],
+                                                        pre_env: Some(func_env),
+                                                    };
+                                                    gen_obj.cached_initial_yield = Some(yield_val.clone());
+                                                    return Ok(create_iterator_result(mc, &func_env, &yield_val, false)?);
+                                                }
+                                                return Err(EvalError::Throw(v, None, None));
+                                            }
+                                            _ => {
+                                                seed_simple_decl_bindings(mc, &func_env, &pre_stmts)?;
+                                            }
+                                        }
+                                    } else if yield_in_catch || yield_in_finally {
+                                        // Run the entire try body within TryCatch semantics.
+                                        if !tc_stmt.try_body.is_empty() {
+                                            let try_result = crate::core::evaluate_statements_with_context_and_last_value(
+                                                mc,
+                                                &func_env,
+                                                &tc_stmt.try_body,
+                                                &[],
+                                            );
+                                            match try_result {
+                                                Ok((crate::core::ControlFlow::Throw(v, _, _), _)) | Err(EvalError::Throw(v, _, _)) => {
+                                                    if let Some(cb) = &tc_stmt.catch_body {
+                                                        if let Some(CatchParamPattern::Identifier(name)) = &tc_stmt.catch_param {
+                                                            let _ = env_set(mc, &func_env, name, &v);
+                                                        }
+                                                        if !yield_in_catch {
+                                                            let _ = crate::core::evaluate_statements(mc, &func_env, cb);
+                                                        }
+                                                    }
+                                                }
+                                                Err(EvalError::Js(js_err)) => {
+                                                    let v = crate::core::js_error_to_value(mc, &func_env, &js_err);
+                                                    if let Some(cb) = &tc_stmt.catch_body {
+                                                        if let Some(CatchParamPattern::Identifier(name)) = &tc_stmt.catch_param {
+                                                            let _ = env_set(mc, &func_env, name, &v);
+                                                        }
+                                                        if !yield_in_catch {
+                                                            let _ = crate::core::evaluate_statements(mc, &func_env, cb);
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        if yield_in_finally {
+                                            if let Some(fb) = &tc_stmt.finally_body
+                                                && inner_idx > 0
+                                                && inner_idx <= fb.len()
+                                            {
+                                                let pre_fin = fb[0..inner_idx].to_vec();
+                                                let _ = crate::core::evaluate_statements(mc, &func_env, &pre_fin)?;
+                                            }
+                                        } else if yield_in_catch
+                                            && let Some(cb) = &tc_stmt.catch_body
+                                            && inner_idx > 0
+                                            && inner_idx <= cb.len()
+                                        {
+                                            let pre_stmts = cb[0..inner_idx].to_vec();
+                                            let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
                             if let Err(e) = env_set(mc, &func_env, &pre_key, &Value::Boolean(true)) {
                                 log::warn!("Error setting pre-execution env key: {e}");
+                            }
+                        }
+
+                        // Nested TryCatch catch-body yield: if the statement
+                        // at try_body[inner_idx] is a TryCatch with no yields
+                        // in its try body but yields in catch, run the inner
+                        // try body and bind the catch param. This runs once per
+                        // resume (keyed separately from pre_stmts above).
+                        if let StatementKind::TryCatch(tc_stmt) = &*tail[idx].kind {
+                            let nested_key = format!("__gen_nested_tc_{}_{}", pc_val, inner_idx);
+                            if env_get_own(&func_env, &nested_key).is_none()
+                                && let Some(inner_stmt) = tc_stmt.try_body.get(inner_idx)
+                                && let StatementKind::TryCatch(inner_tc) = &*inner_stmt.kind
+                                && find_first_yield_in_statements(&inner_tc.try_body).is_none()
+                                && inner_tc
+                                    .catch_body
+                                    .as_ref()
+                                    .is_some_and(|cb| find_first_yield_in_statements(cb).is_some())
+                            {
+                                let inner_tc_clone = inner_tc.clone();
+                                let inner_try_result = crate::core::evaluate_statements_with_context_and_last_value(
+                                    mc,
+                                    &func_env,
+                                    &inner_tc_clone.try_body,
+                                    &[],
+                                );
+                                match inner_try_result {
+                                    Ok((crate::core::ControlFlow::Throw(thrown, _, _), _)) | Err(EvalError::Throw(thrown, _, _)) => {
+                                        if let Some(CatchParamPattern::Identifier(name)) = &inner_tc_clone.catch_param {
+                                            env_set(mc, &func_env, name, &thrown)?;
+                                        }
+                                    }
+                                    Err(EvalError::Js(js_err)) => {
+                                        let thrown = crate::core::js_error_to_value(mc, &func_env, &js_err);
+                                        if let Some(CatchParamPattern::Identifier(name)) = &inner_tc_clone.catch_param {
+                                            env_set(mc, &func_env, name, &thrown)?;
+                                        }
+                                    }
+                                    Ok(_) => {} // inner try completed normally
+                                }
+                                // Run catch pre-yield stmts
+                                if let Some(cb) = &inner_tc_clone.catch_body
+                                    && let Some((cyi, _, _, _)) = find_first_yield_in_statements(cb)
+                                    && cyi > 0
+                                {
+                                    let pre_catch = cb[0..cyi].to_vec();
+                                    crate::core::evaluate_statements(mc, &func_env, &pre_catch)?;
+                                }
+                                let _ = env_set(mc, &func_env, &nested_key, &Value::Boolean(true));
                             }
                         }
                     }
@@ -3260,11 +3746,11 @@ pub fn generator_next<'gc>(
                         && inner_idx > 0
                     {
                         tc_stmt.try_body.drain(0..inner_idx);
-                        if let Some(body_stmt) = gen_obj.body.get_mut(pc_val + idx)
-                            && let StatementKind::TryCatch(body_tc_stmt) = body_stmt.kind.as_mut()
-                        {
-                            body_tc_stmt.try_body.drain(0..inner_idx);
-                        }
+                        // NOTE: Do NOT drain from gen_obj.body — the pre_key
+                        // guard prevents re-execution, and draining from the
+                        // persistent body would change try_body indices and
+                        // invalidate count_yield_vars_in_statement on future
+                        // resumes.
                     }
 
                     slot_set(mc, &func_env, InternalSlot::GenThrowVal, &Value::Undefined);
@@ -3316,7 +3802,7 @@ pub fn generator_next<'gc>(
                                         }
 
                                         gen_obj.cached_initial_yield = Some(val.clone());
-                                        return Ok(create_iterator_result(mc, &val, false)?);
+                                        return Ok(create_iterator_result(mc, &func_env, &val, false)?);
                                     }
                                     Err(e) => {
                                         let throw_val = eval_error_to_value(mc, &func_env, e);
@@ -3350,14 +3836,14 @@ pub fn generator_next<'gc>(
                                 }
 
                                 gen_obj.cached_initial_yield = Some(Value::Undefined);
-                                return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                                return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
                             }
                         }
                     }
 
                     if yield_kind == YieldKind::Yield && expr_contains_yield(&inner_expr_box) {
                         gen_obj.cached_initial_yield = Some(Value::Undefined);
-                        return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                        return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
                     }
 
                     let func_home = func_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
@@ -3393,7 +3879,7 @@ pub fn generator_next<'gc>(
                                                 Value::Undefined
                                             };
                                             gen_obj.cached_initial_yield = Some(yielded.clone());
-                                            return Ok(create_iterator_result_with_done(mc, &yielded, &done_val)?);
+                                            return Ok(create_iterator_result_with_done(mc, &func_env, &yielded, &done_val)?);
                                         }
 
                                         let value = crate::core::get_property_with_accessors(mc, &func_env, &res_obj, "value")?;
@@ -3427,7 +3913,7 @@ pub fn generator_next<'gc>(
                                 *body_stmt = snapshot_stmt;
                             }
                             gen_obj.cached_initial_yield = Some(val.clone());
-                            return Ok(create_iterator_result(mc, &val, false)?);
+                            return Ok(create_iterator_result(mc, &func_env, &val, false)?);
                         }
                         Err(e) => {
                             let throw_val = eval_error_to_value(mc, &func_env, e);
@@ -3437,7 +3923,7 @@ pub fn generator_next<'gc>(
                     }
                 }
 
-                return Ok(create_iterator_result(mc, &Value::Undefined, false)?);
+                return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, false)?);
             }
 
             // Execute the (possibly modified) tail and interpret completion per spec
@@ -3445,14 +3931,18 @@ pub fn generator_next<'gc>(
             log::trace!("DEBUG: evaluate_statements result (control flow): {:?}", cf);
             gen_obj.state = GeneratorState::Completed;
             match cf {
-                crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &v, true)?),
-                crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &Value::Undefined, true)?),
+                crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &func_env, &v, true)?),
+                crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?),
                 crate::core::ControlFlow::Throw(v, l, c) => Err(crate::core::EvalError::Throw(v, l, c)),
                 _ => Err(raise_eval_error!("Unexpected control flow after evaluating generator tail").into()),
             }
         }
-        GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running").into()),
-        GeneratorState::Completed => Ok(create_iterator_result(mc, &Value::Undefined, true)?),
+        GeneratorState::Running { .. } => Err(raise_type_error!("Generator is already running").into()),
+        GeneratorState::Completed => {
+            // Restore state to Completed (std::mem::replace set it to Running above)
+            gen_obj.state = GeneratorState::Completed;
+            Ok(create_iterator_result(mc, &gen_obj.env, &Value::Undefined, true)?)
+        }
     }
 }
 
@@ -3466,14 +3956,14 @@ fn resume_with_return_completion<'gc>(
     match &mut gen_obj.state {
         GeneratorState::NotStarted | GeneratorState::Completed => {
             gen_obj.state = GeneratorState::Completed;
-            Ok(create_iterator_result(mc, return_value, true)?)
+            Ok(create_iterator_result(mc, &gen_obj.env, return_value, true)?)
         }
-        GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running").into()),
+        GeneratorState::Running { .. } => Err(raise_type_error!("Generator is already running").into()),
         GeneratorState::Suspended { pc, .. } => {
             let pc_val = *pc;
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = GeneratorState::Completed;
-                return Ok(create_iterator_result(mc, return_value, true)?);
+                return Ok(create_iterator_result(mc, &gen_obj.env, return_value, true)?);
             }
 
             let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
@@ -3510,13 +4000,182 @@ fn resume_with_return_completion<'gc>(
             }
 
             slot_set(mc, &func_env, InternalSlot::GenThrowVal, return_value);
+
+            // ---- Finally-body yield special case for .return() ----
+            // When .return() is called while suspended in a try-finally, the
+            // yield in try is replaced with `return __gen_throw_val`. If the
+            // finally body has a yield, we need to suspend at that yield and
+            // park the return completion for re-fire after finally.
+            if let Some((tc_idx, _, _, _)) = find_first_yield_in_statements(&tail) {
+                let is_finally_yield = if let StatementKind::TryCatch(tc) = &*tail[tc_idx].kind {
+                    find_first_yield_in_statements(&tc.try_body).is_none()
+                        && (tc.catch_body.is_none()
+                            || tc
+                                .catch_body
+                                .as_ref()
+                                .is_some_and(|cb| find_first_yield_in_statements(cb).is_none()))
+                        && tc
+                            .finally_body
+                            .as_ref()
+                            .is_some_and(|fb| find_first_yield_in_statements(fb).is_some())
+                } else {
+                    false
+                };
+
+                if is_finally_yield {
+                    let tc = if let StatementKind::TryCatch(tc) = &*tail[tc_idx].kind {
+                        tc.clone()
+                    } else {
+                        unreachable!()
+                    };
+
+                    // Run pre-TryCatch statements from the modified tail
+                    if tc_idx > 0 {
+                        let pre_stmts = tail[0..tc_idx].to_vec();
+                        crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    }
+
+                    // Run try body (which now has `return __gen_throw_val`)
+                    let try_result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tc.try_body, &[]);
+
+                    // Determine the abrupt completion from try/catch
+                    let abrupt_completion: Option<GeneratorPendingCompletion> = match try_result {
+                        Ok((crate::core::ControlFlow::Return(v), _)) => Some(GeneratorPendingCompletion::Return(v)),
+                        Ok((crate::core::ControlFlow::Throw(v, _, _), _)) | Err(EvalError::Throw(v, _, _)) => {
+                            if let Some(catch_body) = &tc.catch_body {
+                                if let Some(CatchParamPattern::Identifier(name)) = &tc.catch_param {
+                                    env_set(mc, &func_env, name, &v)?;
+                                }
+                                match crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, catch_body, &[]) {
+                                    Ok((crate::core::ControlFlow::Normal(_), _)) => None,
+                                    Ok((crate::core::ControlFlow::Return(rv), _)) => Some(GeneratorPendingCompletion::Return(rv)),
+                                    Ok((crate::core::ControlFlow::Throw(tv, _, _), _)) => Some(GeneratorPendingCompletion::Throw(tv)),
+                                    Err(EvalError::Throw(tv, _, _)) => Some(GeneratorPendingCompletion::Throw(tv)),
+                                    _ => None,
+                                }
+                            } else {
+                                Some(GeneratorPendingCompletion::Throw(v))
+                            }
+                        }
+                        Err(EvalError::Js(js_err)) => {
+                            let v = crate::core::js_error_to_value(mc, &func_env, &js_err);
+                            Some(GeneratorPendingCompletion::Throw(v))
+                        }
+                        Ok(_) => None, // try completed normally
+                    };
+
+                    // Enter finally body: find yield, run pre-yield stmts, evaluate yield
+                    let finally_body = tc.finally_body.as_ref().unwrap();
+                    let (fin_yield_idx, _, _, fin_yield_inner) = find_first_yield_in_statements(finally_body).unwrap();
+
+                    if fin_yield_idx > 0 {
+                        let pre_fin = finally_body[0..fin_yield_idx].to_vec();
+                        crate::core::evaluate_statements(mc, &func_env, &pre_fin)?;
+                    }
+
+                    let yield_val = if let Some(inner) = fin_yield_inner {
+                        crate::core::evaluate_expr(mc, &func_env, &inner)?
+                    } else {
+                        Value::Undefined
+                    };
+
+                    // Store pending completion for re-fire after finally
+                    gen_obj.pending_completion = abrupt_completion;
+
+                    // Replace the TryCatch in body with remaining finally stmts
+                    let remaining_finally = if fin_yield_idx + 1 < finally_body.len() {
+                        finally_body[fin_yield_idx + 1..].to_vec()
+                    } else {
+                        vec![]
+                    };
+                    gen_obj.body[pc_val + tc_idx] = StatementKind::Block(remaining_finally).into();
+
+                    gen_obj.state = GeneratorState::Suspended {
+                        pc: pc_val + tc_idx,
+                        stack: vec![],
+                        pre_env: Some(func_env),
+                    };
+                    gen_obj.cached_initial_yield = Some(yield_val.clone());
+                    return Ok(create_iterator_result(mc, &func_env, &yield_val, false)?);
+                }
+
+                // ---- Catch-body yield special case for .return() ----
+                // When .return() is called while suspended in a try-catch, the
+                // yield in try is replaced with `return __gen_throw_val`. If
+                // the catch body has a yield (e.g. nested try-catch within catch),
+                // we must handle it to avoid evaluate_statements failing on yield.
+                let is_catch_yield = if let StatementKind::TryCatch(tc) = &*tail[tc_idx].kind {
+                    find_first_yield_in_statements(&tc.try_body).is_none()
+                        && tc
+                            .catch_body
+                            .as_ref()
+                            .is_some_and(|cb| find_first_yield_in_statements(cb).is_some())
+                } else {
+                    false
+                };
+
+                if is_catch_yield {
+                    // For .return(), the try body has `return __gen_throw_val`.
+                    // The try body returns normally (or the return is caught?).
+                    // Since the return exits the try and there's no throw,
+                    // the catch is not entered. Run try + finally and return.
+                    let tc = if let StatementKind::TryCatch(tc) = &*tail[tc_idx].kind {
+                        tc.clone()
+                    } else {
+                        unreachable!()
+                    };
+
+                    if tc_idx > 0 {
+                        let pre_stmts = tail[0..tc_idx].to_vec();
+                        crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    }
+
+                    let try_result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tc.try_body, &[]);
+                    match try_result {
+                        Ok((crate::core::ControlFlow::Return(v), _)) => {
+                            if let Some(finally_stmts) = &tc.finally_body {
+                                crate::core::evaluate_statements(mc, &func_env, finally_stmts)?;
+                            }
+                            gen_obj.state = GeneratorState::Completed;
+                            return Ok(create_iterator_result(mc, &func_env, &v, true)?);
+                        }
+                        Ok((crate::core::ControlFlow::Throw(v, _, _), _)) | Err(EvalError::Throw(v, _, _)) => {
+                            // Try threw; bind catch param and run catch body
+                            if let Some(CatchParamPattern::Identifier(name)) = &tc.catch_param {
+                                env_set(mc, &func_env, name, &v)?;
+                            }
+                            if let Some(catch_body) = &tc.catch_body {
+                                // Catch body has yields — but for .return() we just
+                                // need to complete the generator and return the value.
+                                // The catch body's yield is not reached since we're
+                                // doing a return completion, not throwing.
+                                let _ = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, catch_body, &[]);
+                            }
+                            if let Some(finally_stmts) = &tc.finally_body {
+                                crate::core::evaluate_statements(mc, &func_env, finally_stmts)?;
+                            }
+                            gen_obj.state = GeneratorState::Completed;
+                            return Ok(create_iterator_result(mc, &func_env, return_value, true)?);
+                        }
+                        Ok(_) => {
+                            if let Some(finally_stmts) = &tc.finally_body {
+                                crate::core::evaluate_statements(mc, &func_env, finally_stmts)?;
+                            }
+                            gen_obj.state = GeneratorState::Completed;
+                            return Ok(create_iterator_result(mc, &func_env, return_value, true)?);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+
             let result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tail, &[]);
             gen_obj.state = GeneratorState::Completed;
 
             match result {
                 Ok((cf, _last)) => match cf {
-                    crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &v, true)?),
-                    crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &Value::Undefined, true)?),
+                    crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &func_env, &v, true)?),
+                    crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?),
                     crate::core::ControlFlow::Throw(v, l, c) => Err(crate::core::EvalError::Throw(v, l, c)),
                     _ => Err(raise_eval_error!("Unexpected control flow after generator return handling").into()),
                 },
@@ -3531,7 +4190,15 @@ fn generator_return<'gc>(
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     return_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let mut gen_obj = generator.borrow_mut(mc);
+    let mut gen_obj = match generator.try_borrow_mut(mc) {
+        Ok(g) => g,
+        Err(_) => return Err(raise_type_error!("Generator is already running").into()),
+    };
+
+    if matches!(gen_obj.state, GeneratorState::Running { .. }) {
+        return Err(raise_type_error!("Generator is already running").into());
+    }
+
     if let Some(iter_obj) = gen_obj.yield_star_iterator {
         let ret_method = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &iter_obj, "return") {
             Ok(v) => v,
@@ -3607,7 +4274,7 @@ fn generator_return<'gc>(
         } else {
             Value::Undefined
         };
-        return Ok(create_iterator_result_with_done(mc, &value, &done_val)?);
+        return Ok(create_iterator_result_with_done(mc, &gen_obj.env, &value, &done_val)?);
     }
 
     if let Some(iter_obj) = gen_obj.pending_iterator {
@@ -3621,7 +4288,7 @@ fn generator_return<'gc>(
     match gen_obj.state {
         GeneratorState::NotStarted | GeneratorState::Completed => {
             gen_obj.state = GeneratorState::Completed;
-            Ok(create_iterator_result(mc, return_value, true)?)
+            Ok(create_iterator_result(mc, &gen_obj.env, return_value, true)?)
         }
         GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running").into()),
         GeneratorState::Suspended { .. } => {
@@ -3637,7 +4304,14 @@ pub fn generator_throw<'gc>(
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     throw_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let mut gen_obj = generator.borrow_mut(mc);
+    let mut gen_obj = match generator.try_borrow_mut(mc) {
+        Ok(g) => g,
+        Err(_) => return Err(raise_type_error!("Generator is already running").into()),
+    };
+
+    if matches!(gen_obj.state, GeneratorState::Running { .. }) {
+        return Err(raise_type_error!("Generator is already running").into());
+    }
 
     if let Some(iter_obj) = gen_obj.yield_star_iterator {
         let throw_method = match crate::core::get_property_with_accessors(mc, &gen_obj.env, &iter_obj, "throw") {
@@ -3749,12 +4423,13 @@ pub fn generator_throw<'gc>(
         } else {
             Value::Undefined
         };
-        return Ok(create_iterator_result_with_done(mc, &value, &done_val)?);
+        return Ok(create_iterator_result_with_done(mc, &gen_obj.env, &value, &done_val)?);
     }
 
     match &mut gen_obj.state {
         GeneratorState::NotStarted => {
-            // Throwing into a not-started generator throws synchronously
+            // Throwing into a not-started generator marks it completed and throws synchronously
+            gen_obj.state = GeneratorState::Completed;
             Err(EvalError::Throw(throw_value.clone(), None, None))
         }
         GeneratorState::Suspended { pc, .. } => {
@@ -3764,6 +4439,18 @@ pub fn generator_throw<'gc>(
                 gen_obj.state = GeneratorState::Completed;
                 return Err(EvalError::Throw(throw_value.clone(), None, None));
             }
+
+            // ---- Pending completion from finally-body yield ----
+            // When the generator is paused at a yield inside a finally block,
+            // calling .throw(val) fires the throw at the yield point. The
+            // remaining finally stmts DO NOT execute (the throw is abrupt).
+            // The new throw overrides the pending completion.
+            if gen_obj.pending_completion.is_some() {
+                gen_obj.pending_completion = None;
+                gen_obj.state = GeneratorState::Completed;
+                return Err(EvalError::Throw(throw_value.clone(), None, None));
+            }
+
             let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
 
             // If resuming from a pre-executed environment, the enclosing `for`
@@ -3819,6 +4506,326 @@ pub fn generator_throw<'gc>(
 
             slot_set(mc, &func_env, InternalSlot::GenThrowVal, &throw_value.clone());
 
+            // If the modified tail still contains yields (e.g., in catch/finally
+            // bodies after the injected throw), evaluate_statements would fail
+            // on those yield expressions. Handle TryCatch with catch-body yields
+            // directly: run try body, bind catch param, evaluate catch yield.
+            if find_first_yield_in_statements(&tail).is_some() {
+                // Check if the first yield is in a catch body of a TryCatch
+                if let Some((tc_idx, _, _, _)) = find_first_yield_in_statements(&tail) {
+                    let is_catch_yield = if let StatementKind::TryCatch(tc) = &*tail[tc_idx].kind {
+                        find_first_yield_in_statements(&tc.try_body).is_none()
+                            && tc
+                                .catch_body
+                                .as_ref()
+                                .is_some_and(|cb| find_first_yield_in_statements(cb).is_some())
+                    } else {
+                        false
+                    };
+
+                    if is_catch_yield {
+                        let tc = if let StatementKind::TryCatch(tc) = &*tail[tc_idx].kind {
+                            tc.clone()
+                        } else {
+                            unreachable!()
+                        };
+
+                        // Run pre-TryCatch statements from the modified tail
+                        if tc_idx > 0 {
+                            let pre_stmts = tail[0..tc_idx].to_vec();
+                            crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        }
+
+                        // Run try body (which contains the injected throw)
+                        let try_result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tc.try_body, &[]);
+
+                        let thrown_value_opt = match try_result {
+                            Ok((crate::core::ControlFlow::Throw(v, _, _), _)) => Some(v),
+                            Err(EvalError::Throw(v, _, _)) => Some(v),
+                            Err(EvalError::Js(js_err)) => Some(crate::core::js_error_to_value(mc, &func_env, &js_err)),
+                            Ok(_) => None,
+                        };
+
+                        if let Some(thrown) = thrown_value_opt {
+                            // Bind catch parameter
+                            if let Some(CatchParamPattern::Identifier(name)) = &tc.catch_param {
+                                env_set(mc, &func_env, name, &thrown)?;
+                            }
+
+                            let catch_body = tc.catch_body.as_ref().unwrap();
+                            let (catch_yield_idx, _, _, catch_yield_inner) = find_first_yield_in_statements(catch_body).unwrap();
+
+                            if catch_yield_idx > 0 {
+                                let pre_catch = catch_body[0..catch_yield_idx].to_vec();
+                                crate::core::evaluate_statements(mc, &func_env, &pre_catch)?;
+                            }
+
+                            let yield_val = if let Some(inner) = catch_yield_inner {
+                                crate::core::evaluate_expr(mc, &func_env, &inner)?
+                            } else {
+                                Value::Undefined
+                            };
+
+                            // Inject the throw into the ACTUAL body so that on next
+                            // resume, the TryCatch's try body will re-throw (the
+                            // yield in try was replaced with throw __gen_throw_val).
+                            let mut replaced_in_body = false;
+                            for s in gen_obj.body[pc_val..].iter_mut() {
+                                if replace_first_yield_statement_with_throw(s, throw_value) {
+                                    replaced_in_body = true;
+                                    break;
+                                }
+                            }
+                            if !replaced_in_body {
+                                gen_obj.body[pc_val] = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None)).into();
+                            }
+
+                            gen_obj.state = GeneratorState::Suspended {
+                                pc: pc_val + tc_idx,
+                                stack: vec![],
+                                pre_env: Some(func_env),
+                            };
+                            gen_obj.cached_initial_yield = Some(yield_val.clone());
+                            return Ok(create_iterator_result(mc, &func_env, &yield_val, false)?);
+                        }
+
+                        // Try completed normally (shouldn't happen with injected throw)
+                        if let Some(finally_stmts) = &tc.finally_body {
+                            crate::core::evaluate_statements(mc, &func_env, finally_stmts)?;
+                        }
+                        gen_obj.state = GeneratorState::Completed;
+                        return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?);
+                    }
+
+                    // ---- Finally-body yield special case ----
+                    // Scan for any TryCatch in the tail whose finally body
+                    // has yields. This handles nested structures where the
+                    // try body may have unreachable yields (the injected throw
+                    // fires before they are reached).
+                    let finally_tc_idx = tail.iter().position(|s| {
+                        if let StatementKind::TryCatch(tc) = &*s.kind {
+                            tc.finally_body
+                                .as_ref()
+                                .is_some_and(|fb| find_first_yield_in_statements(fb).is_some())
+                                && (tc.catch_body.is_none()
+                                    || tc
+                                        .catch_body
+                                        .as_ref()
+                                        .is_some_and(|cb| find_first_yield_in_statements(cb).is_none()))
+                        } else {
+                            false
+                        }
+                    });
+
+                    if let Some(ftc_idx) = finally_tc_idx {
+                        // Check if the throw was injected BEFORE the TryCatch.
+                        // If so, the TryCatch is never reached — skip this handler.
+                        let throw_before_tc = if let Some((orig_idx, _, _, _)) = find_first_yield_in_statements(&tail_before) {
+                            orig_idx < ftc_idx
+                        } else {
+                            false
+                        };
+
+                        if !throw_before_tc {
+                            let tc = if let StatementKind::TryCatch(tc) = &*tail[ftc_idx].kind {
+                                tc.clone()
+                            } else {
+                                unreachable!()
+                            };
+
+                            // Check if there's a nested TryCatch in the try body
+                            // where the inner catch has yields (the throw is caught
+                            // by the inner catch, so we should yield from inner catch
+                            // rather than proceeding to the finally body).
+                            let nested_catch_yield_info: Option<(usize, Box<crate::core::TryCatchStatement>)> =
+                                tc.try_body.iter().enumerate().find_map(|(i, s)| {
+                                    if let StatementKind::TryCatch(inner_tc) = &*s.kind
+                                        && find_first_yield_in_statements(&inner_tc.try_body).is_none()
+                                        && inner_tc
+                                            .catch_body
+                                            .as_ref()
+                                            .is_some_and(|cb| find_first_yield_in_statements(cb).is_some())
+                                    {
+                                        return Some((i, inner_tc.clone()));
+                                    }
+                                    None
+                                });
+
+                            if let Some((inner_tc_idx, inner_tc)) = nested_catch_yield_info {
+                                // ---- Nested catch-body yield ----
+                                // The throw is caught by inner catch, yield from inner catch.
+                                if ftc_idx > 0 {
+                                    let pre_stmts = tail[0..ftc_idx].to_vec();
+                                    crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                }
+
+                                // Run outer try body stmts before the inner TryCatch
+                                if inner_tc_idx > 0 {
+                                    let pre_inner = tc.try_body[0..inner_tc_idx].to_vec();
+                                    crate::core::evaluate_statements(mc, &func_env, &pre_inner)?;
+                                }
+
+                                // Run inner TryCatch try body (which throws)
+                                let try_result =
+                                    crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &inner_tc.try_body, &[]);
+                                let thrown = match try_result {
+                                    Ok((crate::core::ControlFlow::Throw(v, _, _), _)) | Err(EvalError::Throw(v, _, _)) => Some(v),
+                                    Err(EvalError::Js(js_err)) => Some(crate::core::js_error_to_value(mc, &func_env, &js_err)),
+                                    Ok(_) => None,
+                                };
+
+                                if let Some(thrown_val) = thrown {
+                                    if let Some(CatchParamPattern::Identifier(name)) = &inner_tc.catch_param {
+                                        env_set(mc, &func_env, name, &thrown_val)?;
+                                    }
+                                    let catch_body = inner_tc.catch_body.as_ref().unwrap();
+                                    let (catch_yield_idx, _, _, catch_yield_inner) = find_first_yield_in_statements(catch_body).unwrap();
+                                    if catch_yield_idx > 0 {
+                                        let pre_catch = catch_body[0..catch_yield_idx].to_vec();
+                                        crate::core::evaluate_statements(mc, &func_env, &pre_catch)?;
+                                    }
+                                    let yield_val = if let Some(inner) = catch_yield_inner {
+                                        crate::core::evaluate_expr(mc, &func_env, &inner)?
+                                    } else {
+                                        Value::Undefined
+                                    };
+
+                                    // Inject throw into actual body for next resume
+                                    let mut replaced_in_body = false;
+                                    for s in gen_obj.body[pc_val..].iter_mut() {
+                                        if replace_first_yield_statement_with_throw(s, throw_value) {
+                                            replaced_in_body = true;
+                                            break;
+                                        }
+                                    }
+                                    if !replaced_in_body {
+                                        gen_obj.body[pc_val] =
+                                            StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None)).into();
+                                    }
+
+                                    gen_obj.state = GeneratorState::Suspended {
+                                        pc: pc_val + ftc_idx,
+                                        stack: vec![],
+                                        pre_env: Some(func_env),
+                                    };
+                                    gen_obj.cached_initial_yield = Some(yield_val.clone());
+                                    return Ok(create_iterator_result(mc, &func_env, &yield_val, false)?);
+                                }
+                                // Inner try didn't throw — shouldn't happen, fall through
+                            } else {
+                                // ---- Finally-body yield (throw propagates to finally) ----
+
+                                // Run pre-TryCatch statements from the modified tail
+                                if ftc_idx > 0 {
+                                    let pre_stmts = tail[0..ftc_idx].to_vec();
+                                    crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                                }
+
+                                // Run try body (which contains the injected throw)
+                                let try_result =
+                                    crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tc.try_body, &[]);
+
+                                // Determine the abrupt completion from try/catch
+                                let abrupt_completion: Option<GeneratorPendingCompletion> = match try_result {
+                                    Ok((crate::core::ControlFlow::Throw(v, _, _), _)) | Err(EvalError::Throw(v, _, _)) => {
+                                        if let Some(catch_body) = &tc.catch_body {
+                                            // Bind catch param and run catch body
+                                            if let Some(CatchParamPattern::Identifier(name)) = &tc.catch_param {
+                                                env_set(mc, &func_env, name, &v)?;
+                                            }
+                                            match crate::core::evaluate_statements_with_context_and_last_value(
+                                                mc,
+                                                &func_env,
+                                                catch_body,
+                                                &[],
+                                            ) {
+                                                Ok((crate::core::ControlFlow::Normal(_), _)) => None,
+                                                Ok((crate::core::ControlFlow::Return(rv), _)) => {
+                                                    Some(GeneratorPendingCompletion::Return(rv))
+                                                }
+                                                Ok((crate::core::ControlFlow::Throw(tv, _, _), _)) => {
+                                                    Some(GeneratorPendingCompletion::Throw(tv))
+                                                }
+                                                Err(EvalError::Throw(tv, _, _)) => Some(GeneratorPendingCompletion::Throw(tv)),
+                                                Err(EvalError::Js(js_err)) => Some(GeneratorPendingCompletion::Throw(
+                                                    crate::core::js_error_to_value(mc, &func_env, &js_err),
+                                                )),
+                                                _ => None,
+                                            }
+                                        } else {
+                                            // No catch: the throw is parked for re-fire after finally
+                                            Some(GeneratorPendingCompletion::Throw(v))
+                                        }
+                                    }
+                                    Err(EvalError::Js(js_err)) => {
+                                        let v = crate::core::js_error_to_value(mc, &func_env, &js_err);
+                                        if let Some(catch_body) = &tc.catch_body {
+                                            if let Some(CatchParamPattern::Identifier(name)) = &tc.catch_param {
+                                                env_set(mc, &func_env, name, &v)?;
+                                            }
+                                            match crate::core::evaluate_statements_with_context_and_last_value(
+                                                mc,
+                                                &func_env,
+                                                catch_body,
+                                                &[],
+                                            ) {
+                                                Ok((crate::core::ControlFlow::Normal(_), _)) => None,
+                                                Ok((crate::core::ControlFlow::Return(rv), _)) => {
+                                                    Some(GeneratorPendingCompletion::Return(rv))
+                                                }
+                                                Ok((crate::core::ControlFlow::Throw(tv, _, _), _)) => {
+                                                    Some(GeneratorPendingCompletion::Throw(tv))
+                                                }
+                                                Err(EvalError::Throw(tv, _, _)) => Some(GeneratorPendingCompletion::Throw(tv)),
+                                                _ => None,
+                                            }
+                                        } else {
+                                            Some(GeneratorPendingCompletion::Throw(v))
+                                        }
+                                    }
+                                    Ok((crate::core::ControlFlow::Return(v), _)) => Some(GeneratorPendingCompletion::Return(v)),
+                                    Ok(_) => None, // try completed normally
+                                };
+
+                                // Enter finally body: find yield, run pre-yield stmts, evaluate yield
+                                let finally_body = tc.finally_body.as_ref().unwrap();
+                                let (fin_yield_idx, _, _, fin_yield_inner) = find_first_yield_in_statements(finally_body).unwrap();
+
+                                if fin_yield_idx > 0 {
+                                    let pre_fin = finally_body[0..fin_yield_idx].to_vec();
+                                    crate::core::evaluate_statements(mc, &func_env, &pre_fin)?;
+                                }
+
+                                let yield_val = if let Some(inner) = fin_yield_inner {
+                                    crate::core::evaluate_expr(mc, &func_env, &inner)?
+                                } else {
+                                    Value::Undefined
+                                };
+
+                                // Store pending completion for re-fire after finally
+                                gen_obj.pending_completion = abrupt_completion;
+
+                                // Replace the TryCatch in body with remaining finally stmts
+                                let remaining_finally = if fin_yield_idx + 1 < finally_body.len() {
+                                    finally_body[fin_yield_idx + 1..].to_vec()
+                                } else {
+                                    vec![]
+                                };
+                                gen_obj.body[pc_val + ftc_idx] = StatementKind::Block(remaining_finally).into();
+
+                                gen_obj.state = GeneratorState::Suspended {
+                                    pc: pc_val + ftc_idx,
+                                    stack: vec![],
+                                    pre_env: Some(func_env),
+                                };
+                                gen_obj.cached_initial_yield = Some(yield_val.clone());
+                                return Ok(create_iterator_result(mc, &func_env, &yield_val, false)?);
+                            }
+                        } // close if !throw_before_tc
+                    } // close if let Some(ftc_idx)
+                } // close if let Some((tc_idx, ...))
+            } // close if find_first_yield
+
             // Execute the modified tail. If the throw is uncaught, evaluate_statements
             // will return Err and we should propagate that to the caller.
             let func_home = func_env.borrow().get_home_object().map(|h| Gc::as_ptr(*h.borrow()));
@@ -3838,8 +4845,8 @@ pub fn generator_throw<'gc>(
 
             match result {
                 Ok((cf, _last)) => match cf {
-                    crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &v, true)?),
-                    crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &Value::Undefined, true)?),
+                    crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &func_env, &v, true)?),
+                    crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?),
                     crate::core::ControlFlow::Throw(v, l, c) => Err(crate::core::EvalError::Throw(v, l, c)),
                     _ => Err(raise_eval_error!("Unexpected control flow after generator throw handling").into()),
                 },
@@ -3847,14 +4854,43 @@ pub fn generator_throw<'gc>(
             }
         }
         GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running").into()),
-        GeneratorState::Completed => Err(raise_eval_error!("Generator has already completed").into()),
+        GeneratorState::Completed => Err(EvalError::Throw(throw_value.clone(), None, None)),
     }
 }
 
+fn get_global_env<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'gc> {
+    let mut global_env = *env;
+    loop {
+        if global_env
+            .borrow()
+            .properties
+            .contains_key(&crate::core::PropertyKey::String("globalThis".to_string()))
+        {
+            break;
+        }
+        let proto = global_env.borrow().prototype;
+        if let Some(p) = proto {
+            global_env = p;
+        } else {
+            break;
+        }
+    }
+    global_env
+}
+
 /// Create an iterator result object {value: value, done: done}
-fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: &Value<'gc>, done: bool) -> Result<Value<'gc>, JSError> {
+fn create_iterator_result<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    value: &Value<'gc>,
+    done: bool,
+) -> Result<Value<'gc>, JSError> {
     // Iterator result objects should be extensible by default
     let obj = crate::core::new_js_object_data(mc);
+
+    // Ensure iterator result inherits from Object.prototype
+    let global_env = get_global_env(mc, env);
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, &global_env, "Object");
 
     // Debug: report iterator result being created
     log::trace!("create_iterator_result: value={:?} done={}", value, done);
@@ -3870,10 +4906,15 @@ fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: &Value<'gc>, do
 
 fn create_iterator_result_with_done<'gc>(
     mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
     done_value: &Value<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     let obj = crate::core::new_js_object_data(mc);
+
+    let global_env = get_global_env(mc, env);
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, &global_env, "Object");
+
     object_set_key_value(mc, &obj, "value", value)?;
     object_set_key_value(mc, &obj, "done", done_value)?;
     Ok(Value::Object(obj))
@@ -3899,18 +4940,40 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     // DEBUG: report gen_proto and later when GeneratorFunction.prototype is linked
     log::debug!("init_generator: gen_proto created at {:p}", Gc::as_ptr(gen_proto));
 
-    // Attach prototype methods as named functions that dispatch to the generator handler
-    let val = Value::Function("Generator.prototype.next".to_string());
-    object_set_key_value(mc, &gen_proto, "next", &val)?;
-    gen_proto.borrow_mut(mc).set_non_enumerable("next");
+    // Attach prototype methods as built-in function objects with proper name/length.
+    let create_builtin_method_obj = |native_name: &str, display_name: &str, length: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
+        let method_obj = crate::core::new_js_object_data(mc);
+        if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            method_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        method_obj
+            .borrow_mut(mc)
+            .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function(native_name.to_string()))));
 
-    let val = Value::Function("Generator.prototype.return".to_string());
-    object_set_key_value(mc, &gen_proto, "return", &val)?;
-    gen_proto.borrow_mut(mc).set_non_enumerable("return");
+        let name_desc =
+            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(display_name)), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &method_obj, "name", &name_desc)?;
 
-    let val = Value::Function("Generator.prototype.throw".to_string());
-    object_set_key_value(mc, &gen_proto, "throw", &val)?;
-    gen_proto.borrow_mut(mc).set_non_enumerable("throw");
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(length), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &method_obj, "length", &len_desc)?;
+        Ok(method_obj)
+    };
+
+    let next_obj = create_builtin_method_obj("Generator.prototype.next", "next", 1.0)?;
+    let next_desc = crate::core::create_descriptor_object(mc, &Value::Object(next_obj), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_proto, "next", &next_desc)?;
+
+    let return_obj = create_builtin_method_obj("Generator.prototype.return", "return", 1.0)?;
+    let return_desc = crate::core::create_descriptor_object(mc, &Value::Object(return_obj), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_proto, "return", &return_desc)?;
+
+    let throw_obj = create_builtin_method_obj("Generator.prototype.throw", "throw", 1.0)?;
+    let throw_desc = crate::core::create_descriptor_object(mc, &Value::Object(throw_obj), true, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_proto, "throw", &throw_desc)?;
 
     // Register Symbol.iterator on Generator.prototype -> returns the generator object itself
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -3919,9 +4982,10 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
     {
         // Create a function name recognized by the call dispatcher
-        let val = Value::Function("Generator.prototype.iterator".to_string());
+        let iter_obj = create_builtin_method_obj("Generator.prototype.iterator", "[Symbol.iterator]", 0.0)?;
         log::debug!("js_generator::init: registering Symbol.iterator ptr = {:p}", Gc::as_ptr(*iter_sym));
-        object_set_key_value(mc, &gen_proto, iter_sym, &val)?;
+        let iter_desc = crate::core::create_descriptor_object(mc, &Value::Object(iter_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &gen_proto, *iter_sym, &iter_desc)?;
         gen_proto
             .borrow_mut(mc)
             .set_non_enumerable(crate::core::PropertyKey::Symbol(*iter_sym));
@@ -3997,6 +5061,11 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     // writable=false, enumerable=false, configurable=true
     let desc_proto_ctor = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_ctor), false, false, true)?;
     crate::js_object::define_property_internal(mc, &gen_func_proto, "constructor", &desc_proto_ctor)?;
+
+    // %GeneratorPrototype%.constructor -> %GeneratorFunction.prototype%
+    // writable=false, enumerable=false, configurable=true
+    let gen_proto_ctor_desc = crate::core::create_descriptor_object(mc, &Value::Object(gen_func_proto), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &gen_proto, "constructor", &gen_proto_ctor_desc)?;
     // DEBUG: report whether `gen_func_proto` now has a 'prototype' property and where it points
     if let Some(proto_rc) = crate::core::object_get_key_value(&gen_func_proto, "prototype") {
         let proto_val = proto_rc.borrow().clone();

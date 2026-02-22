@@ -368,7 +368,30 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         && let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator")
         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
     {
-        object_set_key_value(mc, &iterator_proto, iter_sym, &Value::Function("IteratorSelf".to_string()))?;
+        // Create a proper function object with name="[Symbol.iterator]" and length=0
+        let iter_fn_obj = new_js_object_data(mc);
+        if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            iter_fn_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        iter_fn_obj
+            .borrow_mut(mc)
+            .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function("IteratorSelf".to_string()))));
+        let name_desc = crate::core::create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("[Symbol.iterator]")),
+            false,
+            false,
+            true,
+        )?;
+        crate::js_object::define_property_internal(mc, &iter_fn_obj, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &iter_fn_obj, "length", &len_desc)?;
+
+        object_set_key_value(mc, &iterator_proto, iter_sym, &Value::Object(iter_fn_obj))?;
         iterator_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
     }
 

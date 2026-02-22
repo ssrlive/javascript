@@ -260,7 +260,7 @@ pub fn handle_global_function<'gc>(
         "parseInt" => return parse_int_function(args),
         "parseFloat" => return parse_float_function(args),
         "isNaN" => return is_nan_function(args),
-        "isFinite" => return is_finite_function(args),
+        "isFinite" => return is_finite_function(mc, args, env),
         "encodeURIComponent" => return encode_uri_component(mc, args, env),
         "decodeURIComponent" => return decode_uri_component(mc, args, env),
         "Object" => return crate::js_class::handle_object_constructor(mc, args, env),
@@ -1175,24 +1175,14 @@ fn is_nan_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc
     }
 }
 
-fn is_finite_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Evaluate all arguments for side effects
-
+fn is_finite_function<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let arg_val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
-
-    match arg_val {
-        Value::Number(n) => Ok(Value::Boolean(n.is_finite())),
-        Value::String(s) => {
-            let str_val = utf16_to_utf8(&s);
-            match str_val.trim().parse::<f64>() {
-                Ok(n) => Ok(Value::Boolean(n.is_finite())),
-                Err(_) => Ok(Value::Boolean(false)), // Non-numeric strings are not finite
-            }
-        }
-        Value::Boolean(_) => Ok(Value::Boolean(true)), // Booleans are finite
-        Value::Undefined => Ok(Value::Boolean(false)), // undefined is not finite
-        _ => Ok(Value::Boolean(false)),                // Objects, functions, etc. are not finite
-    }
+    let num = crate::core::to_number_with_env(mc, env, &arg_val)?;
+    Ok(Value::Boolean(num.is_finite()))
 }
 
 fn function_constructor<'gc>(

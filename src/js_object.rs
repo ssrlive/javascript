@@ -1724,7 +1724,19 @@ pub fn handle_object_method<'gc>(
                             | "Object.prototype.__lookupSetter__"
                             | "ArrayBuffer.isView"
                             | "ArrayBuffer.prototype.resize"
-                            | "Array.prototype.sort" => 1.0,
+                            | "Array.prototype.sort"
+                            | "Function.prototype.call"
+                            | "Function.prototype.bind"
+                            | "Function.prototype.[Symbol.hasInstance]"
+                            | "Error.isError"
+                            | "encodeURI"
+                            | "encodeURIComponent"
+                            | "decodeURI"
+                            | "decodeURIComponent"
+                            | "isNaN"
+                            | "isFinite"
+                            | "parseInt"
+                            | "parseFloat" => 1.0,
                             "Array.prototype.slice"
                             | "Array.prototype.splice"
                             | "Array.prototype.copyWithin"
@@ -1736,13 +1748,18 @@ pub fn handle_object_method<'gc>(
                             | "Object.groupBy"
                             | "Object.hasOwn"
                             | "Object.is"
-                            | "Object.setPrototypeOf" => 2.0,
+                            | "Object.setPrototypeOf"
+                            | "Function.prototype.apply" => 2.0,
                             "Object.defineProperty" => 3.0,
                             _ => 0.0,
                         };
                         crate::core::create_descriptor_object(mc, &Value::Number(len), false, false, true)?
                     } else if prop_name == "name" {
-                        let short_name = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                        let short_name = if func_name.contains("[Symbol.hasInstance]") {
+                            "[Symbol.hasInstance]"
+                        } else {
+                            func_name.rsplit('.').next().unwrap_or(func_name.as_str())
+                        };
                         crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(short_name)), false, false, true)?
                     } else {
                         return Ok(Value::Undefined);

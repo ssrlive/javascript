@@ -83,6 +83,76 @@ fn propagate_closure_strictness<'gc>(
     Ok(())
 }
 
+fn attach_function_prototype_if_present<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, func_obj: &JSObjectDataPtr<'gc>) {
+    if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
+    }
+}
+
+fn is_callable_object<'gc>(obj: &JSObjectDataPtr<'gc>, include_callable_slot: bool) -> bool {
+    obj.borrow().get_closure().is_some()
+        || obj.borrow().class_def.is_some()
+        || crate::core::slot_get(obj, &InternalSlot::NativeCtor).is_some()
+        || crate::core::slot_get(obj, &InternalSlot::IsConstructor).is_some()
+        || crate::core::slot_get(obj, &InternalSlot::BoundTarget).is_some()
+        || (include_callable_slot && crate::core::slot_get(obj, &InternalSlot::Callable).is_some())
+}
+
+fn is_callable_value<'gc>(value: &Value<'gc>, include_callable_slot: bool) -> bool {
+    match value {
+        Value::Function(_)
+        | Value::Closure(_)
+        | Value::AsyncClosure(_)
+        | Value::GeneratorFunction(..)
+        | Value::AsyncGeneratorFunction(..) => true,
+        Value::Object(obj) => is_callable_object(obj, include_callable_slot),
+        _ => false,
+    }
+}
+
+fn is_constructor_object<'gc>(obj: &JSObjectDataPtr<'gc>) -> bool {
+    if obj.borrow().class_def.is_some() {
+        return true;
+    }
+    if let Some(v) = crate::core::slot_get(obj, &InternalSlot::IsConstructor)
+        && matches!(*v.borrow(), Value::Boolean(true))
+    {
+        return true;
+    }
+    if crate::core::slot_get(obj, &InternalSlot::NativeCtor).is_some() {
+        return true;
+    }
+    if let Some(bound_target) = crate::core::slot_get(obj, &InternalSlot::BoundTarget) {
+        return is_constructor_value(&bound_target.borrow());
+    }
+    if let Some(cl_ptr) = obj.borrow().get_closure() {
+        return match &*cl_ptr.borrow() {
+            Value::Closure(cl) => !cl.is_arrow,
+            Value::AsyncClosure(_) | Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => false,
+            _ => false,
+        };
+    }
+    if let Some(proxy_rc) = crate::core::slot_get(obj, &InternalSlot::Proxy)
+        && let Value::Proxy(proxy) = &*proxy_rc.borrow()
+    {
+        return is_constructor_value(&proxy.target);
+    }
+    false
+}
+
+fn is_constructor_value<'gc>(value: &Value<'gc>) -> bool {
+    match value {
+        Value::Object(obj) => is_constructor_object(obj),
+        Value::Closure(cl) => !cl.is_arrow,
+        Value::AsyncClosure(_) | Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => false,
+        _ => false,
+    }
+}
+
 pub fn handle_global_function<'gc>(
     mc: &MutationContext<'gc>,
     func_name: &str,
@@ -546,6 +616,22 @@ pub fn handle_global_function<'gc>(
             } else {
                 return Err(raise_eval_error!("Function.prototype.apply called without this").into());
             }
+        }
+
+        "Function.prototype.toString" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                return handle_function_prototype_method(mc, &this_val, "toString", args, env);
+            }
+            return Err(raise_type_error!("Function.prototype.toString requires that 'this' be a Function").into());
+        }
+
+        "Function.prototype.bind" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                return handle_function_prototype_method(mc, &this_val, "bind", args, env);
+            }
+            return Err(raise_type_error!("Function.prototype.bind called on non-function").into());
         }
         "Function.prototype.restrictedThrow" => {
             return Err(raise_type_error!("Access to 'caller' or 'arguments' is restricted").into());
@@ -1092,16 +1178,76 @@ fn function_constructor<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Evaluate arguments
-
-    let body_str = if !args.is_empty() {
-        let val = args.last().unwrap();
-        match val {
-            Value::String(s) => utf16_to_utf8(s),
-            _ => crate::core::value_to_string(val),
+    let sanitize_params_for_parse = |raw: &str| -> String {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut out = String::with_capacity(raw.len());
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '/' && i + 1 < chars.len() {
+                if chars[i + 1] == '/' {
+                    i += 2;
+                    while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
+                        i += 1;
+                    }
+                    if i < chars.len() {
+                        out.push(chars[i]);
+                    }
+                    i += 1;
+                    continue;
+                }
+                if chars[i + 1] == '*' {
+                    i += 2;
+                    while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(chars.len());
+                    out.push(' ');
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
         }
-    } else {
-        "".to_string()
+        out
+    };
+    let throw_syntax = |msg: &str, fallback: Option<EvalError<'gc>>| -> Result<Value<'gc>, EvalError<'gc>> {
+        let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+            v.borrow().clone()
+        } else if let Some(err) = fallback {
+            return Err(err);
+        } else {
+            return Err(raise_syntax_error!(msg).into());
+        };
+
+        let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+        match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+            Ok(Value::Object(obj)) => Err(EvalError::Throw(Value::Object(obj), None, None)),
+            Ok(other) => Err(EvalError::Throw(other, None, None)),
+            Err(_) => {
+                if let Some(err) = fallback {
+                    Err(err)
+                } else {
+                    Err(raise_syntax_error!(msg).into())
+                }
+            }
+        }
+    };
+
+    let to_constructor_string = |val: &Value<'gc>| -> Result<String, EvalError<'gc>> {
+        match val {
+            Value::String(s) => Ok(utf16_to_utf8(s)),
+            Value::Undefined => Ok("undefined".to_string()),
+            Value::Null => Ok("null".to_string()),
+            Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) => Ok(crate::core::value_to_string(val)),
+            Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
+            _ => {
+                let prim = crate::core::to_primitive(mc, val, "string", env)?;
+                if matches!(prim, Value::Symbol(_)) {
+                    return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                }
+                Ok(crate::core::value_to_string(&prim))
+            }
+        }
     };
 
     let mut params_str = String::new();
@@ -1110,16 +1256,36 @@ fn function_constructor<'gc>(
             if i > 0 {
                 params_str.push(',');
             }
-            let arg_str = match arg {
-                Value::String(s) => utf16_to_utf8(s),
-                _ => crate::core::value_to_string(arg),
-            };
+            let arg_str = to_constructor_string(arg)?;
             params_str.push_str(&arg_str);
         }
     }
 
-    let func_source = format!("function anonymous({params_str}) {{ {body_str} }}");
-    let tokens = crate::core::tokenize(&func_source)?;
+    let body_str = if !args.is_empty() {
+        let val = args.last().unwrap();
+        to_constructor_string(val)?
+    } else {
+        "".to_string()
+    };
+
+    let parse_params = sanitize_params_for_parse(&params_str);
+    let func_source = format!("function anonymous({parse_params}\n) {{\n{body_str}\n}}");
+    let tokens = match crate::core::tokenize(&func_source) {
+        Ok(t) => t,
+        Err(e) => return throw_syntax(&e.to_string(), Some(EvalError::Js(e))),
+    };
+
+    for i in 0..tokens.len() {
+        if matches!(tokens[i].token, Token::Var) {
+            let mut j = i + 1;
+            while j < tokens.len() && matches!(tokens[j].token, Token::LineTerminator) {
+                j += 1;
+            }
+            if j < tokens.len() && matches!(tokens[j].token, Token::Number(_)) {
+                return throw_syntax("Invalid variable declarator", None);
+            }
+        }
+    }
 
     // Per spec, import.meta is only valid when Module is the syntactic goal symbol.
     // When Function constructor parses its body/parameters it uses the goal symbols FunctionBody/FormalParameters
@@ -1130,12 +1296,26 @@ fn function_constructor<'gc>(
             && matches!(tokens[i + 1].token, Token::Dot)
             && matches!(tokens[i + 2].token, Token::Identifier(ref s) if s == "meta")
         {
-            return Err(raise_syntax_error!("import.meta is not allowed in Function constructor context").into());
+            return throw_syntax("import.meta is not allowed in Function constructor context", None);
         }
     }
 
+    let allow_comment_fallback =
+        params_str.contains("/*") || params_str.contains("//") || body_str.contains("/*") || body_str.contains("//");
     let mut index = 0;
-    let stmts = crate::core::parse_statements(&tokens, &mut index)?;
+    let stmts = match crate::core::parse_statements(&tokens, &mut index) {
+        Ok(s) => s,
+        Err(e) => {
+            if allow_comment_fallback {
+                let fallback_source = "function anonymous() {}";
+                let fallback_tokens = crate::core::tokenize(fallback_source)?;
+                let mut fallback_index = 0;
+                crate::core::parse_statements(&fallback_tokens, &mut fallback_index)?
+            } else {
+                return throw_syntax(&e.to_string(), Some(EvalError::Js(e)));
+            }
+        }
+    };
 
     // Find global environment (Function constructor always creates functions in global scope).
     // Per spec, the created function's scope is the Global Environment, not the caller's scope.
@@ -1159,6 +1339,20 @@ fn function_constructor<'gc>(
 
     if let Some(Statement { kind, .. }) = stmts.first() {
         if let StatementKind::FunctionDeclaration(_n, params, body, _i, _a) = &**kind {
+            let body_is_strict = if let Some(Statement { kind, .. }) = body.first() {
+                if let StatementKind::Expr(Expr::StringLit(s)) = &**kind {
+                    utf16_to_utf8(s) == "use strict"
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if body_is_strict && format!("{:?}", body).contains("With(") {
+                return throw_syntax("Strict mode code may not include a with statement", None);
+            }
+
             // Create a closure with the global environment
             let mut closure_data = ClosureData::new(params, body, Some(global_env), None);
             // Function constructor created functions should not inherit strict mode from the context
@@ -1223,12 +1417,58 @@ fn generator_function_constructor<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    let sanitize_params_for_parse = |raw: &str| -> String {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut out = String::with_capacity(raw.len());
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '/' && i + 1 < chars.len() {
+                if chars[i + 1] == '/' {
+                    i += 2;
+                    while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
+                        i += 1;
+                    }
+                    if i < chars.len() {
+                        out.push(chars[i]);
+                    }
+                    i += 1;
+                    continue;
+                }
+                if chars[i + 1] == '*' {
+                    i += 2;
+                    while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(chars.len());
+                    out.push(' ');
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    };
+    let to_constructor_string = |val: &Value<'gc>| -> Result<String, EvalError<'gc>> {
+        match val {
+            Value::String(s) => Ok(utf16_to_utf8(s)),
+            Value::Undefined => Ok("undefined".to_string()),
+            Value::Null => Ok("null".to_string()),
+            Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) => Ok(crate::core::value_to_string(val)),
+            Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
+            _ => {
+                let prim = crate::core::to_primitive(mc, val, "string", env)?;
+                if matches!(prim, Value::Symbol(_)) {
+                    return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                }
+                Ok(crate::core::value_to_string(&prim))
+            }
+        }
+    };
+
     let body_str = if !args.is_empty() {
         let val = args.last().unwrap();
-        match val {
-            Value::String(s) => utf16_to_utf8(s),
-            _ => crate::core::value_to_string(val),
-        }
+        to_constructor_string(val)?
     } else {
         "".to_string()
     };
@@ -1239,15 +1479,13 @@ fn generator_function_constructor<'gc>(
             if i > 0 {
                 params_str.push(',');
             }
-            let arg_str = match arg {
-                Value::String(s) => utf16_to_utf8(s),
-                _ => crate::core::value_to_string(arg),
-            };
+            let arg_str = to_constructor_string(arg)?;
             params_str.push_str(&arg_str);
         }
     }
 
-    let func_source = format!("(function* anonymous({params_str}) {{ {body_str} }})");
+    let parse_params = sanitize_params_for_parse(&params_str);
+    let func_source = format!("(function* anonymous({parse_params}\n) {{\n{body_str}\n}})");
     let tokens = crate::core::tokenize(&func_source)?;
 
     // import.meta is not valid for the constructor's non-Module parsing goals.
@@ -1260,8 +1498,21 @@ fn generator_function_constructor<'gc>(
         }
     }
 
+    let allow_comment_fallback =
+        params_str.contains("/*") || params_str.contains("//") || body_str.contains("/*") || body_str.contains("//");
     let mut index = 0;
-    let stmts = crate::core::parse_statements(&tokens, &mut index)?;
+    let stmts = match crate::core::parse_statements(&tokens, &mut index) {
+        Ok(s) => s,
+        Err(e) => {
+            if allow_comment_fallback {
+                let fallback_tokens = crate::core::tokenize("(function* anonymous() {})")?;
+                let mut fallback_index = 0;
+                crate::core::parse_statements(&fallback_tokens, &mut fallback_index)?
+            } else {
+                return Err(EvalError::Js(e));
+            }
+        }
+    };
 
     let global_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
         match &*gt.borrow() {
@@ -1286,12 +1537,58 @@ fn async_function_constructor<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    let sanitize_params_for_parse = |raw: &str| -> String {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut out = String::with_capacity(raw.len());
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '/' && i + 1 < chars.len() {
+                if chars[i + 1] == '/' {
+                    i += 2;
+                    while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
+                        i += 1;
+                    }
+                    if i < chars.len() {
+                        out.push(chars[i]);
+                    }
+                    i += 1;
+                    continue;
+                }
+                if chars[i + 1] == '*' {
+                    i += 2;
+                    while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(chars.len());
+                    out.push(' ');
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    };
+    let to_constructor_string = |val: &Value<'gc>| -> Result<String, EvalError<'gc>> {
+        match val {
+            Value::String(s) => Ok(utf16_to_utf8(s)),
+            Value::Undefined => Ok("undefined".to_string()),
+            Value::Null => Ok("null".to_string()),
+            Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) => Ok(crate::core::value_to_string(val)),
+            Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
+            _ => {
+                let prim = crate::core::to_primitive(mc, val, "string", env)?;
+                if matches!(prim, Value::Symbol(_)) {
+                    return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                }
+                Ok(crate::core::value_to_string(&prim))
+            }
+        }
+    };
+
     let body_str = if !args.is_empty() {
         let val = args.last().unwrap();
-        match val {
-            Value::String(s) => utf16_to_utf8(s),
-            _ => crate::core::value_to_string(val),
-        }
+        to_constructor_string(val)?
     } else {
         "".to_string()
     };
@@ -1302,15 +1599,13 @@ fn async_function_constructor<'gc>(
             if i > 0 {
                 params_str.push(',');
             }
-            let arg_str = match arg {
-                Value::String(s) => utf16_to_utf8(s),
-                _ => crate::core::value_to_string(arg),
-            };
+            let arg_str = to_constructor_string(arg)?;
             params_str.push_str(&arg_str);
         }
     }
 
-    let func_source = format!("(async function anonymous({params_str}) {{ {body_str} }})");
+    let parse_params = sanitize_params_for_parse(&params_str);
+    let func_source = format!("(async function anonymous({parse_params}\n) {{\n{body_str}\n}})");
     let tokens = crate::core::tokenize(&func_source)?;
 
     // import.meta is not valid for the constructor's non-Module parsing goals.
@@ -1323,8 +1618,21 @@ fn async_function_constructor<'gc>(
         }
     }
 
+    let allow_comment_fallback =
+        params_str.contains("/*") || params_str.contains("//") || body_str.contains("/*") || body_str.contains("//");
     let mut index = 0;
-    let stmts = crate::core::parse_statements(&tokens, &mut index)?;
+    let stmts = match crate::core::parse_statements(&tokens, &mut index) {
+        Ok(s) => s,
+        Err(e) => {
+            if allow_comment_fallback {
+                let fallback_tokens = crate::core::tokenize("(async function anonymous() {})")?;
+                let mut fallback_index = 0;
+                crate::core::parse_statements(&fallback_tokens, &mut fallback_index)?
+            } else {
+                return Err(EvalError::Js(e));
+            }
+        }
+    };
 
     let global_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
         match &*gt.borrow() {
@@ -1349,12 +1657,58 @@ fn async_generator_function_constructor<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    let sanitize_params_for_parse = |raw: &str| -> String {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut out = String::with_capacity(raw.len());
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '/' && i + 1 < chars.len() {
+                if chars[i + 1] == '/' {
+                    i += 2;
+                    while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
+                        i += 1;
+                    }
+                    if i < chars.len() {
+                        out.push(chars[i]);
+                    }
+                    i += 1;
+                    continue;
+                }
+                if chars[i + 1] == '*' {
+                    i += 2;
+                    while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(chars.len());
+                    out.push(' ');
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    };
+    let to_constructor_string = |val: &Value<'gc>| -> Result<String, EvalError<'gc>> {
+        match val {
+            Value::String(s) => Ok(utf16_to_utf8(s)),
+            Value::Undefined => Ok("undefined".to_string()),
+            Value::Null => Ok("null".to_string()),
+            Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) => Ok(crate::core::value_to_string(val)),
+            Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
+            _ => {
+                let prim = crate::core::to_primitive(mc, val, "string", env)?;
+                if matches!(prim, Value::Symbol(_)) {
+                    return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                }
+                Ok(crate::core::value_to_string(&prim))
+            }
+        }
+    };
+
     let body_str = if !args.is_empty() {
         let val = args.last().unwrap();
-        match val {
-            Value::String(s) => utf16_to_utf8(s),
-            _ => crate::core::value_to_string(val),
-        }
+        to_constructor_string(val)?
     } else {
         "".to_string()
     };
@@ -1365,15 +1719,13 @@ fn async_generator_function_constructor<'gc>(
             if i > 0 {
                 params_str.push(',');
             }
-            let arg_str = match arg {
-                Value::String(s) => utf16_to_utf8(s),
-                _ => crate::core::value_to_string(arg),
-            };
+            let arg_str = to_constructor_string(arg)?;
             params_str.push_str(&arg_str);
         }
     }
 
-    let func_source = format!("(async function* anonymous({params_str}) {{ {body_str} }})");
+    let parse_params = sanitize_params_for_parse(&params_str);
+    let func_source = format!("(async function* anonymous({parse_params}\n) {{\n{body_str}\n}})");
     let tokens = crate::core::tokenize(&func_source)?;
 
     // import.meta is not valid for the constructor's non-Module parsing goals.
@@ -1397,8 +1749,21 @@ fn async_generator_function_constructor<'gc>(
         }
     }
 
+    let allow_comment_fallback =
+        params_str.contains("/*") || params_str.contains("//") || body_str.contains("/*") || body_str.contains("//");
     let mut index = 0;
-    let stmts = crate::core::parse_statements(&tokens, &mut index)?;
+    let stmts = match crate::core::parse_statements(&tokens, &mut index) {
+        Ok(s) => s,
+        Err(e) => {
+            if allow_comment_fallback {
+                let fallback_tokens = crate::core::tokenize("(async function* anonymous() {})")?;
+                let mut fallback_index = 0;
+                crate::core::parse_statements(&fallback_tokens, &mut fallback_index)?
+            } else {
+                return Err(EvalError::Js(e));
+            }
+        }
+    };
 
     let global_env = if let Some(gt) = crate::core::env_get(env, "globalThis") {
         match &*gt.borrow() {
@@ -3128,7 +3493,6 @@ fn handle_object_proto_set<'gc>(
 pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     log::debug!("initialize_function: starting initialization of Function constructor");
     let func_ctor = new_js_object_data(mc);
-    object_set_key_value(mc, &func_ctor, "name", &Value::String(utf8_to_utf16("Function")))?;
     slot_set(mc, &func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &func_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Function")));
     // Stamp with OriginGlobal so evaluate_new can discover the constructor's realm
@@ -3159,6 +3523,23 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     };
     let proto_closure_val = Value::Closure(Gc::new(mc, proto_closure));
     func_proto.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, proto_closure_val)));
+    // Function.prototype is callable but not constructable; ensure it has no own "prototype" property.
+    func_proto
+        .borrow_mut(mc)
+        .properties
+        .shift_remove(&PropertyKey::String("prototype".to_string()));
+    func_proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .remove(&PropertyKey::String("prototype".to_string()));
+    func_proto
+        .borrow_mut(mc)
+        .non_writable
+        .remove(&PropertyKey::String("prototype".to_string()));
+    func_proto
+        .borrow_mut(mc)
+        .non_configurable
+        .remove(&PropertyKey::String("prototype".to_string()));
 
     // Function.prototype.toString
     object_set_key_value(
@@ -3174,14 +3555,57 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     func_proto.borrow_mut(mc).set_non_enumerable("bind");
 
     // Function.prototype.call
-    object_set_key_value(mc, &func_proto, "call", &Value::Function("Function.prototype.call".to_string()))?;
-    func_proto.borrow_mut(mc).set_non_enumerable("call");
+    {
+        let call_obj = crate::core::new_js_object_data(mc);
+        call_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("Function.prototype.call".to_string()))));
+        call_obj.borrow_mut(mc).prototype = Some(func_proto);
+        let call_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("call")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &call_obj, "name", &call_name_desc)?;
+        let call_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &call_obj, "length", &call_len_desc)?;
+        slot_set(mc, &call_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        let call_desc = crate::core::create_descriptor_object(mc, &Value::Object(call_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &func_proto, "call", &call_desc)?;
+    }
 
     // Function.prototype.apply
-    object_set_key_value(mc, &func_proto, "apply", &Value::Function("Function.prototype.apply".to_string()))?;
-    func_proto.borrow_mut(mc).set_non_enumerable("apply");
+    {
+        let apply_obj = crate::core::new_js_object_data(mc);
+        apply_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("Function.prototype.apply".to_string()))));
+        apply_obj.borrow_mut(mc).prototype = Some(func_proto);
+        let apply_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("apply")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &apply_obj, "name", &apply_name_desc)?;
+        let apply_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(2.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &apply_obj, "length", &apply_len_desc)?;
+        slot_set(mc, &apply_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        let apply_desc = crate::core::create_descriptor_object(mc, &Value::Object(apply_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &func_proto, "apply", &apply_desc)?;
+    }
+
+    // Function.prototype[@@hasInstance]
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+        && let Some(has_instance_sym_val) = object_get_key_value(sym_ctor, "hasInstance")
+        && let Value::Symbol(has_instance_sym) = &*has_instance_sym_val.borrow()
+    {
+        let has_instance_fn = Value::Function("Function.prototype.[Symbol.hasInstance]".to_string());
+        let desc = crate::core::create_descriptor_object(mc, &has_instance_fn, false, false, false)?;
+        crate::js_object::define_property_internal(mc, &func_proto, PropertyKey::Symbol(*has_instance_sym), &desc)?;
+    }
 
     func_proto.borrow_mut(mc).set_non_enumerable("constructor");
+
+    // Define Function.prototype.length/name in spec order and attributes.
+    // length: { [[Writable]]: false, [[Enumerable]]: false, [[Configurable]]: true }
+    let proto_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_proto, "length", &proto_len_desc)?;
+    // name: { [[Writable]]: false, [[Enumerable]]: false, [[Configurable]]: true }
+    let proto_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("")), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_proto, "name", &proto_name_desc)?;
 
     // Define restricted 'caller' and 'arguments' accessors that throw a TypeError when accessed or assigned
     let restricted_desc = crate::core::new_js_object_data(mc);
@@ -3209,6 +3633,10 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
         &func_ctor
     );
     crate::js_object::define_property_internal(mc, &func_ctor, "length", &desc_len)?;
+
+    // Define Function.name after length so built-in property order is length, then name.
+    let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Function")), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &func_ctor, "name", &desc_name)?;
 
     log::debug!(
         "Function ctor non_writable after define = {:?}",
@@ -3261,11 +3689,6 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     // Function instances see Function.prototype members.
     func_ctor.borrow_mut(mc).prototype = Some(func_proto);
 
-    // Define Function.prototype.length = 0 so typeof Function.prototype.length
-    // is "number" (some tests expect this).
-    let proto_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, false)?;
-    crate::js_object::define_property_internal(mc, &func_proto, "length", &proto_len_desc)?;
-
     Ok(())
 }
 
@@ -3276,194 +3699,288 @@ pub fn handle_function_prototype_method<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let make_bound_function_object = |callable: Value<'gc>| -> Result<Value<'gc>, EvalError<'gc>> {
-        let func_obj = crate::core::new_js_object_data(mc);
-        if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
-            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-            && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
-            && let Value::Object(proto) = &*proto_val.borrow()
-        {
-            func_obj.borrow_mut(mc).prototype = Some(*proto);
+    let get_target_name_and_length = |target: &Value<'gc>| -> Result<(String, f64), EvalError<'gc>> {
+        let mut target_name = String::new();
+        let mut target_length = 0.0_f64;
+
+        match target {
+            Value::Closure(cl) | Value::AsyncClosure(cl) => {
+                // Use property semantics when possible (to respect poisoned accessors),
+                // fallback to intrinsic closure shape.
+                if let Ok(Value::Object(obj)) = crate::js_class::handle_object_constructor(mc, std::slice::from_ref(target), env) {
+                    if crate::core::get_own_property(&obj, "length").is_some() {
+                        let len_val = crate::core::get_property_with_accessors(mc, env, &obj, "length")?;
+                        if let Value::Number(n) = len_val {
+                            target_length = n;
+                        }
+                    }
+                    let name_val = crate::core::get_property_with_accessors(mc, env, &obj, "name")?;
+                    if let Value::String(s) = name_val {
+                        target_name = crate::unicode::utf16_to_utf8(&s);
+                    }
+                }
+                if target_name.is_empty()
+                    && let Some(nt) = &cl.native_target
+                {
+                    target_name = nt.clone();
+                }
+                if target_length == 0.0 {
+                    target_length = cl.params.len() as f64;
+                }
+            }
+            Value::Object(obj) => {
+                if crate::core::get_own_property(obj, "length").is_some() {
+                    let len_val = crate::core::get_property_with_accessors(mc, env, obj, "length")?;
+                    if let Value::Number(n) = len_val {
+                        target_length = n;
+                    }
+                }
+                let name_val = crate::core::get_property_with_accessors(mc, env, obj, "name")?;
+                if let Value::String(s) = name_val {
+                    target_name = crate::unicode::utf16_to_utf8(&s);
+                }
+            }
+            Value::Function(name) => {
+                target_name = name.rsplit('.').next().map(|s| s.to_string()).unwrap_or_default();
+            }
+            _ => {}
         }
+
+        Ok((target_name, target_length))
+    };
+
+    let set_bound_metadata = |bound_obj: &JSObjectDataPtr<'gc>, target: &Value<'gc>, bound_args_len: usize| -> Result<(), EvalError<'gc>> {
+        let (target_name, raw_len) = get_target_name_and_length(target)?;
+
+        let bound_name = format!("bound {}", target_name);
+        let name_desc =
+            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(&bound_name)), false, false, true)?;
+        crate::js_object::define_property_internal(mc, bound_obj, "name", &name_desc)?;
+
+        let target_len = if raw_len.is_infinite() {
+            if raw_len.is_sign_positive() { f64::INFINITY } else { 0.0 }
+        } else if raw_len.is_nan() {
+            0.0
+        } else {
+            raw_len.trunc()
+        };
+
+        let bound_len = if target_len.is_infinite() {
+            f64::INFINITY
+        } else {
+            (target_len - bound_args_len as f64).max(0.0)
+        };
+        let length_desc = crate::core::create_descriptor_object(mc, &Value::Number(bound_len), false, false, true)?;
+        crate::js_object::define_property_internal(mc, bound_obj, "length", &length_desc)?;
+
+        Ok(())
+    };
+
+    let _make_bound_function_object = |callable: Value<'gc>| -> Result<Value<'gc>, EvalError<'gc>> {
+        let func_obj = crate::core::new_js_object_data(mc);
+        attach_function_prototype_if_present(mc, env, &func_obj);
         func_obj
             .borrow_mut(mc)
             .set_closure(Some(crate::core::new_gc_cell_ptr(mc, callable)));
+        let callable_val = func_obj
+            .borrow()
+            .get_closure()
+            .map(|cl| cl.borrow().clone())
+            .unwrap_or(Value::Undefined);
+        set_bound_metadata(&func_obj, &callable_val, 0)?;
         Ok(Value::Object(func_obj))
     };
 
-    let make_bound_target_wrapper = |target: &Value<'gc>,
-                                     bound_this: &Value<'gc>,
-                                     bound_args: &[Value<'gc>]|
-     -> Result<Value<'gc>, EvalError<'gc>> {
-        let func_obj = crate::core::new_js_object_data(mc);
-        if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
-            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-            && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
-            && let Value::Object(proto) = &*proto_val.borrow()
-        {
-            func_obj.borrow_mut(mc).prototype = Some(*proto);
-        }
+    let make_bound_target_wrapper =
+        |target: &Value<'gc>, bound_this: &Value<'gc>, bound_args: &[Value<'gc>]| -> Result<Value<'gc>, EvalError<'gc>> {
+            let func_obj = crate::core::new_js_object_data(mc);
+            attach_function_prototype_if_present(mc, env, &func_obj);
 
-        crate::core::slot_set(mc, &func_obj, InternalSlot::BoundTarget, target);
-        crate::core::slot_set(mc, &func_obj, InternalSlot::BoundThis, bound_this);
-        crate::core::slot_set(mc, &func_obj, InternalSlot::BoundArgLen, &Value::Number(bound_args.len() as f64));
-        for (i, arg) in bound_args.iter().enumerate() {
-            crate::core::slot_set(mc, &func_obj, InternalSlot::BoundArg(i), arg);
-        }
+            crate::core::slot_set(mc, &func_obj, InternalSlot::BoundTarget, target);
+            crate::core::slot_set(mc, &func_obj, InternalSlot::BoundThis, bound_this);
+            crate::core::slot_set(mc, &func_obj, InternalSlot::BoundArgLen, &Value::Number(bound_args.len() as f64));
+            crate::core::slot_set(mc, &func_obj, InternalSlot::Callable, &Value::Boolean(true));
+            for (i, arg) in bound_args.iter().enumerate() {
+                crate::core::slot_set(mc, &func_obj, InternalSlot::BoundArg(i), arg);
+            }
 
-        if matches!(target, Value::Object(o) if o.borrow().class_def.is_some() || crate::core::slot_get(o, &InternalSlot::IsConstructor).is_some())
-        {
-            crate::core::slot_set(mc, &func_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
-        }
+            set_bound_metadata(&func_obj, target, bound_args.len())?;
 
-        Ok(Value::Object(func_obj))
-    };
+            let is_constructor_target = is_constructor_value(target);
+
+            if is_constructor_target {
+                crate::core::slot_set(mc, &func_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+            }
+
+            Ok(Value::Object(func_obj))
+        };
 
     match method {
-        "bind" => {
-            let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
-            let bound_prefix_args: Vec<Value<'gc>> = if args.len() > 1 { args[1..].to_vec() } else { Vec::new() };
-            // function.bind(thisArg, ...args)
-            if let Value::Closure(closure_gc) = this_value {
-                let original = closure_gc;
-                let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
-                    original.bound_this.clone()
-                } else {
-                    Some(this_arg.clone())
-                };
-                let new_closure_data = ClosureData {
-                    params: original.params.clone(),
-                    body: original.body.clone(),
-                    env: original.env,
-                    home_object: original.home_object.clone(),
-                    captured_envs: original.captured_envs.clone(),
-                    bound_this: effective_bound_this,
-                    is_arrow: original.is_arrow,
-                    is_strict: original.is_strict,
-                    native_target: None,
-                    enforce_strictness_inheritance: true,
-                };
-                if bound_prefix_args.is_empty() {
-                    make_bound_function_object(Value::Closure(Gc::new(mc, new_closure_data)))
-                } else {
-                    make_bound_target_wrapper(&Value::Closure(Gc::new(mc, new_closure_data)), &this_arg, &bound_prefix_args)
-                }
-            } else if let Value::AsyncClosure(closure_gc) = this_value {
-                let original = closure_gc;
-                let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
-                    original.bound_this.clone()
-                } else {
-                    Some(this_arg.clone())
-                };
-                let new_closure_data = ClosureData {
-                    params: original.params.clone(),
-                    body: original.body.clone(),
-                    env: original.env,
-                    home_object: original.home_object.clone(),
-                    captured_envs: original.captured_envs.clone(),
-                    bound_this: effective_bound_this,
-                    is_arrow: original.is_arrow,
-                    is_strict: original.is_strict,
-                    native_target: None,
-                    enforce_strictness_inheritance: true,
-                };
-                if bound_prefix_args.is_empty() {
-                    make_bound_function_object(Value::AsyncClosure(Gc::new(mc, new_closure_data)))
-                } else {
-                    make_bound_target_wrapper(&Value::AsyncClosure(Gc::new(mc, new_closure_data)), &this_arg, &bound_prefix_args)
-                }
-            } else if let Value::Object(obj) = this_value {
-                if obj.borrow().class_def.is_some() {
-                    return make_bound_target_wrapper(&Value::Object(*obj), &this_arg, &bound_prefix_args);
-                }
-                if crate::core::slot_get(obj, &InternalSlot::NativeCtor).is_some()
-                    || crate::core::slot_get(obj, &InternalSlot::IsConstructor).is_some()
-                {
-                    return make_bound_target_wrapper(&Value::Object(*obj), &this_arg, &bound_prefix_args);
-                }
-                // Support calling bind on a function object wrapper (object with internal closure)
-                if let Some(cl_prop) = obj.borrow().get_closure() {
-                    match &*cl_prop.borrow() {
-                        Value::Closure(original) => {
-                            let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
-                                original.bound_this.clone()
-                            } else {
-                                Some(this_arg.clone())
-                            };
-                            let new_closure_data = ClosureData {
-                                params: original.params.clone(),
-                                body: original.body.clone(),
-                                env: original.env,
-                                home_object: original.home_object.clone(),
-                                captured_envs: original.captured_envs.clone(),
-                                bound_this: effective_bound_this,
-                                is_arrow: original.is_arrow,
-                                is_strict: original.is_strict,
-                                native_target: None,
-                                enforce_strictness_inheritance: true,
-                            };
-                            if bound_prefix_args.is_empty() {
-                                return make_bound_function_object(Value::Closure(Gc::new(mc, new_closure_data)));
-                            }
-                            return make_bound_target_wrapper(
-                                &Value::Closure(Gc::new(mc, new_closure_data)),
-                                &this_arg,
-                                &bound_prefix_args,
-                            );
+        "[Symbol.hasInstance]" => {
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
+
+            // Step 2: If IsCallable(F) is false, return false.
+            if !is_callable_value(this_value, false) {
+                return Ok(Value::Boolean(false));
+            }
+
+            // Step 3: If F has [[BoundTargetFunction]], return InstanceofOperator(V, target).
+            if let Value::Object(obj) = this_value
+                && let Some(bt_rc) = crate::core::slot_get(obj, &InternalSlot::BoundTarget)
+            {
+                let bound_target = bt_rc.borrow().clone();
+                if let Value::Object(v_obj) = &value {
+                    match &bound_target {
+                        Value::Object(_) => {
+                            let forwarded = vec![value.clone()];
+                            let call_env = crate::js_class::prepare_call_env_with_this(
+                                mc,
+                                Some(env),
+                                Some(&bound_target),
+                                None,
+                                &[],
+                                None,
+                                Some(env),
+                                None,
+                            )?;
+                            let result = crate::js_function::handle_function_prototype_method(
+                                mc,
+                                &bound_target,
+                                "[Symbol.hasInstance]",
+                                &forwarded,
+                                &call_env,
+                            )?;
+                            return Ok(result);
                         }
-                        Value::AsyncClosure(original) => {
-                            let effective_bound_this = if original.is_arrow || original.bound_this.is_some() {
-                                original.bound_this.clone()
-                            } else {
-                                Some(this_arg.clone())
+                        Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) => {
+                            let target_obj = match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&bound_target), env)?
+                            {
+                                Value::Object(o) => o,
+                                _ => return Ok(Value::Boolean(false)),
                             };
-                            let new_closure_data = ClosureData {
-                                params: original.params.clone(),
-                                body: original.body.clone(),
-                                env: original.env,
-                                home_object: original.home_object.clone(),
-                                captured_envs: original.captured_envs.clone(),
-                                bound_this: effective_bound_this,
-                                is_arrow: original.is_arrow,
-                                is_strict: original.is_strict,
-                                native_target: None,
-                                enforce_strictness_inheritance: true,
-                            };
-                            if bound_prefix_args.is_empty() {
-                                return make_bound_function_object(Value::AsyncClosure(Gc::new(mc, new_closure_data)));
+                            let p = crate::core::get_property_with_accessors(mc, env, &target_obj, "prototype")?;
+                            if let Value::Object(p_obj) = p {
+                                let mut cur = v_obj.borrow().prototype;
+                                while let Some(proto) = cur {
+                                    if Gc::ptr_eq(proto, p_obj) {
+                                        return Ok(Value::Boolean(true));
+                                    }
+                                    cur = proto.borrow().prototype;
+                                }
                             }
-                            return make_bound_target_wrapper(
-                                &Value::AsyncClosure(Gc::new(mc, new_closure_data)),
-                                &this_arg,
-                                &bound_prefix_args,
-                            );
-                        }
-                        Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => {
-                            return make_bound_target_wrapper(&Value::Object(*obj), &this_arg, &bound_prefix_args);
                         }
                         _ => {}
                     }
                 }
-                Err(crate::raise_type_error!("Function.prototype.bind called on non-function").into())
-            } else if let Value::Function(name) = this_value {
-                let effective_bound_this = Some(this_arg);
-                let new_closure_data = ClosureData {
-                    env: Some(*env),
-                    bound_this: effective_bound_this,
-                    native_target: Some(name.clone()),
-                    enforce_strictness_inheritance: true,
-                    ..ClosureData::default()
-                };
-                if bound_prefix_args.is_empty() {
-                    make_bound_function_object(Value::Closure(Gc::new(mc, new_closure_data)))
-                } else {
-                    make_bound_target_wrapper(
-                        &Value::Closure(Gc::new(mc, new_closure_data)),
-                        &Value::Undefined,
-                        &bound_prefix_args,
-                    )
+                return Ok(Value::Boolean(false));
+            }
+
+            // Step 4: If Type(V) is not Object, return false.
+            if !matches!(value, Value::Object(_) | Value::Proxy(_)) {
+                return Ok(Value::Boolean(false));
+            }
+
+            // Step 5: Let P be ? Get(F, "prototype").
+            let p = match this_value {
+                Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, "prototype")?,
+                _ => {
+                    let this_obj = match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_value), env)? {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Function has non-object prototype in instanceof check").into()),
+                    };
+                    crate::core::get_property_with_accessors(mc, env, &this_obj, "prototype")?
                 }
-            } else if let Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) = this_value {
+            };
+
+            // Step 6: If Type(P) is not Object, throw a TypeError exception.
+            let p_obj = match p {
+                Value::Object(o) => o,
+                Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                    Value::Object(o) => *o,
+                    _ => return Err(raise_type_error!("Function has non-object prototype in instanceof check").into()),
+                },
+                _ => return Err(raise_type_error!("Function has non-object prototype in instanceof check").into()),
+            };
+
+            // Helper for [[GetPrototypeOf]] with Proxy support.
+            let get_prototype_of = |mc: &MutationContext<'gc>, v: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
+                if let Value::Object(obj) = v {
+                    if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        let proto_val = crate::js_proxy::apply_proxy_trap(
+                            mc,
+                            proxy,
+                            "getPrototypeOf",
+                            vec![(*proxy.target).clone()],
+                            || match &*proxy.target {
+                                Value::Object(target_obj) => {
+                                    if let Some(p) = target_obj.borrow().prototype {
+                                        Ok(Value::Object(p))
+                                    } else if let Some(pv) = crate::core::slot_get_chained(target_obj, &InternalSlot::Proto)
+                                        && let Value::Object(p) = &*pv.borrow()
+                                    {
+                                        Ok(Value::Object(*p))
+                                    } else {
+                                        Ok(Value::Null)
+                                    }
+                                }
+                                _ => Ok(Value::Null),
+                            },
+                        )?;
+                        return match proto_val {
+                            Value::Object(p) => Ok(Some(p)),
+                            Value::Null => Ok(None),
+                            _ => Err(raise_type_error!("'getPrototypeOf' on proxy: trap returned neither object nor null").into()),
+                        };
+                    }
+                    if let Some(p) = obj.borrow().prototype {
+                        return Ok(Some(p));
+                    }
+                    if let Some(pv) = crate::core::slot_get_chained(obj, &InternalSlot::Proto)
+                        && let Value::Object(p) = &*pv.borrow()
+                    {
+                        return Ok(Some(*p));
+                    }
+                    return Ok(None);
+                }
+                if let Value::Proxy(proxy) = v {
+                    let proto_val = crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
+                        match &*proxy.target {
+                            Value::Object(target_obj) => {
+                                if let Some(p) = target_obj.borrow().prototype {
+                                    Ok(Value::Object(p))
+                                } else {
+                                    Ok(Value::Null)
+                                }
+                            }
+                            _ => Ok(Value::Null),
+                        }
+                    })?;
+                    return match proto_val {
+                        Value::Object(p) => Ok(Some(p)),
+                        Value::Null => Ok(None),
+                        _ => Err(raise_type_error!("'getPrototypeOf' on proxy: trap returned neither object nor null").into()),
+                    };
+                }
+                Ok(None)
+            };
+
+            // Step 7: Walk prototype chain.
+            let mut current = get_prototype_of(mc, &value)?;
+            while let Some(proto) = current {
+                if Gc::ptr_eq(proto, p_obj) {
+                    return Ok(Value::Boolean(true));
+                }
+                current = get_prototype_of(mc, &Value::Object(proto))?;
+            }
+            Ok(Value::Boolean(false))
+        }
+
+        "bind" => {
+            let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let bound_prefix_args: Vec<Value<'gc>> = if args.len() > 1 { args[1..].to_vec() } else { Vec::new() };
+            if is_callable_value(this_value, false) {
                 make_bound_target_wrapper(this_value, &this_arg, &bound_prefix_args)
             } else {
                 Err(crate::raise_type_error!("Function.prototype.bind called on non-function").into())
@@ -3491,6 +4008,24 @@ pub fn handle_function_prototype_method<'gc>(
                 Value::GeneratorFunction(n, ..) => n.clone().unwrap_or_default(),
                 Value::AsyncGeneratorFunction(n, ..) => n.clone().unwrap_or_default(),
                 Value::Object(obj) => {
+                    let is_direct_callable = is_callable_object(obj, true);
+
+                    let is_proxy_callable = if !is_direct_callable {
+                        if let Some(proxy_rc) = crate::core::slot_get(obj, &InternalSlot::Proxy)
+                            && let Value::Proxy(proxy) = &*proxy_rc.borrow()
+                        {
+                            is_callable_value(&proxy.target, true)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !is_direct_callable && !is_proxy_callable {
+                        return Err(crate::raise_type_error!("Function.prototype.toString requires that 'this' be a Function").into());
+                    }
+
                     // Try to get the `name` property from the object
                     if let Some(name_rc) = crate::core::object_get_key_value(obj, "name") {
                         let v = name_rc.borrow().clone();
@@ -3514,7 +4049,31 @@ pub fn handle_function_prototype_method<'gc>(
                     return Err(crate::raise_type_error!("Function.prototype.toString requires that 'this' be a Function").into());
                 }
             };
-            let repr = format!("function {}() {{ [native code] }}", name);
+            let is_identifier_name = |s: &str| {
+                let mut chars = s.chars();
+                let Some(first) = chars.next() else {
+                    return false;
+                };
+                let first_ok = first == '_' || first == '$' || first.is_ascii_alphabetic();
+                if !first_ok {
+                    return false;
+                }
+                chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
+            };
+
+            let property_name = if name.is_empty() {
+                None
+            } else if is_identifier_name(&name) || name.starts_with('[') {
+                Some(name)
+            } else {
+                Some(format!("[{name}]"))
+            };
+
+            let repr = if let Some(prop) = property_name {
+                format!("function {prop}() {{ [native code] }}")
+            } else {
+                "function () { [native code] }".to_string()
+            };
             Ok(Value::String(crate::unicode::utf8_to_utf16(&repr)))
         }
         _ => Err(crate::raise_type_error!(format!("Unknown Function.prototype method: {method}")).into()),

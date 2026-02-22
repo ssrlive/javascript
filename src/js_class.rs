@@ -46,13 +46,44 @@ fn unwrap_object_value<'gc>(val: &Value<'gc>) -> Option<JSObjectDataPtr<'gc>> {
 /// Returns `None` when no realm can be determined (caller should fall back to
 /// the current realm).
 pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSObjectDataPtr<'gc>> {
+    let normalize_realm = |mut realm_env: JSObjectDataPtr<'gc>| -> JSObjectDataPtr<'gc> {
+        if let Some(gt) = crate::core::env_get(&realm_env, "globalThis")
+            && let Value::Object(global_obj) = &*gt.borrow()
+        {
+            return *global_obj;
+        }
+        while let Some(proto) = realm_env.borrow().prototype {
+            realm_env = proto;
+        }
+        realm_env
+    };
+
     // 1-2) __origin_global / OriginGlobal slot
     if let Some(origin_val) = object_get_key_value(obj, "__origin_global")
         .or_else(|| slot_get(obj, &InternalSlot::OriginGlobal))
         .or_else(|| slot_get_chained(obj, &InternalSlot::OriginGlobal))
         && let Value::Object(origin) = &*origin_val.borrow()
     {
-        return Some(*origin);
+        return Some(normalize_realm(*origin));
+    }
+
+    // Bound function exotic object: realm is the realm of its target function.
+    if let Some(bound_target_rc) = slot_get(obj, &InternalSlot::BoundTarget) {
+        match &*bound_target_rc.borrow() {
+            Value::Object(target_obj) => {
+                if let Some(realm) = get_function_realm(target_obj) {
+                    return Some(normalize_realm(realm));
+                }
+            }
+            Value::Property { value: Some(v), .. } => {
+                if let Value::Object(target_obj) = &*v.borrow()
+                    && let Some(realm) = get_function_realm(target_obj)
+                {
+                    return Some(normalize_realm(realm));
+                }
+            }
+            _ => {}
+        }
     }
 
     // 3) Direct closure on the object
@@ -60,7 +91,7 @@ pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSOb
         match &*cl_val_rc.borrow() {
             Value::Closure(data) | Value::AsyncClosure(data) => {
                 if data.env.is_some() {
-                    return data.env;
+                    return data.env.map(normalize_realm);
                 }
             }
             _ => {}
@@ -77,7 +108,7 @@ pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSOb
             match &*c_cl_val_rc.borrow() {
                 Value::Closure(data) | Value::AsyncClosure(data) => {
                     if data.env.is_some() {
-                        return data.env;
+                        return data.env.map(normalize_realm);
                     }
                 }
                 _ => {}
@@ -237,6 +268,45 @@ fn compute_function_length(params: &[DestructuringElement]) -> usize {
         }
     }
     fn_length
+}
+
+fn object_has_construct<'gc>(obj: &JSObjectDataPtr<'gc>) -> bool {
+    if obj.borrow().class_def.is_some() {
+        return true;
+    }
+    if let Some(flag_rc) = slot_get(obj, &InternalSlot::IsConstructor)
+        && matches!(*flag_rc.borrow(), Value::Boolean(true))
+    {
+        return true;
+    }
+    if slot_get(obj, &InternalSlot::NativeCtor).is_some() {
+        return true;
+    }
+    if let Some(bound_target_rc) = slot_get(obj, &InternalSlot::BoundTarget) {
+        return value_has_construct(&bound_target_rc.borrow());
+    }
+    if let Some(cl_ptr) = obj.borrow().get_closure() {
+        return match &*cl_ptr.borrow() {
+            Value::Closure(cl) => !cl.is_arrow,
+            Value::AsyncClosure(_) | Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => false,
+            _ => false,
+        };
+    }
+    if let Some(proxy_ptr) = slot_get(obj, &InternalSlot::Proxy)
+        && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
+    {
+        return value_has_construct(&proxy.target);
+    }
+    false
+}
+
+fn value_has_construct<'gc>(value: &Value<'gc>) -> bool {
+    match value {
+        Value::Object(obj) => object_has_construct(obj),
+        Value::Closure(cl) => !cl.is_arrow,
+        Value::AsyncClosure(_) | Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => false,
+        _ => false,
+    }
 }
 
 fn create_class_method_function_object<'gc>(
@@ -602,24 +672,7 @@ pub fn create_arguments_object<'gc>(
 
     if let Some(callee_val) = callee {
         if crate::core::env_get_strictness(func_env) {
-            let thrower_body = vec![crate::core::Statement {
-                kind: Box::new(crate::core::StatementKind::Throw(crate::core::Expr::New(
-                    Box::new(crate::core::Expr::Var("TypeError".to_string(), None, None)),
-                    vec![crate::core::Expr::StringLit(crate::unicode::utf8_to_utf16(
-                        "'callee' and 'caller' restricted",
-                    ))],
-                ))),
-                line: 0,
-                column: 0,
-            }];
-
-            let thrower_data = crate::core::ClosureData {
-                body: thrower_body,
-                env: Some(*func_env),
-                enforce_strictness_inheritance: true,
-                ..ClosureData::default()
-            };
-            let thrower_val = crate::core::Value::Closure(crate::core::Gc::new(mc, thrower_data));
+            let thrower_val = Value::Function("Function.prototype.restrictedThrow".to_string());
 
             let prop = crate::core::Value::Property {
                 value: None,
@@ -1110,23 +1163,38 @@ pub(crate) fn evaluate_new<'gc>(
         }
         merged_args.extend_from_slice(evaluated_args);
 
-        let effective_new_target = if let Some(nt) = new_target { nt } else { &bound_target };
+        let mut effective_new_target = if let Some(nt) = new_target {
+            nt.clone()
+        } else {
+            bound_target.clone()
+        };
 
-        return evaluate_new(mc, env, &bound_target, &merged_args, Some(effective_new_target));
+        if let Value::Object(nt_obj) = &effective_new_target
+            && Gc::ptr_eq(*nt_obj, *bound_obj)
+        {
+            effective_new_target = bound_target.clone();
+        }
+
+        return evaluate_new(mc, env, &bound_target, &merged_args, Some(&effective_new_target));
     }
 
     // Evaluate arguments first
 
     match constructor_val {
         Value::Object(class_obj) => {
-            let own_prototype_property = get_own_property(class_obj, "prototype");
-            let has_own_prototype_property = own_prototype_property.is_some();
-            let constructor_marked = class_obj.borrow().class_def.is_some()
-                || slot_get(class_obj, &InternalSlot::IsConstructor).is_some()
-                || slot_get(class_obj, &InternalSlot::NativeCtor).is_some();
+            if let Some(ctor_val) = object_get_key_value(class_obj, "constructor")
+                && let Value::Object(func_ctor) = &*ctor_val.borrow()
+                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+                && let Value::Object(func_proto_obj) = &*proto_val.borrow()
+                && Gc::ptr_eq(*func_proto_obj, *class_obj)
+            {
+                return Err(raise_type_error!("Constructor is not callable").into());
+            }
+
+            let constructor_marked = object_has_construct(class_obj);
             let has_callable_shape =
                 class_obj.borrow().get_closure().is_some() || slot_get(class_obj, &InternalSlot::BoundTarget).is_some();
-            if has_callable_shape && !constructor_marked && !has_own_prototype_property {
+            if has_callable_shape && !constructor_marked {
                 return Err(raise_type_error!("Constructor is not callable").into());
             }
 
@@ -1367,10 +1435,11 @@ pub(crate) fn evaluate_new<'gc>(
                 && let Value::String(name) = &*native_ctor_rc.borrow()
             {
                 let name_desc = utf16_to_utf8(name);
+                let ctor_realm_env = get_function_realm(class_obj).unwrap_or(*env);
                 match name_desc.as_str() {
-                    "Promise" => return crate::js_promise::handle_promise_constructor_val(mc, evaluated_args, env),
-                    "Array" => return crate::js_array::handle_array_constructor(mc, evaluated_args, env, new_target),
-                    "Date" => return crate::js_date::handle_date_constructor(mc, evaluated_args, env, new_target),
+                    "Promise" => return crate::js_promise::handle_promise_constructor_val(mc, evaluated_args, &ctor_realm_env),
+                    "Array" => return crate::js_array::handle_array_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
+                    "Date" => return crate::js_date::handle_date_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
                     "RegExp" => return crate::js_regexp::handle_regexp_constructor(mc, evaluated_args),
                     "Object" => {
                         // Per spec: If NewTarget is neither undefined nor the active function (Object),
@@ -1387,21 +1456,21 @@ pub(crate) fn evaluate_new<'gc>(
                         if is_subclass {
                             let instance = new_js_object_data(mc);
                             if let Some(Value::Object(nt_obj)) = new_target
-                                && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, env, "Object")?
+                                && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "Object")?
                             {
                                 instance.borrow_mut(mc).prototype = Some(proto);
                             }
                             return Ok(Value::Object(instance));
                         }
-                        return handle_object_constructor(mc, evaluated_args, env);
+                        return handle_object_constructor(mc, evaluated_args, &ctor_realm_env);
                     }
-                    "Number" => return handle_number_constructor(mc, evaluated_args, env),
+                    "Number" => return handle_number_constructor(mc, evaluated_args, &ctor_realm_env),
                     "Boolean" => {
-                        let result = handle_boolean_constructor(mc, evaluated_args, env)?;
+                        let result = handle_boolean_constructor(mc, evaluated_args, &ctor_realm_env)?;
                         // GetPrototypeFromConstructor: override prototype from newTarget
                         if let Some(Value::Object(nt_obj)) = new_target
                             && let Value::Object(result_obj) = &result
-                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, env, "Boolean")?
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "Boolean")?
                         {
                             result_obj.borrow_mut(mc).prototype = Some(proto);
                         }
@@ -1413,62 +1482,66 @@ pub(crate) fn evaluate_new<'gc>(
                         } else {
                             evaluated_args[0].clone()
                         };
-                        return handle_object_constructor(mc, &[str_val], env);
+                        return handle_object_constructor(mc, &[str_val], &ctor_realm_env);
                     }
                     "Function" => {
                         // Execute Function constructor in the constructor's realm.
-                        let call_env_for_function = get_function_realm(class_obj).unwrap_or(*env);
-                        return crate::js_function::handle_global_function(mc, "Function", evaluated_args, &call_env_for_function);
+                        let fn_val = crate::js_function::handle_global_function(mc, "Function", evaluated_args, &ctor_realm_env)?;
+                        if let Some(Value::Object(nt_obj)) = new_target
+                            && let Value::Object(fn_obj) = &fn_val
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "Function")?
+                        {
+                            fn_obj.borrow_mut(mc).prototype = Some(proto);
+                        }
+                        return Ok(fn_val);
                     }
                     "GeneratorFunction" => {
-                        return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, env);
+                        return crate::js_function::handle_global_function(mc, "GeneratorFunction", evaluated_args, &ctor_realm_env);
                     }
                     "AsyncFunction" => {
-                        let ctor_realm_env = get_function_realm(class_obj).unwrap_or(*env);
                         let fn_val = crate::js_function::handle_global_function(mc, "AsyncFunction", evaluated_args, &ctor_realm_env)?;
                         // GetPrototypeFromConstructor(newTarget, "%AsyncFunction.prototype%")
                         if let Some(Value::Object(nt_obj)) = new_target
                             && let Value::Object(fn_obj) = &fn_val
-                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, env, "AsyncFunction")?
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "AsyncFunction")?
                         {
                             fn_obj.borrow_mut(mc).prototype = Some(proto);
                         }
                         return Ok(fn_val);
                     }
                     "AsyncGeneratorFunction" => {
-                        let ctor_realm_env = get_function_realm(class_obj).unwrap_or(*env);
                         let fn_val =
                             crate::js_function::handle_global_function(mc, "AsyncGeneratorFunction", evaluated_args, &ctor_realm_env)?;
                         // GetPrototypeFromConstructor(newTarget, "%AsyncGeneratorFunction.prototype%")
                         if let Some(Value::Object(nt_obj)) = new_target
                             && let Value::Object(fn_obj) = &fn_val
-                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, env, "AsyncGeneratorFunction")?
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "AsyncGeneratorFunction")?
                         {
                             fn_obj.borrow_mut(mc).prototype = Some(proto);
                         }
                         return Ok(fn_val);
                     }
-                    "Map" => return Ok(crate::js_map::handle_map_constructor(mc, evaluated_args, env)?),
-                    "Set" => return Ok(crate::js_set::handle_set_constructor(mc, evaluated_args, env)?),
-                    "WeakMap" => return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, env)?),
-                    "WeakSet" => return Ok(crate::js_weakset::handle_weakset_constructor(mc, evaluated_args, env)?),
+                    "Map" => return Ok(crate::js_map::handle_map_constructor(mc, evaluated_args, &ctor_realm_env)?),
+                    "Set" => return Ok(crate::js_set::handle_set_constructor(mc, evaluated_args, &ctor_realm_env)?),
+                    "WeakMap" => return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, &ctor_realm_env)?),
+                    "WeakSet" => return Ok(crate::js_weakset::handle_weakset_constructor(mc, evaluated_args, &ctor_realm_env)?),
                     "ArrayBuffer" => {
-                        return crate::js_typedarray::handle_arraybuffer_constructor(mc, evaluated_args, env, new_target);
+                        return crate::js_typedarray::handle_arraybuffer_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }
                     "SharedArrayBuffer" => {
-                        return crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, evaluated_args, env, new_target);
+                        return crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }
                     "DataView" => {
-                        return crate::js_typedarray::handle_dataview_constructor(mc, evaluated_args, env, new_target);
+                        return crate::js_typedarray::handle_dataview_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }
                     "Error" | "TypeError" | "ReferenceError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError"
                     | "AggregateError" => {
                         // GetPrototypeFromConstructor for Error types
                         let prototype: Option<JSObjectDataPtr<'_>> = if let Some(Value::Object(nt_obj)) = new_target {
-                            get_prototype_from_constructor(mc, nt_obj, env, &name_desc)?
+                            get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, &name_desc)?
                         } else {
                             // No newTarget — use the constructor's own prototype
-                            crate::core::get_property_with_accessors(mc, env, class_obj, "prototype")
+                            crate::core::get_property_with_accessors(mc, &ctor_realm_env, class_obj, "prototype")
                                 .ok()
                                 .and_then(|v| if let Value::Object(p) = v { Some(p) } else { None })
                         };
@@ -1477,14 +1550,21 @@ pub(crate) fn evaluate_new<'gc>(
                             let errors_val = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
                             let message_val = evaluated_args.get(1).cloned();
                             let options_val = evaluated_args.get(2).cloned();
-                            return crate::core::js_error::create_aggregate_error(mc, env, prototype, errors_val, message_val, options_val);
+                            return crate::core::js_error::create_aggregate_error(
+                                mc,
+                                &ctor_realm_env,
+                                prototype,
+                                errors_val,
+                                message_val,
+                                options_val,
+                            );
                         }
 
                         let raw_msg = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
                         let msg_val = if matches!(raw_msg, Value::Undefined) {
                             Value::Undefined
                         } else {
-                            let prim = crate::core::to_primitive(mc, &raw_msg, "string", env)?;
+                            let prim = crate::core::to_primitive(mc, &raw_msg, "string", &ctor_realm_env)?;
                             if matches!(prim, Value::Symbol(_)) {
                                 return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                             }
@@ -2092,6 +2172,17 @@ pub(crate) fn create_class_object<'gc>(
     // Create a class object (function) that can be instantiated with 'new'
     let class_obj = new_js_object_data(mc);
 
+    // Record origin global so cross-realm call/new paths can discover the
+    // constructor realm for error/prototype semantics.
+    let origin_global = if let Some(gt) = crate::core::env_get(env, "globalThis")
+        && let Value::Object(g) = &*gt.borrow()
+    {
+        *g
+    } else {
+        *env
+    };
+    slot_set(mc, &class_obj, InternalSlot::OriginGlobal, &Value::Object(origin_global));
+
     // Base class constructors should inherit from Function.prototype
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
@@ -2148,20 +2239,7 @@ pub(crate) fn create_class_object<'gc>(
                 slot_set(mc, &class_obj, InternalSlot::ExtendsNull, &Value::Boolean(true));
             }
             Value::Object(parent_class_obj) => {
-                let is_constructor = if parent_class_obj.borrow().class_def.is_some() {
-                    true
-                } else if let Some(flag_rc) = slot_get(&parent_class_obj, &InternalSlot::IsConstructor) {
-                    matches!(*flag_rc.borrow(), Value::Boolean(true))
-                } else if slot_get(&parent_class_obj, &InternalSlot::NativeCtor).is_some() {
-                    true
-                } else if let Some(cl_ptr) = parent_class_obj.borrow().get_closure() {
-                    match &*cl_ptr.borrow() {
-                        Value::Closure(cl) => !cl.is_arrow,
-                        _ => false,
-                    }
-                } else {
-                    false
-                };
+                let is_constructor = object_has_construct(&parent_class_obj);
 
                 if !is_constructor {
                     return Err(raise_type_error!("Class extends value is not a constructor").into());

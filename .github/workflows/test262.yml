@@ -201,8 +201,8 @@ jobs:
               FOCUS='built-ins/Date,built-ins/decodeURI,built-ins/decodeURIComponent,built-ins/encodeURI,built-ins/encodeURIComponent'
               ;;
             32)
-              TITLE='"built-ins/DisposableStack" - "built-ins/eval"'
-              FOCUS='built-ins/DisposableStack,built-ins/Error,built-ins/eval'
+              TITLE='"built-ins/DisposableStack" - "built-ins/Function"'
+              FOCUS='built-ins/DisposableStack,built-ins/Error,built-ins/eval,built-ins/FinalizationRegistry,built-ins/Function'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

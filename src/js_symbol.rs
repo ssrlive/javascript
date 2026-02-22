@@ -54,6 +54,11 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let species_sym = Value::Symbol(species_data);
     object_set_key_value(mc, &symbol_ctor, "species", &species_sym)?;
 
+    // Symbol.match
+    let match_data = Gc::new(mc, SymbolData::new(Some("Symbol.match")));
+    let match_sym = Value::Symbol(match_data);
+    object_set_key_value(mc, &symbol_ctor, "match", &match_sym)?;
+
     // Symbol.hasInstance
     let has_instance_data = Gc::new(mc, SymbolData::new(Some("Symbol.hasInstance")));
     let has_instance_sym = Value::Symbol(has_instance_data);
@@ -72,6 +77,7 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         "toPrimitive",
         "toStringTag",
         "species",
+        "match",
         "hasInstance",
         "unscopables",
     ] {

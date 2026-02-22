@@ -1293,6 +1293,22 @@ pub fn to_primitive<'gc>(
             };
 
             if effective_hint == "string" {
+                if obj.borrow().get_home_object().is_some() && obj.borrow().get_closure().is_some() {
+                    let maybe_name = crate::core::get_property_with_accessors(mc, env, obj, "name").ok();
+                    if let Some(Value::String(name_u16)) = maybe_name {
+                        let name = crate::unicode::utf16_to_utf8(&name_u16);
+                        let mut chars = name.chars();
+                        let is_ident = if let Some(first) = chars.next() {
+                            (first == '_' || first == '$' || first.is_ascii_alphabetic())
+                                && chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
+                        } else {
+                            false
+                        };
+                        if is_ident {
+                            return Ok(Value::String(crate::unicode::utf8_to_utf16(&format!("{}(){{}}", name))));
+                        }
+                    }
+                }
                 // toString -> valueOf
                 log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
                 let to_s = call_to_string_strict(mc, env, obj)?;
@@ -1324,6 +1340,21 @@ pub fn to_primitive<'gc>(
                 // result from a non-callable `toString` property.
                 if !matches!(to_s, crate::core::Value::Uninitialized) && is_primitive(&to_s) {
                     return Ok(to_s);
+                }
+            }
+
+            let is_callable_object = obj.borrow().get_closure().is_some()
+                || obj.borrow().class_def.is_some()
+                || crate::core::slot_get_chained(obj, &InternalSlot::IsConstructor).is_some()
+                || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                || crate::core::slot_get_chained(obj, &InternalSlot::Callable)
+                    .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+                    .unwrap_or(false);
+
+            if is_callable_object {
+                let fn_str = crate::js_function::handle_function_prototype_method(mc, &Value::Object(*obj), "toString", &[], env)?;
+                if is_primitive(&fn_str) {
+                    return Ok(fn_str);
                 }
             }
 
@@ -1420,7 +1451,26 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
             }
             "[object Object]".to_string()
         }
-        Value::Function(name) => format!("function {}", name),
+        Value::Function(name) => {
+            let is_identifier_name = |s: &str| {
+                let mut chars = s.chars();
+                let Some(first) = chars.next() else {
+                    return false;
+                };
+                let first_ok = first == '_' || first == '$' || first.is_ascii_alphabetic();
+                if !first_ok {
+                    return false;
+                }
+                chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
+            };
+            if name.is_empty() {
+                "function () { [native code] }".to_string()
+            } else if is_identifier_name(name) || name.starts_with('[') {
+                format!("function {name}() {{ [native code] }}")
+            } else {
+                format!("function [{name}]() {{ [native code] }}")
+            }
+        }
         Value::Closure(..) => "function".to_string(),
         Value::AsyncClosure(..) => "async function".to_string(),
         Value::GeneratorFunction(name, ..) => format!("function* {}", name.as_deref().unwrap_or("")),

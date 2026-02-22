@@ -2379,6 +2379,9 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
             if *index >= tokens.len() {
                 return Err(raise_parse_error!("Unexpected end of parameters"));
             }
+            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
             if matches!(tokens[*index].token, Token::RParen) {
                 break;
             }

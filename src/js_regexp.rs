@@ -43,6 +43,31 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         regexp_proto.borrow_mut(mc).set_non_enumerable(method);
     }
 
+    if let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_ctor_val.borrow()
+    {
+        if let Some(match_sym_val) = object_get_key_value(sym_ctor, "match")
+            && let Value::Symbol(match_sym) = &*match_sym_val.borrow()
+        {
+            let match_fn = Value::Function("RegExp.prototype.match".to_string());
+            object_set_key_value(mc, &regexp_proto, *match_sym, &match_fn)?;
+            regexp_proto.borrow_mut(mc).set_non_enumerable(*match_sym);
+        }
+
+        if let Some(species_sym_val) = object_get_key_value(sym_ctor, "species")
+            && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+        {
+            let species_getter = Value::Function("RegExp.species".to_string());
+            let species_accessor = Value::Property {
+                value: None,
+                getter: Some(Box::new(species_getter)),
+                setter: None,
+            };
+            object_set_key_value(mc, &regexp_ctor, *species_sym, &species_accessor)?;
+            regexp_ctor.borrow_mut(mc).set_non_enumerable(*species_sym);
+        }
+    }
+
     // Register accessor properties on RegExp.prototype per spec
     let accessor_props = vec![
         "source",

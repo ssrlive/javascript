@@ -12494,6 +12494,14 @@ pub fn evaluate_call_dispatch<'gc>(
 
             let closure_opt = { obj.borrow().get_closure() };
             if let Some(cl_ptr) = closure_opt {
+                if obj.borrow().class_def.is_some() {
+                    let realm_env = crate::js_class::get_function_realm(obj).unwrap_or(*env);
+                    return Err(throw_realm_type_error(
+                        mc,
+                        &realm_env,
+                        "Class constructor cannot be invoked without 'new'",
+                    ));
+                }
                 let callable = { cl_ptr.borrow().clone() };
                 match callable {
                     Value::Closure(cl) => {
@@ -12525,11 +12533,19 @@ pub fn evaluate_call_dispatch<'gc>(
                     // Async generator functions: create AsyncGenerator instance
                     Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, &cl, eval_args, Some(*obj))?),
                     // Native function stored as closure (e.g., eval Object wrapper)
-                    Value::Function(name) => evaluate_call_dispatch(mc, env, &Value::Function(name), this_val, eval_args),
+                    Value::Function(name) => {
+                        let native_env = crate::js_class::get_function_realm(obj).unwrap_or(*env);
+                        evaluate_call_dispatch(mc, &native_env, &Value::Function(name), this_val, eval_args)
+                    }
                     _ => Err(raise_type_error!("Not a function").into()),
                 }
             } else if obj.borrow().class_def.is_some() {
-                Err(raise_type_error!("Class constructor cannot be invoked without 'new'").into())
+                let realm_env = crate::js_class::get_function_realm(obj).unwrap_or(*env);
+                Err(throw_realm_type_error(
+                    mc,
+                    &realm_env,
+                    "Class constructor cannot be invoked without 'new'",
+                ))
             } else if let Some(native_name) = slot_get_chained(obj, &InternalSlot::NativeCtor) {
                 let native_name_val = match &*native_name.borrow() {
                     Value::Property { value: Some(v), .. } => v.borrow().clone(),
@@ -14924,12 +14940,28 @@ fn evaluate_expr_binary<'gc>(
                     // Prototype must be an object
                     if let Value::Object(constructor_proto_obj) = prototype_val {
                         // Walk the internal prototype chain
-                        let mut current_proto_opt: Option<crate::core::JSObjectDataPtr> = obj.borrow().prototype;
+                        let mut current_proto_opt: Option<crate::core::JSObjectDataPtr> = if let Some(p) = obj.borrow().prototype {
+                            Some(p)
+                        } else if let Some(proto_slot) = crate::core::slot_get_chained(&obj, &InternalSlot::Proto)
+                            && let Value::Object(p) = &*proto_slot.borrow()
+                        {
+                            Some(*p)
+                        } else {
+                            None
+                        };
                         while let Some(proto_obj) = current_proto_opt {
                             if Gc::ptr_eq(proto_obj, constructor_proto_obj) {
                                 return Ok(Value::Boolean(true));
                             }
-                            current_proto_opt = proto_obj.borrow().prototype;
+                            current_proto_opt = if let Some(p) = proto_obj.borrow().prototype {
+                                Some(p)
+                            } else if let Some(proto_slot) = crate::core::slot_get_chained(&proto_obj, &InternalSlot::Proto)
+                                && let Value::Object(p) = &*proto_slot.borrow()
+                            {
+                                Some(*p)
+                            } else {
+                                None
+                            };
                         }
                         Ok(Value::Boolean(false))
                     } else {
@@ -15979,6 +16011,8 @@ fn evaluate_expr_property<'gc>(
             | "encodeURIComponent"
             | "decodeURI"
             | "decodeURIComponent"
+            | "Function.prototype.call"
+            | "Function.prototype.bind"
             | "Error.isError"
             | "isNaN"
             | "isFinite"
@@ -15995,6 +16029,7 @@ fn evaluate_expr_property<'gc>(
             | "Object.hasOwn"
             | "Object.is"
             | "Object.setPrototypeOf"
+            | "Function.prototype.apply"
             | "DataView.prototype.setInt8"
             | "DataView.prototype.setUint8"
             | "DataView.prototype.setInt16"
@@ -16005,6 +16040,7 @@ fn evaluate_expr_property<'gc>(
             | "DataView.prototype.setFloat64"
             | "DataView.prototype.setBigInt64"
             | "DataView.prototype.setBigUint64" => 2.0,
+            "Function.prototype.[Symbol.hasInstance]" => 1.0,
             "Object.defineProperty" => 3.0,
             _ => {
                 if func_name.starts_with("DataView.prototype.get") {
@@ -16021,7 +16057,11 @@ fn evaluate_expr_property<'gc>(
         if is_builtin_function_virtual_prop_deleted(env, func_name, "name") {
             return Ok(Value::Undefined);
         }
-        let short_name = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+        let short_name = if func_name.contains("[Symbol.hasInstance]") {
+            "[Symbol.hasInstance]"
+        } else {
+            func_name.rsplit('.').next().unwrap_or(func_name.as_str())
+        };
         Ok(Value::String(utf8_to_utf16(short_name)))
     } else if key == "length"
         && matches!(
@@ -17301,6 +17341,8 @@ fn evaluate_expr_index<'gc>(
                     | "encodeURIComponent"
                     | "decodeURI"
                     | "decodeURIComponent"
+                    | "Function.prototype.call"
+                    | "Function.prototype.bind"
                     | "Error.isError"
                     | "isNaN"
                     | "isFinite"
@@ -17318,6 +17360,7 @@ fn evaluate_expr_index<'gc>(
                     | "Object.hasOwn"
                     | "Object.is"
                     | "Object.setPrototypeOf"
+                    | "Function.prototype.apply"
                     | "DataView.prototype.setInt8"
                     | "DataView.prototype.setUint8"
                     | "DataView.prototype.setInt16"
@@ -17328,6 +17371,7 @@ fn evaluate_expr_index<'gc>(
                     | "DataView.prototype.setFloat64"
                     | "DataView.prototype.setBigInt64"
                     | "DataView.prototype.setBigUint64" => 2.0,
+                    "Function.prototype.[Symbol.hasInstance]" => 1.0,
                     "Object.defineProperty" => 3.0,
                     _ => {
                         if func_name.starts_with("DataView.prototype.get") {
@@ -17343,7 +17387,11 @@ fn evaluate_expr_index<'gc>(
                 if is_builtin_function_virtual_prop_deleted(env, func_name, "name") {
                     return Ok(Value::Undefined);
                 }
-                let short_name = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                let short_name = if func_name.contains("[Symbol.hasInstance]") {
+                    "[Symbol.hasInstance]"
+                } else {
+                    func_name.rsplit('.').next().unwrap_or(func_name.as_str())
+                };
                 return Ok(Value::String(utf8_to_utf16(short_name)));
             }
         }
@@ -18492,24 +18540,19 @@ pub fn call_native_function<'gc>(
                             // Try call_native_function first; it handles protocol
                             // methods like AsyncGenerator.prototype.{next,throw,return}
                             // that are not in handle_global_function.
+                            let origin_env = crate::js_class::get_function_realm(obj);
+                            let native_env = origin_env.unwrap_or(*env);
                             if func_name != "eval"
-                                && let Some(res) = call_native_function(mc, func_name, Some(new_this), rest_args, env)?
+                                && let Some(res) = call_native_function(mc, func_name, Some(new_this), rest_args, &native_env)?
                             {
                                 return Ok(Some(res));
                             }
                             // Detect cross-realm eval via OriginGlobal
-                            let origin_env = if func_name == "eval" {
-                                if let Some(og_rc) = slot_get(obj, &InternalSlot::OriginGlobal)
-                                    && let Value::Object(origin) = &*og_rc.borrow()
-                                {
-                                    Some(*origin)
-                                } else {
-                                    None
-                                }
+                            let target_env = if func_name == "eval" {
+                                origin_env.unwrap_or_else(|| find_global_environment(env))
                             } else {
-                                None
+                                native_env
                             };
-                            let target_env = origin_env.unwrap_or_else(|| find_global_environment(env));
                             let call_env = crate::core::new_js_object_data(mc);
                             call_env.borrow_mut(mc).prototype = Some(target_env);
                             call_env.borrow_mut(mc).is_function_scope = true;
@@ -18536,16 +18579,34 @@ pub fn call_native_function<'gc>(
     if name == "apply" || name == "Function.prototype.apply" {
         let this = this_val.ok_or_else(|| EvalError::Js(raise_eval_error!("Cannot call apply without this")))?;
         log::trace!("call_native_function: apply called on this={:?}", this);
+        let error_env = *env;
         let new_this = args.first().cloned().unwrap_or(Value::Undefined);
         let arg_array = args.get(1).cloned().unwrap_or(Value::Undefined);
 
         let mut rest_args = Vec::new();
-        if let Value::Object(obj) = arg_array {
-            let len_val = object_get_key_value(&obj, "length").unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
-            let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
-            for k in 0..len {
-                let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
-                rest_args.push(item.borrow().clone());
+        match arg_array {
+            Value::Undefined | Value::Null => {}
+            Value::Object(obj) => {
+                let len_v = get_property_with_accessors(mc, env, &obj, "length")?;
+                let len_n = crate::core::to_number(&len_v).unwrap_or(0.0);
+                let len = if !len_n.is_finite() {
+                    if len_n.is_sign_positive() { u32::MAX as usize } else { 0 }
+                } else if len_n <= 0.0 || len_n.is_nan() {
+                    0
+                } else {
+                    len_n.floor() as usize
+                };
+                for k in 0..len {
+                    let item = get_property_with_accessors(mc, env, &obj, k)?;
+                    rest_args.push(item);
+                }
+            }
+            _ => {
+                return Err(throw_realm_type_error(
+                    mc,
+                    &error_env,
+                    "CreateListFromArrayLike called on non-object",
+                ));
             }
         }
 
@@ -18631,18 +18692,12 @@ pub fn call_native_function<'gc>(
                         Value::AsyncGeneratorFunction(_, cl) => Ok(Some(handle_async_generator_function_call(mc, cl, &rest_args, None)?)),
                         // Object wrapping a native function (e.g. eval Object)
                         Value::Function(func_name) => {
-                            let origin_env = if func_name == "eval" {
-                                if let Some(og_rc) = slot_get(obj, &InternalSlot::OriginGlobal)
-                                    && let Value::Object(origin) = &*og_rc.borrow()
-                                {
-                                    Some(*origin)
-                                } else {
-                                    None
-                                }
+                            let origin_env = crate::js_class::get_function_realm(obj);
+                            let target_env = if func_name == "eval" {
+                                origin_env.unwrap_or_else(|| find_global_environment(env))
                             } else {
-                                None
+                                origin_env.unwrap_or(*env)
                             };
-                            let target_env = origin_env.unwrap_or_else(|| find_global_environment(env));
                             let call_env = crate::core::new_js_object_data(mc);
                             call_env.borrow_mut(mc).prototype = Some(target_env);
                             call_env.borrow_mut(mc).is_function_scope = true;
@@ -18656,13 +18711,13 @@ pub fn call_native_function<'gc>(
                             }
                             Ok(Some(result))
                         }
-                        _ => Err(raise_type_error!("Not a function").into()),
+                        _ => Err(throw_realm_type_error(mc, &error_env, "Not a function")),
                     }
                 } else {
-                    Err(raise_type_error!("Not a function").into())
+                    Err(throw_realm_type_error(mc, &error_env, "Not a function"))
                 }
             }
-            _ => Err(raise_type_error!("Not a function").into()),
+            _ => Err(throw_realm_type_error(mc, &error_env, "Not a function")),
         };
     }
 
@@ -18752,6 +18807,17 @@ pub fn call_native_function<'gc>(
     if name == "Symbol.prototype.valueOf" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         return Ok(Some(crate::js_symbol::handle_symbol_valueof(mc, this_v)?));
+    }
+
+    if name == "Function.prototype.[Symbol.hasInstance]" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(crate::js_function::handle_function_prototype_method(
+            mc,
+            this_v,
+            "[Symbol.hasInstance]",
+            args,
+            env,
+        )?));
     }
 
     if name.starts_with("Map.")
@@ -19398,6 +19464,7 @@ pub fn call_closure<'gc>(
     }
 
     let fn_is_strict = cl.is_strict || env_strict_ancestor;
+    let this_realm_env = cl.env.unwrap_or(*env);
     // Explicitly set strictness on both environments
     env_set_strictness(mc, &param_env, fn_is_strict)?;
     env_set_strictness(mc, &var_env, fn_is_strict)?;
@@ -19491,7 +19558,7 @@ pub fn call_closure<'gc>(
     // If no this_val was supplied (bare call), we must default according to the function's strictness:
     // - strict functions: undefined
     // - non-strict functions: global object
-    let effective_this = if cl.is_arrow {
+    let mut effective_this = if cl.is_arrow {
         let lexical_env = cl.env.as_ref().unwrap_or(env);
         Some(crate::js_class::evaluate_this_allow_uninitialized(mc, lexical_env)?)
     } else if let Some(bound) = &cl.bound_this {
@@ -19507,13 +19574,38 @@ pub fn call_closure<'gc>(
             // which walks the scope chain to find the actual global object,
             // rather than walking the prototype chain (which would overshoot
             // to Object.prototype now that the global has a [[Prototype]]).
-            if let Some(gt) = crate::core::env_get(env, "globalThis") {
+            if let Some(gt) = crate::core::env_get(&this_realm_env, "globalThis") {
                 Some(gt.borrow().clone())
             } else {
-                Some(Value::Object(*env))
+                Some(Value::Object(this_realm_env))
             }
         }
     };
+
+    // Non-strict this coercion for explicit/bound thisArg:
+    // - null/undefined -> globalThis
+    // - primitives -> ToObject(primitive)
+    if !cl.is_arrow
+        && !fn_is_strict
+        && let Some(tv) = effective_this.clone()
+    {
+        effective_this = Some(match tv {
+            Value::Undefined | Value::Null => {
+                if let Some(gt) = crate::core::env_get(&this_realm_env, "globalThis") {
+                    gt.borrow().clone()
+                } else {
+                    Value::Object(this_realm_env)
+                }
+            }
+            Value::Number(_) | Value::BigInt(_) | Value::String(_) | Value::Boolean(_) | Value::Symbol(_) => {
+                match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&tv), &this_realm_env) {
+                    Ok(Value::Object(o)) => Value::Object(o),
+                    _ => tv,
+                }
+            }
+            other => other,
+        });
+    }
 
     // Bind 'this' into the var_env (function body environment) so the body can access it.
     if let Some(tv) = effective_this {
@@ -20632,27 +20724,20 @@ fn evaluate_expr_new<'gc>(
             }
         }
         Value::Object(obj) => {
-            if let Some(bound_target_rc) = crate::core::slot_get(&obj, &InternalSlot::BoundTarget) {
-                let bound_target = bound_target_rc.borrow().clone();
-                let bound_arg_len = crate::core::slot_get(&obj, &InternalSlot::BoundArgLen)
-                    .and_then(|v| {
-                        if let Value::Number(n) = *v.borrow() {
-                            Some(n.max(0.0) as usize)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0);
+            if let Some(ctor_val) = object_get_key_value(&obj, "constructor")
+                && let Value::Object(func_ctor) = &*ctor_val.borrow()
+                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+                && let Value::Object(func_proto_obj) = &*proto_val.borrow()
+                && Gc::ptr_eq(*func_proto_obj, obj)
+            {
+                return Err(raise_type_error!("Not a constructor").into());
+            }
 
-                let mut merged_args = Vec::with_capacity(bound_arg_len + eval_args.len());
-                for i in 0..bound_arg_len {
-                    if let Some(arg_rc) = crate::core::slot_get(&obj, &InternalSlot::BoundArg(i)) {
-                        merged_args.push(arg_rc.borrow().clone());
-                    }
-                }
-                merged_args.extend_from_slice(&eval_args);
-
-                let val = crate::js_class::evaluate_new(mc, env, &bound_target, &merged_args, Some(&bound_target))?;
+            if crate::core::slot_get(&obj, &InternalSlot::BoundTarget).is_some() {
+                let new_target = Value::Object(obj);
+                // Let js_class::evaluate_new perform bound argument merging and recursive
+                // newTarget substitution for bound-function chains.
+                let val = crate::js_class::evaluate_new(mc, env, &Value::Object(obj), &eval_args, Some(&new_target))?;
                 return Ok(val);
             }
 

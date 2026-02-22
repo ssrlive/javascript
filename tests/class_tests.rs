@@ -139,23 +139,18 @@ mod class_tests {
             "is_obj_person: " + is_obj_person;
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match &result {
-            Ok(s) => {
-                let s_inner = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                    s[1..s.len() - 1].to_string()
-                } else {
-                    s.clone()
-                };
-                println!("{}", s_inner);
-                assert!(s_inner.contains("is_person_instance: true"));
-                assert!(s_inner.contains("is_animal_instance: true"));
-                assert!(s_inner.contains("is_person_animal: false"));
-                assert!(s_inner.contains("is_obj_person: false"));
-            }
-            Err(e) => println!("Error: {:?}", e),
-        }
-        assert!(result.is_ok(), "instanceof operator should work");
+        let s = evaluate_script(script, None::<&std::path::Path>).unwrap();
+
+        let s_inner = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+            s[1..s.len() - 1].to_string()
+        } else {
+            s.clone()
+        };
+        println!("{}", s_inner);
+        assert!(s_inner.contains("is_person_instance: true"));
+        assert!(s_inner.contains("is_animal_instance: true"));
+        assert!(s_inner.contains("is_person_animal: false"));
+        assert!(s_inner.contains("is_obj_person: false"));
     }
 
     #[test]

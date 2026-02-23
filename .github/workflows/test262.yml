@@ -43,6 +43,7 @@ jobs:
           - id: 30
           - id: 31
           - id: 32
+          - id: 33
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -203,6 +204,10 @@ jobs:
             32)
               TITLE='"built-ins/DisposableStack" - "built-ins/isNaN"'
               FOCUS='built-ins/DisposableStack,built-ins/Error,built-ins/eval,built-ins/FinalizationRegistry,built-ins/Function,built-ins/GeneratorFunction,built-ins/GeneratorPrototype,built-ins/global,built-ins/Infinity,built-ins/isFinite,built-ins/isNaN'
+              ;;
+            33)
+              TITLE='"built-ins/Iterator"'
+              FOCUS='built-ins/Iterator'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

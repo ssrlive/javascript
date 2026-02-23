@@ -79,6 +79,39 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     object_set_key_value(mc, &set_proto, "size", &size_prop)?;
 
     env_set(mc, env, "Set", &Value::Object(set_ctor))?;
+
+    // --- %SetIteratorPrototype% ---
+    // [[Prototype]] = %IteratorPrototype%
+    let set_iter_proto = new_js_object_data(mc);
+    if let Some(iter_proto_val) = slot_get_chained(env, &InternalSlot::IteratorPrototype)
+        && let Value::Object(iter_proto) = &*iter_proto_val.borrow()
+    {
+        set_iter_proto.borrow_mut(mc).prototype = Some(*iter_proto);
+    }
+
+    // next method (non-enumerable)
+    object_set_key_value(
+        mc,
+        &set_iter_proto,
+        "next",
+        &Value::Function("SetIterator.prototype.next".to_string()),
+    )?;
+    set_iter_proto.borrow_mut(mc).set_non_enumerable("next");
+
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+    {
+        // Symbol.toStringTag = "Set Iterator" (non-writable, non-enumerable, configurable)
+        if let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+            && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+        {
+            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Set Iterator")), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &set_iter_proto, crate::core::PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+        }
+    }
+
+    slot_set(mc, env, InternalSlot::SetIteratorPrototype, &Value::Object(set_iter_proto));
+
     Ok(())
 }
 
@@ -245,38 +278,16 @@ fn create_set_iterator<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     let iterator = new_js_object_data(mc);
 
-    // Store set weak reference or strong? JS iterators usually keep the collection alive.
-    // However, cycle collection might be tricky if we use strong ref here and set has ref to iterator?
-    // Usually iterators are created from set, set doesn't hold iterators. So strong ref matches spec.
-    // Use Value::Set to store it.
-    slot_set(mc, &iterator, InternalSlot::IteratorSet, &Value::Set(set));
-
-    // Store index
-    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
-    // Store kind
-    slot_set(mc, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
-
-    // next method - shared native function name, handled in eval.rs
-    object_set_key_value(mc, &iterator, "next", &Value::Function("SetIterator.prototype.next".to_string()))?;
-
-    // Register Symbols
-    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
-        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+    // Set [[Prototype]] to %SetIteratorPrototype%
+    if let Some(proto_val) = slot_get_chained(env, &InternalSlot::SetIteratorPrototype)
+        && let Value::Object(proto) = &*proto_val.borrow()
     {
-        // Symbol.iterator
-        if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
-            && let Value::Symbol(s) = &*iter_sym.borrow()
-        {
-            object_set_key_value(mc, &iterator, s, &Value::Function("IteratorSelf".to_string()))?;
-        }
-
-        // Symbol.toStringTag
-        if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
-            && let Value::Symbol(s) = &*tag_sym.borrow()
-        {
-            object_set_key_value(mc, &iterator, s, &Value::String(utf8_to_utf16("Set Iterator")))?;
-        }
+        iterator.borrow_mut(mc).prototype = Some(*proto);
     }
+
+    slot_set(mc, &iterator, InternalSlot::IteratorSet, &Value::Set(set));
+    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
+    slot_set(mc, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
 
     Ok(Value::Object(iterator))
 }

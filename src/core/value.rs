@@ -379,15 +379,47 @@ pub enum InternalSlot {
     AsyncGeneratorProto, // __async_generator_proto
 
     // --- Iterator ---
-    IteratorIndex,              // __iterator_index__
-    IteratorKind,               // __iterator_kind__
-    IteratorArray,              // __iterator_array__
-    IteratorMap,                // __iterator_map__
-    IteratorSet,                // __iterator_set__
-    IteratorString,             // __iterator_string__
-    PendingIterator,            // __pending_iterator
-    PendingIteratorDone,        // __pending_iterator_done
-    ArrayIteratorPrototype,     // %ArrayIteratorPrototype%
+    IteratorIndex,             // __iterator_index__
+    IteratorKind,              // __iterator_kind__
+    IteratorArray,             // __iterator_array__
+    IteratorMap,               // __iterator_map__
+    IteratorSet,               // __iterator_set__
+    IteratorString,            // __iterator_string__
+    PendingIterator,           // __pending_iterator
+    PendingIteratorDone,       // __pending_iterator_done
+    ArrayIteratorPrototype,    // %ArrayIteratorPrototype%
+    MapIteratorPrototype,      // %MapIteratorPrototype%
+    SetIteratorPrototype,      // %SetIteratorPrototype%
+    StringIteratorPrototype,   // %StringIteratorPrototype%
+    IteratorPrototype,         // %IteratorPrototype%
+    IteratorHelperPrototype,   // %IteratorHelperPrototype%
+    WrapForValidIteratorProto, // %WrapForValidIteratorPrototype%
+
+    // --- Iterator Helpers (per-instance slots) ---
+    IteratorHelperKind,       // discriminant: "map", "filter", "take", etc.
+    IteratorHelperUnderlying, // underlying iterator object
+    IteratorHelperNextMethod, // underlying .next method
+    IteratorHelperCallback,   // mapper / predicate callback
+    IteratorHelperCounter,    // running counter (f64)
+    IteratorHelperRemaining,  // remaining count for take / drop (f64)
+    IteratorHelperDone,       // boolean, true when exhausted
+    IteratorHelperExecuting,  // boolean, true when generator body is executing (re-entrancy guard)
+    IteratorHelperStarted,    // boolean, true once .next() has been called (suspended-start vs suspended-yield)
+    IteratorHelperInnerIter,  // inner iterator for flatMap / concat
+    IteratorHelperInnerNext,  // inner .next method for flatMap / concat
+
+    // --- WrapForValid (per-instance slots) ---
+    WrapForValidUnderlying, // underlying iterator object
+    WrapForValidNextMethod, // underlying .next method
+
+    // --- Zip / ZipKeyed (per-instance slots) ---
+    ZipIterators,   // JS array of iterator objects [iter0, iter1, ...]
+    ZipNextMethods, // JS array of .next method values [next0, next1, ...]
+    ZipOpenFlags,   // JS array of booleans [true, true, ...] — still open?
+    ZipMode,        // "shortest" | "longest" | "strict"
+    ZipPadding,     // JS array of padding values (for longest mode)
+    ZipKeys,        // JS array of string keys (for zipKeyed only)
+
     AsyncFunctionCtor,          // %AsyncFunction% constructor (hidden intrinsic)
     AsyncGeneratorFunctionCtor, // %AsyncGeneratorFunction% constructor (hidden intrinsic)
 

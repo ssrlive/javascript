@@ -140,6 +140,42 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     crate::js_object::define_property_internal(mc, &string_proto, "length", &proto_len_desc)?;
 
     env_set(mc, env, "String", &Value::Object(string_ctor))?;
+
+    Ok(())
+}
+
+/// Create %StringIteratorPrototype%. Must be called AFTER %IteratorPrototype% is available.
+pub fn initialize_string_iterator_prototype<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let str_iter_proto = new_js_object_data(mc);
+    if let Some(iter_proto_val) = slot_get_chained(env, &InternalSlot::IteratorPrototype)
+        && let Value::Object(iter_proto) = &*iter_proto_val.borrow()
+    {
+        str_iter_proto.borrow_mut(mc).prototype = Some(*iter_proto);
+    }
+
+    // next method (non-enumerable)
+    object_set_key_value(
+        mc,
+        &str_iter_proto,
+        "next",
+        &Value::Function("StringIterator.prototype.next".to_string()),
+    )?;
+    str_iter_proto.borrow_mut(mc).set_non_enumerable("next");
+
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+    {
+        // Symbol.toStringTag = "String Iterator" (non-writable, non-enumerable, configurable)
+        if let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+            && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+        {
+            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("String Iterator")), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &str_iter_proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+        }
+    }
+
+    slot_set(mc, env, InternalSlot::StringIteratorPrototype, &Value::Object(str_iter_proto));
+
     Ok(())
 }
 
@@ -209,7 +245,7 @@ pub fn handle_string_method<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
-        "[Symbol.iterator]" => create_string_iterator(mc, s),
+        "[Symbol.iterator]" => create_string_iterator(mc, s, env),
         "toString" => string_to_string_method(s, args),
         "valueOf" => string_to_string_method(s, args),
         "substring" => string_substring_method(s, args),
@@ -1959,16 +1995,25 @@ pub fn string_from_code_point<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, Ev
 pub fn string_raw<'gc>(_args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     Ok(Value::String(Vec::new()))
 }
+
 /// Create a new String Iterator
-pub(crate) fn create_string_iterator<'gc>(mc: &MutationContext<'gc>, s: &[u16]) -> Result<Value<'gc>, EvalError<'gc>> {
+pub(crate) fn create_string_iterator<'gc>(
+    mc: &MutationContext<'gc>,
+    s: &[u16],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let iterator = new_js_object_data(mc);
+
+    // Set [[Prototype]] to %StringIteratorPrototype%
+    if let Some(proto_val) = slot_get_chained(env, &InternalSlot::StringIteratorPrototype)
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        iterator.borrow_mut(mc).prototype = Some(*proto);
+    }
 
     // Store string data
     slot_set(mc, &iterator, InternalSlot::IteratorString, &Value::String(s.to_vec()));
     slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
-
-    // next method
-    object_set_key_value(mc, &iterator, "next", &Value::Function("StringIterator.prototype.next".to_string()))?;
 
     Ok(Value::Object(iterator))
 }

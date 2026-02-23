@@ -2230,6 +2230,94 @@ pub fn handle_object_method<'gc>(
             let eq = crate::core::values_equal(mc, &a, &b);
             Ok(Value::Boolean(eq))
         }
+        "fromEntries" => {
+            // Object.fromEntries(iterable) — creates an object from an iterable of key-value pairs
+            let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+            if matches!(iterable, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Object.fromEntries requires an iterable argument").into());
+            }
+
+            let result = crate::core::new_js_object_data(mc);
+
+            // Get iterator from iterable
+            let iter_sym = crate::js_iterator_helpers::get_well_known_symbol(env, "iterator")
+                .ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol.iterator not found").into() })?;
+            let method_val = crate::core::get_property_with_accessors(
+                mc,
+                env,
+                &match &iterable {
+                    Value::Object(o) => *o,
+                    _ => return Err(raise_type_error!("Object.fromEntries requires an iterable argument").into()),
+                },
+                crate::core::PropertyKey::Symbol(iter_sym),
+            )?;
+            let method_is_callable = matches!(
+                &method_val,
+                Value::Function(_)
+                    | Value::Closure(_)
+                    | Value::AsyncClosure(_)
+                    | Value::GeneratorFunction(..)
+                    | Value::AsyncGeneratorFunction(..)
+            );
+            if matches!(method_val, Value::Undefined | Value::Null) || !method_is_callable {
+                return Err(raise_type_error!("Object.fromEntries requires an iterable argument").into());
+            }
+
+            let iter_result = crate::core::evaluate_call_dispatch(mc, env, &method_val, Some(&iterable), &[])?;
+            let iter_obj = match &iter_result {
+                Value::Object(o) => *o,
+                _ => return Err(raise_type_error!("Iterator result is not an object").into()),
+            };
+            let next_method =
+                crate::core::get_property_with_accessors(mc, env, &iter_obj, crate::core::PropertyKey::String("next".to_string()))?;
+
+            loop {
+                let step = crate::core::evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+                let done_val = crate::core::get_property_with_accessors(
+                    mc,
+                    env,
+                    &match &step {
+                        Value::Object(o) => *o,
+                        _ => return Err(raise_type_error!("Iterator result is not an object").into()),
+                    },
+                    crate::core::PropertyKey::String("done".to_string()),
+                )?;
+                let is_done = match &done_val {
+                    Value::Boolean(b) => *b,
+                    Value::Undefined | Value::Null => false,
+                    Value::Number(n) => *n != 0.0 && !n.is_nan(),
+                    Value::String(s) => !s.is_empty(),
+                    _ => true,
+                };
+                if is_done {
+                    break;
+                }
+                let pair = crate::core::get_property_with_accessors(
+                    mc,
+                    env,
+                    &match &step {
+                        Value::Object(o) => *o,
+                        _ => return Err(raise_type_error!("Iterator result is not an object").into()),
+                    },
+                    crate::core::PropertyKey::String("value".to_string()),
+                )?;
+
+                // Each entry must be an object (array-like with [0] and [1])
+                let pair_obj = match &pair {
+                    Value::Object(o) => *o,
+                    _ => return Err(raise_type_error!("Iterator value is not an object").into()),
+                };
+                let key_val =
+                    crate::core::get_property_with_accessors(mc, env, &pair_obj, crate::core::PropertyKey::String("0".to_string()))?;
+                let val = crate::core::get_property_with_accessors(mc, env, &pair_obj, crate::core::PropertyKey::String("1".to_string()))?;
+
+                // Convert key to property key
+                let key_str = crate::core::value_to_string(&key_val);
+                crate::core::object_set_key_value(mc, &result, &*key_str, &val)?;
+            }
+
+            Ok(Value::Object(result))
+        }
         _ => Err(raise_eval_error!(format!("Object.{method} is not implemented")).into()),
     }
 }

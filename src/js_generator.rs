@@ -39,6 +39,15 @@ fn eval_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
     }
 }
 
+/// Public wrapper so other modules (e.g. js_iterator_helpers) can call GetIterator.
+pub fn public_get_iterator<'gc>(
+    mc: &MutationContext<'gc>,
+    val: &Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+    get_iterator(mc, val, env)
+}
+
 fn get_iterator<'gc>(
     mc: &MutationContext<'gc>,
     val: &Value<'gc>,
@@ -73,9 +82,67 @@ fn get_iterator<'gc>(
                     && let Value::Object(ctor_obj) = &*ctor.borrow()
                     && let Some(proto_ref) = object_get_key_value(ctor_obj, "prototype")
                     && let Value::Object(proto) = &*proto_ref.borrow()
-                    && let Some(method_ref) = object_get_key_value(proto, PropertyKey::Symbol(*iter_sym))
                 {
-                    method_ref.borrow().clone()
+                    // Walk the prototype chain starting from proto to find Symbol.iterator,
+                    // handling accessor descriptors with the primitive as `this`
+                    let sym_key = PropertyKey::Symbol(*iter_sym);
+                    let mut found = Value::Undefined;
+                    let mut cur_proto = Some(*proto);
+                    while let Some(cp) = cur_proto {
+                        if let Some(raw_ptr) = crate::core::get_own_property(&cp, &sym_key) {
+                            let raw = raw_ptr.borrow().clone();
+                            found = match raw {
+                                Value::Property { getter, value, .. } => {
+                                    if let Some(g) = getter {
+                                        // The getter may be a Closure, Function, or Getter value.
+                                        // For Getter (AST-based), evaluate inline with primitive `this`.
+                                        // For Closure/Function, use evaluate_call_dispatch.
+                                        match *g {
+                                            Value::Getter(ref body, ref captured_env, ref home_opt) => {
+                                                let call_env = crate::core::new_js_object_data(mc);
+                                                call_env.borrow_mut(mc).prototype = Some(*captured_env);
+                                                call_env.borrow_mut(mc).is_function_scope = true;
+                                                object_set_key_value(mc, &call_env, "this", val)?;
+                                                call_env.borrow_mut(mc).set_home_object(home_opt.clone());
+                                                let body_clone = body.clone();
+                                                match crate::core::evaluate_statements_with_labels(mc, &call_env, &body_clone, &[], &[])? {
+                                                    crate::core::ControlFlow::Return(v) => v,
+                                                    crate::core::ControlFlow::Normal(_) => Value::Undefined,
+                                                    crate::core::ControlFlow::Throw(v, line, col) => {
+                                                        return Err(EvalError::Throw(v, line, col));
+                                                    }
+                                                    _ => Value::Undefined,
+                                                }
+                                            }
+                                            _ => crate::core::evaluate_call_dispatch(mc, env, &g, Some(val), &[])?,
+                                        }
+                                    } else if let Some(v) = value {
+                                        v.borrow().clone()
+                                    } else {
+                                        Value::Undefined
+                                    }
+                                }
+                                Value::Getter(ref body, ref captured_env, ref home_opt) => {
+                                    let call_env = crate::core::new_js_object_data(mc);
+                                    call_env.borrow_mut(mc).prototype = Some(*captured_env);
+                                    call_env.borrow_mut(mc).is_function_scope = true;
+                                    object_set_key_value(mc, &call_env, "this", val)?;
+                                    call_env.borrow_mut(mc).set_home_object(home_opt.clone());
+                                    let body_clone = body.clone();
+                                    match crate::core::evaluate_statements_with_labels(mc, &call_env, &body_clone, &[], &[])? {
+                                        crate::core::ControlFlow::Return(v) => v,
+                                        crate::core::ControlFlow::Normal(_) => Value::Undefined,
+                                        crate::core::ControlFlow::Throw(v, line, col) => return Err(EvalError::Throw(v, line, col)),
+                                        _ => Value::Undefined,
+                                    }
+                                }
+                                other => other,
+                            };
+                            break;
+                        }
+                        cur_proto = cp.borrow().prototype;
+                    }
+                    found
                 } else {
                     Value::Undefined
                 }
@@ -3017,6 +3084,61 @@ pub fn generator_next<'gc>(
                 return Ok(create_iterator_result(mc, &func_env, &yielded, false)?);
             }
 
+            // Special case: While loop containing a yield in its body.
+            // On resume, execute post-yield statements from the previous
+            // iteration, re-check the condition, and if true execute
+            // pre-yield statements and evaluate the yield inner expression
+            // to produce the next value.
+            if let Some(stmt) = gen_obj.body.get(pc_val)
+                && let StatementKind::While(cond, while_body) = &*stmt.kind
+                && let Some((body_yield_idx, None, _yield_kind, yield_inner)) = find_first_yield_in_statements(while_body)
+            {
+                // Execute post-yield statements from current iteration
+                if body_yield_idx + 1 < while_body.len() {
+                    let post_stmts = while_body[body_yield_idx + 1..].to_vec();
+                    crate::core::evaluate_statements(mc, &func_env, &post_stmts)?;
+                }
+
+                // Re-check loop condition
+                let cond_val = crate::core::evaluate_expr(mc, &func_env, cond)?;
+                if !cond_val.to_truthy() {
+                    // Loop done, advance to next statement
+                    if pc_val + 1 >= gen_obj.body.len() {
+                        gen_obj.state = GeneratorState::Completed;
+                        return Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?);
+                    }
+                    gen_obj.state = GeneratorState::Suspended {
+                        pc: pc_val + 1,
+                        stack: vec![],
+                        pre_env: Some(func_env),
+                    };
+                    drop(gen_obj);
+                    return generator_next(mc, generator, &Value::Undefined);
+                }
+
+                // Execute pre-yield statements for next iteration
+                if body_yield_idx > 0 {
+                    let pre_stmts = while_body[0..body_yield_idx].to_vec();
+                    crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                }
+
+                // Evaluate yield inner expression
+                let yielded = if let Some(inner) = yield_inner {
+                    crate::core::evaluate_expr(mc, &func_env, &inner)?
+                } else {
+                    Value::Undefined
+                };
+
+                // Suspend at the same while-loop statement
+                gen_obj.state = GeneratorState::Suspended {
+                    pc: pc_val,
+                    stack: vec![],
+                    pre_env: Some(func_env),
+                };
+                gen_obj.cached_initial_yield = Some(yielded.clone());
+                return Ok(create_iterator_result(mc, &func_env, &yielded, false)?);
+            }
+
             // Special-case: precompute conditional branch inner yield's operand
             // value so we can return it now while still installing placeholders
             // for subsequent resumes. Also record which branch was chosen so we
@@ -4935,8 +5057,15 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
 
     let gen_proto = crate::core::new_js_object_data(mc);
     log::debug!("js_generator::init: gen_proto ptr = {:p}", Gc::as_ptr(gen_proto));
-    // Ensure Generator.prototype inherits from Object.prototype so ToPrimitive works.
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &gen_proto, env, "Object");
+    // Per spec, Generator.prototype.[[Prototype]] = %IteratorPrototype%.
+    // Fall back to Object.prototype if %IteratorPrototype% is not available.
+    if let Some(ip_val) = crate::core::slot_get_chained(env, &InternalSlot::IteratorPrototype)
+        && let Value::Object(ip) = &*ip_val.borrow()
+    {
+        gen_proto.borrow_mut(mc).prototype = Some(*ip);
+    } else {
+        let _ = crate::core::set_internal_prototype_from_constructor(mc, &gen_proto, env, "Object");
+    }
     // DEBUG: report gen_proto and later when GeneratorFunction.prototype is linked
     log::debug!("init_generator: gen_proto created at {:p}", Gc::as_ptr(gen_proto));
 

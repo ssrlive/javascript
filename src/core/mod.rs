@@ -105,6 +105,8 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_math(mc, env)?;
     initialize_string(mc, env)?;
     initialize_array(mc, env)?;
+    // Create %StringIteratorPrototype% now that %IteratorPrototype% is available
+    crate::js_string::initialize_string_iterator_prototype(mc, env)?;
     crate::js_function::initialize_function(mc, env)?;
     initialize_regexp(mc, env)?;
     // Initialize Date constructor and prototype
@@ -125,6 +127,9 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     crate::js_generator::initialize_generator(mc, env)?;
     // Initialize async generator prototype/constructor
     crate::js_async_generator::initialize_async_generator(mc, env)?;
+
+    // Initialize Iterator helpers (Iterator constructor, prototype methods, etc.)
+    crate::js_iterator_helpers::initialize_iterator_helpers(mc, env)?;
 
     // Create AsyncFunction constructor/prototype so async function objects
     // inherit @@toStringTag = "AsyncFunction" from a distinct prototype.

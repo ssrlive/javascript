@@ -395,6 +395,9 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         iterator_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
     }
 
+    // Store %IteratorPrototype% in env so Iterator helpers init can find it
+    slot_set(mc, env, InternalSlot::IteratorPrototype, &Value::Object(iterator_proto));
+
     // %ArrayIteratorPrototype% has [[Prototype]] = %IteratorPrototype%,
     // a `next` method, and Symbol.toStringTag = "Array Iterator".
     let array_iter_proto = new_js_object_data(mc);
@@ -869,7 +872,105 @@ pub(crate) fn handle_array_static_method<'gc>(
                         result.push(map_value(mc, env, &mapper, &this_arg, i, element)?);
                     }
                 }
-                _ => return Err(raise_type_error!("Array.from requires an array-like or iterable object").into()),
+                _ => {
+                    // For primitives (Number, Boolean, BigInt, Symbol), try to look up
+                    // @@iterator on the wrapper prototype (e.g. Number.prototype[Symbol.iterator])
+                    let proto_name = match &items {
+                        Value::Number(_) => "Number",
+                        Value::Boolean(_) => "Boolean",
+                        Value::BigInt(_) => "BigInt",
+                        Value::Symbol(_) => "Symbol",
+                        _ => "",
+                    };
+                    if !proto_name.is_empty()
+                        && let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                        && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
+                        && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+                        && let Some(ctor) = crate::core::env_get(env, proto_name)
+                        && let Value::Object(ctor_obj) = &*ctor.borrow()
+                        && let Some(proto_ref) = object_get_key_value(ctor_obj, "prototype")
+                        && let Value::Object(proto) = &*proto_ref.borrow()
+                        && let Some(method_ref) = object_get_key_value(proto, PropertyKey::Symbol(*iter_sym))
+                    {
+                        let iter_fn = method_ref.borrow().clone();
+                        if !matches!(iter_fn, Value::Undefined | Value::Null) {
+                            // used_iterator_or_string = true;
+                            let iterator_val = evaluate_call_dispatch(mc, env, &iter_fn, Some(&items), &[])?;
+                            let iter_obj = match iterator_val {
+                                Value::Object(o) => o,
+                                _ => return Err(raise_type_error!("Array.from iterator must return an object").into()),
+                            };
+
+                            let out = create_with_ctor_or_array(None)?;
+                            let close_iterator = |iter_obj: &JSObjectDataPtr<'gc>| {
+                                if let Ok(return_fn) = crate::core::get_property_with_accessors(mc, env, iter_obj, "return")
+                                    && !matches!(return_fn, Value::Undefined | Value::Null)
+                                {
+                                    let _ = evaluate_call_dispatch(mc, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
+                                }
+                            };
+
+                            let mut idx = 0usize;
+                            loop {
+                                let next_fn = match crate::core::get_property_with_accessors(mc, env, &iter_obj, "next") {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                let next_res = match evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                let next_obj = match next_res {
+                                    Value::Object(o) => o,
+                                    _ => {
+                                        close_iterator(&iter_obj);
+                                        return Err(raise_type_error!("Iterator.next must return an object").into());
+                                    }
+                                };
+                                let done_val = match crate::core::get_property_with_accessors(mc, env, &next_obj, "done") {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                if done_val.to_truthy() {
+                                    break;
+                                }
+                                let value = match crate::core::get_property_with_accessors(mc, env, &next_obj, "value") {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                let mapped = match map_value(mc, env, &mapper, &this_arg, idx, value) {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        close_iterator(&iter_obj);
+                                        return Err(err);
+                                    }
+                                };
+                                if let Err(err) = create_data_property_or_throw(&out, idx, &mapped) {
+                                    close_iterator(&iter_obj);
+                                    return Err(err);
+                                }
+                                idx += 1;
+                            }
+
+                            set_length_with_set_semantics(&out, idx)?;
+                            return Ok(Value::Object(out));
+                        }
+                    }
+                    return Err(raise_type_error!("Array.from requires an array-like or iterable object").into());
+                }
             }
 
             let out = if used_iterator_or_string {

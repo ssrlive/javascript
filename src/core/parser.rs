@@ -3354,7 +3354,15 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                     *index += 1; // consume ]
                     prop_expr_opt = Some(expr);
                 }
-                _ => return Err(raise_parse_error_at!(t.get(*index))),
+                _ => {
+                    // Accept reserved words as property names (e.g. `get return()`)
+                    if let Some(name) = t[*index].token.as_identifier_string() {
+                        prop_name_str = Some(name);
+                        *index += 1;
+                    } else {
+                        return Err(raise_parse_error_at!(t.get(*index)));
+                    }
+                }
             }
 
             if *index >= t.len() || !matches!(t[*index].token, Token::LParen) {
@@ -4539,8 +4547,8 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         };
 
                         // Check for optional '*' prefix to denote generator method
-                        let mut is_generator = false;
-                        if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+                        // (only if not already set from before the computed key)
+                        if !is_generator && *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
                             is_generator = true;
                             *index += 1; // consume '*'
                         }

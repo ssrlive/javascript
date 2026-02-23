@@ -1583,6 +1583,30 @@ pub(crate) fn evaluate_new<'gc>(
                     "BigInt" | "Symbol" => {
                         return Err(raise_type_error!(format!("{} is not a constructor", name_desc)).into());
                     }
+                    "Iterator" => {
+                        // Per spec: Iterator is an abstract constructor.
+                        // If NewTarget is the Iterator constructor itself, throw TypeError.
+                        let is_direct = if let Some(nt) = new_target {
+                            if let Value::Object(nt_obj) = nt {
+                                Gc::ptr_eq(*nt_obj, *class_obj)
+                            } else {
+                                false
+                            }
+                        } else {
+                            true // no new target → called without new
+                        };
+                        if is_direct || new_target.is_none() {
+                            return Err(raise_type_error!("Abstract class Iterator not directly constructable").into());
+                        }
+                        // Subclass: OrdinaryCreateFromConstructor(NewTarget, "%Iterator.prototype%")
+                        let instance = new_js_object_data(mc);
+                        if let Some(Value::Object(nt_obj)) = new_target
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "Iterator")?
+                        {
+                            instance.borrow_mut(mc).prototype = Some(proto);
+                        }
+                        return Ok(Value::Object(instance));
+                    }
                     _ => {}
                 }
             }

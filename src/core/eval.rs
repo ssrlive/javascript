@@ -8545,7 +8545,7 @@ fn set_super_property_with_accessors<'gc>(
                 Value::Property { setter, getter, .. } => {
                     if let Some(s) = setter {
                         let s_clone = (*s).clone();
-                        return call_setter(mc, receiver, &s_clone, val);
+                        return call_setter(mc, receiver, &s_clone, val, Some(env));
                     }
                     if getter.is_some() {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -18088,7 +18088,7 @@ pub(crate) fn set_property_with_accessors<'gc>(
                             // Clone setter out to avoid holding a borrow on the inherited property
                             // cell while calling into the setter, which may mutate prototypes/receiver.
                             let s_clone = (*s).clone();
-                            return call_setter(mc, &receiver_ptr, &s_clone, val);
+                            return call_setter(mc, &receiver_ptr, &s_clone, val, Some(_env));
                         }
                         if is_accessor_like {
                             return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -18207,7 +18207,7 @@ pub(crate) fn set_property_with_accessors<'gc>(
                         // Clone setter value to avoid holding any borrows into the property cell
                         // while the setter executes and potentially mutates the receiver.
                         let s_clone = (*s).clone();
-                        return call_setter(mc, &receiver_ptr, &s_clone, val);
+                        return call_setter(mc, &receiver_ptr, &s_clone, val, Some(_env));
                     }
                     if is_accessor_like {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -18257,7 +18257,7 @@ pub(crate) fn set_property_with_accessors<'gc>(
                         // Clone setter to drop any borrows into the property's storage
                         // before invoking the setter, which may mutate the receiver.
                         let s_clone = (*s).clone();
-                        return call_setter(mc, &receiver_ptr, &s_clone, val);
+                        return call_setter(mc, &receiver_ptr, &s_clone, val, Some(_env));
                     }
                     if is_accessor_like {
                         return Err(raise_type_error!("Cannot set property which has only a getter").into());
@@ -18811,6 +18811,10 @@ pub fn call_native_function<'gc>(
     if name == "IteratorSelf" {
         return Ok(Some(this_val.unwrap_or(&Value::Undefined).clone()));
     }
+    // --- Iterator Helpers dispatch ---
+    if let Some(result) = crate::js_iterator_helpers::handle_iterator_helper_dispatch(mc, name, this_val, args, env)? {
+        return Ok(Some(result));
+    }
     if name == "StringIterator.prototype.next" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         if let Value::Object(obj) = this_v {
@@ -19151,6 +19155,7 @@ fn call_setter<'gc>(
     receiver: &JSObjectDataPtr<'gc>,
     setter: &Value<'gc>,
     val: &Value<'gc>,
+    env: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<(), EvalError<'gc>> {
     match setter {
         Value::Setter(params, body, captured_env, home_opt) => {
@@ -19183,13 +19188,25 @@ fn call_setter<'gc>(
         Value::Object(obj) => {
             // Check for internal closure
             let cl_val_opt = obj.borrow().get_closure();
-            if let Some(cl_val) = cl_val_opt
-                && let Value::Closure(cl) = &*cl_val.borrow()
-            {
-                // If the function object wrapper holds a home object, propagate it
-                let home_opt = obj.borrow().get_home_object();
-                let env_ptr = cl.env.expect("Closure must have an env for setter call");
-                return call_setter_raw(mc, receiver, &cl.params, &cl.body, &env_ptr, home_opt, val);
+            if let Some(cl_val) = cl_val_opt {
+                match &*cl_val.borrow() {
+                    Value::Closure(cl) => {
+                        // If the function object wrapper holds a home object, propagate it
+                        let home_opt = obj.borrow().get_home_object();
+                        let env_ptr = cl.env.expect("Closure must have an env for setter call");
+                        return call_setter_raw(mc, receiver, &cl.params, &cl.body, &env_ptr, home_opt, val);
+                    }
+                    Value::Function(name) => {
+                        // Native function setter (e.g. Iterator.prototype.set constructor)
+                        if let Some(env_ptr) = env
+                            && call_native_function(mc, name, Some(&Value::Object(*receiver)), std::slice::from_ref(val), env_ptr)?
+                                .is_some()
+                        {
+                            return Ok(());
+                        }
+                    }
+                    _ => {}
+                }
             }
             Err(raise_type_error!("Setter is not a function").into())
         }

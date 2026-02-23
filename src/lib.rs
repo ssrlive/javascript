@@ -14,6 +14,7 @@ pub(crate) mod js_console;
 pub(crate) mod js_date;
 pub(crate) mod js_function;
 pub(crate) mod js_generator;
+pub(crate) mod js_iterator_helpers;
 pub(crate) mod js_json;
 pub(crate) mod js_map;
 pub(crate) mod js_math;

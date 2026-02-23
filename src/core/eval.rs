@@ -12373,44 +12373,30 @@ pub fn evaluate_call_dispatch<'gc>(
                 } else {
                     Err(raise_eval_error!(format!("Unknown Generator function: {}", name)).into())
                 }
+            } else if name == "Map[Symbol.species]" {
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                Ok(this_v.clone())
             } else if name.starts_with("Map.") {
                 if let Some(method) = name.strip_prefix("Map.prototype.") {
                     let this_v = this_val.unwrap_or(&Value::Undefined);
                     if let Value::Object(obj) = this_v {
                         if let Some(map_val) = slot_get_chained(obj, &InternalSlot::Map) {
                             if let Value::Map(map_ptr) = &*map_val.borrow() {
-                                Ok(crate::js_map::handle_map_instance_method(mc, map_ptr, method, eval_args, env)?)
+                                Ok(crate::js_map::handle_map_instance_method(
+                                    mc, map_ptr, method, eval_args, env, this_v,
+                                )?)
                             } else {
-                                Err(raise_eval_error!("TypeError: Map.prototype method called on incompatible receiver").into())
+                                Err(raise_type_error!(format!("Method Map.prototype.{} called on incompatible receiver", method)).into())
                             }
                         } else {
-                            Err(raise_eval_error!("TypeError: Map.prototype method called on incompatible receiver").into())
+                            Err(raise_type_error!(format!("Method Map.prototype.{} called on incompatible receiver", method)).into())
                         }
                     } else if let Value::Map(map_ptr) = this_v {
-                        Ok(crate::js_map::handle_map_instance_method(mc, map_ptr, method, eval_args, env)?)
+                        Ok(crate::js_map::handle_map_instance_method(
+                            mc, map_ptr, method, eval_args, env, this_v,
+                        )?)
                     } else {
-                        Err(raise_eval_error!("TypeError: Map.prototype method called on non-object receiver").into())
-                    }
-                } else {
-                    Err(raise_eval_error!(format!("Unknown Map function: {}", name)).into())
-                }
-            } else if name.starts_with("Map.") {
-                if let Some(method) = name.strip_prefix("Map.prototype.") {
-                    let this_v = this_val.unwrap_or(&Value::Undefined);
-                    if let Value::Object(obj) = this_v {
-                        if let Some(map_val) = slot_get_chained(obj, &InternalSlot::Map) {
-                            if let Value::Map(map_ptr) = &*map_val.borrow() {
-                                Ok(crate::js_map::handle_map_instance_method(mc, map_ptr, method, eval_args, env)?)
-                            } else {
-                                Err(raise_eval_error!("TypeError: Map.prototype method called on incompatible receiver").into())
-                            }
-                        } else {
-                            Err(raise_eval_error!("TypeError: Map.prototype method called on incompatible receiver").into())
-                        }
-                    } else if let Value::Map(map_ptr) = this_v {
-                        Ok(crate::js_map::handle_map_instance_method(mc, map_ptr, method, eval_args, env)?)
-                    } else {
-                        Err(raise_eval_error!("TypeError: Map.prototype method called on non-object receiver").into())
+                        Err(raise_type_error!(format!("Method Map.prototype.{} called on incompatible receiver", method)).into())
                     }
                 } else {
                     Err(raise_eval_error!(format!("Unknown Map function: {}", name)).into())
@@ -16064,7 +16050,15 @@ fn evaluate_expr_property<'gc>(
             | "isNaN"
             | "isFinite"
             | "parseInt"
-            | "parseFloat" => 1.0,
+            | "parseFloat"
+            | "Map.prototype.get"
+            | "Map.prototype.has"
+            | "Map.prototype.delete"
+            | "Map.prototype.forEach"
+            | "Set.prototype.add"
+            | "Set.prototype.has"
+            | "Set.prototype.delete"
+            | "Set.prototype.forEach" => 1.0,
             "Array.prototype.slice"
             | "Array.prototype.splice"
             | "Array.prototype.copyWithin"
@@ -16086,7 +16080,8 @@ fn evaluate_expr_property<'gc>(
             | "DataView.prototype.setFloat32"
             | "DataView.prototype.setFloat64"
             | "DataView.prototype.setBigInt64"
-            | "DataView.prototype.setBigUint64" => 2.0,
+            | "DataView.prototype.setBigUint64"
+            | "Map.prototype.set" => 2.0,
             "Function.prototype.[Symbol.hasInstance]" => 1.0,
             "Object.defineProperty" => 3.0,
             _ => {
@@ -16106,6 +16101,11 @@ fn evaluate_expr_property<'gc>(
         }
         let short_name = if func_name.contains("[Symbol.hasInstance]") {
             "[Symbol.hasInstance]"
+        } else if func_name == "Map.prototype.size" || func_name == "Set.prototype.size" {
+            let base = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+            return Ok(Value::String(utf8_to_utf16(&format!("get {}", base))));
+        } else if func_name.ends_with("[Symbol.species]") {
+            return Ok(Value::String(utf8_to_utf16("get [Symbol.species]")));
         } else {
             func_name.rsplit('.').next().unwrap_or(func_name.as_str())
         };
@@ -17394,7 +17394,15 @@ fn evaluate_expr_index<'gc>(
                     | "isNaN"
                     | "isFinite"
                     | "parseInt"
-                    | "parseFloat" => 1.0,
+                    | "parseFloat"
+                    | "Map.prototype.get"
+                    | "Map.prototype.has"
+                    | "Map.prototype.delete"
+                    | "Map.prototype.forEach"
+                    | "Set.prototype.add"
+                    | "Set.prototype.has"
+                    | "Set.prototype.delete"
+                    | "Set.prototype.forEach" => 1.0,
                     "Array.prototype.slice"
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
@@ -17418,7 +17426,8 @@ fn evaluate_expr_index<'gc>(
                     | "DataView.prototype.setFloat64"
                     | "DataView.prototype.setBigInt64"
                     | "DataView.prototype.setBigUint64"
-                    | "JSON.parse" => 2.0,
+                    | "JSON.parse"
+                    | "Map.prototype.set" => 2.0,
                     "Function.prototype.[Symbol.hasInstance]" => 1.0,
                     "Object.defineProperty" | "JSON.stringify" => 3.0,
                     _ => {
@@ -17437,6 +17446,11 @@ fn evaluate_expr_index<'gc>(
                 }
                 let short_name = if func_name.contains("[Symbol.hasInstance]") {
                     "[Symbol.hasInstance]"
+                } else if func_name == "Map.prototype.size" || func_name == "Set.prototype.size" {
+                    let base = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                    return Ok(Value::String(utf8_to_utf16(&format!("get {}", base))));
+                } else if func_name.ends_with("[Symbol.species]") {
+                    return Ok(Value::String(utf8_to_utf16("get [Symbol.species]")));
                 } else {
                     func_name.rsplit('.').next().unwrap_or(func_name.as_str())
                 };
@@ -18885,6 +18899,11 @@ pub fn call_native_function<'gc>(
         )?));
     }
 
+    if name == "Map[Symbol.species]" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(this_v.clone()));
+    }
+
     if name.starts_with("Map.")
         && let Some(method) = name.strip_prefix("Map.prototype.")
     {
@@ -18892,17 +18911,21 @@ pub fn call_native_function<'gc>(
         if let Value::Object(obj) = this_v {
             if let Some(map_val) = slot_get_chained(obj, &InternalSlot::Map) {
                 if let Value::Map(map_ptr) = &*map_val.borrow() {
-                    return Ok(Some(crate::js_map::handle_map_instance_method(mc, map_ptr, method, args, env)?));
+                    return Ok(Some(crate::js_map::handle_map_instance_method(
+                        mc, map_ptr, method, args, env, this_v,
+                    )?));
                 } else {
-                    return Err(raise_eval_error!("TypeError: Map.prototype method called on incompatible receiver").into());
+                    return Err(raise_type_error!(format!("Method Map.prototype.{} called on incompatible receiver", method)).into());
                 }
             } else {
-                return Err(raise_eval_error!("TypeError: Map.prototype method called on incompatible receiver").into());
+                return Err(raise_type_error!(format!("Method Map.prototype.{} called on incompatible receiver", method)).into());
             }
         } else if let Value::Map(map_ptr) = this_v {
-            return Ok(Some(crate::js_map::handle_map_instance_method(mc, map_ptr, method, args, env)?));
+            return Ok(Some(crate::js_map::handle_map_instance_method(
+                mc, map_ptr, method, args, env, this_v,
+            )?));
         } else {
-            return Err(raise_eval_error!("TypeError: Map.prototype method called on non-object receiver").into());
+            return Err(raise_type_error!(format!("Method Map.prototype.{} called on incompatible receiver", method)).into());
         }
     }
 
@@ -21122,7 +21145,7 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "RegExp" {
                         return crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), &eval_args);
                     } else if name_str == "Map" {
-                        return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
+                        return crate::js_map::handle_map_constructor(mc, &eval_args, env, None);
                     } else if name_str == "Proxy" {
                         return crate::js_proxy::handle_proxy_constructor(mc, &eval_args, env);
                     } else if name_str == "WeakMap" {

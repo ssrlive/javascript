@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSMap<'gc> {
-    pub entries: Vec<(Value<'gc>, Value<'gc>)>,
+    pub entries: Vec<Option<(Value<'gc>, Value<'gc>)>>,
 }
 
 #[derive(Clone, Collect)]

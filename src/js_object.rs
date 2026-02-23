@@ -1739,7 +1739,15 @@ pub fn handle_object_method<'gc>(
                             | "isNaN"
                             | "isFinite"
                             | "parseInt"
-                            | "parseFloat" => 1.0,
+                            | "parseFloat"
+                            | "Map.prototype.get"
+                            | "Map.prototype.has"
+                            | "Map.prototype.delete"
+                            | "Map.prototype.forEach"
+                            | "Set.prototype.add"
+                            | "Set.prototype.has"
+                            | "Set.prototype.delete"
+                            | "Set.prototype.forEach" => 1.0,
                             "Array.prototype.slice"
                             | "Array.prototype.splice"
                             | "Array.prototype.copyWithin"
@@ -1753,7 +1761,8 @@ pub fn handle_object_method<'gc>(
                             | "Object.is"
                             | "Object.setPrototypeOf"
                             | "Function.prototype.apply"
-                            | "JSON.parse" => 2.0,
+                            | "JSON.parse"
+                            | "Map.prototype.set" => 2.0,
                             "Object.defineProperty" | "JSON.stringify" => 3.0,
                             _ => 0.0,
                         };
@@ -1761,6 +1770,31 @@ pub fn handle_object_method<'gc>(
                     } else if prop_name == "name" {
                         let short_name = if func_name.contains("[Symbol.hasInstance]") {
                             "[Symbol.hasInstance]"
+                        } else if func_name == "Map.prototype.size" || func_name == "Set.prototype.size" {
+                            let base = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16(&format!("get {}", base))),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
+                        } else if func_name.ends_with("[Symbol.species]") {
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16("get [Symbol.species]")),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
                         } else {
                             func_name.rsplit('.').next().unwrap_or(func_name.as_str())
                         };

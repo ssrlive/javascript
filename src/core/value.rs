@@ -21,7 +21,7 @@ pub struct JSMap<'gc> {
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSSet<'gc> {
-    pub values: Vec<Value<'gc>>,
+    pub values: Vec<Option<Value<'gc>>>,
 }
 
 #[derive(Clone, Collect)]

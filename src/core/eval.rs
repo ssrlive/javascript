@@ -12447,32 +12447,26 @@ pub fn evaluate_call_dispatch<'gc>(
                 } else {
                     Err(raise_eval_error!(format!("Unknown Map function: {}", name)).into())
                 }
+            } else if name == "Set[Symbol.species]" {
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                Ok(this_v.clone())
             } else if name.starts_with("Set.") {
                 if let Some(method) = name.strip_prefix("Set.prototype.") {
                     let this_v = this_val.unwrap_or(&Value::Undefined);
                     if let Value::Object(obj) = this_v {
                         if let Some(set_val) = slot_get_chained(obj, &InternalSlot::Set) {
                             if let Value::Set(set_ptr) = &*set_val.borrow() {
-                                Ok(handle_set_instance_method(mc, set_ptr, this_v, method, eval_args, env)?)
+                                Ok(handle_set_instance_method(mc, set_ptr, method, eval_args, env, this_v)?)
                             } else {
-                                Err(raise_eval_error!("TypeError: Set.prototype method called on incompatible receiver").into())
+                                Err(raise_type_error!(format!("Method Set.prototype.{} called on incompatible receiver", method)).into())
                             }
                         } else {
-                            Err(raise_eval_error!("TypeError: Set.prototype method called on incompatible receiver").into())
+                            Err(raise_type_error!(format!("Method Set.prototype.{} called on incompatible receiver", method)).into())
                         }
                     } else if let Value::Set(set_ptr) = this_v {
-                        Ok(handle_set_instance_method(mc, set_ptr, this_v, method, eval_args, env)?)
+                        Ok(handle_set_instance_method(mc, set_ptr, method, eval_args, env, this_v)?)
                     } else {
-                        // Fallback: if `this_v` is an object, check if it has the Set internal slot on the underlying object
-                        // This happens when `this_v` is a JSObject wrapping the Set pointer? No, `Value::Set` is separate.
-                        // Actually, `this_val` from `Expr::Call` might be just `obj_val`.
-                        // If `this_val` is `Value::Object` (which it defaults to in `Expr::Call` matching logic),
-                        // it might still fail the `__set__` check if it's not set up yet?
-
-                        // Debug:
-                        // println!("Set method call debug: method={}, this_val={:?}", method, this_v);
-
-                        Err(raise_eval_error!("TypeError: Set.prototype method called on non-object receiver").into())
+                        Err(raise_type_error!(format!("Method Set.prototype.{} called on incompatible receiver", method)).into())
                     }
                 } else {
                     Err(raise_eval_error!(format!("Unknown Set function: {}", name)).into())
@@ -18862,7 +18856,7 @@ pub fn call_native_function<'gc>(
         if let Value::Object(obj) = this_v {
             return Ok(Some(crate::js_set::handle_set_iterator_next(mc, obj, env)?));
         } else {
-            return Err(raise_eval_error!("TypeError: SetIterator.prototype.next called on non-object").into());
+            return Err(raise_type_error!("Method SetIterator.prototype.next called on incompatible receiver").into());
         }
     }
 
@@ -18929,6 +18923,11 @@ pub fn call_native_function<'gc>(
         }
     }
 
+    if name == "Set[Symbol.species]" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(this_v.clone()));
+    }
+
     if name.starts_with("Set.")
         && let Some(method) = name.strip_prefix("Set.prototype.")
     {
@@ -18936,24 +18935,17 @@ pub fn call_native_function<'gc>(
         if let Value::Object(obj) = this_v {
             if let Some(set_val) = slot_get_chained(obj, &InternalSlot::Set) {
                 if let Value::Set(set_ptr) = &*set_val.borrow() {
-                    return Ok(Some(handle_set_instance_method(mc, set_ptr, this_v, method, args, env)?));
+                    return Ok(Some(handle_set_instance_method(mc, set_ptr, method, args, env, this_v)?));
                 } else {
-                    return Err(raise_eval_error!("TypeError: Set.prototype method called on incompatible receiver").into());
+                    return Err(raise_type_error!(format!("Method Set.prototype.{} called on incompatible receiver", method)).into());
                 }
             } else {
-                return Err(raise_eval_error!("TypeError: Set.prototype method called on incompatible receiver").into());
+                return Err(raise_type_error!(format!("Method Set.prototype.{} called on incompatible receiver", method)).into());
             }
         } else if let Value::Set(set_ptr) = this_v {
-            return Ok(Some(handle_set_instance_method(
-                mc,
-                set_ptr,
-                &Value::Set(*set_ptr),
-                method,
-                args,
-                env,
-            )?));
+            return Ok(Some(handle_set_instance_method(mc, set_ptr, method, args, env, this_v)?));
         } else {
-            return Err(raise_eval_error!("TypeError: Set.prototype method called on non-object receiver").into());
+            return Err(raise_type_error!(format!("Method Set.prototype.{} called on incompatible receiver", method)).into());
         }
     }
 
@@ -21153,7 +21145,7 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "WeakSet" {
                         return Ok(crate::js_weakset::handle_weakset_constructor(mc, &eval_args, env)?);
                     } else if name_str == "Set" {
-                        return Ok(crate::js_set::handle_set_constructor(mc, &eval_args, env)?);
+                        return crate::js_set::handle_set_constructor(mc, &eval_args, env, None);
                     } else if name_str == "ArrayBuffer" {
                         return crate::js_typedarray::handle_arraybuffer_constructor(mc, &eval_args, env, None);
                     } else if name_str == "SharedArrayBuffer" {

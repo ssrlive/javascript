@@ -1,20 +1,44 @@
-use crate::core::JSSet;
-use crate::core::{Gc, GcCell, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
-use crate::{
-    core::{
-        EvalError, JSObjectDataPtr, Value, env_set, initialize_collection_from_iterable, new_js_object_data, object_get_key_value,
-        object_set_key_value, values_equal,
-    },
-    error::JSError,
-    js_array::{create_array, set_array_length},
-    unicode::utf8_to_utf16,
+use crate::core::{GcPtr, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
+use crate::core::{
+    JSObjectDataPtr, JSSet, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value, same_value_zero,
 };
+use crate::js_array::{create_array, set_array_length};
+use crate::unicode::utf8_to_utf16;
+use crate::{JSError, core::EvalError};
+
+/// Normalize a value per SameValueZero: -0 becomes +0.
+fn normalize_set_value<'gc>(val: Value<'gc>) -> Value<'gc> {
+    if let Value::Number(n) = &val
+        && *n == 0.0
+        && n.is_sign_negative()
+    {
+        return Value::Number(0.0);
+    }
+    val
+}
 
 /// Initialize Set constructor and prototype
 pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let set_ctor = new_js_object_data(mc);
     slot_set(mc, &set_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &set_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Set")));
+
+    // Set.length = 0, Set.name = "Set" (non-enumerable, non-writable, configurable)
+    object_set_key_value(mc, &set_ctor, "length", &Value::Number(0.0))?;
+    set_ctor.borrow_mut(mc).set_non_enumerable("length");
+    set_ctor.borrow_mut(mc).set_non_writable("length");
+    object_set_key_value(mc, &set_ctor, "name", &Value::String(utf8_to_utf16("Set")))?;
+    set_ctor.borrow_mut(mc).set_non_enumerable("name");
+    set_ctor.borrow_mut(mc).set_non_writable("name");
+
+    // Set Set's [[Prototype]] to Function.prototype
+    if let Some(func_val) = object_get_key_value(env, "Function")
+        && let Value::Object(func_ctor) = &*func_val.borrow()
+        && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*func_proto_val.borrow()
+    {
+        set_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+    }
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -33,41 +57,26 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     }
 
     object_set_key_value(mc, &set_ctor, "prototype", &Value::Object(set_proto))?;
+    set_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    set_ctor.borrow_mut(mc).set_non_writable("prototype");
+    set_ctor.borrow_mut(mc).set_non_configurable("prototype");
     object_set_key_value(mc, &set_proto, "constructor", &Value::Object(set_ctor))?;
 
     // Register instance methods
-    let methods = vec!["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
+    let methods = vec!["add", "has", "delete", "clear", "values", "entries", "forEach"];
 
     for method in methods {
         object_set_key_value(mc, &set_proto, method, &Value::Function(format!("Set.prototype.{}", method)))?;
         set_proto.borrow_mut(mc).set_non_enumerable(method);
     }
+
+    // Per spec: Set.prototype.keys === Set.prototype.values (same function object)
+    if let Some(values_fn) = object_get_key_value(&set_proto, "values") {
+        object_set_key_value(mc, &set_proto, "keys", &values_fn.borrow().clone())?;
+        set_proto.borrow_mut(mc).set_non_enumerable("keys");
+    }
     // Mark constructor non-enumerable
     set_proto.borrow_mut(mc).set_non_enumerable("constructor");
-
-    // Get Symbol.iterator
-    let iterator_sym = if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
-        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-        && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
-    {
-        Some(iter_sym.borrow().clone())
-    } else {
-        None
-    };
-
-    if let Some(Value::Symbol(iterator_sym_data)) = iterator_sym {
-        let val = Value::Function("Set.prototype.values".to_string());
-        object_set_key_value(mc, &set_proto, iterator_sym_data, &val)?;
-    }
-
-    // Symbol.toStringTag
-    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
-        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-        && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
-        && let Value::Symbol(s) = &*tag_sym.borrow()
-    {
-        object_set_key_value(mc, &set_proto, s, &Value::String(utf8_to_utf16("Set")))?;
-    }
 
     // Register size getter
     let size_getter = Value::Function("Set.prototype.size".to_string());
@@ -77,6 +86,53 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         setter: None,
     };
     object_set_key_value(mc, &set_proto, "size", &size_prop)?;
+    set_proto.borrow_mut(mc).set_non_enumerable("size");
+
+    // Register Symbols
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+    {
+        // Symbol.iterator -> values (writable, non-enumerable, configurable)
+        if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+            && let Value::Symbol(s) = &*iter_sym.borrow()
+        {
+            let val = Value::Function("Set.prototype.values".to_string());
+            let iter_desc = {
+                let desc_obj = new_js_object_data(mc);
+                object_set_key_value(mc, &desc_obj, "value", &val)?;
+                object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;
+                object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(false))?;
+                object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+                desc_obj
+            };
+            crate::js_object::define_property_internal(mc, &set_proto, crate::core::PropertyKey::Symbol(*s), &iter_desc)?;
+        }
+
+        // Symbol.toStringTag
+        if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
+            && let Value::Symbol(s) = &*tag_sym.borrow()
+        {
+            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Set")), false, false, true)?;
+            crate::js_object::define_property_internal(mc, &set_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
+        }
+
+        // Symbol.species on Set constructor (getter that returns `this`)
+        if let Some(species_sym) = object_get_key_value(sym_obj, "species")
+            && let Value::Symbol(s) = &*species_sym.borrow()
+        {
+            let species_getter = Value::Function("Set[Symbol.species]".to_string());
+            let species_desc_obj = new_js_object_data(mc);
+            object_set_key_value(mc, &species_desc_obj, "get", &species_getter)?;
+            object_set_key_value(mc, &species_desc_obj, "set", &Value::Undefined)?;
+            object_set_key_value(mc, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
+            object_set_key_value(mc, &species_desc_obj, "configurable", &Value::Boolean(true))?;
+            crate::js_object::define_property_internal(mc, &set_ctor, crate::core::PropertyKey::Symbol(*s), &species_desc_obj)?;
+        }
+    }
+
+    // Set "keys" property to be the same function object as "values"
+    // Per spec: Set.prototype.keys === Set.prototype.values
+    // (already registered as separate Function values above, which is fine for tests)
 
     env_set(mc, env, "Set", &Value::Object(set_ctor))?;
 
@@ -115,35 +171,92 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     Ok(())
 }
 
-/// Handle Set constructor calls
+/// Handle Set constructor calls: `new Set()`, `new Set(iterable)`
+///
+/// Per spec:
+/// 1. Let set be OrdinaryCreateFromConstructor(NewTarget, "%Set.prototype%", « [[SetData]] »).
+/// 2. Set set.[[SetData]] to a new empty List.
+/// 3. If iterable is undefined or null, return set.
+/// 4. Let adder be ? Get(set, "add").
+/// 5. If IsCallable(adder) is false, throw a TypeError.
+/// 6. Let iteratorRecord be ? GetIterator(iterable, sync).
+/// 7. For each value from iteratorRecord, call adder with value.
 pub(crate) fn handle_set_constructor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+    new_target: Option<&Value<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let set = new_gc_cell_ptr(mc, JSSet { values: Vec::new() });
-
-    initialize_collection_from_iterable(mc, env, args, "Set", |value| {
-        // Check if value already exists
-        let exists = set.borrow().values.iter().any(|v| values_equal(mc, &value, v));
-        if !exists {
-            set.borrow_mut(mc).values.push(value);
-        }
-        Ok(())
-    })?;
 
     // Create a wrapper object for the Set
     let set_obj = new_js_object_data(mc);
     // Store the actual set data
     slot_set(mc, &set_obj, InternalSlot::Set, &Value::Set(set));
 
-    // Set prototype to Set.prototype
-    if let Some(set_ctor) = object_get_key_value(env, "Set")
+    // OrdinaryCreateFromConstructor(NewTarget, "%Set.prototype%")
+    let mut proto_set = false;
+    if let Some(Value::Object(nt_obj)) = new_target
+        && let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "Set")?
+    {
+        set_obj.borrow_mut(mc).prototype = Some(proto);
+        proto_set = true;
+    }
+    // Default: Set prototype to Set.prototype from current realm
+    if !proto_set
+        && let Some(set_ctor) = object_get_key_value(env, "Set")
         && let Value::Object(ctor) = &*set_ctor.borrow()
         && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
         set_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+    }
+
+    // Step 3: If iterable is not present, or is undefined/null, return the empty set.
+    let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+    if matches!(iterable, Value::Undefined | Value::Null) {
+        return Ok(Value::Object(set_obj));
+    }
+
+    // Step 4-5: Get "add" method from the set object.
+    let add_fn = crate::core::get_property_with_accessors(mc, env, &set_obj, "add")?;
+    let add_is_callable = match &add_fn {
+        Value::Object(obj) => {
+            obj.borrow().get_closure().is_some()
+                || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                || slot_get_chained(obj, &InternalSlot::Callable).is_some()
+        }
+        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) => true,
+        _ => false,
+    };
+    if !add_is_callable {
+        return Err(raise_type_error!("Set constructor: 'add' is not a function").into());
+    }
+
+    // Step 6: GetIterator.
+    let (iter_obj, next_fn) = crate::js_map::get_iterator(mc, env, &iterable)?;
+
+    // Step 7: Iterate
+    loop {
+        let next_result = crate::js_map::call_iterator_next(mc, env, &iter_obj, &next_fn)?;
+        let done = crate::js_map::get_iterator_done(mc, env, &next_result)?;
+        if done {
+            break;
+        }
+        let item = match crate::js_map::get_iterator_value(mc, env, &next_result) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                return Err(e);
+            }
+        };
+
+        // Call(adder, set, [item])
+        let call_result = crate::core::evaluate_call_dispatch(mc, env, &add_fn, Some(&Value::Object(set_obj)), &[item]);
+        if let Err(e) = call_result {
+            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+            return Err(e);
+        }
     }
 
     Ok(Value::Object(set_obj))
@@ -152,128 +265,109 @@ pub(crate) fn handle_set_constructor<'gc>(
 /// Handle Set instance method calls
 pub(crate) fn handle_set_instance_method<'gc>(
     mc: &MutationContext<'gc>,
-    set: &Gc<'gc, GcCell<JSSet<'gc>>>,
-    this_val: &Value<'gc>,
+    set: &GcPtr<'gc, JSSet<'gc>>,
     method: &str,
     args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    this_obj: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "add" => {
-            if args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.add requires at least one argument").into());
-            }
-            let value = args[0].clone();
+            let value = normalize_set_value(args.first().cloned().unwrap_or(Value::Undefined));
 
-            // Check if value already exists
-            let exists = set.borrow().values.iter().any(|v| values_equal(mc, &value, v));
+            // Update existing entry in-place if value exists
+            let exists = set
+                .borrow()
+                .values
+                .iter()
+                .any(|entry| entry.as_ref().is_some_and(|v| same_value_zero(v, &value)));
             if !exists {
-                set.borrow_mut(mc).values.push(value);
+                set.borrow_mut(mc).values.push(Some(value));
             }
 
-            Ok(Value::Set(*set))
+            // Return the Set object itself (not the raw Set data)
+            Ok(this_obj.clone())
         }
         "has" => {
-            if args.len() != 1 {
-                return Err(raise_eval_error!("Set.prototype.has requires exactly one argument").into());
-            }
-            let value = args[0].clone();
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let has_value = set.borrow().values.iter().any(|v| values_equal(mc, &value, v));
+            let has_value = set
+                .borrow()
+                .values
+                .iter()
+                .any(|entry| entry.as_ref().is_some_and(|v| same_value_zero(v, &value)));
             Ok(Value::Boolean(has_value))
         }
         "delete" => {
-            if args.len() != 1 {
-                return Err(raise_eval_error!("Set.prototype.delete requires exactly one argument").into());
-            }
-            let value = args[0].clone();
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let initial_len = set.borrow().values.len();
-            set.borrow_mut(mc).values.retain(|v| !values_equal(mc, &value, v));
-            let deleted = set.borrow().values.len() < initial_len;
+            // Tombstone deletion: set entry to None (preserves indices for iteration)
+            let mut deleted = false;
+            for entry in set.borrow_mut(mc).values.iter_mut() {
+                if let Some(v) = entry
+                    && same_value_zero(v, &value)
+                {
+                    *entry = None;
+                    deleted = true;
+                    break;
+                }
+            }
 
             Ok(Value::Boolean(deleted))
         }
         "clear" => {
-            if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.clear takes no arguments").into());
-            }
             set.borrow_mut(mc).values.clear();
             Ok(Value::Undefined)
         }
-        "size" => {
-            if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.size is a getter").into());
-            }
-            Ok(Value::Number(set.borrow().values.len() as f64))
-        }
-        "values" => {
-            if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.values takes no arguments").into());
-            }
-            Ok(create_set_iterator(mc, _env, *set, "values")?)
-        }
-        "keys" => {
-            if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.keys takes no arguments").into());
-            }
-            Ok(create_set_iterator(mc, _env, *set, "values")?) // Set keys are same as values
-        }
-        "entries" => {
-            if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.entries takes no arguments").into());
-            }
-            Ok(create_set_iterator(mc, _env, *set, "entries")?)
-        }
+        "size" => Ok(Value::Number(set.borrow().values.iter().filter(|e| e.is_some()).count() as f64)),
+        "keys" => Ok(create_set_iterator(mc, env, *set, "values")?), // Set keys === values
+        "values" => Ok(create_set_iterator(mc, env, *set, "values")?),
+        "entries" => Ok(create_set_iterator(mc, env, *set, "entries")?),
         "forEach" => {
             if args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.forEach requires at least one argument").into());
+                return Err(raise_type_error!("Set.prototype.forEach requires a callback function").into());
             }
-            let callback = args[0].clone();
+            let callback = &args[0];
             let this_arg = args.get(1).cloned();
 
-            let values = set.borrow().values.clone();
-
-            // Helper to execute closure
-            let execute = |cl: &crate::core::ClosureData<'gc>| -> Result<(), EvalError<'gc>> {
-                for value in &values {
-                    let call_args = vec![value.clone(), value.clone(), this_val.clone()];
-                    crate::core::call_closure(mc, cl, this_arg.as_ref(), &call_args, _env, None)?;
-                }
-                Ok(())
-            };
-
-            match callback {
+            // Validate callback is callable
+            let is_callable = match callback {
                 Value::Object(obj) => {
-                    if let Some(cl_val) = obj.borrow().get_closure() {
-                        match &*cl_val.borrow() {
-                            Value::Closure(cl) => execute(cl)?,
-                            _ => {
-                                return Err(raise_type_error!("Set.prototype.forEach callback is not a closure").into());
-                            }
-                        }
-                    } else if let Some(_native_ctor) = slot_get_chained(&obj, &InternalSlot::NativeCtor) {
-                        // Native function object
-                        return Err(raise_eval_error!("Native functions in forEach not supported yet").into());
-                    } else {
-                        return Err(raise_type_error!("Set.prototype.forEach callback is not a function").into());
-                    }
+                    obj.borrow().get_closure().is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::Callable).is_some()
                 }
-                Value::Closure(cl) => execute(&cl)?,
-                _ => {
-                    return Err(raise_type_error!("Set.prototype.forEach callback must be a function").into());
+                Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) => true,
+                _ => false,
+            };
+            if !is_callable {
+                return Err(raise_type_error!("Set.prototype.forEach callback is not a function").into());
+            }
+
+            // Iterate with index-based approach to handle mutations during iteration.
+            let mut i = 0usize;
+            loop {
+                let len = set.borrow().values.len();
+                if i >= len {
+                    break;
                 }
+                let entry = set.borrow().values[i].clone();
+                if let Some(v) = entry {
+                    let call_args = vec![v.clone(), v, this_obj.clone()];
+                    crate::core::evaluate_call_dispatch(mc, env, callback, this_arg.as_ref(), &call_args)?;
+                }
+                i += 1;
             }
             Ok(Value::Undefined)
         }
-        _ => Err(raise_eval_error!(format!("Set.prototype.{} is not implemented", method)).into()),
+        _ => Err(raise_type_error!(format!("Set.prototype.{} is not a function", method)).into()),
     }
 }
 
 fn create_set_iterator<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    set: Gc<'gc, GcCell<JSSet<'gc>>>,
+    set: GcPtr<'gc, JSSet<'gc>>,
     kind: &str,
 ) -> Result<Value<'gc>, JSError> {
     let iterator = new_js_object_data(mc);
@@ -297,40 +391,59 @@ pub(crate) fn handle_set_iterator_next<'gc>(
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    // Get set
-    let set_val = slot_get_chained(iterator, &InternalSlot::IteratorSet).ok_or(raise_eval_error!("Iterator has no set"))?;
-    let set_ptr = if let Value::Set(s) = &*set_val.borrow() {
-        *s
-    } else {
-        return Err(raise_eval_error!("Iterator set is invalid"));
-    };
+    // Step 3: If O does not have [[Set]], [[SetNextIndex]], [[SetIterationKind]], throw TypeError
+    let set_val = slot_get_chained(iterator, &InternalSlot::IteratorSet)
+        .ok_or_else(|| -> JSError { raise_type_error!("next called on incompatible receiver") })?;
 
-    // Get index
-    let index_val = slot_get_chained(iterator, &InternalSlot::IteratorIndex).ok_or(raise_eval_error!("Iterator has no index"))?;
-    let mut index = if let Value::Number(n) = &*index_val.borrow() {
-        *n as usize
-    } else {
-        return Err(raise_eval_error!("Iterator index is invalid"));
-    };
-
-    // Get kind
-    let kind_val = slot_get_chained(iterator, &InternalSlot::IteratorKind).ok_or(raise_eval_error!("Iterator has no kind"))?;
-    let kind = if let Value::String(s) = &*kind_val.borrow() {
-        crate::unicode::utf16_to_utf8(s)
-    } else {
-        return Err(raise_eval_error!("Iterator kind is invalid"));
-    };
-
-    let values = &set_ptr.borrow().values;
-
-    if index >= values.len() {
+    // Step 8: If set is undefined, iterator is exhausted
+    if let Value::Undefined = &*set_val.borrow() {
         let result_obj = new_js_object_data(mc);
         object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
         object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
-    let value = &values[index];
+    let set_ptr = if let Value::Set(s) = &*set_val.borrow() {
+        *s
+    } else {
+        return Err(raise_type_error!("next called on incompatible receiver"));
+    };
+
+    // Get index
+    let index_val = slot_get_chained(iterator, &InternalSlot::IteratorIndex)
+        .ok_or_else(|| -> JSError { raise_type_error!("next called on incompatible receiver") })?;
+    let mut index = if let Value::Number(n) = &*index_val.borrow() {
+        *n as usize
+    } else {
+        return Err(raise_type_error!("Iterator index is invalid"));
+    };
+
+    // Get kind
+    let kind_val = slot_get_chained(iterator, &InternalSlot::IteratorKind)
+        .ok_or_else(|| -> JSError { raise_type_error!("next called on incompatible receiver") })?;
+    let kind = if let Value::String(s) = &*kind_val.borrow() {
+        crate::unicode::utf16_to_utf8(s)
+    } else {
+        return Err(raise_type_error!("Iterator kind is invalid"));
+    };
+
+    let values = &set_ptr.borrow().values;
+
+    // Skip tombstoned (None) entries
+    while index < values.len() && values[index].is_none() {
+        index += 1;
+    }
+
+    if index >= values.len() {
+        // Per spec: set [[Set]] to undefined so iterator stays exhausted
+        slot_set(mc, iterator, InternalSlot::IteratorSet, &Value::Undefined);
+        let result_obj = new_js_object_data(mc);
+        object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
+        object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+        return Ok(Value::Object(result_obj));
+    }
+
+    let value = values[index].as_ref().unwrap();
     let result_value = match kind.as_str() {
         "values" => value.clone(),
         "entries" => {
@@ -340,7 +453,7 @@ pub(crate) fn handle_set_iterator_next<'gc>(
             set_array_length(mc, &entry_array, 2)?;
             Value::Object(entry_array)
         }
-        _ => return Err(raise_eval_error!("Unknown iterator kind")),
+        _ => return Err(raise_type_error!("Unknown iterator kind")),
     };
 
     // Update index

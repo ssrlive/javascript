@@ -1532,7 +1532,9 @@ pub(crate) fn evaluate_new<'gc>(
                     "Map" => {
                         return crate::js_map::handle_map_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }
-                    "Set" => return Ok(crate::js_set::handle_set_constructor(mc, evaluated_args, &ctor_realm_env)?),
+                    "Set" => {
+                        return crate::js_set::handle_set_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
+                    }
                     "WeakMap" => return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, &ctor_realm_env)?),
                     "WeakSet" => return Ok(crate::js_weakset::handle_weakset_constructor(mc, evaluated_args, &ctor_realm_env)?),
                     "ArrayBuffer" => {

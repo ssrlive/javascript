@@ -984,41 +984,6 @@ pub fn set_internal_prototype_from_constructor<'gc>(
     Ok(())
 }
 
-// Helper to initialize a collection from an iterable argument.
-// Used by Map, Set, WeakMap, WeakSet constructors.
-pub fn initialize_collection_from_iterable<'gc, F>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    args: &[Value<'gc>],
-    constructor_name: &str,
-    mut process_item: F,
-) -> Result<(), JSError>
-where
-    F: FnMut(Value<'gc>) -> Result<(), JSError>,
-{
-    if args.is_empty() {
-        return Ok(());
-    }
-    if args.len() > 1 {
-        let msg = format!("{constructor_name} constructor takes at most one argument",);
-        return Err(raise_eval_error!(msg));
-    }
-    let iterable = args[0].clone();
-    match iterable {
-        Value::Object(obj) => {
-            let mut i = 0_usize;
-            while let Some(_item_val) = object_get_key_value(&obj, i) {
-                // Use accessor-aware get so getters are invoked and any throws propagate
-                let item = crate::core::eval::get_property_with_accessors(mc, env, &obj, i)?;
-                process_item(item)?;
-                i += 1;
-            }
-            Ok(())
-        }
-        _ => Err(raise_eval_error!(format!("{constructor_name} constructor requires an iterable"))),
-    }
-}
-
 /// Read a script file from disk and decode it into a UTF-8 Rust `String`.
 /// Supports UTF-8 (with optional BOM) and UTF-16 (LE/BE) with BOM.
 pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JSError> {

@@ -525,7 +525,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 // ---------------------------------------------------------------------------
 
 /// Get an iterator from an iterable object (GetIterator).
-fn get_iterator<'gc>(
+pub(crate) fn get_iterator<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iterable: &Value<'gc>,
@@ -577,7 +577,7 @@ fn get_iterator<'gc>(
 }
 
 /// Call iterator.next()
-fn call_iterator_next<'gc>(
+pub(crate) fn call_iterator_next<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
@@ -587,7 +587,11 @@ fn call_iterator_next<'gc>(
 }
 
 /// Get "done" from iterator result
-fn get_iterator_done<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, result: &Value<'gc>) -> Result<bool, EvalError<'gc>> {
+pub(crate) fn get_iterator_done<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    result: &Value<'gc>,
+) -> Result<bool, EvalError<'gc>> {
     if let Value::Object(obj) = result {
         let done_val = crate::core::get_property_with_accessors(mc, env, obj, "done")?;
         Ok(done_val.to_truthy())
@@ -597,7 +601,7 @@ fn get_iterator_done<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 }
 
 /// Get "value" from iterator result (accessor-aware)
-fn get_iterator_value<'gc>(
+pub(crate) fn get_iterator_value<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     result: &Value<'gc>,
@@ -610,7 +614,7 @@ fn get_iterator_value<'gc>(
 }
 
 /// Close an iterator (call iterator.return() if present)
-fn close_iterator<'gc>(
+pub(crate) fn close_iterator<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,

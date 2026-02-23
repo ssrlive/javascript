@@ -44,6 +44,7 @@ jobs:
           - id: 31
           - id: 32
           - id: 33
+          - id: 34
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -208,6 +209,10 @@ jobs:
             33)
               TITLE='"built-ins/Iterator" - "built-ins/SetIteratorPrototype"'
               FOCUS='built-ins/Iterator,built-ins/JSON,built-ins/Map,built-ins/MapIteratorPrototype,built-ins/Set,built-ins/SetIteratorPrototype'
+              ;;
+            34)
+              TITLE='"built-ins/Math"'
+              FOCUS='built-ins/Math'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

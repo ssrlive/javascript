@@ -12596,7 +12596,8 @@ pub fn evaluate_call_dispatch<'gc>(
                 match native_name_val {
                     Value::String(name) => {
                         if name == crate::unicode::utf8_to_utf16("Object") {
-                            Ok(crate::js_class::handle_object_constructor(mc, eval_args, env)?)
+                            let ctor_realm = crate::js_class::get_function_realm(obj).unwrap_or(*env);
+                            Ok(crate::js_class::handle_object_constructor(mc, eval_args, &ctor_realm)?)
                         } else if name == crate::unicode::utf8_to_utf16("Date") {
                             // Date() called as a function (without new) always returns
                             // a string representing the current time, ignoring arguments.
@@ -17416,9 +17417,10 @@ fn evaluate_expr_index<'gc>(
                     | "DataView.prototype.setFloat32"
                     | "DataView.prototype.setFloat64"
                     | "DataView.prototype.setBigInt64"
-                    | "DataView.prototype.setBigUint64" => 2.0,
+                    | "DataView.prototype.setBigUint64"
+                    | "JSON.parse" => 2.0,
                     "Function.prototype.[Symbol.hasInstance]" => 1.0,
-                    "Object.defineProperty" => 3.0,
+                    "Object.defineProperty" | "JSON.stringify" => 3.0,
                     _ => {
                         if func_name.starts_with("DataView.prototype.get") {
                             1.0
@@ -21050,7 +21052,8 @@ fn evaluate_expr_new<'gc>(
                             crate::core::js_error::create_aggregate_error(mc, env, prototype, errors_val, message_val, options_val)?;
                         return Ok(err_val);
                     } else if name_str == "Object" {
-                        return crate::js_class::handle_object_constructor(mc, &eval_args, env);
+                        let ctor_realm = crate::js_class::get_function_realm(&obj).unwrap_or(*env);
+                        return crate::js_class::handle_object_constructor(mc, &eval_args, &ctor_realm);
                     } else if name_str == "Promise" {
                         return crate::js_promise::handle_promise_constructor_val(mc, &eval_args, env);
                     } else if name_str == "String" {

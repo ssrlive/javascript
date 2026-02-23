@@ -262,7 +262,7 @@ mod builtin_functions_tests {
 
         let script5 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[3]"#;
         let result5 = evaluate_script(script5, None::<&std::path::Path>).unwrap();
-        assert_eq!(result5, "undefined");
+        assert_eq!(result5, "null");
     }
 
     #[test]

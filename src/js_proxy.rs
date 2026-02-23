@@ -379,13 +379,33 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
         "getOwnPropertyDescriptor",
         vec![(*proxy.target).clone(), property_key_to_value(key)],
         || {
-            // Default: return an object descriptor for target's own property, or undefined
+            // Default: target.[[GetOwnProperty]](P)
+            // For proxy targets, recurse through their traps.
             match &*proxy.target {
                 Value::Object(obj) => {
-                    if let Some(val_rc) = object_get_key_value(obj, key) {
+                    // If target is itself a proxy, delegate to its [[GetOwnProperty]]
+                    if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
+                        && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
+                    {
+                        let inner_result = proxy_get_own_property_descriptor(mc, inner_proxy, key)?;
+                        match inner_result {
+                            Some(is_enum) => {
+                                // Build a descriptor object matching what the inner proxy returned
+                                let desc_obj = crate::core::new_js_object_data(mc);
+                                // Get the actual value through the inner proxy's get trap
+                                let val =
+                                    crate::core::get_property_with_accessors(mc, &crate::core::new_js_object_data(mc), obj, key.clone())?;
+                                crate::core::object_set_key_value(mc, &desc_obj, "value", &val)?;
+                                crate::core::object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(is_enum))?;
+                                crate::core::object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;
+                                crate::core::object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+                                Ok(Value::Object(desc_obj))
+                            }
+                            None => Ok(Value::Undefined),
+                        }
+                    } else if let Some(val_rc) = object_get_key_value(obj, key) {
                         let desc_obj = crate::core::new_js_object_data(mc);
                         crate::core::object_set_key_value(mc, &desc_obj, "value", &val_rc.borrow().clone())?;
-                        // Use object's enumerable flag for default
                         let is_enum = obj.borrow().is_enumerable(key);
                         crate::core::object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(is_enum))?;
                         crate::core::object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;

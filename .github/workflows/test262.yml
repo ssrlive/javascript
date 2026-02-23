@@ -206,8 +206,8 @@ jobs:
               FOCUS='built-ins/DisposableStack,built-ins/Error,built-ins/eval,built-ins/FinalizationRegistry,built-ins/Function,built-ins/GeneratorFunction,built-ins/GeneratorPrototype,built-ins/global,built-ins/Infinity,built-ins/isFinite,built-ins/isNaN'
               ;;
             33)
-              TITLE='"built-ins/Iterator"'
-              FOCUS='built-ins/Iterator'
+              TITLE='"built-ins/Iterator" - "built-ins/JSON"'
+              FOCUS='built-ins/Iterator,built-ins/JSON'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

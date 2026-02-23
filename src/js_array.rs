@@ -13,7 +13,7 @@ use crate::{
 /// CreateDataPropertyOrThrow(O, P, V) — defines P on O with
 /// {value: V, writable: true, enumerable: true, configurable: true}.
 /// Throws TypeError if the define fails (non-extensible or non-configurable property).
-fn create_data_property_or_throw<'gc>(
+pub(crate) fn create_data_property_or_throw<'gc>(
     mc: &MutationContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,

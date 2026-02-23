@@ -14,6 +14,9 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     let object_ctor = new_js_object_data(mc);
     slot_set(mc, &object_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &object_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Object")));
+    // Stamp OriginGlobal so get_function_realm can find the constructor's realm
+    // (needed for cross-realm Object() calls to use the correct intrinsic prototypes).
+    slot_set(mc, &object_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
     object_set_key_value(mc, &object_ctor, "length", &Value::Number(1.0))?;
     object_ctor.borrow_mut(mc).set_non_enumerable("length");
     object_ctor.borrow_mut(mc).set_non_writable("length");
@@ -1749,8 +1752,9 @@ pub fn handle_object_method<'gc>(
                             | "Object.hasOwn"
                             | "Object.is"
                             | "Object.setPrototypeOf"
-                            | "Function.prototype.apply" => 2.0,
-                            "Object.defineProperty" => 3.0,
+                            | "Function.prototype.apply"
+                            | "JSON.parse" => 2.0,
+                            "Object.defineProperty" | "JSON.stringify" => 3.0,
                             _ => 0.0,
                         };
                         crate::core::create_descriptor_object(mc, &Value::Number(len), false, false, true)?

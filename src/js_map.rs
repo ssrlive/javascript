@@ -443,16 +443,27 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    // Get map
-    let map_val = slot_get_chained(iterator, &InternalSlot::IteratorMap).ok_or(raise_eval_error!("Iterator has no map"))?;
+    // Step 3: If O does not have [[Map]], [[MapNextIndex]], [[MapIterationKind]], throw TypeError
+    let map_val = slot_get_chained(iterator, &InternalSlot::IteratorMap)
+        .ok_or_else(|| -> JSError { raise_type_error!("next called on incompatible receiver") })?;
+
+    // Step 8: If map is undefined, iterator is exhausted → return {value: undefined, done: true}
+    if let Value::Undefined = &*map_val.borrow() {
+        let result_obj = new_js_object_data(mc);
+        object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
+        object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+        return Ok(Value::Object(result_obj));
+    }
+
     let map_ptr = if let Value::Map(m) = &*map_val.borrow() {
         *m
     } else {
-        return Err(raise_eval_error!("Iterator map is invalid"));
+        return Err(raise_type_error!("next called on incompatible receiver"));
     };
 
     // Get index
-    let index_val = slot_get_chained(iterator, &InternalSlot::IteratorIndex).ok_or(raise_eval_error!("Iterator has no index"))?;
+    let index_val = slot_get_chained(iterator, &InternalSlot::IteratorIndex)
+        .ok_or_else(|| -> JSError { raise_type_error!("next called on incompatible receiver") })?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
@@ -460,7 +471,8 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     };
 
     // Get kind
-    let kind_val = slot_get_chained(iterator, &InternalSlot::IteratorKind).ok_or(raise_eval_error!("Iterator has no kind"))?;
+    let kind_val = slot_get_chained(iterator, &InternalSlot::IteratorKind)
+        .ok_or_else(|| -> JSError { raise_type_error!("next called on incompatible receiver") })?;
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {
@@ -475,6 +487,8 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     }
 
     if index >= entries.len() {
+        // Per spec: set [[Map]] to undefined so iterator stays exhausted
+        slot_set(mc, iterator, InternalSlot::IteratorMap, &Value::Undefined);
         let result_obj = new_js_object_data(mc);
         object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
         object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;

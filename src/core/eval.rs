@@ -18844,7 +18844,7 @@ pub fn call_native_function<'gc>(
         if let Value::Object(obj) = this_v {
             return Ok(Some(crate::js_map::handle_map_iterator_next(mc, obj, env)?));
         } else {
-            return Err(raise_eval_error!("TypeError: MapIterator.prototype.next called on non-object").into());
+            return Err(raise_type_error!("Method MapIterator.prototype.next called on incompatible receiver").into());
         }
     }
 

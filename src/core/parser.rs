@@ -1235,6 +1235,11 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     let start = *index;
     *index += 1; // consume try
 
+    // Skip line terminators between `try` and `{`
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+
     let try_block = parse_block_statement(t, index)?;
     let try_body = if let StatementKind::Block(stmts) = *try_block.kind {
         stmts
@@ -1288,6 +1293,11 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 return Err(raise_parse_error_with_token!(t.get(*index).unwrap(), msg));
             }
             *index += 1; // consume )
+        }
+
+        // Skip line terminators between catch(...) and {
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
         }
 
         let catch_block = parse_block_statement(t, index)?;

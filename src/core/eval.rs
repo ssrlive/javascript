@@ -148,7 +148,7 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
         Value::BigInt(_) => Err(raise_type_error!("Cannot convert a BigInt value to a number").into()),
         Value::String(s) => {
             let str_val = utf16_to_utf8(s);
-            let trimmed = str_val.trim();
+            let trimmed = crate::js_number::es_trim(&str_val);
             if trimmed.is_empty() {
                 return Ok(0.0);
             }
@@ -169,10 +169,12 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
             }
             let parsed = trimmed.parse::<f64>().unwrap_or(f64::NAN);
             if parsed.is_infinite() {
-                return Ok(match trimmed {
-                    "Infinity" | "+Infinity" | "-Infinity" => parsed,
-                    _ => f64::NAN,
-                });
+                // Allow exact "Infinity"/"+Infinity"/"-Infinity" and numeric overflow like "10e10000"
+                // Reject word-form "infinity"/"INFINITY" etc.
+                let stripped = trimmed.strip_prefix('+').or_else(|| trimmed.strip_prefix('-')).unwrap_or(trimmed);
+                if stripped.starts_with(|c: char| c.is_alphabetic()) && stripped != "Infinity" {
+                    return Ok(f64::NAN);
+                }
             }
             Ok(parsed)
         }
@@ -12132,7 +12134,7 @@ pub fn evaluate_call_dispatch<'gc>(
             } else if let Some(method) = name.strip_prefix("BigInt.") {
                 Ok(crate::js_bigint::handle_bigint_static_method(mc, method, eval_args, env)?)
             } else if let Some(method) = name.strip_prefix("Number.prototype.") {
-                Ok(handle_number_prototype_method(this_val, method, eval_args)?)
+                Ok(handle_number_prototype_method(mc, env, this_val, method, eval_args)?)
             } else if let Some(method) = name.strip_prefix("Number.") {
                 Ok(handle_number_static_method(method, eval_args)?)
             } else if let Some(method) = name.strip_prefix("Math.") {
@@ -16053,6 +16055,14 @@ fn evaluate_expr_property<'gc>(
             | "Set.prototype.has"
             | "Set.prototype.delete"
             | "Set.prototype.forEach"
+            | "Number.isNaN"
+            | "Number.isFinite"
+            | "Number.isInteger"
+            | "Number.isSafeInteger"
+            | "Number.prototype.toString"
+            | "Number.prototype.toFixed"
+            | "Number.prototype.toExponential"
+            | "Number.prototype.toPrecision"
             | "Math.abs"
             | "Math.acos"
             | "Math.acosh"
@@ -17431,6 +17441,14 @@ fn evaluate_expr_index<'gc>(
                     | "Set.prototype.has"
                     | "Set.prototype.delete"
                     | "Set.prototype.forEach"
+                    | "Number.isNaN"
+                    | "Number.isFinite"
+                    | "Number.isInteger"
+                    | "Number.isSafeInteger"
+                    | "Number.prototype.toString"
+                    | "Number.prototype.toFixed"
+                    | "Number.prototype.toExponential"
+                    | "Number.prototype.toPrecision"
                     | "Math.abs"
                     | "Math.acos"
                     | "Math.acosh"

@@ -269,7 +269,7 @@ pub fn handle_global_function<'gc>(
             let method = if func_name == "BigInt.asIntN" { "asIntN" } else { "asUintN" };
             return crate::js_bigint::handle_bigint_static_method(mc, method, args, env);
         }
-        "Number" => return Ok(crate::js_number::number_constructor(mc, args, env)?),
+        "Number" => return crate::js_number::number_constructor(mc, args, env),
         "Boolean" => return boolean_constructor(args),
         "Proxy.revocable" => return crate::js_proxy::handle_proxy_revocable(mc, args, env),
         "Proxy.__internal_revoke" => {
@@ -695,7 +695,7 @@ pub fn handle_global_function<'gc>(
                 if matches!(this_val, Value::Undefined | Value::Null) {
                     return Err(raise_type_error!("Number.prototype method called on null or undefined").into());
                 }
-                return Ok(crate::js_number::handle_number_prototype_method(Some(&this_val), method, args)?);
+                return crate::js_number::handle_number_prototype_method(mc, env, Some(&this_val), method, args);
             }
             Err(raise_type_error!("Number.prototype method called without this").into())
         }

@@ -1464,7 +1464,17 @@ pub(crate) fn evaluate_new<'gc>(
                         }
                         return handle_object_constructor(mc, evaluated_args, &ctor_realm_env);
                     }
-                    "Number" => return handle_number_constructor(mc, evaluated_args, &ctor_realm_env),
+                    "Number" => {
+                        let result = handle_number_constructor(mc, evaluated_args, &ctor_realm_env)?;
+                        // GetPrototypeFromConstructor: override prototype from newTarget
+                        if let Some(Value::Object(nt_obj)) = new_target
+                            && let Value::Object(result_obj) = &result
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "Number")?
+                        {
+                            result_obj.borrow_mut(mc).prototype = Some(proto);
+                        }
+                        return Ok(result);
+                    }
                     "Boolean" => {
                         let result = handle_boolean_constructor(mc, evaluated_args, &ctor_realm_env)?;
                         // GetPrototypeFromConstructor: override prototype from newTarget
@@ -1938,7 +1948,7 @@ pub(crate) fn evaluate_new<'gc>(
             }
             // Check if this is the Number constructor object
             if object_get_key_value(class_obj, "MAX_VALUE").is_some() {
-                return Ok(crate::js_number::number_constructor(mc, evaluated_args, env)?);
+                return crate::js_number::number_constructor(mc, evaluated_args, env);
             }
             // Check for constructor-like singleton objects created by the evaluator
             if slot_get(class_obj, &InternalSlot::IsStringConstructor).is_some() {
@@ -4344,32 +4354,17 @@ pub(crate) fn handle_number_constructor<'gc>(
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let num_val = if evaluated_args.is_empty() {
-        // Number() - returns 0
-        0.0
-    } else {
-        // Number(value) - convert value to number
-        let arg_val = evaluated_args[0].clone();
-        match arg_val {
-            Value::Number(n) => n,
-            Value::String(s) => {
-                let str_val = utf16_to_utf8(&s);
-                str_val.trim().parse::<f64>().unwrap_or(f64::NAN)
-            }
-            Value::Boolean(b) => {
-                if b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            Value::Undefined => f64::NAN,
-            Value::Object(_) => f64::NAN,
-            _ => f64::NAN,
-        }
+    // Use the canonical number_constructor for value conversion (handles Symbol→TypeError,
+    // BigInt→f64, Object→ToPrimitive, ES whitespace, "INFINITY" rejection, etc.)
+    let num_val = match crate::js_number::number_constructor(mc, evaluated_args, env) {
+        Ok(Value::Number(n)) => n,
+        Ok(_) => 0.0,
+        Err(e) => return Err(e),
     };
     let obj = new_js_object_data(mc);
     slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Number(num_val));
+    // Set prototype from the current env (may be overridden by caller for
+    // cross-realm / Reflect.construct scenarios via GetPrototypeFromConstructor)
     crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number")?;
     Ok(Value::Object(obj))
 }

@@ -211,8 +211,8 @@ jobs:
               FOCUS='built-ins/Iterator,built-ins/JSON,built-ins/Map,built-ins/MapIteratorPrototype,built-ins/Set,built-ins/SetIteratorPrototype'
               ;;
             34)
-              TITLE='"built-ins/Math"'
-              FOCUS='built-ins/Math'
+              TITLE='"built-ins/Math" - "built-ins/Number"'
+              FOCUS='built-ins/Math,built-ins/NaN,built-ins/NativeErrors,built-ins/Number'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

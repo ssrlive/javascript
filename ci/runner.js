@@ -386,6 +386,20 @@ async function runAll(){
       if (missing){ skip++; log(`SKIP (missing-include) ${f}`); continue; }
     }
 
+    // For ALL tests (including those without explicit includes), ensure assert.js/sta.js
+    // are prepended if the test source references `assert` or `Test262Error`.
+    {
+      const src = fs.readFileSync(f, 'utf8');
+      if (/\bassert\b/.test(src) || /\bTest262Error\b/.test(src)) {
+        let have_assert = resolved_includes.some(p => p && path.basename(p) === 'assert.js');
+        if (!have_assert && HARNESS_INDEX['assert.js']) {
+          const sta = HARNESS_INDEX['sta.js'];
+          if (sta && !resolved_includes.some(p => p && path.basename(p) === 'sta.js')) resolved_includes.unshift(sta);
+          resolved_includes.unshift(HARNESS_INDEX['assert.js']);
+        }
+      }
+    }
+
     // async flag handling
     if (/flags:\s*\[.*async.*\]/.test(meta)){
       const done = HARNESS_INDEX['doneprintHandle.js'];

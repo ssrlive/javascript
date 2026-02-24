@@ -1,14 +1,53 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::MutationContext;
+use crate::core::js_error::EvalError;
 use crate::core::{
     InternalSlot, JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value, slot_get_chained, slot_set,
-    to_primitive,
+    to_number_with_env,
 };
 use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use num_traits::ToPrimitive;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// ECMAScript whitespace characters (broader than Rust's `.trim()`).
+fn is_es_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0009}' | '\u{000A}' | '\u{000B}' | '\u{000C}' | '\u{000D}' | '\u{0020}' | '\u{00A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{2028}' | '\u{2029}' | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+    )
+}
+
+/// Trim ECMAScript whitespace from both ends of a string.
+pub(crate) fn es_trim(s: &str) -> &str {
+    let start = s.find(|c: char| !is_es_whitespace(c)).unwrap_or(s.len());
+    let end = s
+        .rfind(|c: char| !is_es_whitespace(c))
+        .map_or(start, |i| i + s[i..].chars().next().unwrap().len_utf8());
+    &s[start..end]
+}
+
+/// ToIntegerOrInfinity on a JS value, propagating errors for BigInt/Symbol/objects.
+fn to_integer_or_infinity<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
+    let n = to_number_with_env(mc, env, val)?;
+    if n.is_nan() || n == 0.0 {
+        Ok(0.0)
+    } else if !n.is_finite() {
+        Ok(n) // ±∞
+    } else {
+        Ok(n.trunc())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Initialization
+// ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let number_obj = make_number_object(mc, env)?;
@@ -22,77 +61,50 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     slot_set(mc, &number_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &number_obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Number")));
 
-    object_set_key_value(mc, &number_obj, "MAX_VALUE", &Value::Number(f64::MAX))?;
-    object_set_key_value(mc, &number_obj, "MIN_VALUE", &Value::Number(f64::from_bits(1)))?;
-    object_set_key_value(mc, &number_obj, "NaN", &Value::Number(f64::NAN))?;
-    object_set_key_value(mc, &number_obj, "POSITIVE_INFINITY", &Value::Number(f64::INFINITY))?;
-    object_set_key_value(mc, &number_obj, "NEGATIVE_INFINITY", &Value::Number(f64::NEG_INFINITY))?;
-    object_set_key_value(mc, &number_obj, "EPSILON", &Value::Number(f64::EPSILON))?;
-    object_set_key_value(mc, &number_obj, "MAX_SAFE_INTEGER", &Value::Number(9007199254740991.0))?;
-    object_set_key_value(mc, &number_obj, "MIN_SAFE_INTEGER", &Value::Number(-9007199254740991.0))?;
-    object_set_key_value(mc, &number_obj, "isNaN", &Value::Function("Number.isNaN".to_string()))?;
-    object_set_key_value(mc, &number_obj, "isFinite", &Value::Function("Number.isFinite".to_string()))?;
-    object_set_key_value(mc, &number_obj, "isInteger", &Value::Function("Number.isInteger".to_string()))?;
-    object_set_key_value(
-        mc,
-        &number_obj,
-        "isSafeInteger",
-        &Value::Function("Number.isSafeInteger".to_string()),
-    )?;
-    object_set_key_value(mc, &number_obj, "parseFloat", &Value::Function("Number.parseFloat".to_string()))?;
-    object_set_key_value(mc, &number_obj, "parseInt", &Value::Function("Number.parseInt".to_string()))?;
+    // --- Constants (non-writable, non-enumerable, non-configurable) ---
+    let constants: &[(&str, f64)] = &[
+        ("MAX_VALUE", f64::MAX),
+        ("MIN_VALUE", f64::from_bits(1)),
+        ("NaN", f64::NAN),
+        ("POSITIVE_INFINITY", f64::INFINITY),
+        ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
+        ("EPSILON", f64::EPSILON),
+        ("MAX_SAFE_INTEGER", 9007199254740991.0),
+        ("MIN_SAFE_INTEGER", -9007199254740991.0),
+    ];
+    for &(name, val) in constants {
+        object_set_key_value(mc, &number_obj, name, &Value::Number(val))?;
+        number_obj.borrow_mut(mc).set_non_enumerable(name);
+        number_obj.borrow_mut(mc).set_non_writable(name);
+        number_obj.borrow_mut(mc).set_non_configurable(name);
+    }
 
-    // Make static Number properties non-enumerable
-    number_obj.borrow_mut(mc).set_non_enumerable("MAX_VALUE");
-    number_obj.borrow_mut(mc).set_non_enumerable("MIN_VALUE");
-    number_obj.borrow_mut(mc).set_non_enumerable("NaN");
-    number_obj.borrow_mut(mc).set_non_enumerable("POSITIVE_INFINITY");
-    number_obj.borrow_mut(mc).set_non_enumerable("NEGATIVE_INFINITY");
-    number_obj.borrow_mut(mc).set_non_enumerable("EPSILON");
-    number_obj.borrow_mut(mc).set_non_enumerable("MAX_SAFE_INTEGER");
-    number_obj.borrow_mut(mc).set_non_enumerable("MIN_SAFE_INTEGER");
-    number_obj.borrow_mut(mc).set_non_enumerable("isNaN");
-    number_obj.borrow_mut(mc).set_non_enumerable("isFinite");
-    number_obj.borrow_mut(mc).set_non_enumerable("isInteger");
-    number_obj.borrow_mut(mc).set_non_enumerable("isSafeInteger");
-    number_obj.borrow_mut(mc).set_non_enumerable("parseFloat");
-    number_obj.borrow_mut(mc).set_non_enumerable("parseInt");
+    // --- Static methods (non-enumerable) ---
+    let statics: &[(&str, &str)] = &[
+        ("isNaN", "Number.isNaN"),
+        ("isFinite", "Number.isFinite"),
+        ("isInteger", "Number.isInteger"),
+        ("isSafeInteger", "Number.isSafeInteger"),
+        // Number.parseFloat/parseInt must be the SAME function object as global parseFloat/parseInt
+        ("parseFloat", "parseFloat"),
+        ("parseInt", "parseInt"),
+    ];
+    for &(name, tag) in statics {
+        object_set_key_value(mc, &number_obj, name, &Value::Function(tag.to_string()))?;
+        number_obj.borrow_mut(mc).set_non_enumerable(name);
+    }
 
-    // Per ECMAScript spec, the numeric constants on Number are non-writable and non-configurable
-    number_obj.borrow_mut(mc).set_non_writable("MAX_VALUE");
-    number_obj.borrow_mut(mc).set_non_configurable("MAX_VALUE");
-
-    number_obj.borrow_mut(mc).set_non_writable("MIN_VALUE");
-    number_obj.borrow_mut(mc).set_non_configurable("MIN_VALUE");
-    number_obj.borrow_mut(mc).set_non_writable("NaN");
-    number_obj.borrow_mut(mc).set_non_configurable("NaN");
-
-    number_obj.borrow_mut(mc).set_non_writable("POSITIVE_INFINITY");
-    number_obj.borrow_mut(mc).set_non_configurable("POSITIVE_INFINITY");
-
-    number_obj.borrow_mut(mc).set_non_writable("NEGATIVE_INFINITY");
-    number_obj.borrow_mut(mc).set_non_configurable("NEGATIVE_INFINITY");
-
-    number_obj.borrow_mut(mc).set_non_writable("EPSILON");
-    number_obj.borrow_mut(mc).set_non_configurable("EPSILON");
-
-    number_obj.borrow_mut(mc).set_non_writable("MAX_SAFE_INTEGER");
-    number_obj.borrow_mut(mc).set_non_configurable("MAX_SAFE_INTEGER");
-
-    number_obj.borrow_mut(mc).set_non_writable("MIN_SAFE_INTEGER");
-    number_obj.borrow_mut(mc).set_non_configurable("MIN_SAFE_INTEGER");
-
-    // Internal markers and prototype should not be enumerable
+    // prototype descriptor: non-enumerable, non-writable, non-configurable
     number_obj.borrow_mut(mc).set_non_enumerable("prototype");
     number_obj.borrow_mut(mc).set_non_writable("prototype");
     number_obj.borrow_mut(mc).set_non_configurable("prototype");
 
-    // Number.length = 1 (non-writable, non-enumerable, non-configurable)
+    // Number.length = 1
     object_set_key_value(mc, &number_obj, "length", &Value::Number(1.0))?;
     number_obj.borrow_mut(mc).set_non_enumerable("length");
     number_obj.borrow_mut(mc).set_non_writable("length");
 
-    // Get Object.prototype
+    // --- Object.prototype ---
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
         && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
@@ -103,470 +115,474 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         None
     };
 
-    // Create Number.prototype
+    // --- Number.prototype ---
     let number_prototype = new_js_object_data(mc);
     if let Some(proto) = object_proto {
         number_prototype.borrow_mut(mc).prototype = Some(proto);
     }
+    // Number.prototype is itself a Number object with [[NumberData]] = +0
+    slot_set(mc, &number_prototype, InternalSlot::PrimitiveValue, &Value::Number(0.0));
 
-    object_set_key_value(
-        mc,
-        &number_prototype,
-        "toString",
-        &Value::Function("Number.prototype.toString".to_string()),
-    )?;
-    object_set_key_value(
-        mc,
-        &number_prototype,
-        "valueOf",
-        &Value::Function("Number.prototype.valueOf".to_string()),
-    )?;
-    object_set_key_value(
-        mc,
-        &number_prototype,
-        "toLocaleString",
-        &Value::Function("Number.prototype.toLocaleString".to_string()),
-    )?;
-    object_set_key_value(
-        mc,
-        &number_prototype,
-        "toExponential",
-        &Value::Function("Number.prototype.toExponential".to_string()),
-    )?;
-    object_set_key_value(
-        mc,
-        &number_prototype,
-        "toFixed",
-        &Value::Function("Number.prototype.toFixed".to_string()),
-    )?;
-    object_set_key_value(
-        mc,
-        &number_prototype,
-        "toPrecision",
-        &Value::Function("Number.prototype.toPrecision".to_string()),
-    )?;
-
-    // Make number prototype methods non-enumerable and mark constructor non-enumerable
-    number_prototype.borrow_mut(mc).set_non_enumerable("toString");
-    number_prototype.borrow_mut(mc).set_non_enumerable("valueOf");
-    number_prototype.borrow_mut(mc).set_non_enumerable("toLocaleString");
-    number_prototype.borrow_mut(mc).set_non_enumerable("toExponential");
-    number_prototype.borrow_mut(mc).set_non_enumerable("toFixed");
-    number_prototype.borrow_mut(mc).set_non_enumerable("toPrecision");
+    let proto_methods = ["toString", "valueOf", "toLocaleString", "toExponential", "toFixed", "toPrecision"];
+    for name in proto_methods {
+        object_set_key_value(mc, &number_prototype, name, &Value::Function(format!("Number.prototype.{name}")))?;
+        number_prototype.borrow_mut(mc).set_non_enumerable(name);
+    }
     number_prototype.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Set prototype on Number constructor
     object_set_key_value(mc, &number_obj, "prototype", &Value::Object(number_prototype))?;
 
-    // Ensure Number.prototype.constructor points back to Number
+    // Ensure Number.prototype.constructor → Number
     if let Some(proto_val) = object_get_key_value(&number_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         object_set_key_value(mc, proto_obj, "constructor", &Value::Object(number_obj))?;
-        // Non-enumerable already set above, but ensure it's non-enumerable
         proto_obj.borrow_mut(mc).set_non_enumerable("constructor");
     }
 
     Ok(number_obj)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Constructor
+// ═══════════════════════════════════════════════════════════════════════════════
+
 pub(crate) fn number_constructor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    // Number constructor
-    if let Some(arg_val) = args.first() {
-        match arg_val {
-            Value::Number(n) => Ok(Value::Number(*n)),
-            Value::String(s) => {
-                let str_val = utf16_to_utf8(s);
-                Ok(Value::Number(string_to_f64(str_val.trim()).unwrap_or(f64::NAN)))
-            }
-            Value::Boolean(b) => Ok(Value::Number(if *b { 1.0 } else { 0.0 })),
-            Value::Null => Ok(Value::Number(0.0)),
-            Value::Undefined => Ok(Value::Number(f64::NAN)),
-            Value::BigInt(b) => {
-                // Convert BigInt to Number (may lose precision)
-                if let Some(n) = b.to_f64() {
-                    Ok(Value::Number(n))
-                } else {
-                    Ok(Value::Number(f64::NAN))
-                }
-            }
-            Value::Object(obj) => {
-                // Try ToPrimitive with 'number' hint
-                let prim = to_primitive(mc, &Value::Object(*obj), "number", env)?;
-                match prim {
-                    Value::Number(n) => Ok(Value::Number(n)),
-                    Value::String(s) => {
-                        let str_val = utf16_to_utf8(&s);
-                        Ok(Value::Number(string_to_f64(str_val.trim()).unwrap_or(f64::NAN)))
-                    }
-                    Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
-                    Value::Null => Ok(Value::Number(0.0)),
-                    Value::Undefined => Ok(Value::Number(f64::NAN)),
-                    Value::BigInt(b) => {
-                        if let Some(n) = b.to_f64() {
-                            Ok(Value::Number(n))
-                        } else {
-                            Ok(Value::Number(f64::NAN))
-                        }
-                    }
-                    _ => Ok(Value::Number(f64::NAN)),
-                }
-            }
-            _ => Ok(Value::Number(f64::NAN)),
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if args.is_empty() {
+        return Ok(Value::Number(0.0));
+    }
+    let arg_val = &args[0];
+    match arg_val {
+        Value::Number(n) => Ok(Value::Number(*n)),
+        Value::Boolean(b) => Ok(Value::Number(if *b { 1.0 } else { 0.0 })),
+        Value::Null => Ok(Value::Number(0.0)),
+        Value::Undefined => Ok(Value::Number(f64::NAN)),
+        Value::BigInt(b) => {
+            // Number(BigInt) does NOT throw — converts lossy via ℝ(n)
+            Ok(Value::Number(b.to_f64().unwrap_or(f64::NAN)))
         }
-    } else {
-        Ok(Value::Number(0.0)) // Number() with no args returns 0
+        Value::Symbol(_) => Err(EvalError::from(raise_type_error!("Cannot convert a Symbol value to a number"))),
+        Value::String(s) => {
+            let str_val = utf16_to_utf8(s);
+            Ok(Value::Number(es_string_to_number(&str_val)))
+        }
+        Value::Object(obj) => {
+            // ToNumeric: ToPrimitive(number hint), then if BigInt → ℝ, else ToNumber
+            let prim = crate::core::to_primitive(mc, &Value::Object(*obj), "number", env)?;
+            match prim {
+                Value::Number(n) => Ok(Value::Number(n)),
+                Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                Value::Null => Ok(Value::Number(0.0)),
+                Value::Undefined => Ok(Value::Number(f64::NAN)),
+                Value::BigInt(b) => Ok(Value::Number(b.to_f64().unwrap_or(f64::NAN))),
+                Value::Symbol(_) => Err(EvalError::from(raise_type_error!("Cannot convert a Symbol value to a number"))),
+                Value::String(s) => {
+                    let str_val = utf16_to_utf8(&s);
+                    Ok(Value::Number(es_string_to_number(&str_val)))
+                }
+                _ => Ok(Value::Number(f64::NAN)),
+            }
+        }
+        _ => Ok(Value::Number(f64::NAN)),
     }
 }
 
-pub(crate) fn string_to_f64(s: &str) -> Result<f64, JSError> {
-    let trimmed = s.trim();
+/// ES-compliant string→number (used by Number(), NOT by parseFloat/parseInt).
+/// Empty/whitespace → 0, only exact "Infinity"/"+Infinity"/"-Infinity", hex/bin/oct.
+pub(crate) fn es_string_to_number(s: &str) -> f64 {
+    let trimmed = es_trim(s);
+    if trimmed.is_empty() {
+        return 0.0;
+    }
     if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
-        Ok(i64::from_str_radix(hex, 16).map(|v| v as f64)?)
-    } else if let Some(bin) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
-        Ok(i64::from_str_radix(bin, 2).map(|v| v as f64)?)
-    } else if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
-        Ok(i64::from_str_radix(oct, 8).map(|v| v as f64)?)
-    } else {
-        Ok(trimmed.parse::<f64>()?)
+        return i64::from_str_radix(hex, 16).map(|v| v as f64).unwrap_or(f64::NAN);
     }
+    if let Some(bin) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
+        return i64::from_str_radix(bin, 2).map(|v| v as f64).unwrap_or(f64::NAN);
+    }
+    if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
+        return i64::from_str_radix(oct, 8).map(|v| v as f64).unwrap_or(f64::NAN);
+    }
+    // Only accept exact "Infinity"/"+Infinity"/"-Infinity" (case-sensitive)
+    match trimmed {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    // Guard: reject word-form "infinity"/"INFINITY" etc. (Rust's parse accepts them),
+    // but allow legitimate numeric overflow like "10e10000" → Infinity.
+    let result = trimmed.parse::<f64>().unwrap_or(f64::NAN);
+    if result.is_infinite() {
+        let stripped = trimmed.strip_prefix('+').or_else(|| trimmed.strip_prefix('-')).unwrap_or(trimmed);
+        if stripped.starts_with(|c: char| c.is_alphabetic()) {
+            return f64::NAN; // case-insensitive word "infinity" → NaN
+        }
+    }
+    result
 }
 
-/// Handle Number object method calls
+/// Legacy wrapper kept for external callers.
+pub(crate) fn string_to_f64(s: &str) -> Result<f64, JSError> {
+    Ok(es_string_to_number(s))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Static methods
+// ═══════════════════════════════════════════════════════════════════════════════
+
 pub fn handle_number_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
     match method {
         "isNaN" => {
-            if let Some(arg_val) = args.first() {
-                if let Value::Number(n) = arg_val {
-                    Ok(Value::Boolean(n.is_nan()))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
+            let arg = args.first().unwrap_or(&Value::Undefined);
+            if let Value::Number(n) = arg {
+                Ok(Value::Boolean(n.is_nan()))
             } else {
-                Err(raise_eval_error!("Number.isNaN expects exactly one argument"))
+                Ok(Value::Boolean(false)) // not Number type → false
             }
         }
         "isFinite" => {
-            if let Some(arg_val) = args.first() {
-                if let Value::Number(n) = arg_val {
-                    Ok(Value::Boolean(n.is_finite()))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
+            let arg = args.first().unwrap_or(&Value::Undefined);
+            if let Value::Number(n) = arg {
+                Ok(Value::Boolean(n.is_finite()))
             } else {
-                Err(raise_eval_error!("Number.isFinite expects exactly one argument"))
+                Ok(Value::Boolean(false))
             }
         }
         "isInteger" => {
-            if let Some(arg_val) = args.first() {
-                if let Value::Number(n) = arg_val {
-                    Ok(Value::Boolean(n.fract() == 0.0 && n.is_finite()))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
+            let arg = args.first().unwrap_or(&Value::Undefined);
+            if let Value::Number(n) = arg {
+                Ok(Value::Boolean(n.is_finite() && n.fract() == 0.0))
             } else {
-                Err(raise_eval_error!("Number.isInteger expects exactly one argument"))
+                Ok(Value::Boolean(false))
             }
         }
         "isSafeInteger" => {
-            if let Some(arg_val) = args.first() {
-                if let Value::Number(n) = arg_val {
-                    let is_int = n.fract() == 0.0 && n.is_finite();
-                    let is_safe = (-9007199254740991.0..=9007199254740991.0).contains(n);
-                    Ok(Value::Boolean(is_int && is_safe))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
+            let arg = args.first().unwrap_or(&Value::Undefined);
+            if let Value::Number(n) = arg {
+                let is_int = n.is_finite() && n.fract() == 0.0;
+                let is_safe = (-9007199254740991.0..=9007199254740991.0).contains(n);
+                Ok(Value::Boolean(is_int && is_safe))
             } else {
-                Err(raise_eval_error!("Number.isSafeInteger expects exactly one argument"))
-            }
-        }
-        "parseFloat" => {
-            if let Some(arg_val) = args.first() {
-                match arg_val {
-                    Value::String(s) => {
-                        let str_val = utf16_to_utf8(s);
-                        match str_val.trim().parse::<f64>() {
-                            Ok(n) => Ok(Value::Number(n)),
-                            Err(_) => Ok(Value::Number(f64::NAN)),
-                        }
-                    }
-                    Value::Number(n) => Ok(Value::Number(*n)),
-                    _ => Ok(Value::Number(f64::NAN)),
-                }
-            } else {
-                Err(raise_eval_error!("Number.parseFloat expects exactly one argument"))
-            }
-        }
-        "parseInt" => {
-            if !args.is_empty() {
-                let arg_val = &args[0];
-                let radix = if args.len() >= 2 {
-                    if let Value::Number(r) = &args[1] { *r as u32 } else { 10 }
-                } else {
-                    10
-                };
-
-                match arg_val {
-                    Value::String(s) => {
-                        let str_val = utf16_to_utf8(s);
-                        let trimmed = str_val.trim();
-                        if trimmed.is_empty() {
-                            Ok(Value::Number(f64::NAN))
-                        } else {
-                            // For parseInt, we need to parse only the integer part
-                            // Find the first non-digit character (considering radix)
-                            let mut end_pos = 0;
-                            let chars: Vec<char> = trimmed.chars().collect();
-
-                            // Handle sign
-                            let mut start_pos = 0;
-                            if !chars.is_empty() && (chars[0] == '+' || chars[0] == '-') {
-                                start_pos = 1;
-                            }
-
-                            // Parse digits based on radix
-                            for (i, &c) in chars.iter().enumerate().skip(start_pos) {
-                                let digit_val = match c {
-                                    '0'..='9' => (c as u32) - ('0' as u32),
-                                    'a'..='z' => (c as u32) - ('a' as u32) + 10,
-                                    'A'..='Z' => (c as u32) - ('A' as u32) + 10,
-                                    _ => break,
-                                };
-
-                                if digit_val >= radix {
-                                    break;
-                                }
-                                end_pos = i + 1;
-                            }
-
-                            if end_pos > start_pos || (start_pos == 1 && end_pos >= 1) {
-                                let int_part = &trimmed[..end_pos];
-                                if radix == 10 {
-                                    match int_part.parse::<i64>() {
-                                        Ok(n) => Ok(Value::Number(n as f64)),
-                                        Err(_) => Ok(Value::Number(f64::NAN)),
-                                    }
-                                } else {
-                                    match i64::from_str_radix(int_part, radix) {
-                                        Ok(n) => Ok(Value::Number(n as f64)),
-                                        Err(_) => Ok(Value::Number(f64::NAN)),
-                                    }
-                                }
-                            } else {
-                                Ok(Value::Number(f64::NAN))
-                            }
-                        }
-                    }
-                    Value::Number(n) => Ok(Value::Number(n.trunc())),
-                    _ => Ok(Value::Number(f64::NAN)),
-                }
-            } else {
-                Err(raise_eval_error!("Number.parseInt expects at least one argument"))
+                Ok(Value::Boolean(false))
             }
         }
         _ => Err(raise_eval_error!(format!("Number.{method} is not implemented"))),
     }
 }
 
-/// Handle Number instance method calls
-pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
+// ═══════════════════════════════════════════════════════════════════════════════
+// Prototype / instance methods
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Core instance-method dispatch. `n` is the resolved thisNumberValue.
+fn handle_number_instance_method<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    n: f64,
+    method: &str,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
+        // ─── toString ───────────────────────────────────────────────
         "toString" => {
-            if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
-                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))));
+            let radix_arg = args.first().unwrap_or(&Value::Undefined);
+            if matches!(radix_arg, Value::Undefined) {
+                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n)))));
             }
-
-            let radix = match &args[0] {
-                Value::Number(r) => *r as i32,
-                Value::Boolean(b) => {
-                    if *b {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                Value::Null => 0,
-                Value::Undefined => 10,
-                _ => 10,
-            };
-
-            if radix != 0 && !(2..=36).contains(&radix) {
-                return Err(raise_eval_error!("toString() radix argument must be between 2 and 36"));
+            let radix_f = to_number_with_env(mc, env, radix_arg)?;
+            let radix = radix_f as i32;
+            if !(2..=36).contains(&radix) {
+                return Err(raise_range_error!("toString() radix must be between 2 and 36").into());
             }
-
-            let radix = if radix == 0 { 10 } else { radix };
             if radix == 10 {
-                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))));
+                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n)))));
             }
-
-            if !n.is_finite() {
-                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))));
-            }
-
-            let mut integer = n.trunc() as i128;
-            if integer == 0 {
-                return Ok(Value::String(utf8_to_utf16("0")));
-            }
-
-            let negative = integer < 0;
-            if negative {
-                integer = -integer;
-            }
-
-            let mut digits = Vec::new();
-            let base = radix as i128;
-            while integer > 0 {
-                let d = (integer % base) as u8;
-                let ch = if d < 10 { (b'0' + d) as char } else { (b'a' + (d - 10)) as char };
-                digits.push(ch);
-                integer /= base;
-            }
-            digits.reverse();
-            let mut out: String = digits.into_iter().collect();
-            if negative {
-                out.insert(0, '-');
-            }
-            Ok(Value::String(utf8_to_utf16(&out)))
+            Ok(Value::String(utf8_to_utf16(&number_to_radix_string(n, radix as u32))))
         }
-        "valueOf" => {
-            if args.is_empty() {
-                Ok(Value::Number(*n))
-            } else {
-                Err(raise_eval_error!(format!(
-                    "valueOf method expects no arguments, got {}",
-                    args.len()
-                )))
-            }
-        }
-        "toLocaleString" => {
-            if args.is_empty() {
-                // For now, same as toString
-                Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))))
-            } else {
-                let msg = format!("toLocaleString method expects no arguments, got {}", args.len());
-                Err(raise_eval_error!(msg))
-            }
-        }
+
+        // ─── valueOf ────────────────────────────────────────────────
+        "valueOf" => Ok(Value::Number(n)),
+
+        // ─── toLocaleString ─────────────────────────────────────────
+        "toLocaleString" => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n))))),
+
+        // ─── toExponential ──────────────────────────────────────────
         "toExponential" => {
-            let fraction_digits = if !args.is_empty() {
-                match &args[0] {
-                    Value::Number(d) => Some(*d as usize),
-                    _ => None,
-                }
+            let fd_arg = args.first().unwrap_or(&Value::Undefined);
+            let fd_undefined = matches!(fd_arg, Value::Undefined);
+
+            // Step 2: let f = ToIntegerOrInfinity(fractionDigits) — BEFORE checking NaN/Infinity
+            let f = if fd_undefined {
+                0.0
             } else {
-                None
+                to_integer_or_infinity(mc, env, fd_arg)?
             };
 
-            let normalize_exponent_sign = |s: String| {
-                if let Some((mantissa, exp)) = s.split_once('e')
-                    && !exp.starts_with('+')
-                    && !exp.starts_with('-')
-                {
-                    format!("{mantissa}e+{exp}")
-                } else {
-                    s
-                }
-            };
-
-            match fraction_digits {
-                Some(d) => Ok(Value::String(utf8_to_utf16(&normalize_exponent_sign(format!("{:.1$e}", n, d))))),
-                None => Ok(Value::String(utf8_to_utf16(&normalize_exponent_sign(format!("{:e}", n))))),
+            // Step 4-6: NaN / Infinity
+            if n.is_nan() {
+                return Ok(Value::String(utf8_to_utf16("NaN")));
             }
+            if n.is_infinite() {
+                return Ok(Value::String(utf8_to_utf16(if n > 0.0 { "Infinity" } else { "-Infinity" })));
+            }
+
+            // Range check AFTER NaN/Infinity handling
+            if !fd_undefined && !(0.0..=100.0).contains(&f) {
+                return Err(raise_range_error!("toExponential() argument must be between 0 and 100").into());
+            }
+            let f = f as usize;
+
+            Ok(Value::String(utf8_to_utf16(&es_to_exponential(
+                n,
+                if fd_undefined { None } else { Some(f) },
+            ))))
         }
+
+        // ─── toFixed ────────────────────────────────────────────────
         "toFixed" => {
-            let digits = if !args.is_empty() {
-                match &args[0] {
-                    Value::Number(d) => *d as usize,
-                    _ => 0,
-                }
-            } else {
-                0
-            };
-
-            if digits > 100 {
-                return Err(raise_eval_error!("toFixed() digits argument must be between 0 and 100"));
+            let fd_arg = args.first().unwrap_or(&Value::Undefined);
+            let f = to_integer_or_infinity(mc, env, fd_arg)?;
+            if !(0.0..=100.0).contains(&f) {
+                return Err(raise_range_error!("toFixed() digits argument must be between 0 and 100").into());
             }
-
-            Ok(Value::String(utf8_to_utf16(&format!("{:.1$}", n, digits))))
+            let f = f as usize;
+            if n.is_nan() {
+                return Ok(Value::String(utf8_to_utf16("NaN")));
+            }
+            if n.is_infinite() {
+                return Ok(Value::String(utf8_to_utf16(if n > 0.0 { "Infinity" } else { "-Infinity" })));
+            }
+            // Step 9: If x >= 10^21, let m = ToString(x)
+            if n.abs() >= 1e21 {
+                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n)))));
+            }
+            Ok(Value::String(utf8_to_utf16(&format!("{:.prec$}", n, prec = f))))
         }
+
+        // ─── toPrecision ────────────────────────────────────────────
         "toPrecision" => {
-            let precision = if !args.is_empty() {
-                match &args[0] {
-                    Value::Number(p) => Some(*p as usize),
-                    Value::Undefined => None,
-                    _ => None,
-                }
+            let p_arg = args.first().unwrap_or(&Value::Undefined);
+            if matches!(p_arg, Value::Undefined) {
+                return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n)))));
+            }
+            let p = to_integer_or_infinity(mc, env, p_arg)?;
+            if n.is_nan() {
+                return Ok(Value::String(utf8_to_utf16("NaN")));
+            }
+            if n.is_infinite() {
+                return Ok(Value::String(utf8_to_utf16(if n > 0.0 { "Infinity" } else { "-Infinity" })));
+            }
+            let p = p as usize;
+            if !(1..=100).contains(&p) {
+                return Err(raise_range_error!("toPrecision() argument must be between 1 and 100").into());
+            }
+            // Handle ±0 specially
+            let x = if n == 0.0 { 0.0_f64.copysign(1.0) } else { n };
+            let negative = n < 0.0; // -0 is NOT negative for toPrecision
+            let abs_x = x.abs();
+            // Use exponential format to get the exponent
+            let s_exp = format!("{:.prec$e}", abs_x, prec = p - 1);
+            let parts: Vec<&str> = s_exp.split('e').collect();
+            let exponent: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+            let result = if exponent < -6 || exponent >= p as i32 {
+                // Exponential notation
+                normalize_exponent(&s_exp)
             } else {
-                None
+                // Fixed notation: digits after decimal = p - 1 - exponent
+                let digits_after = (p as i32 - 1 - exponent).max(0) as usize;
+                format!("{:.prec$}", abs_x, prec = digits_after)
             };
-
-            match precision {
-                Some(p) => {
-                    if !(1..=100).contains(&p) {
-                        return Err(raise_eval_error!("toPrecision() argument must be between 1 and 100"));
-                    }
-
-                    if n.is_nan() || n.is_infinite() {
-                        return Ok(Value::String(utf8_to_utf16(&n.to_string())));
-                    }
-
-                    // Format in exponential to get the exponent
-                    let s_exp = format!("{:.1$e}", n, p - 1);
-                    let normalized_s_exp = if let Some((mantissa, exp)) = s_exp.split_once('e') {
-                        if !exp.starts_with('+') && !exp.starts_with('-') {
-                            format!("{mantissa}e+{exp}")
-                        } else {
-                            s_exp.clone()
-                        }
-                    } else {
-                        s_exp.clone()
-                    };
-                    let parts: Vec<&str> = s_exp.split('e').collect();
-                    let exponent: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-                    if exponent < -6 || exponent >= p as i32 {
-                        Ok(Value::String(utf8_to_utf16(&normalized_s_exp)))
-                    } else {
-                        // Use fixed notation
-                        // digits after decimal = p - 1 - exponent
-                        let digits_after_decimal = p as i32 - 1 - exponent;
-                        let width = if digits_after_decimal < 0 {
-                            0
-                        } else {
-                            digits_after_decimal as usize
-                        };
-                        Ok(Value::String(utf8_to_utf16(&format!("{:.1$}", n, width))))
-                    }
-                }
-                None => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n))))),
+            if negative {
+                Ok(Value::String(utf8_to_utf16(&format!("-{result}"))))
+            } else {
+                Ok(Value::String(utf8_to_utf16(&result)))
             }
         }
-        _ => Err(raise_eval_error!(format!("Number.prototype.{method} is not implemented"))),
+
+        _ => Err(raise_eval_error!(format!("Number.prototype.{method} is not implemented")).into()),
     }
 }
 
-/// Handle Number prototype method calls
-pub fn handle_number_prototype_method<'gc>(this: Option<&Value<'gc>>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
-    if let Some(Value::Number(n)) = this {
-        handle_number_instance_method(n, method, args)
-    } else if let Some(Value::Object(obj)) = this {
-        if let Some(val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
-            if let Value::Number(n) = &*val.borrow() {
-                handle_number_instance_method(n, method, args)
-            } else {
-                Err(raise_eval_error!("TypeError: Number.prototype method called on non-number object"))
+/// ES-spec compliant toExponential with correct rounding (round half away from zero).
+fn es_to_exponential(n: f64, fraction_digits: Option<usize>) -> String {
+    let negative = n < 0.0;
+    let x = n.abs();
+
+    if x == 0.0 {
+        // Special case for ±0
+        return match fraction_digits {
+            Some(0) | None => "0e+0".to_string(),
+            Some(f) => format!("0.{}e+0", "0".repeat(f)),
+        };
+    }
+
+    let p = match fraction_digits {
+        Some(f) => f + 1, // total significant digits
+        None => {
+            // Shortest representation: use Rust's default but fix sign
+            let s = format!("{:e}", x);
+            let result = normalize_exponent(&s);
+            return if negative { format!("-{result}") } else { result };
+        }
+    };
+
+    // Generate high-precision digits to avoid double-rounding.
+    // Use many extra digits so we can do a single correct round to p sig digits.
+    let extra = 40.max(p + 20);
+    let hp = format!("{:.prec$e}", x, prec = extra);
+    let (mant_str, exp_str) = hp.split_once('e').unwrap();
+    let mut exp: i32 = exp_str.parse().unwrap();
+
+    // Remove the dot to get all digits
+    let all_digits: Vec<u8> = mant_str.bytes().filter(|b| *b != b'.').collect();
+
+    // We have extra+1 significant digits; take p and decide rounding from the rest.
+    let mut result_digits: Vec<u8> = all_digits[..p.min(all_digits.len())].to_vec();
+    let remaining = &all_digits[p.min(all_digits.len())..];
+
+    // Round half away from zero: if remaining >= 0.5 (i.e. first remaining digit >= 5), round up
+    let round_up = !remaining.is_empty() && remaining[0] >= b'5';
+    if round_up {
+        let mut carry = true;
+        for d in result_digits.iter_mut().rev() {
+            if carry {
+                if *d == b'9' {
+                    *d = b'0';
+                } else {
+                    *d += 1;
+                    carry = false;
+                }
             }
+        }
+        if carry {
+            result_digits.insert(0, b'1');
+            result_digits.pop();
+            exp += 1;
+        }
+    }
+
+    // Pad to exactly p digits
+    while result_digits.len() < p {
+        result_digits.push(b'0');
+    }
+
+    let digits_str: String = result_digits.iter().map(|&b| b as char).collect();
+    let (first, rest) = digits_str.split_at(1);
+    let sign = if exp >= 0 { "+" } else { "" };
+    let mantissa = if rest.is_empty() {
+        first.to_string()
+    } else {
+        format!("{first}.{rest}")
+    };
+    let result = format!("{mantissa}e{sign}{exp}");
+    if negative { format!("-{result}") } else { result }
+}
+
+/// Normalize Rust exponent format `1.23e2` → `1.23e+2`, keep `e-4` as-is.
+fn normalize_exponent(s: &str) -> String {
+    if let Some((mantissa, exp)) = s.split_once('e') {
+        if !exp.starts_with('+') && !exp.starts_with('-') {
+            format!("{mantissa}e+{exp}")
         } else {
-            Err(raise_eval_error!(
-                "TypeError: Number.prototype method called on incompatible receiver"
-            ))
+            s.to_string()
         }
     } else {
-        Err(raise_eval_error!("TypeError: Number.prototype method called on non-number"))
+        s.to_string()
     }
+}
+
+/// Number→string in non-decimal radix (2–36), with fractional part.
+fn number_to_radix_string(n: f64, radix: u32) -> String {
+    if n.is_nan() {
+        return "NaN".to_string();
+    }
+    if n == f64::INFINITY {
+        return "Infinity".to_string();
+    }
+    if n == f64::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    } // handles ±0
+
+    let negative = n < 0.0;
+    let abs_n = n.abs();
+    let integer_part = abs_n.trunc() as u64;
+    let fractional_part = abs_n - (integer_part as f64);
+
+    // Integer part
+    let mut int_digits = Vec::new();
+    if integer_part == 0 {
+        int_digits.push('0');
+    } else {
+        let mut rem = integer_part;
+        while rem > 0 {
+            let d = (rem % radix as u64) as u8;
+            int_digits.push(if d < 10 { (b'0' + d) as char } else { (b'a' + d - 10) as char });
+            rem /= radix as u64;
+        }
+        int_digits.reverse();
+    }
+
+    // Fractional part
+    let mut out: String = int_digits.into_iter().collect();
+    if fractional_part > 0.0 {
+        out.push('.');
+        let mut frac = fractional_part;
+        for _ in 0..52 {
+            // precision limit
+            frac *= radix as f64;
+            let digit = frac.trunc() as u8;
+            out.push(if digit < 10 {
+                (b'0' + digit) as char
+            } else {
+                (b'a' + digit - 10) as char
+            });
+            frac -= digit as f64;
+            if frac < f64::EPSILON * radix as f64 {
+                break;
+            }
+        }
+    }
+
+    if negative { format!("-{out}") } else { out }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Prototype dispatch — resolves `this` then delegates
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn handle_number_prototype_method<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    this: Option<&Value<'gc>>,
+    method: &str,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // thisNumberValue(this)
+    let n = match this {
+        Some(Value::Number(n)) => *n,
+        Some(Value::Object(obj)) => {
+            if let Some(val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
+                if let Value::Number(n) = &*val.borrow() {
+                    *n
+                } else {
+                    return Err(raise_type_error!("Number.prototype method called on non-number object").into());
+                }
+            } else {
+                return Err(raise_type_error!("Number.prototype method called on incompatible receiver").into());
+            }
+        }
+        _ => {
+            return Err(raise_type_error!("Number.prototype method requires that 'this' be a Number").into());
+        }
+    };
+    handle_number_instance_method(mc, env, n, method, args)
 }

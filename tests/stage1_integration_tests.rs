@@ -327,8 +327,11 @@ fn stage1_proxy_revocable() {
 #[test]
 fn stage1_proxy_delete_trap() {
     // Test Proxy deleteProperty trap
+    // Note: this engine runs in strict mode, so `delete proxy.foo` throws
+    // TypeError when the trap returns false. We use try/catch to verify.
     let result = evaluate_script(
         r#"
+        "use strict";
         let target = { foo: 42, bar: 24 };
         let handler = {
             deleteProperty: function(target, prop) {
@@ -341,9 +344,14 @@ fn stage1_proxy_delete_trap() {
         let proxy = new Proxy(target, handler);
         delete proxy.bar; // Should work
         let deleted_bar = !('bar' in proxy);
-        delete proxy.foo; // Should be prevented
+        let threw = false;
+        try {
+            delete proxy.foo; // Should throw in strict mode
+        } catch (e) {
+            threw = e instanceof TypeError;
+        }
         let still_has_foo = 'foo' in proxy;
-        deleted_bar && still_has_foo
+        deleted_bar && still_has_foo && threw
     "#,
         None::<&std::path::Path>,
     )

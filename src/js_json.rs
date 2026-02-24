@@ -263,7 +263,7 @@ fn enumerable_own_property_names<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectD
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
                 let pk = PropertyKey::String(s.clone());
-                match crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &pk)? {
+                match crate::js_proxy::proxy_get_own_property_is_enumerable(mc, proxy, &pk)? {
                     Some(true) => result.push(s), // enumerable
                     Some(false) => {}             // non-enumerable
                     None => {}                    // undefined from trap

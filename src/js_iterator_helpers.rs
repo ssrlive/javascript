@@ -1751,7 +1751,7 @@ fn handle_iterator_zip_keyed<'gc>(
             if let Some(proxy_cell) = slot_get(&iterables_obj, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
-                crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, key)
+                crate::js_proxy::proxy_get_own_property_is_enumerable(mc, proxy, key)
             } else {
                 Ok(None) // shouldn't happen
             }

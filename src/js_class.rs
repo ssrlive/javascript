@@ -43,9 +43,10 @@ fn unwrap_object_value<'gc>(val: &Value<'gc>) -> Option<JSObjectDataPtr<'gc>> {
 /// 4. Walk the prototype chain looking for a `constructor` property with
 ///    closure data whose `env` points at the originating realm.
 ///
-/// Returns `None` when no realm can be determined (caller should fall back to
-/// the current realm).
-pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSObjectDataPtr<'gc>> {
+/// Returns `Ok(None)` when no realm can be determined (caller should fall back
+/// to the current realm). Returns `Err` when the proxy is revoked (spec 10.5.12
+/// step 4a: throw TypeError).
+pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
     let normalize_realm = |mut realm_env: JSObjectDataPtr<'gc>| -> JSObjectDataPtr<'gc> {
         if let Some(gt) = crate::core::env_get(&realm_env, "globalThis")
             && let Value::Object(global_obj) = &*gt.borrow()
@@ -64,22 +65,36 @@ pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSOb
         .or_else(|| slot_get_chained(obj, &InternalSlot::OriginGlobal))
         && let Value::Object(origin) = &*origin_val.borrow()
     {
-        return Some(normalize_realm(*origin));
+        return Ok(Some(normalize_realm(*origin)));
+    }
+
+    // Spec 10.5.12 step 4: If obj is a Proxy exotic object, follow [[ProxyTarget]]
+    if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
+        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+    {
+        // Step 4a: If ProxyHandler is null (revoked), throw TypeError
+        if proxy.revoked {
+            return Err(raise_type_error!("Cannot perform 'GetFunctionRealm' on a revoked proxy").into());
+        }
+        match &*proxy.target {
+            Value::Object(target_obj) => return get_function_realm(target_obj),
+            _ => return Ok(None),
+        }
     }
 
     // Bound function exotic object: realm is the realm of its target function.
     if let Some(bound_target_rc) = slot_get(obj, &InternalSlot::BoundTarget) {
         match &*bound_target_rc.borrow() {
             Value::Object(target_obj) => {
-                if let Some(realm) = get_function_realm(target_obj) {
-                    return Some(normalize_realm(realm));
+                if let Some(realm) = get_function_realm(target_obj)? {
+                    return Ok(Some(normalize_realm(realm)));
                 }
             }
             Value::Property { value: Some(v), .. } => {
                 if let Value::Object(target_obj) = &*v.borrow()
-                    && let Some(realm) = get_function_realm(target_obj)
+                    && let Some(realm) = get_function_realm(target_obj)?
                 {
-                    return Some(normalize_realm(realm));
+                    return Ok(Some(normalize_realm(realm)));
                 }
             }
             _ => {}
@@ -91,7 +106,7 @@ pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSOb
         match &*cl_val_rc.borrow() {
             Value::Closure(data) | Value::AsyncClosure(data) => {
                 if data.env.is_some() {
-                    return data.env.map(normalize_realm);
+                    return Ok(data.env.map(normalize_realm));
                 }
             }
             _ => {}
@@ -108,7 +123,7 @@ pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSOb
             match &*c_cl_val_rc.borrow() {
                 Value::Closure(data) | Value::AsyncClosure(data) => {
                     if data.env.is_some() {
-                        return data.env.map(normalize_realm);
+                        return Ok(data.env.map(normalize_realm));
                     }
                 }
                 _ => {}
@@ -117,7 +132,7 @@ pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<JSOb
         cur = o.borrow().prototype;
     }
 
-    None
+    Ok(None)
 }
 
 /// Look up `<name>.prototype` in an environment, trying named properties first,
@@ -176,7 +191,7 @@ pub(crate) fn get_prototype_from_constructor<'gc>(
     }
 
     // Step 4: proto is not Object → GetFunctionRealm(newTarget) → realm intrinsic
-    if let Some(realm) = get_function_realm(new_target_obj)
+    if let Some(realm) = get_function_realm(new_target_obj)?
         && let Some(proto) = lookup_intrinsic_prototype(&realm, intrinsic_name)
     {
         return Ok(Some(proto));
@@ -1435,7 +1450,7 @@ pub(crate) fn evaluate_new<'gc>(
                 && let Value::String(name) = &*native_ctor_rc.borrow()
             {
                 let name_desc = utf16_to_utf8(name);
-                let ctor_realm_env = get_function_realm(class_obj).unwrap_or(*env);
+                let ctor_realm_env = get_function_realm(class_obj).ok().flatten().unwrap_or(*env);
                 match name_desc.as_str() {
                     "Promise" => {
                         let result = crate::js_promise::handle_promise_constructor_val(mc, evaluated_args, &ctor_realm_env)?;

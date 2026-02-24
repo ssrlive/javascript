@@ -109,23 +109,23 @@ fn step<'gc>(
                 // Not done, "value" is the yielded promise (or value to be awaited)
                 // Promise.resolve(value).then(res => step(next(res)), err => step(throw(err)))
 
-                let promise_resolve = if let Some(ctor) = crate::core::env_get(env, "Promise") {
-                    if let Some(resolve_method) = object_get_key_value(
-                        &match ctor.borrow().clone() {
-                            Value::Object(o) => o,
-                            _ => return Err(crate::raise_eval_error!("Promise not object")),
-                        },
-                        "resolve",
-                    ) {
-                        resolve_method.borrow().clone()
-                    } else {
-                        return Err(crate::raise_eval_error!("Promise.resolve missing"));
-                    }
+                let promise_ctor_val = if let Some(ctor) = crate::core::env_get(env, "Promise") {
+                    ctor.borrow().clone()
                 } else {
                     return Err(crate::raise_eval_error!("Promise not found"));
                 };
+                let promise_ctor_obj = match &promise_ctor_val {
+                    Value::Object(o) => *o,
+                    _ => return Err(crate::raise_eval_error!("Promise not object")),
+                };
+                let promise_resolve = if let Some(resolve_method) = object_get_key_value(&promise_ctor_obj, "resolve") {
+                    resolve_method.borrow().clone()
+                } else {
+                    return Err(crate::raise_eval_error!("Promise.resolve missing"));
+                };
 
-                let p_val = crate::js_promise::call_function(mc, &promise_resolve, &[value], env)?;
+                // Call Promise.resolve(value) with `this` = Promise constructor
+                let p_val = call_function_with_this(mc, &promise_resolve, Some(&promise_ctor_val), &[value], env)?;
 
                 let on_fulfilled = create_async_step_callback(mc, generator, resolve, reject, *env, false);
                 let on_rejected = create_async_step_callback(mc, generator, resolve, reject, *env, true);

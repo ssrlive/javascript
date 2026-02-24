@@ -3361,28 +3361,14 @@ fn handle_object_is_prototype_of<'gc>(
 
     // Helper: get the [[GetPrototypeOf]] result for the given value,
     // handling Proxy wrappers (Objects with __proxy__) and Value::Proxy.
+    // Uses proxy_get_prototype_of which includes invariant checks (spec §10.5.1).
     let get_prototype_of = |mc: &MutationContext<'gc>, v: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
         // Check for proxy wrapper Object
         if let Value::Object(obj) = v {
             if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
-                let proto_val = crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
-                    match &*proxy.target {
-                        Value::Object(target_obj) => {
-                            if let Some(p) = target_obj.borrow().prototype {
-                                Ok(Value::Object(p))
-                            } else if let Some(pv) = slot_get_chained(target_obj, &InternalSlot::Proto)
-                                && let Value::Object(p) = &*pv.borrow()
-                            {
-                                Ok(Value::Object(*p))
-                            } else {
-                                Ok(Value::Null)
-                            }
-                        }
-                        _ => Ok(Value::Null),
-                    }
-                })?;
+                let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
                 return match proto_val {
                     Value::Object(p) => Ok(Some(p)),
                     Value::Null => Ok(None),
@@ -3392,19 +3378,7 @@ fn handle_object_is_prototype_of<'gc>(
             return Ok(obj.borrow().prototype);
         }
         if let Value::Proxy(proxy) = v {
-            let proto_val =
-                crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
-                    match &*proxy.target {
-                        Value::Object(target_obj) => {
-                            if let Some(p) = target_obj.borrow().prototype {
-                                Ok(Value::Object(p))
-                            } else {
-                                Ok(Value::Null)
-                            }
-                        }
-                        _ => Ok(Value::Null),
-                    }
-                })?;
+            let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
             return match proto_val {
                 Value::Object(p) => Ok(Some(p)),
                 Value::Null => Ok(None),
@@ -3468,22 +3442,7 @@ fn handle_object_proto_get<'gc>(
         Value::Undefined
     };
     if let Value::Proxy(proxy) = this_val {
-        let result = crate::js_proxy::apply_proxy_trap(mc, &proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
-            match &*proxy.target {
-                Value::Object(target_obj) => {
-                    if let Some(p) = target_obj.borrow().prototype {
-                        Ok(Value::Object(p))
-                    } else if let Some(pv) = slot_get_chained(target_obj, &InternalSlot::Proto)
-                        && let Value::Object(p) = &*pv.borrow()
-                    {
-                        Ok(Value::Object(*p))
-                    } else {
-                        Ok(Value::Null)
-                    }
-                }
-                _ => Ok(Value::Null),
-            }
-        })?;
+        let result = crate::js_proxy::proxy_get_prototype_of(mc, &proxy)?;
 
         return match result {
             Value::Object(_) | Value::Null => Ok(result),
@@ -3503,22 +3462,7 @@ fn handle_object_proto_get<'gc>(
     if let Some(proxy_ptr) = crate::core::slot_get(&this_obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
     {
-        let result = crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
-            match &*proxy.target {
-                Value::Object(target_obj) => {
-                    if let Some(p) = target_obj.borrow().prototype {
-                        Ok(Value::Object(p))
-                    } else if let Some(pv) = slot_get_chained(target_obj, &InternalSlot::Proto)
-                        && let Value::Object(p) = &*pv.borrow()
-                    {
-                        Ok(Value::Object(*p))
-                    } else {
-                        Ok(Value::Null)
-                    }
-                }
-                _ => Ok(Value::Null),
-            }
-        })?;
+        let result = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
 
         return match result {
             Value::Object(_) | Value::Null => Ok(result),
@@ -4022,31 +3966,13 @@ pub fn handle_function_prototype_method<'gc>(
             };
 
             // Helper for [[GetPrototypeOf]] with Proxy support.
+            // Uses proxy_get_prototype_of which includes invariant checks (spec §10.5.1).
             let get_prototype_of = |mc: &MutationContext<'gc>, v: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
                 if let Value::Object(obj) = v {
                     if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        let proto_val = crate::js_proxy::apply_proxy_trap(
-                            mc,
-                            proxy,
-                            "getPrototypeOf",
-                            vec![(*proxy.target).clone()],
-                            || match &*proxy.target {
-                                Value::Object(target_obj) => {
-                                    if let Some(p) = target_obj.borrow().prototype {
-                                        Ok(Value::Object(p))
-                                    } else if let Some(pv) = crate::core::slot_get_chained(target_obj, &InternalSlot::Proto)
-                                        && let Value::Object(p) = &*pv.borrow()
-                                    {
-                                        Ok(Value::Object(*p))
-                                    } else {
-                                        Ok(Value::Null)
-                                    }
-                                }
-                                _ => Ok(Value::Null),
-                            },
-                        )?;
+                        let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
                         return match proto_val {
                             Value::Object(p) => Ok(Some(p)),
                             Value::Null => Ok(None),
@@ -4064,18 +3990,7 @@ pub fn handle_function_prototype_method<'gc>(
                     return Ok(None);
                 }
                 if let Value::Proxy(proxy) = v {
-                    let proto_val = crate::js_proxy::apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
-                        match &*proxy.target {
-                            Value::Object(target_obj) => {
-                                if let Some(p) = target_obj.borrow().prototype {
-                                    Ok(Value::Object(p))
-                                } else {
-                                    Ok(Value::Null)
-                                }
-                            }
-                            _ => Ok(Value::Null),
-                        }
-                    })?;
+                    let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
                     return match proto_val {
                         Value::Object(p) => Ok(Some(p)),
                         Value::Null => Ok(None),

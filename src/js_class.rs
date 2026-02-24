@@ -1437,7 +1437,17 @@ pub(crate) fn evaluate_new<'gc>(
                 let name_desc = utf16_to_utf8(name);
                 let ctor_realm_env = get_function_realm(class_obj).unwrap_or(*env);
                 match name_desc.as_str() {
-                    "Promise" => return crate::js_promise::handle_promise_constructor_val(mc, evaluated_args, &ctor_realm_env),
+                    "Promise" => {
+                        let result = crate::js_promise::handle_promise_constructor_val(mc, evaluated_args, &ctor_realm_env)?;
+                        // GetPrototypeFromConstructor: override prototype from newTarget
+                        if let Some(Value::Object(nt_obj)) = new_target
+                            && let Value::Object(result_obj) = &result
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "Promise")?
+                        {
+                            result_obj.borrow_mut(mc).prototype = Some(proto);
+                        }
+                        return Ok(result);
+                    }
                     "Array" => return crate::js_array::handle_array_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
                     "Date" => return crate::js_date::handle_date_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
                     "RegExp" => return crate::js_regexp::handle_regexp_constructor(mc, evaluated_args),
@@ -3655,9 +3665,12 @@ pub(crate) fn evaluate_super_call<'gc>(
                         // Apply deferred computed-prototype transfer when the returned object is
                         // the same instance under construction. Also apply for TypedArray native
                         // constructors, which may allocate and return a different object but must
-                        // still use newTarget.prototype.
-                        let should_apply_proto_transfer =
-                            Gc::ptr_eq(new_instance, instance) || slot_get(&parent_class_obj, &InternalSlot::Kind).is_some();
+                        // still use newTarget.prototype. Also apply for native constructors like
+                        // Promise, Map, Set etc. that create and return a new object in super().
+                        let is_native_ctor = slot_get(&parent_class_obj, &InternalSlot::NativeCtor).is_some();
+                        let should_apply_proto_transfer = Gc::ptr_eq(new_instance, instance)
+                            || slot_get(&parent_class_obj, &InternalSlot::Kind).is_some()
+                            || is_native_ctor;
 
                         if should_apply_proto_transfer {
                             if let Some(proto_env) = find_binding_env(&lexical_env, "__computed_proto") {

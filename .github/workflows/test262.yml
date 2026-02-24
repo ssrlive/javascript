@@ -45,6 +45,7 @@ jobs:
           - id: 32
           - id: 33
           - id: 34
+          - id: 35
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -213,6 +214,10 @@ jobs:
             34)
               TITLE='"built-ins/Math" - "built-ins/parseInt"'
               FOCUS='built-ins/Math,built-ins/NaN,built-ins/NativeErrors,built-ins/Number,built-ins/parseFloat,built-ins/parseInt'
+              ;;
+            35)
+              TITLE='"built-ins/Promise"'
+              FOCUS='built-ins/Promise'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

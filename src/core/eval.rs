@@ -12674,6 +12674,9 @@ pub fn evaluate_call_dispatch<'gc>(
                                 let err = crate::core::create_error(mc, None, msg_val)?;
                                 Ok(err)
                             }
+                        } else if name == crate::unicode::utf8_to_utf16("Promise") {
+                            // Promise() called without new must throw TypeError per §27.2.3.1 step 1
+                            Err(raise_type_error!("Promise constructor cannot be invoked without 'new'").into())
                         } else if name == crate::unicode::utf8_to_utf16("TypedArray") {
                             // TypedArray constructors (Int8Array, Uint8Array, etc.) called as function
                             // via %TypedArray%.from / %TypedArray%.of construct path
@@ -18662,6 +18665,10 @@ pub fn call_native_function<'gc>(
                     };
                     if let Value::String(name) = native_ctor_val {
                         let ctor_name = crate::unicode::utf16_to_utf8(&name);
+                        // Promise() called without new must throw TypeError per §27.2.3.1 step 1
+                        if ctor_name == "Promise" {
+                            return Err(raise_type_error!("Promise constructor cannot be invoked without 'new'").into());
+                        }
                         let call_env = crate::core::new_js_object_data(mc);
                         call_env.borrow_mut(mc).prototype = Some(*env);
                         call_env.borrow_mut(mc).is_function_scope = true;

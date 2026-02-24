@@ -25,9 +25,8 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, InternalSlot, JSGenerator, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState,
-    Statement, StatementKind, Value, evaluate_call_dispatch, evaluate_statements, extract_closure_from_value, generate_unique_id,
-    object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, slot_get, slot_get_chained, slot_set,
-    value_to_string,
+    Statement, StatementKind, Value, evaluate_statements, extract_closure_from_value, generate_unique_id, object_get_key_value,
+    object_set_key_value, prepare_closure_call_env, prepare_function_call_env, slot_get, slot_get_chained, slot_set, value_to_string,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -89,6 +88,13 @@ enum Task<'gc> {
         reject: Value<'gc>,
         result: Value<'gc>,
         is_reject: bool,
+        env: JSObjectDataPtr<'gc>,
+    },
+    /// PromiseResolveThenableJob: call thenable.then(resolve, reject) asynchronously
+    ResolveThenableJob {
+        promise: GcPtr<'gc, JSPromise<'gc>>,
+        thenable: Value<'gc>,
+        then_fn: Value<'gc>,
         env: JSObjectDataPtr<'gc>,
     },
     /// Task to execute a setTimeout callback
@@ -739,6 +745,7 @@ fn queue_task<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
         }
         Task::Rejection { promise, callbacks } => format!("Rejection promise_ptr={:p} callbacks={}", Gc::as_ptr(*promise), callbacks.len()),
         Task::ExecuteClosure { function, .. } => format!("ExecuteClosure function={:?}", function),
+        Task::ResolveThenableJob { promise, .. } => format!("ResolveThenableJob promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::AttachHandlers { promise, .. } => format!("AttachHandlers promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::ResolvePromise { promise, .. } => format!("ResolvePromise promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::DynamicImport { promise, .. } => format!("DynamicImport promise_ptr={:p}", Gc::as_ptr(*promise)),
@@ -802,6 +809,7 @@ fn queue_task_front<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
             format!("Rejection promise_ptr={:p} callbacks={}", Gc::as_ptr(*promise), callbacks.len())
         }
         Task::ExecuteClosure { function, .. } => format!("ExecuteClosure function={:?}", function),
+        Task::ResolveThenableJob { promise, .. } => format!("ResolveThenableJob promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::AttachHandlers { promise, .. } => format!("AttachHandlers promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::ResolvePromise { promise, .. } => format!("ResolvePromise promise_ptr={:p}", Gc::as_ptr(*promise)),
         Task::DynamicImport { promise, .. } => format!("DynamicImport promise_ptr={:p}", Gc::as_ptr(*promise)),
@@ -959,6 +967,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
             callbacks.len()
         ),
         Task::ExecuteClosure { function, .. } => format!("id={} ExecuteClosure function={:?}", task_id, function),
+        Task::ResolveThenableJob { promise, .. } => format!("id={} ResolveThenableJob promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
         Task::AttachHandlers { promise, .. } => format!("id={} AttachHandlers promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
         Task::ResolvePromise { promise, .. } => format!("id={} ResolvePromise promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
         Task::DynamicImport { promise, .. } => format!("id={} DynamicImport promise_ptr={:p}", task_id, Gc::as_ptr(*promise)),
@@ -1338,6 +1347,23 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
         Task::ResolvePromise { promise, value, env } => {
             log::trace!("Processing ResolvePromise task");
             resolve_promise(mc, &promise, value, &env);
+        }
+        Task::ResolveThenableJob {
+            promise,
+            thenable,
+            then_fn,
+            env,
+        } => {
+            log::trace!("Processing ResolveThenableJob task");
+            let resolve = create_resolve_function_direct(mc, promise, &env);
+            let reject = create_reject_function_direct(mc, promise, &env);
+            if let Err(err) = call_function_with_this(mc, &then_fn, Some(&thenable), &[resolve, reject], &env) {
+                let reason = match err {
+                    EvalError::Throw(v, ..) => v,
+                    EvalError::Js(js_err) => crate::core::js_error_to_value(mc, &env, &js_err),
+                };
+                reject_promise(mc, &promise, reason, &env);
+            }
         }
         Task::DynamicImport {
             promise,
@@ -1728,6 +1754,7 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
                     Task::Resolution { .. } => "Resolution",
                     Task::Rejection { .. } => "Rejection",
                     Task::ExecuteClosure { .. } => "ExecuteClosure",
+                    Task::ResolveThenableJob { .. } => "ResolveThenableJob",
                     Task::Timeout { .. } => "Timeout",
                     Task::Interval { .. } => "Interval",
                     Task::UnhandledCheck { .. } => "UnhandledCheck",
@@ -1890,10 +1917,16 @@ fn create_resolve_function_direct<'gc>(
         vec![Expr::Var("value".to_string(), None, None)],
     ))];
 
-    Value::Closure(Gc::new(
+    let closure = Value::Closure(Gc::new(
         mc,
         ClosureData::new(&[DestructuringElement::Variable("value".to_string(), None)], &body, Some(env), None),
-    ))
+    ));
+
+    // Wrap as a proper function object with length=1, name="" per spec
+    match wrap_closure_as_fn_obj(mc, global_env, closure, "", 1.0) {
+        Ok(fn_obj) => Value::Object(fn_obj),
+        Err(_) => Value::Undefined, // should not happen
+    }
 }
 
 fn create_reject_function_direct<'gc>(
@@ -1911,7 +1944,7 @@ fn create_reject_function_direct<'gc>(
         vec![Expr::Var("reason".to_string(), None, None)],
     ))];
 
-    Value::Closure(Gc::new(
+    let closure = Value::Closure(Gc::new(
         mc,
         ClosureData::new(
             &[DestructuringElement::Variable("reason".to_string(), None)],
@@ -1919,7 +1952,13 @@ fn create_reject_function_direct<'gc>(
             Some(env),
             None,
         ),
-    ))
+    ));
+
+    // Wrap as a proper function object with length=1, name="" per spec
+    match wrap_closure_as_fn_obj(mc, global_env, closure, "", 1.0) {
+        Ok(fn_obj) => Value::Object(fn_obj),
+        Err(_) => Value::Undefined, // should not happen
+    }
 }
 
 /// Helper to handle the actual resolution from the captured environment
@@ -2097,8 +2136,21 @@ pub fn resolve_promise<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) {
     let mut promise_borrow = promise.borrow_mut(mc);
-    // println!("DEBUG: resolve_promise called for promise id={} value={:?}", promise_borrow.id, value);
     if let PromiseState::Pending = promise_borrow.state {
+        // §27.2.1.3.2 Step 6: If SameValue(resolution, promise) is true,
+        // reject with TypeError
+        if let Value::Object(obj) = &value
+            && let Some(other_promise) = get_promise_from_js_object(obj)
+            && std::ptr::eq(Gc::as_ptr(*promise), Gc::as_ptr(other_promise))
+        {
+            // Self-resolution: reject with TypeError
+            drop(promise_borrow);
+            let type_error_js = crate::raise_type_error!("Chaining cycle detected for promise");
+            let type_error_val = crate::core::js_error_to_value(mc, env, &type_error_js);
+            reject_promise(mc, promise, type_error_val, env);
+            return;
+        }
+
         // Check if value is a promise object for flattening
         if let Value::Object(obj) = &value
             && let Some(other_promise) = get_promise_from_js_object(obj)
@@ -2223,17 +2275,18 @@ pub fn resolve_promise<'gc>(
             };
 
             if !matches!(then_value, Value::Undefined | Value::Null) && then_callable {
-                let resolve = create_resolve_function_direct(mc, *promise, env);
-                let reject = create_reject_function_direct(mc, *promise, env);
                 drop(promise_borrow);
 
-                if let Err(err) = call_function_with_this(mc, &then_value, Some(&Value::Object(*obj)), &[resolve, reject], env) {
-                    let reason = match err {
-                        EvalError::Throw(v, ..) => v,
-                        EvalError::Js(js_err) => crate::core::js_error_to_value(mc, env, &js_err),
-                    };
-                    reject_promise(mc, promise, reason, env);
-                }
+                // §27.2.1.3.2 Step 14-15: Enqueue PromiseResolveThenableJob as a microtask
+                queue_task(
+                    mc,
+                    Task::ResolveThenableJob {
+                        promise: *promise,
+                        thenable: Value::Object(*obj),
+                        then_fn: then_value,
+                        env: *env,
+                    },
+                );
                 return;
             }
         }
@@ -2686,6 +2739,7 @@ pub fn __internal_allsettled_state_record_rejected_env<'gc>(
 ///
 /// # Returns
 /// A Value::Closure that can be used as a then callback
+#[allow(dead_code)]
 fn create_allsettled_resolve_callback<'gc>(
     mc: &MutationContext<'gc>,
     state_env: JSObjectDataPtr<'gc>,
@@ -2723,6 +2777,7 @@ fn create_allsettled_resolve_callback<'gc>(
 ///
 /// Creates a closure that calls the internal function to record rejection
 /// in the state env stored on the closure's environment.
+#[allow(dead_code)]
 fn create_allsettled_reject_callback<'gc>(
     mc: &MutationContext<'gc>,
     state_env: JSObjectDataPtr<'gc>,
@@ -3041,7 +3096,16 @@ fn wrap_closure_as_fn_obj<'gc>(
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let fn_obj = new_js_object_data(mc);
     slot_set(mc, &fn_obj, InternalSlot::Callable, &Value::Boolean(true));
-    fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure)));
+    // Mark the closure as arrow-like (non-constructible) — spec built-in functions are not constructors
+    let marked_closure = match closure {
+        Value::Closure(cl) => {
+            let mut data = (*cl).clone();
+            data.is_arrow = true; // prevents `new` from succeeding (object_has_construct returns false)
+            Value::Closure(Gc::new(mc, data))
+        }
+        other => other,
+    };
+    fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, marked_closure)));
     if let Some(fp) = get_function_proto(env) {
         fn_obj.borrow_mut(mc).prototype = Some(fp);
     }
@@ -3073,13 +3137,137 @@ fn is_callable_val<'gc>(v: &Value<'gc>) -> bool {
 #[allow(dead_code)]
 fn is_constructor_val<'gc>(v: &Value<'gc>) -> bool {
     match v {
+        // Plain function declarations/expressions are constructors
+        Value::Function(_) => true,
+        // Class definitions are constructors
+        Value::ClassDefinition(_) => true,
+        // Closures are NOT constructors (arrow functions, etc.)
+        Value::Closure(_) | Value::AsyncClosure(_) => false,
         Value::Object(o) => {
+            // Objects with closures that are not explicitly non-constructor (arrow functions)
+            // are constructors — this covers function declarations/expressions stored as objects
+            if let Some(cl_ptr) = o.borrow().get_closure() {
+                // Check the ClosureData.is_arrow flag
+                let is_arrow_closure = match &*cl_ptr.borrow() {
+                    Value::Closure(cl) | Value::AsyncClosure(cl) => cl.is_arrow,
+                    Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..) => false,
+                    _ => false,
+                };
+                if is_arrow_closure {
+                    return false;
+                }
+                // Also check the InternalSlot::IsArrowFunction marker
+                if let Some(arrow_rc) = slot_get_chained(o, &InternalSlot::IsArrowFunction)
+                    && matches!(*arrow_rc.borrow(), Value::Boolean(true))
+                {
+                    return false;
+                }
+                return true;
+            }
             slot_get_chained(o, &InternalSlot::IsConstructor).is_some()
                 || o.borrow().class_def.is_some()
                 || slot_get_chained(o, &InternalSlot::NativeCtor).is_some()
         }
         _ => false,
     }
+}
+
+/// Check whether a Value has Object type in the ECMAScript sense.
+/// In JS spec, functions are objects. Our engine represents them differently.
+fn is_object_type<'gc>(v: &Value<'gc>) -> bool {
+    matches!(
+        v,
+        Value::Object(_)
+            | Value::Function(_)
+            | Value::Closure(_)
+            | Value::AsyncClosure(_)
+            | Value::ClassDefinition(_)
+            | Value::GeneratorFunction(..)
+            | Value::AsyncGeneratorFunction(..)
+    )
+}
+
+/// Check whether a Value is the built-in Promise constructor (not a subclass).
+fn is_default_promise_ctor<'gc>(v: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> bool {
+    if let Value::Object(obj) = v {
+        // Use slot_get (own property only) — NOT slot_get_chained, because
+        // subclasses that extend Promise would inherit NativeCtor through the chain
+        if let Some(nc_rc) = slot_get(obj, &InternalSlot::NativeCtor)
+            && let Value::String(s) = &*nc_rc.borrow()
+        {
+            let name = crate::unicode::utf16_to_utf8(s);
+            return name == "Promise";
+        }
+        // Also check identity with the global Promise constructor
+        let default_ctor = get_default_promise_ctor(env);
+        if let Value::Object(def_obj) = &default_ctor {
+            return std::ptr::eq(&*obj.borrow() as *const _, &*def_obj.borrow() as *const _);
+        }
+    }
+    false
+}
+
+/// SpeciesConstructor(O, defaultConstructor) — §7.3.20
+/// Looks up O.constructor[Symbol.species], falling back to defaultConstructor.
+fn get_species_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    // §7.3.20 SpeciesConstructor(O, defaultConstructor)
+    // Step 1: Let C = Get(O, "constructor") — must trigger getters
+    let ctor_val = crate::core::get_property_with_accessors(mc, env, obj, "constructor")?;
+
+    // Step 2: If C is undefined, return defaultConstructor
+    if matches!(ctor_val, Value::Undefined) {
+        return Ok(None);
+    }
+
+    // Step 3: If Type(C) is not Object, throw TypeError
+    if !is_object_type(&ctor_val) {
+        return Err(raise_type_error!("Species constructor: constructor is not an object").into());
+    }
+
+    let ctor_obj = match &ctor_val {
+        Value::Object(o) => o,
+        // For Value::Function/ClassDefinition etc (which are object types), just return as-is
+        _ => return Ok(Some(ctor_val)),
+    };
+
+    // Step 4: Let S = Get(C, @@species)
+    // Look up the well-known Symbol.species the same way as ArraySpeciesCreate
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_val.borrow()
+        && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
+        && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+    {
+        let species = crate::core::get_property_with_accessors(mc, env, ctor_obj, *species_sym)?;
+        // Step 5: If S is undefined or null, return defaultConstructor
+        match species {
+            Value::Null | Value::Undefined => return Ok(None),
+            other => {
+                // Step 6: If IsConstructor(S), return S
+                if is_constructor_val(&other) {
+                    return Ok(Some(other));
+                }
+                // Step 7: Throw TypeError
+                return Err(raise_type_error!("Species constructor: species is not a constructor").into());
+            }
+        }
+    }
+    // Fallback: try string key "Symbol.species"
+    if let Ok(species) = crate::core::get_property_with_accessors(mc, env, ctor_obj, "Symbol.species") {
+        match species {
+            Value::Null | Value::Undefined => return Ok(None),
+            other => {
+                if is_constructor_val(&other) {
+                    return Ok(Some(other));
+                }
+                return Err(raise_type_error!("Species constructor: species is not a constructor").into());
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// NewPromiseCapability(C) per ECMAScript spec §27.2.1.5.
@@ -3090,10 +3278,10 @@ pub fn new_promise_capability<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     constructor: &Value<'gc>,
-) -> Result<(Value<'gc>, Value<'gc>, Value<'gc>), JSError> {
+) -> Result<(Value<'gc>, Value<'gc>, Value<'gc>), EvalError<'gc>> {
     // Step 1: Check IsConstructor(C)
     if !is_constructor_val(constructor) {
-        return Err(raise_type_error!("Promise.all/resolve/etc: this is not a constructor"));
+        return Err(raise_type_error!("Promise.all/resolve/etc: this is not a constructor").into());
     }
 
     // Step 2: Create the PromiseCapability record (as an env object)
@@ -3138,10 +3326,10 @@ pub fn new_promise_capability<'gc>(
 
     // Steps 7-8: Validate callability
     if !is_callable_val(&resolve) {
-        return Err(raise_type_error!("Promise capability: resolve is not callable"));
+        return Err(raise_type_error!("Promise capability: resolve is not callable").into());
     }
     if !is_callable_val(&reject) {
-        return Err(raise_type_error!("Promise capability: reject is not callable"));
+        return Err(raise_type_error!("Promise capability: reject is not callable").into());
     }
 
     Ok((promise_obj, resolve, reject))
@@ -3155,7 +3343,7 @@ pub fn __internal_capability_executor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let resolve_arg = args.first().cloned().unwrap_or(Value::Undefined);
     let reject_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
@@ -3167,14 +3355,14 @@ pub fn __internal_capability_executor<'gc>(
                 .map(|rc| !matches!(*rc.borrow(), Value::Undefined))
                 .unwrap_or(false);
             if resolve_already_non_undef {
-                return Err(raise_type_error!("GetCapabilitiesExecutor: [[Resolve]] already set"));
+                return Err(raise_type_error!("GetCapabilitiesExecutor: [[Resolve]] already set").into());
             }
             // Check: if [[Reject]] is already non-undefined, throw
             let reject_already_non_undef = object_get_key_value(&cap_obj, "__cap_reject")
                 .map(|rc| !matches!(*rc.borrow(), Value::Undefined))
                 .unwrap_or(false);
             if reject_already_non_undef {
-                return Err(raise_type_error!("GetCapabilitiesExecutor: [[Reject]] already set"));
+                return Err(raise_type_error!("GetCapabilitiesExecutor: [[Reject]] already set").into());
             }
             // Set both (even if undefined)
             object_set_key_value(mc, &cap_obj, "__cap_resolve", &resolve_arg)?;
@@ -3194,6 +3382,14 @@ fn get_static_this<'gc>(env: &JSObjectDataPtr<'gc>) -> Value<'gc> {
 
 /// Get the default Promise constructor from the global env.
 #[allow(dead_code)]
+/// Convert an EvalError into a JS Value for use in IfAbruptRejectPromise patterns.
+fn eval_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
+    match err {
+        EvalError::Throw(v, ..) => v,
+        EvalError::Js(j) => crate::core::js_error_to_value(mc, env, &j),
+    }
+}
+
 fn get_default_promise_ctor<'gc>(env: &JSObjectDataPtr<'gc>) -> Value<'gc> {
     if let Some(rc) = slot_get_chained(env, &InternalSlot::IntrinsicPromiseCtor) {
         rc.borrow().clone()
@@ -3330,6 +3526,10 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         "__internal_promise_finally_reject",
         "__internal_promise_all_resolve",
         "__internal_promise_all_reject",
+        "__internal_allsettled_resolve",
+        "__internal_allsettled_reject",
+        "__internal_any_resolve",
+        "__internal_any_reject",
         "__internal_capability_executor",
     ];
     for h in helpers {
@@ -3344,7 +3544,7 @@ pub fn __internal_promise_all_resolve<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() < 3 {
         return Ok(Value::Undefined);
     }
@@ -3356,25 +3556,51 @@ pub fn __internal_promise_all_resolve<'gc>(
         && let Some(results_val_rc) = object_get_key_value(state_obj, "results")
         && let Value::Object(results_obj) = &*results_val_rc.borrow()
     {
+        // Check [[AlreadyCalled]] guard for this index
+        let already_key = format!(
+            "__already_{}",
+            match index_val {
+                Value::Number(n) => *n as usize,
+                _ => return Ok(Value::Undefined),
+            }
+        );
+        if let Some(already_rc) = object_get_key_value(state_obj, &already_key)
+            && matches!(*already_rc.borrow(), Value::Boolean(true))
+        {
+            return Ok(Value::Undefined);
+        }
+        object_set_key_value(mc, state_obj, &already_key, &Value::Boolean(true))?;
+
         let idx_str = match index_val {
             Value::Number(n) => n.to_string(),
             _ => return Ok(Value::Undefined),
         };
         object_set_key_value(mc, results_obj, &idx_str, &value.clone())?;
-
-        if let Some(completed_val_rc) = object_get_key_value(state_obj, "completed")
-            && let Value::Number(completed) = &*completed_val_rc.borrow()
+        // Also set length on results array
+        let idx_num = match index_val {
+            Value::Number(n) => *n as usize,
+            _ => 0,
+        };
+        if let Some(len_rc) = object_get_key_value(results_obj, "length")
+            && let Value::Number(cur_len) = &*len_rc.borrow()
+            && (idx_num + 1) as f64 > *cur_len
         {
-            let new_completed = completed + 1.0;
-            object_set_key_value(mc, state_obj, "completed", &Value::Number(new_completed))?;
+            object_set_key_value(mc, results_obj, "length", &Value::Number((idx_num + 1) as f64))?;
+        }
 
-            if let Some(total_val_rc) = object_get_key_value(state_obj, "total")
-                && let Value::Number(total) = &*total_val_rc.borrow()
-                && new_completed == *total
-                && let Some(promise_val_rc) = object_get_key_value(state_obj, "result_promise")
-                && let Value::Promise(promise_ref) = &*promise_val_rc.borrow()
-            {
-                resolve_promise(mc, promise_ref, Value::Object(*results_obj), env);
+        // Decrement remainingElementsCount
+        if let Some(remaining_rc) = object_get_key_value(state_obj, "remaining")
+            && let Value::Number(remaining) = &*remaining_rc.borrow()
+        {
+            let new_remaining = remaining - 1.0;
+            object_set_key_value(mc, state_obj, "remaining", &Value::Number(new_remaining))?;
+
+            if new_remaining == 0.0 {
+                // Use capability resolve
+                if let Some(cap_resolve_rc) = object_get_key_value(state_obj, "cap_resolve") {
+                    let cap_resolve = cap_resolve_rc.borrow().clone();
+                    call_function(mc, &cap_resolve, &[Value::Object(*results_obj)], env)?;
+                }
             }
         }
     }
@@ -3385,18 +3611,221 @@ pub fn __internal_promise_all_reject<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() < 2 {
         return Ok(Value::Undefined);
     }
     let reason = &args[0];
     let state_val = &args[1];
 
+    if let Value::Object(state_obj) = state_val {
+        // Use capability reject (spec: Call(promiseCapability.[[Reject]], undefined, «reason»))
+        if let Some(cap_reject_rc) = object_get_key_value(state_obj, "cap_reject") {
+            let cap_reject = cap_reject_rc.borrow().clone();
+            call_function(mc, &cap_reject, std::slice::from_ref(reason), env)?;
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+/// Internal resolve callback for Promise.allSettled — creates {status:"fulfilled", value} record
+pub fn __internal_allsettled_resolve<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if args.len() < 3 {
+        return Ok(Value::Undefined);
+    }
+    let index_val = &args[0];
+    let value = &args[1];
+    let state_val = &args[2];
+
     if let Value::Object(state_obj) = state_val
-        && let Some(promise_val_rc) = object_get_key_value(state_obj, "result_promise")
-        && let Value::Promise(promise_ref) = &*promise_val_rc.borrow()
+        && let Some(results_val_rc) = object_get_key_value(state_obj, "results")
+        && let Value::Object(results_obj) = &*results_val_rc.borrow()
     {
-        reject_promise(mc, promise_ref, reason.clone(), env);
+        let idx = match index_val {
+            Value::Number(n) => *n as usize,
+            _ => return Ok(Value::Undefined),
+        };
+
+        // [[AlreadyCalled]] guard
+        let already_key = format!("already_{}", idx);
+        if let Some(already_rc) = object_get_key_value(state_obj, &already_key)
+            && matches!(*already_rc.borrow(), Value::Boolean(true))
+        {
+            return Ok(Value::Undefined);
+        }
+        object_set_key_value(mc, state_obj, &already_key, &Value::Boolean(true))?;
+
+        // Build {status: "fulfilled", value} record
+        let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
+        object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
+        object_set_key_value(mc, &result_obj, "value", &value.clone())?;
+        object_set_key_value(mc, results_obj, idx, &Value::Object(result_obj))?;
+
+        // Decrement remainingElementsCount
+        if let Some(remaining_rc) = object_get_key_value(state_obj, "remaining")
+            && let Value::Number(remaining) = &*remaining_rc.borrow()
+        {
+            let new_remaining = remaining - 1.0;
+            object_set_key_value(mc, state_obj, "remaining", &Value::Number(new_remaining))?;
+            if new_remaining == 0.0
+                && let Some(cap_resolve_rc) = object_get_key_value(state_obj, "cap_resolve")
+            {
+                let cap_resolve = cap_resolve_rc.borrow().clone();
+                call_function(mc, &cap_resolve, &[Value::Object(*results_obj)], env)?;
+            }
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+/// Internal reject callback for Promise.allSettled — creates {status:"rejected", reason} record
+pub fn __internal_allsettled_reject<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if args.len() < 3 {
+        return Ok(Value::Undefined);
+    }
+    let index_val = &args[0];
+    let reason = &args[1];
+    let state_val = &args[2];
+
+    if let Value::Object(state_obj) = state_val
+        && let Some(results_val_rc) = object_get_key_value(state_obj, "results")
+        && let Value::Object(results_obj) = &*results_val_rc.borrow()
+    {
+        let idx = match index_val {
+            Value::Number(n) => *n as usize,
+            _ => return Ok(Value::Undefined),
+        };
+
+        // [[AlreadyCalled]] guard
+        let already_key = format!("already_{}", idx);
+        if let Some(already_rc) = object_get_key_value(state_obj, &already_key)
+            && matches!(*already_rc.borrow(), Value::Boolean(true))
+        {
+            return Ok(Value::Undefined);
+        }
+        object_set_key_value(mc, state_obj, &already_key, &Value::Boolean(true))?;
+
+        // Build {status: "rejected", reason} record
+        let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
+        object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("rejected")))?;
+        object_set_key_value(mc, &result_obj, "reason", &reason.clone())?;
+        object_set_key_value(mc, results_obj, idx, &Value::Object(result_obj))?;
+
+        // Decrement remainingElementsCount
+        if let Some(remaining_rc) = object_get_key_value(state_obj, "remaining")
+            && let Value::Number(remaining) = &*remaining_rc.borrow()
+        {
+            let new_remaining = remaining - 1.0;
+            object_set_key_value(mc, state_obj, "remaining", &Value::Number(new_remaining))?;
+            if new_remaining == 0.0
+                && let Some(cap_resolve_rc) = object_get_key_value(state_obj, "cap_resolve")
+            {
+                let cap_resolve = cap_resolve_rc.borrow().clone();
+                call_function(mc, &cap_resolve, &[Value::Object(*results_obj)], env)?;
+            }
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+/// Internal resolve callback for Promise.any — first fulfilled value resolves the capability
+pub fn __internal_any_resolve<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if args.is_empty() {
+        return Ok(Value::Undefined);
+    }
+    let value = &args[0];
+    let state_val = if args.len() > 1 { &args[1] } else { return Ok(Value::Undefined) };
+
+    if let Value::Object(state_obj) = state_val
+        && let Some(cap_resolve_rc) = object_get_key_value(state_obj, "cap_resolve")
+    {
+        let cap_resolve = cap_resolve_rc.borrow().clone();
+        call_function(mc, &cap_resolve, std::slice::from_ref(value), env)?;
+    }
+    Ok(Value::Undefined)
+}
+
+/// Internal reject callback for Promise.any — stores reason, creates AggregateError when all rejected
+pub fn __internal_any_reject<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    if args.len() < 3 {
+        return Ok(Value::Undefined);
+    }
+    let index_val = &args[0];
+    let reason = &args[1];
+    let state_val = &args[2];
+
+    if let Value::Object(state_obj) = state_val
+        && let Some(errors_val_rc) = object_get_key_value(state_obj, "errors")
+        && let Value::Object(errors_obj) = &*errors_val_rc.borrow()
+    {
+        let idx = match index_val {
+            Value::Number(n) => *n as usize,
+            _ => return Ok(Value::Undefined),
+        };
+
+        // [[AlreadyCalled]] guard
+        let already_key = format!("already_{}", idx);
+        if let Some(already_rc) = object_get_key_value(state_obj, &already_key)
+            && matches!(*already_rc.borrow(), Value::Boolean(true))
+        {
+            return Ok(Value::Undefined);
+        }
+        object_set_key_value(mc, state_obj, &already_key, &Value::Boolean(true))?;
+
+        object_set_key_value(mc, errors_obj, idx, &reason.clone())?;
+
+        // Decrement remainingElementsCount
+        if let Some(remaining_rc) = object_get_key_value(state_obj, "remaining")
+            && let Value::Number(remaining) = &*remaining_rc.borrow()
+        {
+            let new_remaining = remaining - 1.0;
+            object_set_key_value(mc, state_obj, "remaining", &Value::Number(new_remaining))?;
+            if new_remaining == 0.0 {
+                // All rejected — create AggregateError
+                let aggregate_error = new_gc_cell_ptr(mc, JSObjectData::new());
+                object_set_key_value(mc, &aggregate_error, "name", &Value::String(utf8_to_utf16("AggregateError")))?;
+                object_set_key_value(
+                    mc,
+                    &aggregate_error,
+                    "message",
+                    &Value::String(utf8_to_utf16("All promises were rejected")),
+                )?;
+                object_set_key_value(mc, &aggregate_error, "errors", &Value::Object(*errors_obj))?;
+                // Set prototype to Error.prototype chain
+                if let Some(agg_ctor_rc) = crate::core::env_get(env, "AggregateError") {
+                    let agg_ctor = agg_ctor_rc.borrow().clone();
+                    if let Value::Object(agg_obj) = &agg_ctor
+                        && let Some(proto_rc) = object_get_key_value(agg_obj, "prototype")
+                    {
+                        let proto = proto_rc.borrow().clone();
+                        if let Value::Object(proto_obj) = proto {
+                            aggregate_error.borrow_mut(mc).prototype = Some(proto_obj);
+                        }
+                    }
+                }
+
+                if let Some(cap_reject_rc) = object_get_key_value(state_obj, "cap_reject") {
+                    let cap_reject = cap_reject_rc.borrow().clone();
+                    call_function(mc, &cap_reject, &[Value::Object(aggregate_error)], env)?;
+                }
+            }
+        }
     }
     Ok(Value::Undefined)
 }
@@ -3405,421 +3834,690 @@ pub fn handle_promise_static_method_val<'gc>(
     mc: &MutationContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
+    this_val: Option<&Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Determine the constructor C from `this` — default to built-in Promise
+    let default_ctor = get_default_promise_ctor(env);
+    let c = this_val.unwrap_or(&default_ctor);
+
     match method {
         "resolve" => {
             let val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
-            // If the argument is already a Promise object we should return it directly (per spec)
+
+            // Step 2: If Type(C) is not Object, throw TypeError
+            // In the spec, functions are objects; our engine represents them as Value::Function/Closure/Object
+            if !is_object_type(c) {
+                return Err(raise_type_error!("Promise.resolve requires that 'this' be an Object").into());
+            }
+
+            // Step 3: If IsPromise(x) and x.constructor === C, return x
             if let Value::Object(obj) = &val
                 && get_promise_from_js_object(obj).is_some()
             {
-                // It's already a Promise object; return it as-is
-                return Ok(val.clone());
+                // Check if val.constructor === C
+                if let Some(ctor_rc) = object_get_key_value(obj, "constructor") {
+                    let ctor_val = ctor_rc.borrow().normalize_slot();
+                    // Use referential equality for objects
+                    let same = match (&ctor_val, c) {
+                        (Value::Object(a), Value::Object(b)) => std::ptr::eq(&*a.borrow() as *const _, &*b.borrow() as *const _),
+                        _ => false,
+                    };
+                    if same {
+                        return Ok(val.clone());
+                    }
+                }
             }
-            // Manually creating promise object and resolving it
-            // We can't easily call `make_promise_js_object` from here if it relies on "Promise" in env.
-            // `make_promise_js_object` uses object_get_key_value(env, "Promise") to get prototype.
-            // If Promise is not yet initialized in env fully this might be tricky, but handle_promise_static_method_val runs dynamically.
+
+            // Step 4: NewPromiseCapability(C)
+            if is_constructor_val(c) && !is_default_promise_ctor(c, env) {
+                let (promise_obj, resolve_fn, _reject_fn) = new_promise_capability(mc, env, c)?;
+                call_function(mc, &resolve_fn, &[val], env)?;
+                return Ok(promise_obj);
+            }
+
+            // Fast path: C is the built-in Promise constructor
             let promise = new_gc_cell_ptr(mc, JSPromise::new());
             let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
             resolve_promise(mc, &promise, val, env);
             Ok(Value::Object(promise_obj))
         }
         "reject" => {
+            // Step 1: Let C be the this value
+            // Step 2: If Type(C) is not Object, throw TypeError
+            if !is_object_type(c) {
+                return Err(raise_type_error!("Promise.reject requires that 'this' be an Object").into());
+            }
+
             let val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+
+            // Step 3: NewPromiseCapability(C)
+            if is_constructor_val(c) && !is_default_promise_ctor(c, env) {
+                let (promise_obj, _resolve_fn, reject_fn) = new_promise_capability(mc, env, c)?;
+                call_function(mc, &reject_fn, &[val], env)?;
+                return Ok(promise_obj);
+            }
+
+            // Fast path: C is the built-in Promise constructor
             let promise = new_gc_cell_ptr(mc, JSPromise::new());
             let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
             reject_promise(mc, &promise, val, env);
             Ok(Value::Object(promise_obj))
         }
         "allSettled" => {
-            // Runtime (evaluated args) version of Promise.allSettled
-            log::trace!("handle_promise_static_method_val - allSettled entered with args={:?}", args);
-            if args.is_empty() {
-                return Err(crate::raise_eval_error!("Promise.allSettled requires at least one argument"));
+            // §27.2.4.2 Promise.allSettled ( iterable )
+            if !is_object_type(c) {
+                return Err(raise_type_error!("Promise.allSettled requires that 'this' be an Object").into());
             }
-            let iterable = args[0].clone();
-            log::trace!("allSettled iterable={:?}", iterable);
-            let promises = match iterable {
-                Value::Object(arr) => {
-                    let mut promises = Vec::new();
-                    let mut i = 0_usize;
-                    while let Some(val_rc) = object_get_key_value(&arr, i) {
-                        promises.push((*val_rc).borrow().clone());
-                        i += 1;
-                    }
-                    promises
-                }
-                _ => return Err(crate::raise_eval_error!("Promise.allSettled argument must be iterable")),
+
+            let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
+
+            let reject_cap = |mc2: &MutationContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
+                let reason = eval_error_to_value(mc2, env, e);
+                let _ = call_function(mc2, &cap_reject, &[reason], env);
+                cap_promise.clone()
             };
 
-            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
-            let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
-
-            let num_promises = promises.len();
-            if num_promises == 0 {
-                let result_arr = crate::js_array::create_array(mc, env)?;
-                resolve_promise(mc, &result_promise, Value::Object(result_arr), env);
-                return Ok(Value::Object(result_promise_obj));
+            let promise_resolve = match c {
+                Value::Object(c_obj) => match crate::core::get_property_with_accessors(mc, env, c_obj, "resolve") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(reject_cap(mc, e)),
+                },
+                _ => Value::Undefined,
+            };
+            if !is_callable_val(&promise_resolve) {
+                let reason = crate::core::js_error_to_value(mc, env, &raise_type_error!("Promise.allSettled: resolve is not a function"));
+                let _ = call_function(mc, &cap_reject, &[reason], env);
+                return Ok(cap_promise);
             }
 
-            let results_array = crate::js_array::create_array(mc, env)?;
-            let state_env = crate::core::new_js_object_data(mc);
-            slot_set(mc, &state_env, InternalSlot::Results, &Value::Object(results_array));
-            slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(0.0));
-            slot_set(mc, &state_env, InternalSlot::Total, &Value::Number(num_promises as f64));
-            slot_set(mc, &state_env, InternalSlot::ResultPromise, &Value::Promise(result_promise));
+            let iterable = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+            let (iter_obj, next_fn) = match crate::js_map::get_iterator(mc, env, &iterable) {
+                Ok(v) => v,
+                Err(e) => return Ok(reject_cap(mc, e)),
+            };
 
-            for (idx, promise_val) in promises.into_iter().enumerate() {
-                match promise_val {
-                    Value::Object(obj) => {
-                        if let Some(promise_ref) = get_promise_from_js_object(&obj) {
-                            let promise_state = &promise_ref.borrow().state;
-                            match promise_state {
-                                PromiseState::Fulfilled(val) => {
-                                    let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-                                    object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
-                                    object_set_key_value(mc, &result_obj, "value", &val.clone())?;
-                                    object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
-                                    if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
-                                        && let Value::Number(n) = &*comp_rc.borrow()
-                                    {
-                                        slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(n + 1.0));
-                                        if let Some(total_rc) = slot_get_chained(&state_env, &InternalSlot::Total)
-                                            && let Value::Number(total) = &*total_rc.borrow()
-                                            && (n + 1.0) == *total
-                                        {
-                                            resolve_promise(mc, &result_promise, Value::Object(results_array), env);
-                                            return Ok(Value::Object(result_promise_obj));
-                                        }
-                                    }
-                                }
-                                PromiseState::Rejected(reason) => {
-                                    let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-                                    object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("rejected")))?;
-                                    object_set_key_value(mc, &result_obj, "reason", &reason.clone())?;
-                                    object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
-                                    if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
-                                        && let Value::Number(n) = &*comp_rc.borrow()
-                                    {
-                                        slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(n + 1.0));
-                                    }
-                                }
-                                PromiseState::Pending => {
-                                    let then_callback = create_allsettled_resolve_callback(mc, state_env, idx, *env);
-                                    let catch_callback = create_allsettled_reject_callback(mc, state_env, idx, *env);
-                                    perform_promise_then(
-                                        mc,
-                                        promise_ref,
-                                        Some(then_callback),
-                                        Some(catch_callback),
-                                        None, // Do not tie result to result_promise
-                                        env,
-                                    )?;
-                                }
-                            }
-                        } else {
-                            let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-                            object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
-                            object_set_key_value(mc, &result_obj, "value", &Value::Object(obj))?;
-                            object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
-                            if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
-                                && let Value::Number(n) = &*comp_rc.borrow()
-                            {
-                                slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(n + 1.0));
-                            }
+            let results_obj = match crate::js_array::create_array(mc, env) {
+                Ok(r) => r,
+                Err(e) => return Ok(reject_cap(mc, e.into())),
+            };
+            let state_obj = new_js_object_data(mc);
+            object_set_key_value(mc, &state_obj, "results", &Value::Object(results_obj))?;
+            object_set_key_value(mc, &state_obj, "remaining", &Value::Number(1.0))?;
+            object_set_key_value(mc, &state_obj, "cap_resolve", &cap_resolve)?;
+            object_set_key_value(mc, &state_obj, "cap_reject", &cap_reject)?;
+
+            let mut index: usize = 0;
+
+            loop {
+                let next_result = match crate::js_map::call_iterator_next(mc, env, &iter_obj, &next_fn) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+                let done = match crate::js_map::get_iterator_done(mc, env, &next_result) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+                if done {
+                    if let Some(rem_rc) = object_get_key_value(&state_obj, "remaining")
+                        && let Value::Number(rem) = &*rem_rc.borrow()
+                    {
+                        let new_rem = rem - 1.0;
+                        object_set_key_value(mc, &state_obj, "remaining", &Value::Number(new_rem))?;
+                        if new_rem == 0.0 {
+                            let _ = call_function(mc, &cap_resolve, &[Value::Object(results_obj)], env);
                         }
                     }
-                    val => {
-                        let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
-                        object_set_key_value(mc, &result_obj, "status", &Value::String(utf8_to_utf16("fulfilled")))?;
-                        object_set_key_value(mc, &result_obj, "value", &val.clone())?;
-                        object_set_key_value(mc, &results_array, idx, &Value::Object(result_obj))?;
-                        if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
-                            && let Value::Number(n) = &*comp_rc.borrow()
-                        {
-                            slot_set(mc, &state_env, InternalSlot::Completed, &Value::Number(n + 1.0));
+                    return Ok(cap_promise);
+                }
+
+                let next_value = match crate::js_map::get_iterator_value(mc, env, &next_result) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+
+                object_set_key_value(mc, &results_obj, index, &Value::Undefined)?;
+                object_set_key_value(mc, &results_obj, "length", &Value::Number((index + 1) as f64))?;
+
+                let next_promise = match call_function_with_this(mc, &promise_resolve, Some(c), &[next_value], env) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+
+                // Create onFulfilled: stores {status:"fulfilled", value} and decrements remaining
+                let then_cb = {
+                    let cb_env = new_js_object_data(mc);
+                    cb_env.borrow_mut(mc).prototype = Some(*env);
+                    object_set_key_value(mc, &cb_env, "pstate", &Value::Object(state_obj))?;
+                    let raw_cl = Value::Closure(Gc::new(
+                        mc,
+                        ClosureData::new(
+                            &[DestructuringElement::Variable("value".to_string(), None)],
+                            &[stmt_expr(Expr::Call(
+                                Box::new(Expr::Var("__internal_allsettled_resolve".to_string(), None, None)),
+                                vec![
+                                    Expr::Number(index as f64),
+                                    Expr::Var("value".to_string(), None, None),
+                                    Expr::Var("pstate".to_string(), None, None),
+                                ],
+                            ))],
+                            Some(cb_env),
+                            None,
+                        ),
+                    ));
+                    Value::Object(wrap_closure_as_fn_obj(mc, env, raw_cl, "", 1.0)?)
+                };
+                // Create onRejected: stores {status:"rejected", reason} and decrements remaining
+                let catch_cb = {
+                    let cb_env = new_js_object_data(mc);
+                    cb_env.borrow_mut(mc).prototype = Some(*env);
+                    object_set_key_value(mc, &cb_env, "pstate", &Value::Object(state_obj))?;
+                    let raw_cl = Value::Closure(Gc::new(
+                        mc,
+                        ClosureData::new(
+                            &[DestructuringElement::Variable("reason".to_string(), None)],
+                            &[stmt_expr(Expr::Call(
+                                Box::new(Expr::Var("__internal_allsettled_reject".to_string(), None, None)),
+                                vec![
+                                    Expr::Number(index as f64),
+                                    Expr::Var("reason".to_string(), None, None),
+                                    Expr::Var("pstate".to_string(), None, None),
+                                ],
+                            ))],
+                            Some(cb_env),
+                            None,
+                        ),
+                    ));
+                    Value::Object(wrap_closure_as_fn_obj(mc, env, raw_cl, "", 1.0)?)
+                };
+
+                if let Some(rem_rc) = object_get_key_value(&state_obj, "remaining")
+                    && let Value::Number(rem) = &*rem_rc.borrow()
+                {
+                    object_set_key_value(mc, &state_obj, "remaining", &Value::Number(rem + 1.0))?;
+                }
+
+                let then_fn = match &next_promise {
+                    Value::Object(np_obj) => match crate::core::get_property_with_accessors(mc, env, np_obj, "then") {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                            return Ok(reject_cap(mc, e));
+                        }
+                    },
+                    _ => Value::Undefined,
+                };
+                if is_callable_val(&then_fn) {
+                    match call_function_with_this(mc, &then_fn, Some(&next_promise), &[then_cb, catch_cb], env) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                            return Ok(reject_cap(mc, e));
                         }
                     }
                 }
-            }
 
-            if let Some(comp_rc) = slot_get_chained(&state_env, &InternalSlot::Completed)
-                && let Value::Number(n) = &*comp_rc.borrow()
-                && (*n as usize) == num_promises
-            {
-                resolve_promise(mc, &result_promise, Value::Object(results_array), env);
-                return Ok(Value::Object(result_promise_obj));
+                index += 1;
             }
-
-            Ok(Value::Object(result_promise_obj))
         }
         "all" => {
-            // Runtime (evaluated args) version of Promise.all
-            if args.is_empty() {
-                return Err(crate::raise_eval_error!("Promise.all requires at least one argument"));
+            // §27.2.4.1 Promise.all ( iterable )
+            // Step 1-2: Let C = this, check Type(C) is Object
+            if !is_object_type(c) {
+                return Err(raise_type_error!("Promise.all requires that 'this' be an Object").into());
             }
-            let iterable = args[0].clone();
-            let promises = match iterable {
-                Value::Object(arr) => {
-                    let mut promises = Vec::new();
-                    let mut i = 0_usize;
-                    while let Some(val_rc) = object_get_key_value(&arr, i) {
-                        promises.push((*val_rc).borrow().clone());
-                        i += 1;
-                    }
-                    promises
-                }
-                _ => return Err(crate::raise_eval_error!("Promise.all argument must be iterable")),
+
+            // Step 3: Let promiseCapability be ? NewPromiseCapability(C)
+            let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
+
+            // IfAbruptRejectPromise helper closure
+            let reject_cap = |mc2: &MutationContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
+                let reason = eval_error_to_value(mc2, env, e);
+                let _ = call_function(mc2, &cap_reject, &[reason], env);
+                cap_promise.clone()
             };
 
-            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
-            let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
-
-            let num_promises = promises.len();
-            if num_promises == 0 {
-                let result_arr = crate::js_array::create_array(mc, env)?;
-                resolve_promise(mc, &result_promise, Value::Object(result_arr), env);
-                return Ok(Value::Object(result_promise_obj));
+            // Step 4: Let promiseResolve be GetPromiseResolve(C) — IfAbruptRejectPromise
+            let promise_resolve = match c {
+                Value::Object(c_obj) => match crate::core::get_property_with_accessors(mc, env, c_obj, "resolve") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(reject_cap(mc, e)),
+                },
+                _ => Value::Undefined,
+            };
+            // Step 5: If IsCallable(promiseResolve) is false — IfAbruptRejectPromise
+            if !is_callable_val(&promise_resolve) {
+                let reason = crate::core::js_error_to_value(mc, env, &raise_type_error!("Promise.all: resolve is not a function"));
+                let _ = call_function(mc, &cap_reject, &[reason], env);
+                return Ok(cap_promise);
             }
 
-            // Create state object for coordination
+            // Step 6: Let iteratorRecord be GetIterator(iterable) — IfAbruptRejectPromise
+            let iterable = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+            let (iter_obj, next_fn) = match crate::js_map::get_iterator(mc, env, &iterable) {
+                Ok(v) => v,
+                Err(e) => return Ok(reject_cap(mc, e)),
+            };
+
+            // §27.2.4.1.2 PerformPromiseAll
+            // Step 1: Let values be new empty List (as JS array)
+            let results_obj = match crate::js_array::create_array(mc, env) {
+                Ok(r) => r,
+                Err(e) => return Ok(reject_cap(mc, e.into())),
+            };
+            // Step 2: Let remainingElementsCount be Record { [[Value]]: 1 }
             let state_obj = new_js_object_data(mc);
-            let results_obj = crate::js_array::create_array(mc, env)?;
             object_set_key_value(mc, &state_obj, "results", &Value::Object(results_obj))?;
-            object_set_key_value(mc, &state_obj, "completed", &Value::Number(0.0))?;
-            object_set_key_value(mc, &state_obj, "total", &Value::Number(num_promises as f64))?;
-            object_set_key_value(mc, &state_obj, "result_promise", &Value::Promise(result_promise))?;
+            object_set_key_value(mc, &state_obj, "remaining", &Value::Number(1.0))?;
+            object_set_key_value(mc, &state_obj, "cap_resolve", &cap_resolve)?;
+            object_set_key_value(mc, &state_obj, "cap_reject", &cap_reject)?;
 
-            for (idx, promise_val) in promises.into_iter().enumerate() {
-                let state_obj_clone = state_obj;
+            // Step 3: Let index be 0
+            let mut index: usize = 0;
 
-                match promise_val {
-                    Value::Object(obj) => {
-                        if let Some(promise_ref) = get_promise_from_js_object(&obj) {
-                            // Check if promise is already settled
-                            let promise_state = &promise_ref.borrow().state;
-                            match promise_state {
-                                PromiseState::Fulfilled(val) => {
-                                    object_set_key_value(mc, &results_obj, idx, &val.clone())?;
-                                    if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
-                                        && let Value::Number(completed) = &*completed_val_rc.borrow()
-                                    {
-                                        let new_completed = completed + 1.0;
-                                        object_set_key_value(mc, &state_obj, "completed", &Value::Number(new_completed))?;
-                                        if let Some(total_val_rc) = object_get_key_value(&state_obj, "total")
-                                            && let Value::Number(total) = &*total_val_rc.borrow()
-                                            && new_completed == *total
-                                            && let Some(promise_val_rc) = object_get_key_value(&state_obj, "result_promise")
-                                            && let Value::Promise(result_promise_ref) = &*promise_val_rc.borrow()
-                                        {
-                                            resolve_promise(mc, result_promise_ref, Value::Object(results_obj), env);
-                                        }
-                                    }
-                                }
-                                PromiseState::Rejected(reason) => {
-                                    if let Some(promise_val_rc) = object_get_key_value(&state_obj, "result_promise")
-                                        && let Value::Promise(result_promise_ref) = &*promise_val_rc.borrow()
-                                    {
-                                        reject_promise(mc, result_promise_ref, reason.clone(), env);
-                                    }
-                                    remove_unhandled_checks_for_promise(Gc::as_ptr(promise_ref) as usize);
-                                    let noop_env = new_js_object_data(mc);
-                                    let noop_closure = Value::Closure(Gc::new(mc, ClosureData::new(&[], &[], Some(noop_env), None)));
-                                    perform_promise_then(mc, promise_ref, None, Some(noop_closure), None, env)?;
-                                    return Ok(Value::Object(result_promise_obj));
-                                }
-                                PromiseState::Pending => {
-                                    let then_callback = Value::Closure(Gc::new(
-                                        mc,
-                                        ClosureData::new(
-                                            &[DestructuringElement::Variable("value".to_string(), None)],
-                                            &[stmt_expr(Expr::Call(
-                                                Box::new(Expr::Var("__internal_promise_all_resolve".to_string(), None, None)),
-                                                vec![
-                                                    Expr::Number(idx as f64),
-                                                    Expr::Var("value".to_string(), None, None),
-                                                    Expr::Var("__state".to_string(), None, None),
-                                                ],
-                                            ))],
-                                            {
-                                                let new_env = *env;
-                                                slot_set(mc, &new_env, InternalSlot::State, &Value::Object(state_obj_clone));
-                                                Some(new_env)
-                                            },
-                                            None,
-                                        ),
-                                    ));
+            loop {
+                // Step 4a: Let next be Completion(IteratorStep(iteratorRecord))
+                let next_result = match crate::js_map::call_iterator_next(mc, env, &iter_obj, &next_fn) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
 
-                                    let catch_callback = Value::Closure(Gc::new(
-                                        mc,
-                                        ClosureData::new(
-                                            &[DestructuringElement::Variable("reason".to_string(), None)],
-                                            &[stmt_expr(Expr::Call(
-                                                Box::new(Expr::Var("__internal_promise_all_reject".to_string(), None, None)),
-                                                vec![
-                                                    Expr::Var("reason".to_string(), None, None),
-                                                    Expr::Var("__state".to_string(), None, None),
-                                                ],
-                                            ))],
-                                            {
-                                                let new_env = *env;
-                                                slot_set(mc, &new_env, InternalSlot::State, &Value::Object(state_obj_clone));
-                                                Some(new_env)
-                                            },
-                                            None,
-                                        ),
-                                    ));
-
-                                    perform_promise_then(mc, promise_ref, Some(then_callback), None, None, env)?;
-                                    perform_promise_then(mc, promise_ref, None, Some(catch_callback), None, env)?;
-                                }
-                            }
-                        } else {
-                            let val = Value::Object(obj);
-                            object_set_key_value(mc, &results_obj, idx, &val)?;
-                            if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
-                                && let Value::Number(completed) = &*completed_val_rc.borrow()
-                            {
-                                object_set_key_value(mc, &state_obj, "completed", &Value::Number(completed + 1.0))?;
-                                // We'll check for completion below
-                            }
+                // Step 4b: If next is done
+                let done = match crate::js_map::get_iterator_done(mc, env, &next_result) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+                if done {
+                    // Decrement remainingElementsCount by 1
+                    if let Some(rem_rc) = object_get_key_value(&state_obj, "remaining")
+                        && let Value::Number(rem) = &*rem_rc.borrow()
+                    {
+                        let new_rem = rem - 1.0;
+                        object_set_key_value(mc, &state_obj, "remaining", &Value::Number(new_rem))?;
+                        if new_rem == 0.0 {
+                            // Resolve with values array
+                            if call_function(mc, &cap_resolve, &[Value::Object(results_obj)], env).is_ok() {}
                         }
                     }
-                    val => {
-                        object_set_key_value(mc, &results_obj, idx, &val.clone())?;
-                        if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
-                            && let Value::Number(completed) = &*completed_val_rc.borrow()
-                        {
-                            object_set_key_value(mc, &state_obj, "completed", &Value::Number(completed + 1.0))?;
+                    return Ok(cap_promise);
+                }
+
+                // Step 4c: Let nextValue be Completion(IteratorValue(next))
+                let next_value = match crate::js_map::get_iterator_value(mc, env, &next_result) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+
+                // Step 4d: Append undefined to values
+                object_set_key_value(mc, &results_obj, index, &Value::Undefined)?;
+                object_set_key_value(mc, &results_obj, "length", &Value::Number((index + 1) as f64))?;
+
+                // Step 4e: Let nextPromise be Call(promiseResolve, C, «nextValue»)
+                let next_promise = match call_function_with_this(mc, &promise_resolve, Some(c), &[next_value], env) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // IfAbruptRejectPromise — close iterator first
+                        let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+
+                // Step 4f-g: Create resolve element function
+                let then_cb = {
+                    let cb_env = new_js_object_data(mc);
+                    cb_env.borrow_mut(mc).prototype = Some(*env);
+                    object_set_key_value(mc, &cb_env, "pstate", &Value::Object(state_obj))?;
+                    let raw_closure = Value::Closure(Gc::new(
+                        mc,
+                        ClosureData::new(
+                            &[DestructuringElement::Variable("value".to_string(), None)],
+                            &[stmt_expr(Expr::Call(
+                                Box::new(Expr::Var("__internal_promise_all_resolve".to_string(), None, None)),
+                                vec![
+                                    Expr::Number(index as f64),
+                                    Expr::Var("value".to_string(), None, None),
+                                    Expr::Var("pstate".to_string(), None, None),
+                                ],
+                            ))],
+                            Some(cb_env),
+                            None,
+                        ),
+                    ));
+                    // Wrap as function object with name="", length=1, non-constructor (spec §27.2.4.1.3)
+                    Value::Object(wrap_closure_as_fn_obj(mc, env, raw_closure, "", 1.0)?)
+                };
+
+                // Step 4h: remainingElementsCount.[[Value]] += 1
+                if let Some(rem_rc) = object_get_key_value(&state_obj, "remaining")
+                    && let Value::Number(rem) = &*rem_rc.borrow()
+                {
+                    object_set_key_value(mc, &state_obj, "remaining", &Value::Number(rem + 1.0))?;
+                }
+
+                // Step 4i: Invoke(nextPromise, "then", «resolveElement, resultCapability.[[Reject]]»)
+                // = Get(nextPromise, "then") then Call(thenFn, nextPromise, args)
+                let then_fn = match &next_promise {
+                    Value::Object(np_obj) => match crate::core::get_property_with_accessors(mc, env, np_obj, "then") {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                            return Ok(reject_cap(mc, e));
+                        }
+                    },
+                    _ => Value::Undefined,
+                };
+                if is_callable_val(&then_fn) {
+                    match call_function_with_this(mc, &then_fn, Some(&next_promise), &[then_cb, cap_reject.clone()], env) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                            return Ok(reject_cap(mc, e));
                         }
                     }
                 }
-            }
 
-            if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
-                && let Value::Number(completed) = &*completed_val_rc.borrow()
-                && (*completed as usize) == num_promises
-                && let Some(promise_val_rc) = object_get_key_value(&state_obj, "result_promise")
-                && let Value::Promise(result_promise_ref) = &*promise_val_rc.borrow()
-            {
-                resolve_promise(mc, result_promise_ref, Value::Object(results_obj), env);
+                // Step 4j: index += 1
+                index += 1;
             }
-
-            Ok(Value::Object(result_promise_obj))
         }
         "race" => {
-            // Runtime (evaluated args) version of Promise.race
-            if args.is_empty() {
-                return Err(crate::raise_eval_error!("Promise.race requires at least one argument"));
+            // §27.2.4.5 Promise.race ( iterable )
+            if !is_object_type(c) {
+                return Err(raise_type_error!("Promise.race requires that 'this' be an Object").into());
             }
-            let iterable = args[0].clone();
-            let promises = match iterable {
-                Value::Object(arr) => {
-                    let mut promises = Vec::new();
-                    let mut i = 0_usize;
-                    while let Some(val_rc) = object_get_key_value(&arr, i) {
-                        promises.push((*val_rc).borrow().clone());
-                        i += 1;
-                    }
-                    promises
-                }
-                _ => return Err(crate::raise_eval_error!("Promise.race argument must be iterable")),
+
+            let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
+
+            let reject_cap = |mc2: &MutationContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
+                let reason = eval_error_to_value(mc2, env, e);
+                let _ = call_function(mc2, &cap_reject, &[reason], env);
+                cap_promise.clone()
             };
 
-            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
-            let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
+            // GetPromiseResolve(C) — IfAbruptRejectPromise
+            let promise_resolve = match c {
+                Value::Object(c_obj) => match crate::core::get_property_with_accessors(mc, env, c_obj, "resolve") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(reject_cap(mc, e)),
+                },
+                _ => Value::Undefined,
+            };
+            if !is_callable_val(&promise_resolve) {
+                let reason = crate::core::js_error_to_value(mc, env, &raise_type_error!("Promise.race: resolve is not a function"));
+                let _ = call_function(mc, &cap_reject, &[reason], env);
+                return Ok(cap_promise);
+            }
 
-            for promise_val in promises {
-                let result_promise_clone = result_promise;
+            // GetIterator(iterable) — IfAbruptRejectPromise
+            let iterable = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+            let (iter_obj, next_fn) = match crate::js_map::get_iterator(mc, env, &iterable) {
+                Ok(v) => v,
+                Err(e) => return Ok(reject_cap(mc, e)),
+            };
 
-                match promise_val {
-                    Value::Object(obj) => {
-                        if let Some(promise_ref) = get_promise_from_js_object(&obj) {
-                            let promise_state = &promise_ref.borrow().state;
-                            match promise_state {
-                                PromiseState::Fulfilled(val) => {
-                                    resolve_promise(mc, &result_promise, val.clone(), env);
-                                    return Ok(Value::Object(result_promise_obj));
-                                }
-                                PromiseState::Rejected(reason) => {
-                                    reject_promise(mc, &result_promise, reason.clone(), env);
-                                    return Ok(Value::Object(result_promise_obj));
-                                }
-                                PromiseState::Pending => {
-                                    let then_callback = Value::Closure(Gc::new(
-                                        mc,
-                                        ClosureData::new(
-                                            &[DestructuringElement::Variable("value".to_string(), None)],
-                                            &[stmt_expr(Expr::Call(
-                                                Box::new(Expr::Var("__internal_promise_race_resolve".to_string(), None, None)),
-                                                vec![
-                                                    Expr::Var("value".to_string(), None, None),
-                                                    Expr::Var("__result_promise".to_string(), None, None),
-                                                ],
-                                            ))],
-                                            {
-                                                let new_env = *env;
-                                                object_set_key_value(
-                                                    mc,
-                                                    &new_env,
-                                                    "__result_promise",
-                                                    &Value::Promise(result_promise_clone),
-                                                )?;
-                                                Some(new_env)
-                                            },
-                                            None,
-                                        ),
-                                    ));
-
-                                    let catch_callback = Value::Closure(Gc::new(
-                                        mc,
-                                        ClosureData::new(
-                                            &[DestructuringElement::Variable("reason".to_string(), None)],
-                                            &[stmt_expr(Expr::Call(
-                                                Box::new(Expr::Var("__internal_promise_race_reject".to_string(), None, None)),
-                                                vec![
-                                                    Expr::Var("reason".to_string(), None, None),
-                                                    Expr::Var("__result_promise".to_string(), None, None),
-                                                ],
-                                            ))],
-                                            {
-                                                let new_env = *env;
-                                                object_set_key_value(
-                                                    mc,
-                                                    &new_env,
-                                                    "__result_promise",
-                                                    &Value::Promise(result_promise_clone),
-                                                )?;
-                                                Some(new_env)
-                                            },
-                                            None,
-                                        ),
-                                    ));
-
-                                    perform_promise_then(mc, promise_ref, Some(then_callback), None, Some(result_promise), env)?;
-                                    perform_promise_then(mc, promise_ref, None, Some(catch_callback), Some(result_promise), env)?;
-                                }
-                            }
-                        } else {
-                            resolve_promise(mc, &result_promise, Value::Object(obj), env);
-                            return Ok(Value::Object(result_promise_obj));
-                        }
+            loop {
+                // IteratorStep
+                let next_result = match crate::js_map::call_iterator_next(mc, env, &iter_obj, &next_fn) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
                     }
-                    val => {
-                        resolve_promise(mc, &result_promise, val.clone(), env);
-                        return Ok(Value::Object(result_promise_obj));
+                };
+
+                let done = match crate::js_map::get_iterator_done(mc, env, &next_result) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+                if done {
+                    return Ok(cap_promise);
+                }
+
+                let next_value = match crate::js_map::get_iterator_value(mc, env, &next_result) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+
+                // Call(promiseResolve, C, «nextValue»)
+                let next_promise = match call_function_with_this(mc, &promise_resolve, Some(c), &[next_value], env) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+
+                // Invoke(nextPromise, "then", «resultCapability.[[Resolve]], resultCapability.[[Reject]]»)
+                let then_fn = match &next_promise {
+                    Value::Object(np_obj) => match crate::core::get_property_with_accessors(mc, env, np_obj, "then") {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                            return Ok(reject_cap(mc, e));
+                        }
+                    },
+                    _ => Value::Undefined,
+                };
+                if is_callable_val(&then_fn) {
+                    match call_function_with_this(mc, &then_fn, Some(&next_promise), &[cap_resolve.clone(), cap_reject.clone()], env) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                            return Ok(reject_cap(mc, e));
+                        }
                     }
                 }
             }
+        }
+        "any" => {
+            // §27.2.4.3 Promise.any ( iterable )
+            if !is_object_type(c) {
+                return Err(raise_type_error!("Promise.any requires that 'this' be an Object").into());
+            }
 
-            Ok(Value::Object(result_promise_obj))
+            let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
+
+            let reject_cap = |mc2: &MutationContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
+                let reason = eval_error_to_value(mc2, env, e);
+                let _ = call_function(mc2, &cap_reject, &[reason], env);
+                cap_promise.clone()
+            };
+
+            let promise_resolve = match c {
+                Value::Object(c_obj) => match crate::core::get_property_with_accessors(mc, env, c_obj, "resolve") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(reject_cap(mc, e)),
+                },
+                _ => Value::Undefined,
+            };
+            if !is_callable_val(&promise_resolve) {
+                let reason = crate::core::js_error_to_value(mc, env, &raise_type_error!("Promise.any: resolve is not a function"));
+                let _ = call_function(mc, &cap_reject, &[reason], env);
+                return Ok(cap_promise);
+            }
+
+            let iterable = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+            let (iter_obj, next_fn) = match crate::js_map::get_iterator(mc, env, &iterable) {
+                Ok(v) => v,
+                Err(e) => return Ok(reject_cap(mc, e)),
+            };
+
+            let errors_obj = match crate::js_array::create_array(mc, env) {
+                Ok(r) => r,
+                Err(e) => return Ok(reject_cap(mc, e.into())),
+            };
+            let state_obj = new_js_object_data(mc);
+            object_set_key_value(mc, &state_obj, "errors", &Value::Object(errors_obj))?;
+            object_set_key_value(mc, &state_obj, "remaining", &Value::Number(1.0))?;
+            object_set_key_value(mc, &state_obj, "cap_resolve", &cap_resolve)?;
+            object_set_key_value(mc, &state_obj, "cap_reject", &cap_reject)?;
+
+            let mut index: usize = 0;
+
+            loop {
+                let next_result = match crate::js_map::call_iterator_next(mc, env, &iter_obj, &next_fn) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+                let done = match crate::js_map::get_iterator_done(mc, env, &next_result) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+                if done {
+                    if let Some(rem_rc) = object_get_key_value(&state_obj, "remaining")
+                        && let Value::Number(rem) = &*rem_rc.borrow()
+                    {
+                        let new_rem = rem - 1.0;
+                        object_set_key_value(mc, &state_obj, "remaining", &Value::Number(new_rem))?;
+                        if new_rem == 0.0 {
+                            // All rejected — create AggregateError and reject
+                            let aggregate_error = new_gc_cell_ptr(mc, JSObjectData::new());
+                            object_set_key_value(mc, &aggregate_error, "name", &Value::String(utf8_to_utf16("AggregateError")))?;
+                            object_set_key_value(
+                                mc,
+                                &aggregate_error,
+                                "message",
+                                &Value::String(utf8_to_utf16("All promises were rejected")),
+                            )?;
+                            object_set_key_value(mc, &aggregate_error, "errors", &Value::Object(errors_obj))?;
+                            if let Some(agg_ctor_rc) = crate::core::env_get(env, "AggregateError") {
+                                let agg_ctor = agg_ctor_rc.borrow().clone();
+                                if let Value::Object(agg_obj) = &agg_ctor
+                                    && let Some(proto_rc) = object_get_key_value(agg_obj, "prototype")
+                                {
+                                    let proto = proto_rc.borrow().clone();
+                                    if let Value::Object(proto_obj) = proto {
+                                        aggregate_error.borrow_mut(mc).prototype = Some(proto_obj);
+                                    }
+                                }
+                            }
+                            let _ = call_function(mc, &cap_reject, &[Value::Object(aggregate_error)], env);
+                        }
+                    }
+                    return Ok(cap_promise);
+                }
+
+                let next_value = match crate::js_map::get_iterator_value(mc, env, &next_result) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+
+                object_set_key_value(mc, &errors_obj, index, &Value::Undefined)?;
+                object_set_key_value(mc, &errors_obj, "length", &Value::Number((index + 1) as f64))?;
+
+                let next_promise = match call_function_with_this(mc, &promise_resolve, Some(c), &[next_value], env) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                        return Ok(reject_cap(mc, e));
+                    }
+                };
+
+                // onFulfilled: immediately resolves the capability
+                let resolve_cb = {
+                    let cb_env = new_js_object_data(mc);
+                    cb_env.borrow_mut(mc).prototype = Some(*env);
+                    object_set_key_value(mc, &cb_env, "pstate", &Value::Object(state_obj))?;
+                    let raw_cl = Value::Closure(Gc::new(
+                        mc,
+                        ClosureData::new(
+                            &[DestructuringElement::Variable("value".to_string(), None)],
+                            &[stmt_expr(Expr::Call(
+                                Box::new(Expr::Var("__internal_any_resolve".to_string(), None, None)),
+                                vec![
+                                    Expr::Var("value".to_string(), None, None),
+                                    Expr::Var("pstate".to_string(), None, None),
+                                ],
+                            ))],
+                            Some(cb_env),
+                            None,
+                        ),
+                    ));
+                    Value::Object(wrap_closure_as_fn_obj(mc, env, raw_cl, "", 1.0)?)
+                };
+
+                // onRejected: stores reason and decrements remaining
+                let reject_cb = {
+                    let cb_env = new_js_object_data(mc);
+                    cb_env.borrow_mut(mc).prototype = Some(*env);
+                    object_set_key_value(mc, &cb_env, "pstate", &Value::Object(state_obj))?;
+                    let raw_cl = Value::Closure(Gc::new(
+                        mc,
+                        ClosureData::new(
+                            &[DestructuringElement::Variable("reason".to_string(), None)],
+                            &[stmt_expr(Expr::Call(
+                                Box::new(Expr::Var("__internal_any_reject".to_string(), None, None)),
+                                vec![
+                                    Expr::Number(index as f64),
+                                    Expr::Var("reason".to_string(), None, None),
+                                    Expr::Var("pstate".to_string(), None, None),
+                                ],
+                            ))],
+                            Some(cb_env),
+                            None,
+                        ),
+                    ));
+                    Value::Object(wrap_closure_as_fn_obj(mc, env, raw_cl, "", 1.0)?)
+                };
+
+                if let Some(rem_rc) = object_get_key_value(&state_obj, "remaining")
+                    && let Value::Number(rem) = &*rem_rc.borrow()
+                {
+                    object_set_key_value(mc, &state_obj, "remaining", &Value::Number(rem + 1.0))?;
+                }
+
+                let then_fn = match &next_promise {
+                    Value::Object(np_obj) => match crate::core::get_property_with_accessors(mc, env, np_obj, "then") {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                            return Ok(reject_cap(mc, e));
+                        }
+                    },
+                    _ => Value::Undefined,
+                };
+                if is_callable_val(&then_fn) {
+                    match call_function_with_this(mc, &then_fn, Some(&next_promise), &[resolve_cb, reject_cb], env) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                            return Ok(reject_cap(mc, e));
+                        }
+                    }
+                }
+
+                index += 1;
+            }
         }
         _ => Err(crate::raise_eval_error!(format!(
             "Static method Promise.{} is not yet wired to receive evaluated arguments.",
             method
-        ))),
+        ))
+        .into()),
     }
 }
 
@@ -3829,24 +4527,21 @@ pub fn handle_promise_prototype_method<'gc>(
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    let promise = get_promise_from_js_object(obj).ok_or(crate::raise_type_error!("Method called on incompatible receiver"))?;
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let promise = get_promise_from_js_object(obj)
+        .ok_or_else(|| -> EvalError<'gc> { crate::raise_type_error!("Method called on incompatible receiver").into() })?;
 
     match method {
         "then" => {
             let on_fulfilled = args.first().cloned();
             let on_rejected = args.get(1).cloned();
-            handle_promise_then_val(mc, promise, on_fulfilled, on_rejected, env)
-        }
-        "catch" => {
-            let on_rejected = args.first().cloned();
-            handle_promise_then_val(mc, promise, None, on_rejected, env)
+            handle_promise_then_val(mc, promise, on_fulfilled, on_rejected, Some(obj), env)
         }
         "finally" => {
             let on_finally = args.first().cloned();
-            handle_promise_finally_val(mc, promise, on_finally, env)
+            Ok(handle_promise_finally_val(mc, promise, on_finally, env)?)
         }
-        _ => Err(crate::raise_eval_error!(format!("Unknown Promise method {method}"))),
+        _ => Err(crate::raise_eval_error!(format!("Unknown Promise method {method}")).into()),
     }
 }
 
@@ -3876,6 +4571,8 @@ pub fn handle_promise_constructor_val<'gc>(
     if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(executor) {
         let executor_args = vec![resolve_func.clone(), reject_func.clone()];
         let executor_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &executor_args, None)?;
+        // §27.2.3.1 step 9: Call(executor, undefined, ...) — set this to undefined
+        object_set_key_value(mc, &executor_env, "this", &Value::Undefined)?;
         log::trace!("Promise executor params={:?}", params);
         match crate::core::evaluate_statements(mc, &executor_env, &body) {
             Ok(_) => {}
@@ -3887,26 +4584,7 @@ pub fn handle_promise_constructor_val<'gc>(
                     EvalError::Js(js_err) => Value::String(utf8_to_utf16(&js_err.message())),
                 };
                 // Call reject callback with the reason
-                match &reject_func {
-                    Value::Closure(cl) => {
-                        let _ = crate::core::call_closure(mc, cl, None, std::slice::from_ref(&reason), &executor_env, None);
-                    }
-                    Value::Function(name) => {
-                        if let Ok(call) = crate::js_class::prepare_call_env_with_this(
-                            mc,
-                            Some(&executor_env),
-                            None,
-                            None,
-                            std::slice::from_ref(&reason),
-                            None,
-                            Some(&executor_env),
-                            None,
-                        ) {
-                            let _ = evaluate_call_dispatch(mc, &call, &Value::Function(name.clone()), None, std::slice::from_ref(&reason));
-                        }
-                    }
-                    _ => {}
-                }
+                let _ = call_function(mc, &reject_func, std::slice::from_ref(&reason), &executor_env);
             }
         }
     } else {
@@ -3920,8 +4598,37 @@ pub fn handle_promise_then_val<'gc>(
     promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     on_fulfilled: Option<Value<'gc>>,
     on_rejected: Option<Value<'gc>>,
+    promise_obj: Option<&JSObjectDataPtr<'gc>>,
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // SpeciesConstructor(promise, %Promise%)
+    // Look up promise.constructor[Symbol.species] to determine result constructor
+    let species_ctor = if let Some(obj) = promise_obj {
+        get_species_constructor(mc, obj, env)?
+    } else {
+        None
+    };
+
+    if let Some(ref ctor) = species_ctor
+        && !is_default_promise_ctor(ctor, env)
+    {
+        // Subclass path: use NewPromiseCapability(C)
+        let (cap_promise, _cap_resolve, _cap_reject) = new_promise_capability(mc, env, ctor)?;
+        // Extract the internal promise from the capability result if it's a promise object
+        if let Value::Object(cap_obj) = &cap_promise
+            && let Some(cap_internal) = get_promise_from_js_object(cap_obj)
+        {
+            perform_promise_then(mc, promise, on_fulfilled, on_rejected, Some(cap_internal), env)?;
+            return Ok(cap_promise);
+        }
+        // Fallback: the capability promise is not a native JSPromise
+        // Just return it with then handlers attached via the task queue
+        let new_promise = new_gc_cell_ptr(mc, JSPromise::new());
+        perform_promise_then(mc, promise, on_fulfilled, on_rejected, Some(new_promise), env)?;
+        return Ok(cap_promise);
+    }
+
+    // Default path: create a plain Promise
     let new_promise = new_gc_cell_ptr(mc, JSPromise::new());
     let new_promise_obj = make_promise_js_object(mc, new_promise, Some(*env))?;
 

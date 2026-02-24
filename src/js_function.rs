@@ -332,16 +332,20 @@ pub fn handle_global_function<'gc>(
         // "__internal_promise_any_resolve" => return internal_promise_any_resolve(mc, args, env),
         // "__internal_promise_any_reject" => return internal_promise_any_reject(mc, args, env),
         // "__internal_promise_race_resolve" => return internal_promise_race_resolve(mc, args, env),
-        "__internal_promise_all_resolve" => return Ok(crate::js_promise::__internal_promise_all_resolve(mc, args, env)?),
-        "__internal_promise_all_reject" => return Ok(crate::js_promise::__internal_promise_all_reject(mc, args, env)?),
-        "Promise.resolve" => return Ok(crate::js_promise::handle_promise_static_method_val(mc, "resolve", args, env)?),
-        "Promise.reject" => return Ok(crate::js_promise::handle_promise_static_method_val(mc, "reject", args, env)?),
-        "Promise.all" => return Ok(crate::js_promise::handle_promise_static_method_val(mc, "all", args, env)?),
-        "Promise.race" => return Ok(crate::js_promise::handle_promise_static_method_val(mc, "race", args, env)?),
-        "Promise.any" => return Ok(crate::js_promise::handle_promise_static_method_val(mc, "any", args, env)?),
-        "Promise.allSettled" => return Ok(crate::js_promise::handle_promise_static_method_val(mc, "allSettled", args, env)?),
+        "__internal_promise_all_resolve" => return crate::js_promise::__internal_promise_all_resolve(mc, args, env),
+        "__internal_promise_all_reject" => return crate::js_promise::__internal_promise_all_reject(mc, args, env),
+        "__internal_allsettled_resolve" => return crate::js_promise::__internal_allsettled_resolve(mc, args, env),
+        "__internal_allsettled_reject" => return crate::js_promise::__internal_allsettled_reject(mc, args, env),
+        "__internal_any_resolve" => return crate::js_promise::__internal_any_resolve(mc, args, env),
+        "__internal_any_reject" => return crate::js_promise::__internal_any_reject(mc, args, env),
+        "Promise.resolve" | "Promise.reject" | "Promise.all" | "Promise.race" | "Promise.any" | "Promise.allSettled" => {
+            let method = func_name.strip_prefix("Promise.").unwrap();
+            // Get `this` value (C) — for SubPromise.resolve() etc.
+            let this_val = crate::core::env_get(env, "this").map(|rc| rc.borrow().clone());
+            return crate::js_promise::handle_promise_static_method_val(mc, method, args, this_val.as_ref(), env);
+        }
 
-        "__internal_capability_executor" => return Ok(crate::js_promise::__internal_capability_executor(mc, args, env)?),
+        "__internal_capability_executor" => return crate::js_promise::__internal_capability_executor(mc, args, env),
         "__internal_promise_resolve_captured" => return Ok(crate::js_promise::__internal_promise_resolve_captured(mc, args, env)?),
         "__internal_promise_reject_captured" => return Ok(crate::js_promise::__internal_promise_reject_captured(mc, args, env)?),
 
@@ -381,18 +385,60 @@ pub fn handle_global_function<'gc>(
         "__internal_resolve_promise" => return internal_resolve_promise(mc, args, env),
         "__internal_reject_promise" => return internal_reject_promise(mc, args, env),
 
-        "Promise.prototype.then" | "Promise.prototype.catch" | "Promise.prototype.finally" => {
+        "Promise.prototype.catch" => {
+            // §27.2.5.1: catch(onRejected) = Invoke(this, "then", «undefined, onRejected»)
+            // Does NOT require `this` to be a Promise — just needs a .then method
+            let this_val = crate::core::env_get(env, "this")
+                .map(|rc| rc.borrow().clone())
+                .unwrap_or(Value::Undefined);
+            let on_rejected = args.first().cloned().unwrap_or(Value::Undefined);
+            // Invoke(this, "then", «undefined, onRejected»):
+            // Step 1: GetV(this, "then") which does ToObject(this).[[Get]]("then", this)
+            let then_fn = match &this_val {
+                Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, "then")?,
+                Value::Undefined | Value::Null => {
+                    return Err(raise_type_error!("Cannot read properties of null/undefined").into());
+                }
+                _ => {
+                    // Primitive: look up .then via the type's prototype
+                    let ctor_name = match &this_val {
+                        Value::Boolean(_) => "Boolean",
+                        Value::Number(_) => "Number",
+                        Value::String(_) => "String",
+                        Value::Symbol(_) => "Symbol",
+                        Value::BigInt(_) => "BigInt",
+                        _ => return Err(raise_type_error!("Cannot read properties of this value").into()),
+                    };
+                    // Get CtorName.prototype.then
+                    let proto_obj = crate::core::env_get(env, ctor_name)
+                        .and_then(|rc| match &*rc.borrow() {
+                            Value::Object(obj) => crate::core::object_get_key_value(obj, "prototype").map(|v| v.borrow().clone()),
+                            _ => None,
+                        })
+                        .and_then(|v| match v {
+                            Value::Object(obj) => Some(obj),
+                            _ => None,
+                        });
+                    if let Some(proto) = proto_obj {
+                        crate::core::object_get_key_value(&proto, "then")
+                            .map(|v| v.borrow().clone())
+                            .unwrap_or(Value::Undefined)
+                    } else {
+                        Value::Undefined
+                    }
+                }
+            };
+            // Call then(undefined, onRejected) with `this` as receiver
+            let call_args = vec![Value::Undefined, on_rejected];
+            return crate::js_promise::call_function_with_this(mc, &then_fn, Some(&this_val), &call_args, env);
+        }
+
+        "Promise.prototype.then" | "Promise.prototype.finally" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    let method = if func_name == "Promise.prototype.then" {
-                        "then"
-                    } else if func_name == "Promise.prototype.catch" {
-                        "catch"
-                    } else {
-                        "finally"
-                    };
-                    return Ok(crate::js_promise::handle_promise_prototype_method(mc, &obj, method, args, env)?);
+                    let method = if func_name == "Promise.prototype.then" { "then" } else { "finally" };
+                    return crate::js_promise::handle_promise_prototype_method(mc, &obj, method, args, env);
                 }
             }
             return Err(raise_type_error!("Promise prototype method called without object this").into());
@@ -411,6 +457,11 @@ pub fn handle_global_function<'gc>(
                 let receiver_val = args[0].clone();
                 let evaluated_args = args[1..].to_vec();
                 if let Value::Function(func_name) = &this_val {
+                    // Constructors that require `new` must not be callable via .call()
+                    if func_name == "Promise" {
+                        return Err(raise_type_error!("Promise constructor cannot be invoked without 'new'").into());
+                    }
+
                     if (func_name == "Object.prototype.hasOwnProperty" || func_name == "Object.prototype.propertyIsEnumerable")
                         && let Value::Function(target_name) = &receiver_val
                     {
@@ -453,6 +504,31 @@ pub fn handle_global_function<'gc>(
                         &evaluated_args,
                     );
                 }
+                // Check NativeCtor BEFORE closure dispatch so that native constructors
+                // that require `new` (like Promise) throw TypeError when called via .call()
+                if let Value::Object(obj) = &this_val
+                    && let Some(native_ctor_rc) = crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor)
+                {
+                    let native_ctor_val = match &*native_ctor_rc.borrow() {
+                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::String(name) = native_ctor_val {
+                        let ctor_name = crate::unicode::utf16_to_utf8(&name);
+                        // Promise() called without new must throw TypeError per §27.2.3.1 step 1
+                        if ctor_name == "Promise" {
+                            return Err(raise_type_error!("Promise constructor cannot be invoked without 'new'").into());
+                        }
+                        let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
+                        return crate::core::evaluate_call_dispatch(
+                            mc,
+                            &call_env,
+                            &Value::Function(ctor_name),
+                            Some(&receiver_val),
+                            &evaluated_args,
+                        );
+                    }
+                }
                 if let Value::Object(obj) = &this_val
                     && let Some(cl_prop) = obj.borrow().get_closure()
                 {
@@ -466,25 +542,6 @@ pub fn handle_global_function<'gc>(
                             mc,
                             &call_env,
                             &Value::Function(name),
-                            Some(&receiver_val),
-                            &evaluated_args,
-                        );
-                    }
-                }
-                if let Value::Object(obj) = &this_val
-                    && let Some(native_ctor_rc) = crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor)
-                {
-                    let native_ctor_val = match &*native_ctor_rc.borrow() {
-                        Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                        other => other.clone(),
-                    };
-                    if let Value::String(name) = native_ctor_val {
-                        let ctor_name = crate::unicode::utf16_to_utf8(&name);
-                        let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
-                        return crate::core::evaluate_call_dispatch(
-                            mc,
-                            &call_env,
-                            &Value::Function(ctor_name),
                             Some(&receiver_val),
                             &evaluated_args,
                         );

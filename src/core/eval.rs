@@ -16201,7 +16201,11 @@ fn evaluate_expr_property<'gc>(
             | "Math.sqrt"
             | "Math.tan"
             | "Math.tanh"
-            | "Math.trunc" => 1.0,
+            | "Math.trunc"
+            | "Reflect.getPrototypeOf"
+            | "Reflect.isExtensible"
+            | "Reflect.ownKeys"
+            | "Reflect.preventExtensions" => 1.0,
             "Array.prototype.slice"
             | "Array.prototype.splice"
             | "Array.prototype.copyWithin"
@@ -16231,9 +16235,15 @@ fn evaluate_expr_property<'gc>(
             | "Math.max"
             | "Math.min"
             | "Math.pow"
-            | "parseInt" => 2.0,
+            | "parseInt"
+            | "Reflect.construct"
+            | "Reflect.deleteProperty"
+            | "Reflect.get"
+            | "Reflect.getOwnPropertyDescriptor"
+            | "Reflect.has"
+            | "Reflect.setPrototypeOf" => 2.0,
             "Function.prototype.[Symbol.hasInstance]" => 1.0,
-            "Object.defineProperty" => 3.0,
+            "Object.defineProperty" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
             _ => {
                 if func_name.starts_with("DataView.prototype.get") {
                     1.0
@@ -17607,7 +17617,11 @@ fn evaluate_expr_index<'gc>(
                     | "Math.sqrt"
                     | "Math.tan"
                     | "Math.tanh"
-                    | "Math.trunc" => 1.0,
+                    | "Math.trunc"
+                    | "Reflect.getPrototypeOf"
+                    | "Reflect.isExtensible"
+                    | "Reflect.ownKeys"
+                    | "Reflect.preventExtensions" => 1.0,
                     "Array.prototype.slice"
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
@@ -17639,9 +17653,15 @@ fn evaluate_expr_index<'gc>(
                     | "Math.max"
                     | "Math.min"
                     | "Math.pow"
-                    | "parseInt" => 2.0,
+                    | "parseInt"
+                    | "Reflect.construct"
+                    | "Reflect.deleteProperty"
+                    | "Reflect.get"
+                    | "Reflect.getOwnPropertyDescriptor"
+                    | "Reflect.has"
+                    | "Reflect.setPrototypeOf" => 2.0,
                     "Function.prototype.[Symbol.hasInstance]" => 1.0,
-                    "Object.defineProperty" | "JSON.stringify" => 3.0,
+                    "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                     _ => {
                         if func_name.starts_with("DataView.prototype.get") {
                             1.0

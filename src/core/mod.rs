@@ -98,10 +98,12 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     initialize_number_module(mc, env)?;
 
+    initialize_symbol(mc, env)?;
+
     // Initialize Reflect object with full (implemented) methods
+    // (must be after initialize_symbol so Symbol.toStringTag is available)
     crate::js_reflect::initialize_reflect(mc, env)?;
 
-    initialize_symbol(mc, env)?;
     initialize_math(mc, env)?;
     initialize_string(mc, env)?;
     initialize_array(mc, env)?;

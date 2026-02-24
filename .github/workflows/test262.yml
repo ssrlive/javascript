@@ -216,8 +216,8 @@ jobs:
               FOCUS='built-ins/Math,built-ins/NaN,built-ins/NativeErrors,built-ins/Number,built-ins/parseFloat,built-ins/parseInt'
               ;;
             35)
-              TITLE='"built-ins/Promise" - "built-ins/Proxy"'
-              FOCUS='built-ins/Promise,built-ins/Proxy'
+              TITLE='"built-ins/Promise" - "built-ins/Reflect"'
+              FOCUS='built-ins/Promise,built-ins/Proxy,built-ins/Reflect'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

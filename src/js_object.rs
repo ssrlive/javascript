@@ -1774,7 +1774,11 @@ pub fn handle_object_method<'gc>(
                             | "Math.sqrt"
                             | "Math.tan"
                             | "Math.tanh"
-                            | "Math.trunc" => 1.0,
+                            | "Math.trunc"
+                            | "Reflect.getPrototypeOf"
+                            | "Reflect.isExtensible"
+                            | "Reflect.ownKeys"
+                            | "Reflect.preventExtensions" => 1.0,
                             "Array.prototype.slice"
                             | "Array.prototype.splice"
                             | "Array.prototype.copyWithin"
@@ -1796,8 +1800,14 @@ pub fn handle_object_method<'gc>(
                             | "Math.max"
                             | "Math.min"
                             | "Math.pow"
-                            | "parseInt" => 2.0,
-                            "Object.defineProperty" | "JSON.stringify" => 3.0,
+                            | "parseInt"
+                            | "Reflect.construct"
+                            | "Reflect.deleteProperty"
+                            | "Reflect.get"
+                            | "Reflect.getOwnPropertyDescriptor"
+                            | "Reflect.has"
+                            | "Reflect.setPrototypeOf" => 2.0,
+                            "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                             _ => 0.0,
                         };
                         crate::core::create_descriptor_object(mc, &Value::Number(len), false, false, true)?

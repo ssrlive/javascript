@@ -109,7 +109,13 @@ mod promise_tests {
 
     #[test]
     fn test_promise_finally() {
-        let code = r#"new Promise(function(resolve, reject) { resolve(42); }).finally(function() { console.log('finally executed'); })"#;
+        let code = r#"
+            var finalResult = "not set";
+            new Promise(function(resolve, reject) { resolve(42); })
+                .finally(function() { console.log('finally executed'); })
+                .then(function(v) { finalResult = v; });
+            finalResult
+        "#;
         let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "42");
     }

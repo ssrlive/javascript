@@ -338,7 +338,14 @@ pub fn handle_global_function<'gc>(
         "__internal_allsettled_reject" => return crate::js_promise::__internal_allsettled_reject(mc, args, env),
         "__internal_any_resolve" => return crate::js_promise::__internal_any_resolve(mc, args, env),
         "__internal_any_reject" => return crate::js_promise::__internal_any_reject(mc, args, env),
-        "Promise.resolve" | "Promise.reject" | "Promise.all" | "Promise.race" | "Promise.any" | "Promise.allSettled" => {
+        "Promise.resolve"
+        | "Promise.reject"
+        | "Promise.all"
+        | "Promise.race"
+        | "Promise.any"
+        | "Promise.allSettled"
+        | "Promise.withResolvers"
+        | "Promise.try" => {
             let method = func_name.strip_prefix("Promise.").unwrap();
             // Get `this` value (C) — for SubPromise.resolve() etc.
             let this_val = crate::core::env_get(env, "this").map(|rc| rc.borrow().clone());
@@ -351,6 +358,9 @@ pub fn handle_global_function<'gc>(
 
         "__internal_promise_finally_resolve" => return Ok(crate::js_promise::__internal_promise_finally_resolve(mc, args, env)?),
         "__internal_promise_finally_reject" => return Ok(crate::js_promise::__internal_promise_finally_reject(mc, args, env)?),
+
+        "__internal_finally_then_wrapper" => return crate::js_promise::__internal_finally_then_wrapper(mc, args, env),
+        "__internal_finally_catch_wrapper" => return crate::js_promise::__internal_finally_catch_wrapper(mc, args, env),
 
         "__internal_async_step_resolve" => return Ok(crate::js_async::__internal_async_step_resolve(mc, args, env)?),
         "__internal_async_step_reject" => return Ok(crate::js_async::__internal_async_step_reject(mc, args, env)?),
@@ -433,15 +443,60 @@ pub fn handle_global_function<'gc>(
             return crate::js_promise::call_function_with_this(mc, &then_fn, Some(&this_val), &call_args, env);
         }
 
-        "Promise.prototype.then" | "Promise.prototype.finally" => {
+        "Promise.prototype.then" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    let method = if func_name == "Promise.prototype.then" { "then" } else { "finally" };
-                    return crate::js_promise::handle_promise_prototype_method(mc, &obj, method, args, env);
+                    return crate::js_promise::handle_promise_prototype_method(mc, &obj, "then", args, env);
                 }
             }
             return Err(raise_type_error!("Promise prototype method called without object this").into());
+        }
+
+        "Promise.prototype.finally" => {
+            // §27.2.5.3 Promise.prototype.finally ( onFinally )
+            // This is intentionally generic — does NOT require a branded Promise receiver
+            let this_val = crate::core::env_get(env, "this")
+                .map(|rc| rc.borrow().clone())
+                .unwrap_or(Value::Undefined);
+
+            // Step 2: If Type(promise) is not Object, throw TypeError
+            if !matches!(
+                &this_val,
+                Value::Object(_) | Value::Function(_) | Value::Closure(_) | Value::ClassDefinition(_)
+            ) {
+                return Err(raise_type_error!("Promise.prototype.finally called on non-object").into());
+            }
+
+            let on_finally = args.first().cloned().unwrap_or(Value::Undefined);
+
+            let (then_finally, catch_finally) = if !crate::js_promise::is_callable_val_pub(&on_finally) {
+                // Step 4: If IsCallable(onFinally) is false, thenFinally = catchFinally = onFinally
+                (on_finally.clone(), on_finally)
+            } else {
+                // Step 5: Create spec wrapper closures
+                // Get C = SpeciesConstructor(promise, %Promise%) for the wrappers
+                let c_val = if let Value::Object(obj) = &this_val {
+                    crate::js_promise::get_species_constructor_pub(mc, obj, env)?
+                        .unwrap_or_else(|| crate::js_promise::get_default_promise_ctor_pub(env))
+                } else {
+                    crate::js_promise::get_default_promise_ctor_pub(env)
+                };
+
+                let then_f = crate::js_promise::create_finally_then_wrapper(mc, &on_finally, &c_val, env)?;
+                let catch_f = crate::js_promise::create_finally_catch_wrapper(mc, &on_finally, &c_val, env)?;
+                (then_f, catch_f)
+            };
+
+            // Step 6: Return Invoke(promise, "then", «thenFinally, catchFinally»)
+            let then_fn = match &this_val {
+                Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, "then")?,
+                _ => Value::Undefined,
+            };
+            if !crate::js_promise::is_callable_val_pub(&then_fn) {
+                return Err(raise_type_error!("finally: this.then is not a function").into());
+            }
+            return crate::js_promise::call_function_with_this(mc, &then_fn, Some(&this_val), &[then_finally, catch_finally], env);
         }
 
         "setTimeout" => return Ok(crate::js_promise::handle_set_timeout_val(mc, args, env)?),

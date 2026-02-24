@@ -3425,6 +3425,86 @@ fn call_then_on_thenable<'gc>(
     Ok(())
 }
 
+// Public wrappers for functions needed by js_function.rs
+
+pub fn is_callable_val_pub<'gc>(v: &Value<'gc>) -> bool {
+    is_callable_val(v)
+}
+
+pub fn get_default_promise_ctor_pub<'gc>(env: &JSObjectDataPtr<'gc>) -> Value<'gc> {
+    get_default_promise_ctor(env)
+}
+
+pub fn get_species_constructor_pub<'gc>(
+    mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    get_species_constructor(mc, obj, env)
+}
+
+/// §27.2.5.3.1 Then Finally Functions — wraps onFinally for the resolved path.
+/// Returns a function that: calls onFinally(), then returns Promise.resolve(C, result).then(() => value)
+pub fn create_finally_then_wrapper<'gc>(
+    mc: &MutationContext<'gc>,
+    on_finally: &Value<'gc>,
+    c: &Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let cb_env = new_js_object_data(mc);
+    cb_env.borrow_mut(mc).prototype = Some(*env);
+    object_set_key_value(mc, &cb_env, "on_finally", on_finally)?;
+    object_set_key_value(mc, &cb_env, "species_ctor", c)?;
+    let raw_cl = Value::Closure(Gc::new(
+        mc,
+        ClosureData::new(
+            &[DestructuringElement::Variable("value".to_string(), None)],
+            &[Statement::from(StatementKind::Return(Some(Expr::Call(
+                Box::new(Expr::Var("__internal_finally_then_wrapper".to_string(), None, None)),
+                vec![
+                    Expr::Var("value".to_string(), None, None),
+                    Expr::Var("on_finally".to_string(), None, None),
+                    Expr::Var("species_ctor".to_string(), None, None),
+                ],
+            ))))],
+            Some(cb_env),
+            None,
+        ),
+    ));
+    Ok(Value::Object(wrap_closure_as_fn_obj(mc, env, raw_cl, "", 1.0)?))
+}
+
+/// §27.2.5.3.2 Catch Finally Functions — wraps onFinally for the rejected path.
+/// Returns a function that: calls onFinally(), then returns Promise.resolve(C, result).then(() => { throw reason })
+pub fn create_finally_catch_wrapper<'gc>(
+    mc: &MutationContext<'gc>,
+    on_finally: &Value<'gc>,
+    c: &Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let cb_env = new_js_object_data(mc);
+    cb_env.borrow_mut(mc).prototype = Some(*env);
+    object_set_key_value(mc, &cb_env, "on_finally", on_finally)?;
+    object_set_key_value(mc, &cb_env, "species_ctor", c)?;
+    let raw_cl = Value::Closure(Gc::new(
+        mc,
+        ClosureData::new(
+            &[DestructuringElement::Variable("reason".to_string(), None)],
+            &[Statement::from(StatementKind::Return(Some(Expr::Call(
+                Box::new(Expr::Var("__internal_finally_catch_wrapper".to_string(), None, None)),
+                vec![
+                    Expr::Var("reason".to_string(), None, None),
+                    Expr::Var("on_finally".to_string(), None, None),
+                    Expr::Var("species_ctor".to_string(), None, None),
+                ],
+            ))))],
+            Some(cb_env),
+            None,
+        ),
+    ));
+    Ok(Value::Object(wrap_closure_as_fn_obj(mc, env, raw_cl, "", 1.0)?))
+}
+
 pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let promise_ctor = new_js_object_data(mc);
     slot_set(mc, &promise_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
@@ -3473,6 +3553,8 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         ("race", 1.0),
         ("resolve", 1.0),
         ("reject", 1.0),
+        ("withResolvers", 0.0),
+        ("try", 1.0),
     ];
     for (method, arity) in static_methods {
         let fn_obj = make_native_fn_obj(mc, env, method, *arity, &format!("Promise.{}", method))?;
@@ -3531,6 +3613,8 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         "__internal_any_resolve",
         "__internal_any_reject",
         "__internal_capability_executor",
+        "__internal_finally_then_wrapper",
+        "__internal_finally_catch_wrapper",
     ];
     for h in helpers {
         crate::core::env_set(mc, env, h, &Value::Function(h.to_string()))?;
@@ -3675,7 +3759,17 @@ pub fn __internal_allsettled_resolve<'gc>(
                 && let Some(cap_resolve_rc) = object_get_key_value(state_obj, "cap_resolve")
             {
                 let cap_resolve = cap_resolve_rc.borrow().clone();
-                call_function(mc, &cap_resolve, &[Value::Object(*results_obj)], env)?;
+                // IfAbruptRejectPromise: if cap_resolve throws, call cap_reject
+                match call_function(mc, &cap_resolve, &[Value::Object(*results_obj)], env) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let Some(cap_reject_rc) = object_get_key_value(state_obj, "cap_reject") {
+                            let cap_reject = cap_reject_rc.borrow().clone();
+                            let reason = eval_error_to_value(mc, env, e);
+                            let _ = call_function(mc, &cap_reject, &[reason], env);
+                        }
+                    }
+                }
             }
         }
     }
@@ -3729,7 +3823,17 @@ pub fn __internal_allsettled_reject<'gc>(
                 && let Some(cap_resolve_rc) = object_get_key_value(state_obj, "cap_resolve")
             {
                 let cap_resolve = cap_resolve_rc.borrow().clone();
-                call_function(mc, &cap_resolve, &[Value::Object(*results_obj)], env)?;
+                // IfAbruptRejectPromise: if cap_resolve throws, call cap_reject
+                match call_function(mc, &cap_resolve, &[Value::Object(*results_obj)], env) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let Some(cap_reject_rc) = object_get_key_value(state_obj, "cap_reject") {
+                            let cap_reject = cap_reject_rc.borrow().clone();
+                            let reason = eval_error_to_value(mc, env, e);
+                            let _ = call_function(mc, &cap_reject, &[reason], env);
+                        }
+                    }
+                }
             }
         }
     }
@@ -3969,7 +4073,14 @@ pub fn handle_promise_static_method_val<'gc>(
                         let new_rem = rem - 1.0;
                         object_set_key_value(mc, &state_obj, "remaining", &Value::Number(new_rem))?;
                         if new_rem == 0.0 {
-                            let _ = call_function(mc, &cap_resolve, &[Value::Object(results_obj)], env);
+                            // IfAbruptRejectPromise: if cap_resolve throws, call cap_reject
+                            match call_function(mc, &cap_resolve, &[Value::Object(results_obj)], env) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    let reason = eval_error_to_value(mc, env, e);
+                                    let _ = call_function(mc, &cap_reject, &[reason], env);
+                                }
+                            }
                         }
                     }
                     return Ok(cap_promise);
@@ -4512,6 +4623,47 @@ pub fn handle_promise_static_method_val<'gc>(
 
                 index += 1;
             }
+        }
+        "withResolvers" => {
+            // §27.2.4.8 Promise.withResolvers ( )
+            // Step 1: Let C be the this value
+            if !is_object_type(c) {
+                return Err(raise_type_error!("Promise.withResolvers requires that 'this' be an Object").into());
+            }
+            // Step 2: Let promiseCapability be ? NewPromiseCapability(C)
+            let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
+            // Step 3: Return OrdinaryObjectCreate(%Object.prototype%) with { promise, resolve, reject }
+            let result = new_js_object_data(mc);
+            let _ = crate::core::set_internal_prototype_from_constructor(mc, &result, env, "Object");
+            object_set_key_value(mc, &result, "promise", &cap_promise)?;
+            object_set_key_value(mc, &result, "resolve", &cap_resolve)?;
+            object_set_key_value(mc, &result, "reject", &cap_reject)?;
+            Ok(Value::Object(result))
+        }
+        "try" => {
+            // §27.2.4.8 Promise.try ( callback, ...args )
+            // Step 1: Let C be the this value
+            if !is_object_type(c) {
+                return Err(raise_type_error!("Promise.try requires that 'this' be an Object").into());
+            }
+            // Step 2: Let promiseCapability be ? NewPromiseCapability(C)
+            let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
+            // Step 3: Let status be Completion(Call(callback, undefined, args))
+            let callback = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+            let call_args = if args.len() > 1 { &args[1..] } else { &[] };
+            match call_function(mc, &callback, call_args, env) {
+                Ok(result) => {
+                    // Step 4: If status is a normal completion, Call(resolve, undefined, «status.[[Value]]»)
+                    let _ = call_function(mc, &cap_resolve, &[result], env);
+                }
+                Err(e) => {
+                    // Step 5: Else, Call(reject, undefined, «status.[[Value]]»)
+                    let reason = eval_error_to_value(mc, env, e);
+                    let _ = call_function(mc, &cap_reject, &[reason], env);
+                }
+            }
+            // Step 6: Return promiseCapability.[[Promise]]
+            Ok(cap_promise)
         }
         _ => Err(crate::raise_eval_error!(format!(
             "Static method Promise.{} is not yet wired to receive evaluated arguments.",
@@ -5073,4 +5225,97 @@ pub fn handle_promise_finally_val<'gc>(
     perform_promise_then(mc, promise, Some(then_callback), Some(catch_callback), Some(new_promise), env)?;
 
     Ok(Value::Object(new_promise_obj))
+}
+
+/// §27.2.5.3.1 Then Finally Functions
+/// Called as thenFinally(value): calls onFinally(), then Promise.resolve(C, result).then(() => value)
+pub fn __internal_finally_then_wrapper<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    let on_finally = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let c = args.get(2).cloned().unwrap_or_else(|| get_default_promise_ctor(env));
+
+    // Step 1: Let result be ? Call(onFinally, undefined)
+    let result = call_function_with_this(mc, &on_finally, None, &[], env)?;
+
+    // Step 2: Let promise be ? PromiseResolve(C, result)
+    let promise_val = handle_promise_static_method_val(mc, "resolve", &[result], Some(&c), env)?;
+
+    // Step 3: Create a valueThunk: () => value
+    let thunk_env = new_js_object_data(mc);
+    thunk_env.borrow_mut(mc).prototype = Some(*env);
+    object_set_key_value(mc, &thunk_env, "__finally_value", &value)?;
+    let value_thunk = Value::Closure(Gc::new(
+        mc,
+        ClosureData::new(
+            &[],
+            &[Statement::from(StatementKind::Return(Some(Expr::Var(
+                "__finally_value".to_string(),
+                None,
+                None,
+            ))))],
+            Some(thunk_env),
+            None,
+        ),
+    ));
+    let value_thunk_fn = Value::Object(wrap_closure_as_fn_obj(mc, env, value_thunk, "", 0.0)?);
+
+    // Step 4: Return promise.then(valueThunk)
+    // Get .then from the resolved promise
+    if let Value::Object(p_obj) = &promise_val {
+        let then_fn = crate::core::get_property_with_accessors(mc, env, p_obj, "then")?;
+        if is_callable_val(&then_fn) {
+            return call_function_with_this(mc, &then_fn, Some(&promise_val), &[value_thunk_fn], env);
+        }
+    }
+    Ok(promise_val)
+}
+
+/// §27.2.5.3.2 Catch Finally Functions
+/// Called as catchFinally(reason): calls onFinally(), then Promise.resolve(C, result).then(() => { throw reason })
+pub fn __internal_finally_catch_wrapper<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let reason = args.first().cloned().unwrap_or(Value::Undefined);
+    let on_finally = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let c = args.get(2).cloned().unwrap_or_else(|| get_default_promise_ctor(env));
+
+    // Step 1: Let result be ? Call(onFinally, undefined)
+    let result = call_function_with_this(mc, &on_finally, None, &[], env)?;
+
+    // Step 2: Let promise be ? PromiseResolve(C, result)
+    let promise_val = handle_promise_static_method_val(mc, "resolve", &[result], Some(&c), env)?;
+
+    // Step 3: Create a thrower: () => { throw reason }
+    let thrower_env = new_js_object_data(mc);
+    thrower_env.borrow_mut(mc).prototype = Some(*env);
+    object_set_key_value(mc, &thrower_env, "__finally_reason", &reason)?;
+    let thrower = Value::Closure(Gc::new(
+        mc,
+        ClosureData::new(
+            &[],
+            &[Statement::from(StatementKind::Throw(Expr::Var(
+                "__finally_reason".to_string(),
+                None,
+                None,
+            )))],
+            Some(thrower_env),
+            None,
+        ),
+    ));
+    let thrower_fn = Value::Object(wrap_closure_as_fn_obj(mc, env, thrower, "", 0.0)?);
+
+    // Step 4: Return promise.then(thrower)
+    if let Value::Object(p_obj) = &promise_val {
+        let then_fn = crate::core::get_property_with_accessors(mc, env, p_obj, "then")?;
+        if is_callable_val(&then_fn) {
+            return call_function_with_this(mc, &then_fn, Some(&promise_val), &[thrower_fn], env);
+        }
+    }
+    Ok(promise_val)
 }

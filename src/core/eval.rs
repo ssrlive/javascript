@@ -16045,7 +16045,6 @@ fn evaluate_expr_property<'gc>(
             | "Error.isError"
             | "isNaN"
             | "isFinite"
-            | "parseInt"
             | "parseFloat"
             | "Map.prototype.get"
             | "Map.prototype.has"
@@ -16119,7 +16118,8 @@ fn evaluate_expr_property<'gc>(
             | "Math.imul"
             | "Math.max"
             | "Math.min"
-            | "Math.pow" => 2.0,
+            | "Math.pow"
+            | "parseInt" => 2.0,
             "Function.prototype.[Symbol.hasInstance]" => 1.0,
             "Object.defineProperty" => 3.0,
             _ => {
@@ -17431,7 +17431,6 @@ fn evaluate_expr_index<'gc>(
                     | "Error.isError"
                     | "isNaN"
                     | "isFinite"
-                    | "parseInt"
                     | "parseFloat"
                     | "Map.prototype.get"
                     | "Map.prototype.has"
@@ -17507,7 +17506,8 @@ fn evaluate_expr_index<'gc>(
                     | "Math.imul"
                     | "Math.max"
                     | "Math.min"
-                    | "Math.pow" => 2.0,
+                    | "Math.pow"
+                    | "parseInt" => 2.0,
                     "Function.prototype.[Symbol.hasInstance]" => 1.0,
                     "Object.defineProperty" | "JSON.stringify" => 3.0,
                     _ => {

@@ -257,8 +257,8 @@ pub fn handle_global_function<'gc>(
             }
             return Ok(Value::Undefined);
         }
-        "parseInt" => return parse_int_function(args),
-        "parseFloat" => return parse_float_function(args),
+        "parseInt" => return parse_int_function(mc, args, env),
+        "parseFloat" => return parse_float_function(mc, args, env),
         "isNaN" => return is_nan_function(mc, args, env),
         "isFinite" => return is_finite_function(mc, args, env),
         "encodeURIComponent" => return encode_uri_component(mc, args, env),
@@ -944,7 +944,11 @@ fn object_prototype_to_string<'gc>(
     Err(raise_eval_error!("Object.prototype.toString called without this").into())
 }
 
-fn parse_int_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn parse_int_function<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate all arguments for side effects
 
     if args.is_empty() {
@@ -952,9 +956,14 @@ fn parse_int_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<
     }
 
     let input_val = args[0].clone();
-    let input_str = match input_val {
+    // ToString(string): call ToPrimitive(hint string) for objects
+    let input_prim = match &input_val {
+        Value::Object(_) => crate::core::to_primitive(mc, &input_val, "string", env)?,
+        _ => input_val.clone(),
+    };
+    let input_str = match input_prim {
         Value::String(s) => crate::unicode::utf16_to_utf8(&s),
-        _ => crate::core::value_to_string(&input_val),
+        _ => crate::core::value_to_string(&input_prim),
     };
 
     // 1. Trim leading whitespace
@@ -976,28 +985,8 @@ fn parse_int_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<
     let mut strip_prefix = true;
 
     if args.len() > 1 {
-        let radix_val = args[1].clone();
-        let r_num = match radix_val {
-            Value::Number(n) => n,
-            Value::Boolean(b) => {
-                if b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            Value::String(s) => {
-                let s_utf8 = crate::unicode::utf16_to_utf8(&s);
-                if s_utf8.trim().is_empty() {
-                    0.0
-                } else {
-                    s_utf8.trim().parse::<f64>().unwrap_or(f64::NAN)
-                }
-            }
-            Value::Undefined => f64::NAN,
-            Value::Null => 0.0,
-            _ => f64::NAN,
-        };
+        // ToInt32(radix): use proper ToNumber which handles objects via ToPrimitive
+        let r_num = crate::core::to_number_with_env(mc, env, &args[1])?;
 
         // ToInt32 logic inline
         let r_int = if !r_num.is_finite() || r_num == 0.0 {
@@ -1056,7 +1045,11 @@ fn parse_int_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<
     Ok(Value::Number(sign * result))
 }
 
-fn parse_float_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn parse_float_function<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate all arguments for side effects
 
     if args.is_empty() {
@@ -1064,9 +1057,14 @@ fn parse_float_function<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalErro
     }
 
     let arg_val = args[0].clone();
-    let str_val = match arg_val {
+    // ToString(string): call ToPrimitive(hint string) for objects
+    let arg_prim = match &arg_val {
+        Value::Object(_) => crate::core::to_primitive(mc, &arg_val, "string", env)?,
+        _ => arg_val.clone(),
+    };
+    let str_val = match arg_prim {
         Value::String(s) => crate::unicode::utf16_to_utf8(&s),
-        _ => crate::core::value_to_string(&arg_val),
+        _ => crate::core::value_to_string(&arg_prim),
     };
 
     let trimmed = str_val.trim_start();

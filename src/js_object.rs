@@ -1738,7 +1738,6 @@ pub fn handle_object_method<'gc>(
                             | "decodeURIComponent"
                             | "isNaN"
                             | "isFinite"
-                            | "parseInt"
                             | "parseFloat"
                             | "Map.prototype.get"
                             | "Map.prototype.has"
@@ -1804,7 +1803,8 @@ pub fn handle_object_method<'gc>(
                             | "Math.imul"
                             | "Math.max"
                             | "Math.min"
-                            | "Math.pow" => 2.0,
+                            | "Math.pow"
+                            | "parseInt" => 2.0,
                             "Object.defineProperty" | "JSON.stringify" => 3.0,
                             _ => 0.0,
                         };

@@ -3399,6 +3399,18 @@ fn handle_object_is_prototype_of<'gc>(
 }
 
 fn ordinary_set_prototype_of<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, proto_obj: Option<JSObjectDataPtr<'gc>>) -> bool {
+    // Immutable prototype exotic objects (e.g. Object.prototype) only allow
+    // setting the prototype to the *same* value (SameValue check). Spec §9.4.7.1.
+    if crate::core::slot_has(obj, &InternalSlot::ImmutablePrototype) {
+        let current_proto = obj.borrow().prototype;
+        let same = match (current_proto, proto_obj) {
+            (Some(cur), Some(next)) => Gc::ptr_eq(cur, next),
+            (None, None) => true,
+            _ => false,
+        };
+        return same;
+    }
+
     let current_proto = obj.borrow().prototype;
     let same_proto = match (current_proto, proto_obj) {
         (Some(cur), Some(next)) => Gc::ptr_eq(cur, next),

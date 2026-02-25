@@ -962,7 +962,7 @@ pub fn handle_reflect_method<'gc>(
                     }
 
                     // Non-proxy target: OrdinarySet(target, P, V, Receiver)
-                    let ok = crate::js_proxy::ordinary_set(mc, &obj, &prop_key, &value, &receiver)?;
+                    let ok = crate::js_proxy::ordinary_set(mc, &obj, &prop_key, &value, &receiver, env)?;
                     Ok(Value::Boolean(ok))
                 }
                 _ => Err(raise_type_error!("Reflect.set target must be an object").into()),
@@ -1005,6 +1005,18 @@ pub fn handle_reflect_method<'gc>(
                     }
 
                     // OrdinarySetPrototypeOf (spec 10.1.2)
+                    // Immutable prototype exotic objects (e.g. Object.prototype):
+                    // [[SetPrototypeOf]](V) returns true only if SameValue(V, current), else false.
+                    if crate::core::slot_has(obj, &InternalSlot::ImmutablePrototype) {
+                        let current_proto = obj.borrow().prototype;
+                        let same = match (&new_proto, &current_proto) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => crate::core::Gc::ptr_eq(*a, *b),
+                            _ => false,
+                        };
+                        return Ok(Value::Boolean(same));
+                    }
+
                     let current_proto = obj.borrow().prototype;
                     let is_extensible = obj.borrow().is_extensible();
 

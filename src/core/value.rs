@@ -487,6 +487,7 @@ pub enum InternalSlot {
     IsBooleanConstructor, // __is_boolean_constructor
     IsDateConstructor,    // __is_date_constructor
     IsStringConstructor,  // __is_string_constructor
+    ImmutablePrototype,   // immutable prototype exotic object (Object.prototype)
 
     // --- Environment ---
     GlobalLexEnv,                // __global_lex_env
@@ -1852,59 +1853,21 @@ pub fn object_set_key_value<'gc>(
             Value::BigInt(_) => return Err(raise_type_error!("Cannot convert a BigInt value to a number")),
             Value::Symbol(_) => return Err(raise_type_error!("Cannot convert a Symbol value to a number")),
             Value::Object(o) => {
-                let hydrate_prop = |v: &Value<'gc>| -> Value<'gc> {
-                    match v {
-                        Value::Property { value: Some(inner), .. } => inner.borrow().clone(),
-                        other => other.clone(),
-                    }
-                };
-
-                if let Some(inner) = slot_get(o, &InternalSlot::PrimitiveValue) {
-                    let unwrapped = hydrate_prop(&inner.borrow());
-                    crate::core::eval::to_number(&unwrapped).map_err(|_| raise_type_error!("Cannot convert object to number"))?
-                } else {
-                    let call_env = o.borrow().definition_env.or(obj.borrow().definition_env).unwrap_or(*obj);
-
-                    let try_call_method = |name: &str| -> Result<Option<Value<'gc>>, JSError> {
-                        if let Some(method_cell) = object_get_key_value(o, name) {
-                            let method = hydrate_prop(&method_cell.borrow());
-                            let callable = matches!(
-                                method,
-                                Value::Function(_)
-                                    | Value::Closure(_)
-                                    | Value::AsyncClosure(_)
-                                    | Value::GeneratorFunction(_, _)
-                                    | Value::AsyncGeneratorFunction(_, _)
-                            ) || matches!(&method, Value::Object(fn_obj) if fn_obj.borrow().get_closure().is_some());
-
-                            if callable {
-                                let this_arg = Value::Object(*o);
-                                let res = evaluate_call_dispatch(mc, &call_env, &method, Some(&this_arg), &[])
-                                    .map_err(|_| raise_type_error!("Cannot convert object to number"))?;
-                                return Ok(Some(res));
-                            }
-                        }
-                        Ok(None)
-                    };
-
-                    if let Some(v) = try_call_method("valueOf")?
-                        && !matches!(v, Value::Object(_))
-                    {
-                        crate::core::eval::to_number(&v).map_err(|_| raise_type_error!("Cannot convert object to number"))?
-                    } else if let Some(v) = try_call_method("toString")?
-                        && !matches!(v, Value::Object(_))
-                    {
-                        crate::core::eval::to_number(&v).map_err(|_| raise_type_error!("Cannot convert object to number"))?
-                    } else {
-                        return Err(raise_type_error!("Cannot convert object to number"));
-                    }
-                }
+                // Use ToPrimitive (supports Symbol.toPrimitive) per spec.
+                let call_env = o.borrow().definition_env.or(obj.borrow().definition_env).unwrap_or(*obj);
+                let prim = to_primitive(mc, val, "number", &call_env).map_err(JSError::from)?;
+                crate::core::eval::to_number(&prim).map_err(|_| raise_type_error!("Cannot convert object to number"))?
             }
             _ => f64::NAN,
         };
 
         if !number_len.is_finite() || number_len < 0.0 || number_len.fract() != 0.0 || number_len > (u32::MAX as f64) {
             return Err(raise_range_error!("Invalid array length"));
+        }
+
+        // Spec (ArraySetLength step 12): after coercion, if length became non-writable, reject.
+        if !obj.borrow().is_writable("length") {
+            return Ok(()); // silently fail; callers needing strict/Reflect semantics handle this above
         }
 
         let new_len = number_len as usize;

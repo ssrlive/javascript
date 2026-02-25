@@ -287,7 +287,11 @@ fn to_int32_value_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     Ok(int as i32)
 }
 
-fn to_uint32_value_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<u32, EvalError<'gc>> {
+pub(crate) fn to_uint32_value_with_env<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    val: &Value<'gc>,
+) -> Result<u32, EvalError<'gc>> {
     let n = to_number_with_env(mc, env, val)?;
     if n.is_nan() || n == 0.0 || !n.is_finite() {
         return Ok(0);
@@ -18253,6 +18257,10 @@ pub(crate) fn set_property_with_accessors<'gc>(
                                     if same_proto {
                                         return Ok(Value::Boolean(true));
                                     }
+                                    // Immutable prototype exotic object check
+                                    if slot_has(target_obj, &InternalSlot::ImmutablePrototype) {
+                                        return Ok(Value::Boolean(false));
+                                    }
                                     if !target_obj.borrow().is_extensible() {
                                         return Ok(Value::Boolean(false));
                                     }
@@ -18285,6 +18293,18 @@ pub(crate) fn set_property_with_accessors<'gc>(
 
             match &val {
                 Value::Object(proto_obj) => {
+                    // Immutable prototype exotic objects (e.g. Object.prototype):
+                    // only allow setting to the same value.
+                    if slot_has(obj, &InternalSlot::ImmutablePrototype) {
+                        let same = match obj.borrow().prototype {
+                            Some(cur) => Gc::ptr_eq(cur, *proto_obj),
+                            None => false,
+                        };
+                        if !same {
+                            return Err(raise_type_error!("Cannot set prototype of immutable prototype object").into());
+                        }
+                        return Ok(());
+                    }
                     let current_proto = obj.borrow().prototype;
                     let same_proto = match current_proto {
                         Some(cur) => Gc::ptr_eq(cur, *proto_obj),
@@ -18311,6 +18331,13 @@ pub(crate) fn set_property_with_accessors<'gc>(
                     return Ok(());
                 }
                 Value::Null => {
+                    // Immutable prototype exotic object: allow null only if current is already null.
+                    if slot_has(obj, &InternalSlot::ImmutablePrototype) {
+                        if obj.borrow().prototype.is_some() {
+                            return Err(raise_type_error!("Cannot set prototype of immutable prototype object").into());
+                        }
+                        return Ok(());
+                    }
                     if !obj.borrow().is_extensible() && obj.borrow().prototype.is_some() {
                         return Err(raise_type_error!("Cannot change prototype of non-extensible object").into());
                     }
@@ -18326,23 +18353,25 @@ pub(crate) fn set_property_with_accessors<'gc>(
     }
 
     // Special-case assignment to 'length' on array objects so we can remove/resize indexed elements
+    // Spec: ArraySetLength (10.4.2.4) — coerce value BEFORE checking [[Writable]].
     if let PropertyKey::String(s) = key
         && s == "length"
         && crate::js_array::is_array(mc, obj)
     {
-        // Respect non-writable length. In non-strict code this should fail silently;
-        // in strict mode it should throw TypeError.
+        // Steps 3-4: ToUint32 then ToNumber (spec order) — coercion may have
+        // observable side-effects (e.g. Symbol.toPrimitive) that change writable.
+        let uint32_len = to_uint32_value_with_env(mc, _env, val)?;
+        let number_len = to_number_with_env(mc, _env, val)?;
+        if (uint32_len as f64) != number_len {
+            return Err(raise_range_error!("Invalid array length").into());
+        }
+        // Step 12: Respect non-writable length (checked AFTER coercion).
         if !obj.borrow().is_writable(key) {
             let is_strict = crate::core::env_get_strictness(_env);
             if is_strict {
                 return Err(raise_type_error!("Cannot assign to read-only property").into());
             }
             return Ok(());
-        }
-        let number_len = to_number_with_env(mc, _env, val)?;
-        let uint32_len = to_uint32_value_with_env(mc, _env, val)?;
-        if !number_len.is_finite() || number_len < 0.0 || (uint32_len as f64) != number_len {
-            return Err(raise_range_error!("Invalid array length").into());
         }
         crate::core::object_set_length(mc, obj, uint32_len as usize)?;
         return Ok(());

@@ -12,11 +12,10 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     slot_set(mc, &regexp_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &regexp_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("RegExp")));
 
-    // RegExp.length = 2 (per spec §22.2.4)
+    // RegExp.length = 2 (per spec §22.2.4: writable:false, enumerable:false, configurable:true)
     object_set_key_value(mc, &regexp_ctor, "length", &Value::Number(2.0))?;
     regexp_ctor.borrow_mut(mc).set_non_enumerable("length");
     regexp_ctor.borrow_mut(mc).set_non_writable("length");
-    regexp_ctor.borrow_mut(mc).set_non_configurable("length");
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")

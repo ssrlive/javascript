@@ -1276,6 +1276,7 @@ pub(crate) fn ordinary_set<'gc>(
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
     receiver: &Value<'gc>,
+    env: &crate::core::JSObjectDataPtr<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
     // Step 1: ownDesc = target.[[GetOwnPropertyDescriptor]](P)
     let own_prop = crate::core::get_own_property(target_obj, key);
@@ -1321,7 +1322,7 @@ pub(crate) fn ordinary_set<'gc>(
             if !target_obj.borrow().is_writable(key) {
                 return Ok(false);
             }
-            return ordinary_set_create_or_update(mc, key, value, receiver);
+            return ordinary_set_create_or_update(mc, key, value, receiver, env);
         }
     }
 
@@ -1378,7 +1379,7 @@ pub(crate) fn ordinary_set<'gc>(
 
     // Default ownDesc = {value: undefined, writable: true, enumerable: true, configurable: true}
     // → CreateDataProperty(Receiver, P, V)
-    ordinary_set_create_or_update(mc, key, value, receiver)
+    ordinary_set_create_or_update(mc, key, value, receiver, env)
 }
 
 /// Helper for OrdinarySet steps 3.c–3.e: operate on Receiver to create or update property.
@@ -1387,6 +1388,7 @@ fn ordinary_set_create_or_update<'gc>(
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
     receiver: &Value<'gc>,
+    env: &crate::core::JSObjectDataPtr<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
     match receiver {
         Value::Object(recv_obj) => {
@@ -1428,6 +1430,25 @@ fn ordinary_set_create_or_update<'gc>(
                     }
                     if !recv_obj.borrow().is_writable(key) {
                         return Ok(false);
+                    }
+                    // Array exotic [[DefineOwnProperty]] for "length": coerce value first,
+                    // then re-check writable (coercion may make it non-writable via side effects).
+                    if let PropertyKey::String(s) = key
+                        && s == "length"
+                        && crate::js_array::is_array(mc, recv_obj)
+                        && !matches!(value, Value::Property { .. })
+                    {
+                        let uint32_len = crate::core::to_uint32_value_with_env(mc, env, value)?;
+                        let number_len = crate::core::to_number_with_env(mc, env, value)?;
+                        if (uint32_len as f64) != number_len {
+                            return Err(raise_range_error!("Invalid array length").into());
+                        }
+                        // Re-check writable after coercion (Symbol.toPrimitive may have changed it)
+                        if !recv_obj.borrow().is_writable(key) {
+                            return Ok(false);
+                        }
+                        crate::core::object_set_length(mc, recv_obj, uint32_len as usize).map_err(EvalError::from)?;
+                        return Ok(true);
                     }
                     object_set_key_value(mc, recv_obj, key, value)?;
                 } else {
@@ -1574,6 +1595,31 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                             } else {
                                 // Receiver is ordinary object
                                 let _recv_has = crate::core::get_own_property(recv_obj, &key_clone);
+                                // Array exotic [[DefineOwnProperty]] for "length": coerce, then re-check writable
+                                if let PropertyKey::String(s) = &key_clone
+                                    && s == "length"
+                                    && crate::js_array::is_array(mc, recv_obj)
+                                    && !matches!(value_clone, Value::Property { .. })
+                                {
+                                    if !recv_obj.borrow().is_writable(&key_clone) {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                    let call_env = recv_obj
+                                        .borrow()
+                                        .definition_env
+                                        .or(target_obj.borrow().definition_env)
+                                        .unwrap_or(*target_obj);
+                                    let uint32_len = crate::core::to_uint32_value_with_env(mc, &call_env, &value_clone)?;
+                                    let number_len = crate::core::to_number_with_env(mc, &call_env, &value_clone)?;
+                                    if (uint32_len as f64) != number_len {
+                                        return Err(raise_range_error!("Invalid array length").into());
+                                    }
+                                    if !recv_obj.borrow().is_writable(&key_clone) {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                    crate::core::object_set_length(mc, recv_obj, uint32_len as usize).map_err(EvalError::from)?;
+                                    return Ok(Value::Boolean(true));
+                                }
                                 // if recv_has.is_some() {
                                 object_set_key_value(mc, recv_obj, &key_clone, &value_clone)?;
                                 // } else {

@@ -101,6 +101,9 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     // __proto__ accessor property must be non-enumerable
     object_proto.borrow_mut(mc).set_non_enumerable("__proto__");
 
+    // Object.prototype is an immutable prototype exotic object (spec §19.1.3)
+    slot_set(mc, &object_proto, InternalSlot::ImmutablePrototype, &Value::Boolean(true));
+
     Ok(())
 }
 
@@ -1571,6 +1574,21 @@ pub fn handle_object_method<'gc>(
                         let success = crate::js_proxy::proxy_set_prototype_of(mc, proxy, &proto_val)?;
                         if !success {
                             return Err(raise_type_error!("'setPrototypeOf' on proxy: trap returned falsish").into());
+                        }
+                        return Ok(Value::Object(obj));
+                    }
+
+                    // Immutable prototype exotic objects (e.g. Object.prototype):
+                    // [[SetPrototypeOf]](V) returns true only if SameValue(V, current), else false → TypeError.
+                    if crate::core::slot_has(&obj, &InternalSlot::ImmutablePrototype) {
+                        let current_proto = obj.borrow().prototype;
+                        let same = match (current_proto, proto_obj) {
+                            (Some(cur), Some(next)) => crate::core::Gc::ptr_eq(cur, next),
+                            (None, None) => true,
+                            _ => false,
+                        };
+                        if !same {
+                            return Err(raise_type_error!("Cannot set prototype of immutable prototype object").into());
                         }
                         return Ok(Value::Object(obj));
                     }

@@ -54,6 +54,17 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             regexp_proto.borrow_mut(mc).set_non_enumerable(*match_sym);
         }
 
+        // Register Symbol.replace, Symbol.search, Symbol.split on RegExp.prototype
+        for sym_name in ["replace", "search", "split"] {
+            if let Some(sym_val) = object_get_key_value(sym_ctor, sym_name)
+                && let Value::Symbol(sym) = &*sym_val.borrow()
+            {
+                let fn_val = Value::Function(format!("RegExp.prototype.{sym_name}"));
+                object_set_key_value(mc, &regexp_proto, *sym, &fn_val)?;
+                regexp_proto.borrow_mut(mc).set_non_enumerable(*sym);
+            }
+        }
+
         if let Some(species_sym_val) = object_get_key_value(sym_ctor, "species")
             && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
         {

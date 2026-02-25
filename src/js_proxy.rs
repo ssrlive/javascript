@@ -1217,13 +1217,22 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                         return Err(raise_type_error!("'getOwnPropertyDescriptor' on proxy: trap reported non-configurable for property that is configurable in the proxy target").into());
                     }
 
-                    // Step 22: non-configurable+non-writable cannot be reported as writable
+                    // Step 22 (proxy-missing-checks): If resultDesc is non-configurable and non-writable,
+                    // but targetDesc is writable, throw TypeError.
+                    // Only applies to data descriptors (spec step 17b: IsDataDescriptor check).
                     if !result_configurable && !target_desc_configurable {
                         let result_writable = crate::core::object_get_key_value(desc_obj, "writable")
                             .map(|v| v.borrow().to_truthy())
                             .unwrap_or(false);
+                        let result_is_data = crate::core::object_get_key_value(desc_obj, "get").is_none()
+                            && crate::core::object_get_key_value(desc_obj, "set").is_none();
+                        // Original check: trap can't report writable for non-configurable non-writable target
                         if result_writable && !target_desc_writable {
                             return Err(raise_type_error!("'getOwnPropertyDescriptor' on proxy: trap reported writable for non-configurable non-writable property in the proxy target").into());
+                        }
+                        // New check: trap can't report non-writable data for non-configurable writable target
+                        if result_is_data && !result_writable && target_desc_writable {
+                            return Err(raise_type_error!("'getOwnPropertyDescriptor' on proxy: trap reported non-configurable non-writable for property that is writable in the proxy target").into());
                         }
                     }
                 } else {

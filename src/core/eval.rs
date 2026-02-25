@@ -12678,7 +12678,7 @@ pub fn evaluate_call_dispatch<'gc>(
                             let date_obj = crate::js_date::handle_date_constructor(mc, &[], env, None)?;
                             crate::js_date::handle_date_method(mc, &date_obj, "toString", &[], env)
                         } else if name == crate::unicode::utf8_to_utf16("RegExp") {
-                            Ok(crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), eval_args)?)
+                            Ok(crate::js_regexp::handle_regexp_call_with_env(mc, Some(env), eval_args)?)
                         } else if name == crate::unicode::utf8_to_utf16("String") {
                             Ok(crate::js_string::string_constructor(mc, eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("Boolean") {
@@ -16205,7 +16205,13 @@ fn evaluate_expr_property<'gc>(
             | "Reflect.getPrototypeOf"
             | "Reflect.isExtensible"
             | "Reflect.ownKeys"
-            | "Reflect.preventExtensions" => 1.0,
+            | "Reflect.preventExtensions"
+            | "ArrayBuffer.isView"
+            | "ArrayBuffer.prototype.resize"
+            | "RegExp.prototype.exec"
+            | "RegExp.prototype.test"
+            | "RegExp.prototype.match"
+            | "RegExp.prototype.search" => 1.0,
             "Array.prototype.slice"
             | "Array.prototype.splice"
             | "Array.prototype.copyWithin"
@@ -16241,9 +16247,13 @@ fn evaluate_expr_property<'gc>(
             | "Reflect.get"
             | "Reflect.getOwnPropertyDescriptor"
             | "Reflect.has"
-            | "Reflect.setPrototypeOf" => 2.0,
+            | "Reflect.setPrototypeOf"
+            | "ArrayBuffer.prototype.slice"
+            | "JSON.parse"
+            | "RegExp.prototype.replace"
+            | "RegExp.prototype.split" => 2.0,
             "Function.prototype.[Symbol.hasInstance]" => 1.0,
-            "Object.defineProperty" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
+            "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
             _ => {
                 if func_name.starts_with("DataView.prototype.get") {
                     1.0
@@ -16261,6 +16271,14 @@ fn evaluate_expr_property<'gc>(
         }
         let short_name = if func_name.contains("[Symbol.hasInstance]") {
             "[Symbol.hasInstance]"
+        } else if func_name == "RegExp.prototype.match" {
+            return Ok(Value::String(utf8_to_utf16("[Symbol.match]")));
+        } else if func_name == "RegExp.prototype.replace" {
+            return Ok(Value::String(utf8_to_utf16("[Symbol.replace]")));
+        } else if func_name == "RegExp.prototype.search" {
+            return Ok(Value::String(utf8_to_utf16("[Symbol.search]")));
+        } else if func_name == "RegExp.prototype.split" {
+            return Ok(Value::String(utf8_to_utf16("[Symbol.split]")));
         } else if func_name == "Map.prototype.size" || func_name == "Set.prototype.size" {
             let base = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
             return Ok(Value::String(utf8_to_utf16(&format!("get {}", base))));
@@ -17621,7 +17639,11 @@ fn evaluate_expr_index<'gc>(
                     | "Reflect.getPrototypeOf"
                     | "Reflect.isExtensible"
                     | "Reflect.ownKeys"
-                    | "Reflect.preventExtensions" => 1.0,
+                    | "Reflect.preventExtensions"
+                    | "RegExp.prototype.exec"
+                    | "RegExp.prototype.test"
+                    | "RegExp.prototype.match"
+                    | "RegExp.prototype.search" => 1.0,
                     "Array.prototype.slice"
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
@@ -17659,7 +17681,9 @@ fn evaluate_expr_index<'gc>(
                     | "Reflect.get"
                     | "Reflect.getOwnPropertyDescriptor"
                     | "Reflect.has"
-                    | "Reflect.setPrototypeOf" => 2.0,
+                    | "Reflect.setPrototypeOf"
+                    | "RegExp.prototype.replace"
+                    | "RegExp.prototype.split" => 2.0,
                     "Function.prototype.[Symbol.hasInstance]" => 1.0,
                     "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                     _ => {
@@ -17678,6 +17702,14 @@ fn evaluate_expr_index<'gc>(
                 }
                 let short_name = if func_name.contains("[Symbol.hasInstance]") {
                     "[Symbol.hasInstance]"
+                } else if func_name == "RegExp.prototype.match" {
+                    return Ok(Value::String(utf8_to_utf16("[Symbol.match]")));
+                } else if func_name == "RegExp.prototype.replace" {
+                    return Ok(Value::String(utf8_to_utf16("[Symbol.replace]")));
+                } else if func_name == "RegExp.prototype.search" {
+                    return Ok(Value::String(utf8_to_utf16("[Symbol.search]")));
+                } else if func_name == "RegExp.prototype.split" {
+                    return Ok(Value::String(utf8_to_utf16("[Symbol.split]")));
                 } else if func_name == "Map.prototype.size" || func_name == "Set.prototype.size" {
                     let base = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
                     return Ok(Value::String(utf8_to_utf16(&format!("get {}", base))));
@@ -18621,7 +18653,13 @@ pub fn call_native_function<'gc>(
     // @@species getters: return `this`
     if matches!(
         name,
-        "Promise.species" | "Array.species" | "ArrayBuffer.species" | "RegExp.species" | "Map.species" | "Set.species"
+        "Promise.species"
+            | "Array.species"
+            | "ArrayBuffer.species"
+            | "RegExp.species"
+            | "RegExp[Symbol.species]"
+            | "Map.species"
+            | "Set.species"
     ) {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         return Ok(Some(this_v.clone()));
@@ -18630,10 +18668,7 @@ pub fn call_native_function<'gc>(
     // RegExp.prototype accessor getters (dispatched via call_accessor)
     if let Some(prop) = name.strip_prefix("RegExp.prototype.get ") {
         let this_v = this_val.unwrap_or(&Value::Undefined);
-        if let Value::Object(obj) = this_v {
-            return crate::js_regexp::handle_regexp_getter(obj, prop);
-        }
-        return Ok(Some(Value::Undefined));
+        return crate::js_regexp::handle_regexp_getter_with_this(mc, env, this_v, prop);
     }
 
     // Date.prototype.* instance methods

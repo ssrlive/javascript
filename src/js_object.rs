@@ -1778,7 +1778,11 @@ pub fn handle_object_method<'gc>(
                             | "Reflect.getPrototypeOf"
                             | "Reflect.isExtensible"
                             | "Reflect.ownKeys"
-                            | "Reflect.preventExtensions" => 1.0,
+                            | "Reflect.preventExtensions"
+                            | "RegExp.prototype.exec"
+                            | "RegExp.prototype.test"
+                            | "RegExp.prototype.match"
+                            | "RegExp.prototype.search" => 1.0,
                             "Array.prototype.slice"
                             | "Array.prototype.splice"
                             | "Array.prototype.copyWithin"
@@ -1806,7 +1810,9 @@ pub fn handle_object_method<'gc>(
                             | "Reflect.get"
                             | "Reflect.getOwnPropertyDescriptor"
                             | "Reflect.has"
-                            | "Reflect.setPrototypeOf" => 2.0,
+                            | "Reflect.setPrototypeOf"
+                            | "RegExp.prototype.replace"
+                            | "RegExp.prototype.split" => 2.0,
                             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                             _ => 0.0,
                         };
@@ -1814,6 +1820,54 @@ pub fn handle_object_method<'gc>(
                     } else if prop_name == "name" {
                         let short_name = if func_name.contains("[Symbol.hasInstance]") {
                             "[Symbol.hasInstance]"
+                        } else if func_name == "RegExp.prototype.match" {
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16("[Symbol.match]")),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
+                        } else if func_name == "RegExp.prototype.replace" {
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16("[Symbol.replace]")),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
+                        } else if func_name == "RegExp.prototype.search" {
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16("[Symbol.search]")),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
+                        } else if func_name == "RegExp.prototype.split" {
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16("[Symbol.split]")),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
                         } else if func_name == "Map.prototype.size" || func_name == "Set.prototype.size" {
                             let base = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
                             return {

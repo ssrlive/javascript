@@ -430,19 +430,20 @@ pub enum InternalSlot {
     WeakSet, // __weakset__
 
     // --- RegExp ---
-    Regex,            // __regex
-    Flags,            // __flags
-    SwapGreed,        // __swapGreed
-    Crlf,             // __crlf
-    Locale,           // __locale
-    RegexGlobal,      // __global
-    RegexIgnoreCase,  // __ignoreCase
-    RegexMultiline,   // __multiline
-    RegexDotAll,      // __dotAll
-    RegexUnicode,     // __unicode
-    RegexSticky,      // __sticky
-    RegexHasIndices,  // __hasIndices
-    RegexUnicodeSets, // __unicodeSets
+    Regex,             // __regex
+    Flags,             // __flags
+    SwapGreed,         // __swapGreed
+    Crlf,              // __crlf
+    Locale,            // __locale
+    RegexGlobal,       // __global
+    RegexIgnoreCase,   // __ignoreCase
+    RegexMultiline,    // __multiline
+    RegexDotAll,       // __dotAll
+    RegexUnicode,      // __unicode
+    RegexSticky,       // __sticky
+    RegexHasIndices,   // __hasIndices
+    RegexUnicodeSets,  // __unicodeSets
+    IsRegExpPrototype, // marker for RegExp.prototype itself
 
     // --- Date ---
     Timestamp, // __timestamp

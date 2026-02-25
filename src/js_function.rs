@@ -249,9 +249,7 @@ pub fn handle_global_function<'gc>(
             let prop = &func_name["RegExp.prototype.get ".len()..];
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_v = this_rc.borrow().clone();
-                if let Value::Object(obj) = this_v
-                    && let Some(val) = crate::js_regexp::handle_regexp_getter(&obj, prop)?
-                {
+                if let Some(val) = crate::js_regexp::handle_regexp_getter_with_this(mc, env, &this_v, prop)? {
                     return Ok(val);
                 }
             }

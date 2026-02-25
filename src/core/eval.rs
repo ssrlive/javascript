@@ -19506,8 +19506,10 @@ pub(crate) fn call_accessor<'gc>(
                         return crate::core::call_closure(mc, cl, Some(&Value::Object(*receiver)), &[], env, Some(*obj));
                     }
                     Value::Function(name) => {
-                        // Native function used as accessor (e.g., DataView.prototype.buffer getter)
-                        if let Some(res) = call_native_function(mc, name, Some(&Value::Object(*receiver)), &[], env)? {
+                        // Use the function's defining realm if available (cross-realm accessor)
+                        let origin_env = crate::js_class::get_function_realm(obj).ok().flatten();
+                        let native_env = origin_env.as_ref().unwrap_or(env);
+                        if let Some(res) = call_native_function(mc, name, Some(&Value::Object(*receiver)), &[], native_env)? {
                             return Ok(res);
                         }
                     }

@@ -2110,6 +2110,11 @@ pub fn object_set_key_value<'gc>(
 
 pub fn env_get_own<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
     if let Some(slot) = str_to_internal_slot(key) {
+        // Check String key first (user-defined variables stored by hoisting/define_property),
+        // then fall back to Internal slot.
+        if let Some(v) = env.borrow().properties.get(&PropertyKey::String(key.to_string())).cloned() {
+            return Some(v);
+        }
         return env.borrow().properties.get(&PropertyKey::Internal(slot)).cloned();
     }
     env.borrow().properties.get(&PropertyKey::String(key.to_string())).cloned()
@@ -2117,10 +2122,15 @@ pub fn env_get_own<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'
 
 pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
     if let Some(slot) = str_to_internal_slot(key) {
-        let pk = PropertyKey::Internal(slot);
+        // Check String key first (user-defined variables), then Internal slot.
+        let str_pk = PropertyKey::String(key.to_string());
+        let int_pk = PropertyKey::Internal(slot);
         let mut current = Some(*env);
         while let Some(cur) = current {
-            if let Some(val) = cur.borrow().properties.get(&pk) {
+            if let Some(val) = cur.borrow().properties.get(&str_pk) {
+                return Some(*val);
+            }
+            if let Some(val) = cur.borrow().properties.get(&int_pk) {
                 return Some(*val);
             }
             current = cur.borrow().prototype;
@@ -2156,9 +2166,16 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
     } else {
         PropertyKey::String(key.to_string())
     };
+    let str_pk = PropertyKey::String(key.to_string());
 
     // If the current env already has this binding as an own property,
     // update it directly without walking the prototype chain.
+    // Check String key first (user-defined variables), then fall back to internal slot.
+    let has_own_str = env.borrow().properties.contains_key(&str_pk);
+    if has_own_str {
+        env.borrow_mut(mc).insert(str_pk, val_ptr);
+        return Ok(());
+    }
     let has_own = env.borrow().properties.contains_key(&pk);
     if has_own {
         env.borrow_mut(mc).insert(pk, val_ptr);
@@ -2170,6 +2187,12 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
     while let Some(c) = cur {
         if c.borrow().is_const(key) {
             return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
+        }
+        // Check String key first, then Internal
+        let found_str = c.borrow().properties.contains_key(&str_pk);
+        if found_str {
+            c.borrow_mut(mc).insert(str_pk, val_ptr);
+            return Ok(());
         }
         let found = c.borrow().properties.contains_key(&pk);
         if found {

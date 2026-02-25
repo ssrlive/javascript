@@ -1,5 +1,5 @@
 use crate::core::{
-    EvalError, InternalSlot, JSObjectDataPtr, MutationContext, Value, env_set, new_js_object_data, object_get_key_value,
+    EvalError, InternalSlot, JSObjectDataPtr, MutationContext, Value, env_set, new_gc_cell_ptr, new_js_object_data, object_get_key_value,
     object_set_key_value, slot_get, slot_set,
 };
 use crate::error::JSError;
@@ -100,7 +100,29 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         "flags",
     ];
     for prop_name in accessor_props {
-        let getter = Value::Function(format!("RegExp.prototype.get {prop_name}"));
+        let getter_fn = Value::Function(format!("RegExp.prototype.get {prop_name}"));
+        // Wrap getter in an Object with OriginGlobal so cross-realm .call() uses the
+        // getter's defining realm (not the caller's realm) for the %RegExp.prototype%
+        // identity check per spec §22.2.5 step 3a.
+        let getter_obj = new_js_object_data(mc);
+        getter_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, getter_fn)));
+        slot_set(mc, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        // Spec-required function properties: length = 0, name = "get <prop>"
+        object_set_key_value(mc, &getter_obj, "length", &Value::Number(0.0))?;
+        getter_obj.borrow_mut(mc).set_non_enumerable("length");
+        getter_obj.borrow_mut(mc).set_non_writable("length");
+        object_set_key_value(mc, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop_name}"))))?;
+        getter_obj.borrow_mut(mc).set_non_enumerable("name");
+        getter_obj.borrow_mut(mc).set_non_writable("name");
+        // Set prototype to Function.prototype
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*func_proto_val.borrow()
+        {
+            getter_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        let getter = Value::Object(getter_obj);
         let accessor = Value::Property {
             value: None,
             getter: Some(Box::new(getter)),
@@ -142,19 +164,40 @@ pub(crate) fn handle_regexp_getter_with_this<'gc>(
     this_val: &Value<'gc>,
     prop: &str,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    // Helper: throw a TypeError using the current env's TypeError constructor
+    // so cross-realm getters produce errors from their own realm.
+    let throw_realm_type_error = |msg: String| -> EvalError<'gc> {
+        let js_err = raise_type_error!(msg);
+        let val = crate::core::js_error_to_value(mc, env, &js_err);
+        EvalError::Throw(val, None, None)
+    };
+
     // Step 1: If Type(this) is not Object, throw TypeError
     let obj = match this_val {
         Value::Object(o) => o,
         _ => {
-            return Err(raise_type_error!(format!("RegExp.prototype.{prop} getter called on incompatible receiver")).into());
+            return Err(throw_realm_type_error(format!(
+                "RegExp.prototype.{prop} getter called on incompatible receiver"
+            )));
         }
+    };
+
+    // Helper: check if obj is the *current realm's* %RegExp.prototype% (identity check)
+    let is_this_realm_regexp_proto = if let Some(regexp_ctor_val) = object_get_key_value(env, "RegExp")
+        && let Value::Object(regexp_ctor) = &*regexp_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(regexp_ctor, "prototype")
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        std::ptr::eq(&**obj as *const _, &**proto_obj as *const _)
+    } else {
+        false
     };
 
     // Special case: `flags` getter should work on any object per spec §22.2.5.3
     // MUST always read properties observably (never use internal flags slot)
     if prop == "flags" {
         // For RegExp.prototype with no actual regex, return ""
-        if slot_get(obj, &InternalSlot::IsRegExpPrototype).is_some() && slot_get(obj, &InternalSlot::Regex).is_none() {
+        if is_this_realm_regexp_proto && slot_get(obj, &InternalSlot::Regex).is_none() {
             return Ok(Some(Value::String(Vec::new())));
         }
         // Build flags from observable property reads (spec §22.2.5.3)
@@ -178,19 +221,23 @@ pub(crate) fn handle_regexp_getter_with_this<'gc>(
         return Ok(Some(Value::String(utf8_to_utf16(&result))));
     }
 
-    // Check if obj is actually a RegExp (has __regex internal slot)
+    // Check if obj is actually a RegExp (has [[OriginalFlags]] / __regex internal slot)
     let is_regexp = slot_get(obj, &InternalSlot::Regex).is_some();
     if !is_regexp {
-        // Step 2: If this does not have [[OriginalFlags]], check if it's %RegExp.prototype%
-        if slot_get(obj, &InternalSlot::IsRegExpPrototype).is_some() {
-            // RegExp.prototype: source → "(?:)", flag booleans → undefined
+        // Step 3: If R does not have [[OriginalFlags]], then
+        //   a. If SameValue(R, %RegExpPrototype%) is true, return undefined.
+        //   b. Otherwise, throw TypeError.
+        // SameValue means identity check against the *current realm's* %RegExpPrototype%.
+        if is_this_realm_regexp_proto {
             return match prop {
                 "source" => Ok(Some(Value::String(utf8_to_utf16("(?:)")))),
                 _ => Ok(Some(Value::Undefined)), // global, ignoreCase, etc.
             };
         }
-        // Otherwise, throw TypeError
-        return Err(raise_type_error!(format!("RegExp.prototype.{prop} getter requires a RegExp object")).into());
+        // Otherwise, throw TypeError (includes cross-realm RegExp.prototype)
+        return Err(throw_realm_type_error(format!(
+            "RegExp.prototype.{prop} getter requires a RegExp object"
+        )));
     }
     match prop {
         "source" => {
@@ -897,6 +944,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             }
 
             let re = create_regex_from_utf16(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
+            let full_unicode = flags.contains('u') || flags.contains('v');
 
             // Per spec (22.2.5.2.2): Always read lastIndex via Get (observable)
             let last_index_val = crate::core::get_property_with_accessors(mc, env, object, "lastIndex").unwrap_or(Value::Number(0.0));
@@ -910,7 +958,13 @@ pub(crate) fn handle_regexp_method<'gc>(
                 0
             };
 
-            let match_result = re.find_from_utf16(&working_input, last_index).next();
+            // Per spec: without 'u'/'v' flag, operate on UTF-16 code units (ucs2);
+            // with 'u'/'v' flag, operate on codepoints (utf16 decodes surrogate pairs).
+            let match_result = if full_unicode {
+                re.find_from_utf16(&working_input, last_index).next()
+            } else {
+                re.find_from_ucs2(&working_input, last_index).next()
+            };
             // For sticky: match must start at exactly lastIndex
             let match_result = if sticky {
                 match match_result {
@@ -1101,14 +1155,32 @@ pub(crate) fn handle_regexp_method<'gc>(
                 (input_u16.clone(), false)
             };
 
-            let re = create_regex_from_utf16(&pattern_u16, &flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
+            // Filter flags for regress (same as exec)
+            let mut r_flags = String::new();
+            for c in flags.chars() {
+                if "gimsuy".contains(c) {
+                    r_flags.push(c);
+                }
+                if c == 'v' {
+                    r_flags.push('u');
+                }
+            }
+
+            let re = create_regex_from_utf16(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
+            let full_unicode = flags.contains('u') || flags.contains('v');
 
             // Per spec: Always read lastIndex via Get (observable), then ToLength
             let last_index_val = crate::core::get_property_with_accessors(mc, env, object, "lastIndex").unwrap_or(Value::Number(0.0));
             let raw_last_index = to_length_with_coercion(mc, &last_index_val, env)?;
             let last_index = if use_last { raw_last_index } else { 0 };
 
-            let match_result = re.find_from_utf16(&working_input, last_index).next();
+            // Per spec: without 'u'/'v' flag, operate on UTF-16 code units (ucs2);
+            // with 'u'/'v' flag, operate on codepoints (utf16 decodes surrogate pairs).
+            let match_result = if full_unicode {
+                re.find_from_utf16(&working_input, last_index).next()
+            } else {
+                re.find_from_ucs2(&working_input, last_index).next()
+            };
             // For sticky: match must start at exactly lastIndex
             let match_result = if sticky {
                 match match_result {
@@ -1608,7 +1680,12 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             if input_str.is_empty() {
                 // Empty string: if regex matches empty string, return []; else return [""]
-                if re.find_from_utf16(&input_str, 0).next().is_some() {
+                let empty_match = if full_unicode {
+                    re.find_from_utf16(&input_str, 0).next().is_some()
+                } else {
+                    re.find_from_ucs2(&input_str, 0).next().is_some()
+                };
+                if empty_match {
                     set_array_length(mc, &result_array, 0)?;
                 } else {
                     object_set_key_value(mc, &result_array, 0usize, &Value::String(input_str))?;
@@ -1623,7 +1700,11 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             while q < str_len {
                 // Try sticky match at position q
-                let m = re.find_from_utf16(&input_str, q).next();
+                let m = if full_unicode {
+                    re.find_from_utf16(&input_str, q).next()
+                } else {
+                    re.find_from_ucs2(&input_str, q).next()
+                };
                 let m = match m {
                     Some(m) if m.range.start == q => m, // sticky: must match at q
                     _ => {

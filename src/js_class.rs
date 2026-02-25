@@ -1465,7 +1465,17 @@ pub(crate) fn evaluate_new<'gc>(
                     }
                     "Array" => return crate::js_array::handle_array_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
                     "Date" => return crate::js_date::handle_date_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
-                    "RegExp" => return crate::js_regexp::handle_regexp_constructor(mc, evaluated_args),
+                    "RegExp" => {
+                        let result = crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(&ctor_realm_env), evaluated_args)?;
+                        // GetPrototypeFromConstructor: override prototype from newTarget
+                        if let Some(Value::Object(nt_obj)) = new_target
+                            && let Value::Object(result_obj) = &result
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "RegExp")?
+                        {
+                            result_obj.borrow_mut(mc).prototype = Some(proto);
+                        }
+                        return Ok(result);
+                    }
                     "Object" => {
                         // Per spec: If NewTarget is neither undefined nor the active function (Object),
                         // return OrdinaryCreateFromConstructor(NewTarget, "%ObjectPrototype%").

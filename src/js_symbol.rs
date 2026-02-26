@@ -154,6 +154,17 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
     }
 
+    // §20.4.3.5 Symbol.prototype[@@toPrimitive](hint)
+    // Returns the primitive Symbol value (thisSymbolValue(this value)).
+    if let Some(tp_sym_val) = object_get_key_value(&symbol_ctor, "toPrimitive")
+        && let Value::Symbol(tp_sym) = &*tp_sym_val.borrow()
+    {
+        let tp_fn = Value::Function("Symbol.prototype.[Symbol.toPrimitive]".to_string());
+        object_set_key_value(mc, &symbol_proto, *tp_sym, &tp_fn)?;
+        symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tp_sym));
+        symbol_proto.borrow_mut(mc).set_non_configurable(PropertyKey::Symbol(*tp_sym));
+    }
+
     env_set(mc, env, "Symbol", &Value::Object(symbol_ctor))?;
 
     Ok(())

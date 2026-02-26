@@ -1440,10 +1440,21 @@ fn call_to_string_strict<'gc>(
     if matches!(method_val, Value::Undefined | Value::Null) {
         return Ok(Value::Uninitialized);
     }
-    if matches!(
-        method_val,
-        Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_)
-    ) {
+    // Only call if the value is actually callable
+    let is_callable = match &method_val {
+        Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) => true,
+        Value::Object(func_obj) => {
+            func_obj.borrow().get_closure().is_some()
+                || func_obj.borrow().class_def.is_some()
+                || crate::core::slot_get_chained(func_obj, &InternalSlot::IsConstructor).is_some()
+                || crate::core::slot_get_chained(func_obj, &InternalSlot::NativeCtor).is_some()
+                || crate::core::slot_get_chained(func_obj, &InternalSlot::Callable)
+                    .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+                    .unwrap_or(false)
+        }
+        _ => false,
+    };
+    if is_callable {
         evaluate_call_dispatch(mc, env, &method_val, Some(&Value::Object(*obj_ptr)), &Vec::new())
     } else {
         Ok(Value::Uninitialized)

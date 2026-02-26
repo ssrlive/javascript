@@ -12397,6 +12397,39 @@ pub fn evaluate_call_dispatch<'gc>(
                             }
                         }
                     }
+                    // §22.1.3.* spec: For split/match/search/replace,
+                    // the @@symbol dispatch on the argument must happen BEFORE ToString(this).
+                    // Check for @@symbol method on the first argument before converting this to string.
+                    // Note: matchAll is NOT included here because it needs to check IsRegExp + 'g' flag first.
+                    let symbol_name = match method {
+                        "split" => Some("split"),
+                        "match" => Some("match"),
+                        "search" => Some("search"),
+                        "replace" | "replaceAll" => Some("replace"),
+                        _ => None,
+                    };
+                    if let Some(sym) = symbol_name
+                        && !eval_args.is_empty()
+                    {
+                        let arg0 = &eval_args[0];
+                        if !matches!(arg0, Value::Undefined | Value::Null)
+                            && let Value::Object(obj) = arg0
+                            && let Some(func) = crate::js_string::get_well_known_symbol_method(mc, env, obj, sym)?
+                        {
+                            // Build args per spec:
+                            // match/search: Call(func, arg0, « this »)
+                            // replace/replaceAll: Call(func, arg0, « this, replaceValue »)
+                            // split: Call(func, arg0, « this, limit »)
+                            let call_args: Vec<Value<'gc>> = match method {
+                                "match" | "search" => vec![this_v.clone()],
+                                _ => {
+                                    let second = eval_args.get(1).cloned().unwrap_or(Value::Undefined);
+                                    vec![this_v.clone(), second]
+                                }
+                            };
+                            return evaluate_call_dispatch(mc, env, &func, Some(arg0), &call_args);
+                        }
+                    }
                     let s_vec = match this_v {
                         Value::String(s) => s.clone(),
                         Value::Object(obj) => {
@@ -19476,6 +19509,13 @@ pub fn call_native_function<'gc>(
         return Ok(Some(crate::js_symbol::handle_symbol_valueof(mc, this_v)?));
     }
 
+    // §20.4.3.5 Symbol.prototype[@@toPrimitive](hint)
+    // Returns thisSymbolValue(this value) — same as valueOf.
+    if name == "Symbol.prototype.[Symbol.toPrimitive]" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(crate::js_symbol::handle_symbol_valueof(mc, this_v)?));
+    }
+
     if name == "Symbol.prototype.description.get" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         return Ok(Some(crate::js_symbol::handle_symbol_description_get(mc, this_v)?));
@@ -21754,10 +21794,10 @@ fn evaluate_expr_new<'gc>(
                         return crate::js_promise::handle_promise_constructor_val(mc, &eval_args, env);
                     } else if name_str == "String" {
                         // new String(symbol) must throw TypeError (spec 22.1.1.1 step 2b)
-                        if let Some(arg) = eval_args.first() {
-                            if matches!(arg, Value::Symbol(_)) {
-                                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
-                            }
+                        if let Some(arg) = eval_args.first()
+                            && matches!(arg, Value::Symbol(_))
+                        {
+                            return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                         }
                         let val = match crate::js_string::string_constructor(mc, &eval_args, env)? {
                             Value::String(s) => s,

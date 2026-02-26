@@ -2424,7 +2424,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     && !o.properties.contains_key(&PropertyKey::Internal(InternalSlot::TypedArray))
             };
 
-            if is_plain_dense {
+            // The fast path returns Some(result) on success, or None if it must
+            // bail (holes that may be inherited from prototype, accessor properties).
+            let fast_result = if is_plain_dense {
                 // Read length directly from own property
                 let current_len = {
                     let o = object.borrow();
@@ -2439,50 +2441,72 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if current_len == 0 {
-                    return Ok(Value::Number(-1.0));
-                }
-
-                let search_element = args.first().cloned().unwrap_or(Value::Undefined);
-                let from_index = if args.len() > 1 {
-                    let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
-                    let n = crate::core::to_number(&prim)?;
-                    if n.is_nan() || n == 0.0 {
-                        0isize
-                    } else if n.is_infinite() {
-                        if n.is_sign_negative() { isize::MIN } else { isize::MAX }
+                    Some(Value::Number(-1.0))
+                } else {
+                    let search_element = args.first().cloned().unwrap_or(Value::Undefined);
+                    let from_index = if args.len() > 1 {
+                        let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                        let n = crate::core::to_number(&prim)?;
+                        if n.is_nan() || n == 0.0 {
+                            0isize
+                        } else if n.is_infinite() {
+                            if n.is_sign_negative() { isize::MIN } else { isize::MAX }
+                        } else {
+                            n.trunc() as isize
+                        }
                     } else {
-                        n.trunc() as isize
-                    }
-                } else {
-                    0isize
-                };
+                        0isize
+                    };
 
-                let start = if from_index < 0 {
-                    (current_len as isize + from_index).max(0) as usize
-                } else {
-                    from_index as usize
-                };
+                    let start = if from_index < 0 {
+                        (current_len as isize + from_index).max(0) as usize
+                    } else {
+                        from_index as usize
+                    };
 
-                let o = object.borrow();
-                for i in start..current_len {
-                    let key = PropertyKey::String(i.to_string());
-                    if let Some(val_ptr) = o.properties.get(&key) {
-                        let element = val_ptr.borrow();
-                        let is_match = match (&*element, &search_element) {
-                            (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
-                            (Value::String(a), Value::String(b)) => a == b,
-                            (Value::Boolean(a), Value::Boolean(b)) => a == b,
-                            (Value::Null, Value::Null) => true,
-                            (Value::Undefined, Value::Undefined) => true,
-                            _ => false, // strict equality for different types
-                        };
-                        if is_match {
-                            return Ok(Value::Number(i as f64));
+                    let o = object.borrow();
+                    let mut result = Some(Value::Number(-1.0));
+                    for i in start..current_len {
+                        let key = PropertyKey::String(i.to_string());
+                        match o.properties.get(&key) {
+                            Some(val_ptr) => {
+                                let element = val_ptr.borrow();
+                                // Accessor / descriptor properties need the slow path
+                                // (getter side-effects, prototype traversal, etc.)
+                                if matches!(&*element, Value::Getter(..) | Value::Property { .. }) {
+                                    result = None;
+                                    break;
+                                }
+                                let is_match = match (&*element, &search_element) {
+                                    (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
+                                    (Value::String(a), Value::String(b)) => a == b,
+                                    (Value::Boolean(a), Value::Boolean(b)) => a == b,
+                                    (Value::Symbol(a), Value::Symbol(b)) => Gc::ptr_eq(*a, *b),
+                                    (Value::Null, Value::Null) => true,
+                                    (Value::Undefined, Value::Undefined) => true,
+                                    (Value::Object(a), Value::Object(b)) => std::ptr::eq(a.as_ptr() as *const (), b.as_ptr() as *const ()),
+                                    _ => false, // strict equality for different types
+                                };
+                                if is_match {
+                                    result = Some(Value::Number(i as f64));
+                                    break;
+                                }
+                            }
+                            None => {
+                                // Hole — may be inherited from prototype; bail to slow path
+                                result = None;
+                                break;
+                            }
                         }
                     }
-                    // holes: skip (indexOf skips holes per spec)
+                    result
                 }
-                return Ok(Value::Number(-1.0));
+            } else {
+                None
+            };
+
+            if let Some(r) = fast_result {
+                return Ok(r);
             }
 
             // -- Slow path: typed arrays, proxies, sparse arrays with accessors --

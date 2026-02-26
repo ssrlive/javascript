@@ -4799,6 +4799,7 @@ fn eval_res<'gc>(
                 stmts_may_create_closure(&for_stmt.body)
                     || for_stmt.test.as_ref().is_some_and(expr_may_create_closure)
                     || for_stmt.update.as_ref().is_some_and(|s| stmt_may_create_closure(s))
+                    || for_stmt.init.as_ref().is_some_and(|s| stmt_may_create_closure(s))
             };
 
             if let Some(init_stmt) = &for_stmt.init {
@@ -13130,7 +13131,12 @@ fn evaluate_expr_call<'gc>(
                     let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
                     for k in 0..len {
                         let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
-                        eval_args.push(item.borrow().clone());
+                        let val = match &*item.borrow() {
+                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                            Value::Property { value: None, .. } => Value::Undefined,
+                            other => other.clone(),
+                        };
+                        eval_args.push(val);
                     }
                 } else {
                     // Support generic iterables via Symbol.iterator
@@ -13648,7 +13654,12 @@ fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
                     for k in 0..len {
                         let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
-                        eval_args.push(item.borrow().clone());
+                        let val = match &*item.borrow() {
+                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                            Value::Property { value: None, .. } => Value::Undefined,
+                            other => other.clone(),
+                        };
+                        eval_args.push(val);
                     }
                 } else {
                     // Support generic iterables via Symbol.iterator
@@ -19045,7 +19056,12 @@ pub fn call_native_function<'gc>(
                     for k in 0..len {
                         let key = PropertyKey::String(k.to_string());
                         if let Some(val_ptr) = borrowed.properties.get(&key) {
-                            rest_args.push(val_ptr.borrow().clone());
+                            let val = match &*val_ptr.borrow() {
+                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                Value::Property { value: None, .. } => Value::Undefined,
+                                other => other.clone(),
+                            };
+                            rest_args.push(val);
                         } else {
                             rest_args.push(Value::Undefined);
                         }
@@ -21014,7 +21030,12 @@ fn evaluate_expr_new<'gc>(
                     let len = object_get_length(&obj).unwrap_or(0);
                     for k in 0..len {
                         let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
-                        eval_args.push(item.borrow().clone());
+                        let val = match &*item.borrow() {
+                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                            Value::Property { value: None, .. } => Value::Undefined,
+                            other => other.clone(),
+                        };
+                        eval_args.push(val);
                     }
                 } else {
                     // Support iterable spread for constructors: if object has Symbol.iterator, iterate and push

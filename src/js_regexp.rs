@@ -2198,10 +2198,7 @@ pub(crate) fn handle_regexp_string_iterator_next<'gc>(
         } else {
             Value::Undefined
         };
-        let match_str = match &match_val {
-            Value::String(s) => s.clone(),
-            other => utf8_to_utf16(&crate::core::value_to_string(other)),
-        };
+        let match_str = crate::js_string::spec_to_string(mc, &match_val, env)?;
 
         // 5.a.ii. If matchStr is the empty String, advance lastIndex
         if match_str.is_empty()

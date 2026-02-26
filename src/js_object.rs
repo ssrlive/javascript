@@ -1802,7 +1802,27 @@ pub fn handle_object_method<'gc>(
                             | "RegExp.prototype.match"
                             | "RegExp.prototype.matchAll"
                             | "RegExp.prototype.search"
-                            | "RegExp.escape" => 1.0,
+                            | "RegExp.escape"
+                            | "String.prototype.charAt"
+                            | "String.prototype.charCodeAt"
+                            | "String.prototype.codePointAt"
+                            | "String.prototype.concat"
+                            | "String.prototype.endsWith"
+                            | "String.prototype.indexOf"
+                            | "String.prototype.lastIndexOf"
+                            | "String.prototype.localeCompare"
+                            | "String.prototype.match"
+                            | "String.prototype.matchAll"
+                            | "String.prototype.padEnd"
+                            | "String.prototype.padStart"
+                            | "String.prototype.repeat"
+                            | "String.prototype.search"
+                            | "String.prototype.startsWith"
+                            | "String.prototype.at"
+                            | "String.prototype.includes"
+                            | "String.fromCharCode"
+                            | "String.fromCodePoint"
+                            | "String.raw" => 1.0,
                             "Array.prototype.slice"
                             | "Array.prototype.splice"
                             | "Array.prototype.copyWithin"
@@ -1832,7 +1852,13 @@ pub fn handle_object_method<'gc>(
                             | "Reflect.has"
                             | "Reflect.setPrototypeOf"
                             | "RegExp.prototype.replace"
-                            | "RegExp.prototype.split" => 2.0,
+                            | "RegExp.prototype.split"
+                            | "String.prototype.replace"
+                            | "String.prototype.replaceAll"
+                            | "String.prototype.slice"
+                            | "String.prototype.split"
+                            | "String.prototype.substring"
+                            | "String.prototype.substr" => 2.0,
                             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                             _ => 0.0,
                         };
@@ -1918,6 +1944,18 @@ pub fn handle_object_method<'gc>(
                                 let desc_obj = crate::core::create_descriptor_object(
                                     mc,
                                     &Value::String(utf8_to_utf16("get [Symbol.species]")),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
+                        } else if func_name.ends_with("[Symbol.iterator]") {
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16("[Symbol.iterator]")),
                                     false,
                                     false,
                                     true,

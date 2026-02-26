@@ -226,11 +226,6 @@ pub(crate) fn es_string_to_number(s: &str) -> f64 {
     result
 }
 
-/// Legacy wrapper kept for external callers.
-pub(crate) fn string_to_f64(s: &str) -> Result<f64, JSError> {
-    Ok(es_string_to_number(s))
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Static methods
 // ═══════════════════════════════════════════════════════════════════════════════

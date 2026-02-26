@@ -12330,11 +12330,11 @@ pub fn evaluate_call_dispatch<'gc>(
                 Ok(handle_date_static_method(mc, method, eval_args, env)?)
             } else if name.starts_with("String.") {
                 if name == "String.fromCharCode" {
-                    Ok(string_from_char_code(eval_args)?)
+                    Ok(string_from_char_code(mc, eval_args, env)?)
                 } else if name == "String.fromCodePoint" {
-                    Ok(string_from_code_point(eval_args)?)
+                    Ok(string_from_code_point(mc, eval_args, env)?)
                 } else if name == "String.raw" {
-                    Ok(string_raw(eval_args)?)
+                    Ok(string_raw(mc, eval_args, env)?)
                 } else if let Some(method) = name.strip_prefix("String.prototype.") {
                     // String instance methods need a 'this' value which should be the first argument if called directly?
                     // But here we are calling the function object directly.
@@ -12368,20 +12368,52 @@ pub fn evaluate_call_dispatch<'gc>(
 
                     // Use the provided `this` value (from method call) as the receiver; fall back to ToString conversion
                     let this_v = this_val.unwrap_or(&Value::Undefined);
+                    // RequireObjectCoercible: throw TypeError for null/undefined this
+                    if matches!(this_v, Value::Undefined | Value::Null) {
+                        return Err(raise_type_error!(format!("String.prototype.{method} called on null or undefined")).into());
+                    }
+                    // toString and valueOf: thisStringValue check — only accepts String or String wrapper object
+                    if method == "toString" || method == "valueOf" {
+                        match this_v {
+                            Value::String(_) => {} // OK
+                            Value::Object(obj) => {
+                                if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
+                                    if !matches!(&*val_rc.borrow(), Value::String(_)) {
+                                        return Err(raise_type_error!(format!(
+                                            "String.prototype.{method} requires that 'this' be a String"
+                                        ))
+                                        .into());
+                                    }
+                                } else {
+                                    return Err(
+                                        raise_type_error!(format!("String.prototype.{method} requires that 'this' be a String")).into(),
+                                    );
+                                }
+                            }
+                            _ => {
+                                return Err(
+                                    raise_type_error!(format!("String.prototype.{method} requires that 'this' be a String")).into(),
+                                );
+                            }
+                        }
+                    }
                     let s_vec = match this_v {
                         Value::String(s) => s.clone(),
                         Value::Object(obj) => {
+                            // Check for wrapper objects (String, Number, Boolean)
                             if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
-                                if let Value::String(s2) = &*val_rc.borrow() {
-                                    s2.clone()
-                                } else {
-                                    utf8_to_utf16(&value_to_string(this_v))
+                                let pv = val_rc.borrow().clone();
+                                match pv {
+                                    Value::String(s2) => s2,
+                                    // Non-string PrimitiveValue — convert the inner primitive to string
+                                    _ => crate::js_string::spec_to_string(mc, &pv, env)?,
                                 }
                             } else {
-                                utf8_to_utf16(&value_to_string(this_v))
+                                // Regular object — use ToPrimitive → ToString
+                                crate::js_string::spec_to_string(mc, this_v, env)?
                             }
                         }
-                        _ => utf8_to_utf16(&value_to_string(this_v)),
+                        _ => crate::js_string::spec_to_string(mc, this_v, env)?,
                     };
                     Ok(handle_string_method(mc, &s_vec, method, eval_args, env)?)
                 } else {
@@ -16329,7 +16361,27 @@ fn evaluate_expr_property<'gc>(
             | "RegExp.prototype.match"
             | "RegExp.prototype.matchAll"
             | "RegExp.prototype.search"
-            | "RegExp.escape" => 1.0,
+            | "RegExp.escape"
+            | "String.prototype.charAt"
+            | "String.prototype.charCodeAt"
+            | "String.prototype.codePointAt"
+            | "String.prototype.concat"
+            | "String.prototype.endsWith"
+            | "String.prototype.indexOf"
+            | "String.prototype.lastIndexOf"
+            | "String.prototype.localeCompare"
+            | "String.prototype.match"
+            | "String.prototype.matchAll"
+            | "String.prototype.padEnd"
+            | "String.prototype.padStart"
+            | "String.prototype.repeat"
+            | "String.prototype.search"
+            | "String.prototype.startsWith"
+            | "String.prototype.at"
+            | "String.prototype.includes"
+            | "String.fromCharCode"
+            | "String.fromCodePoint"
+            | "String.raw" => 1.0,
             "Array.prototype.slice"
             | "Array.prototype.splice"
             | "Array.prototype.copyWithin"
@@ -16370,7 +16422,13 @@ fn evaluate_expr_property<'gc>(
             | "SharedArrayBuffer.prototype.slice"
             | "JSON.parse"
             | "RegExp.prototype.replace"
-            | "RegExp.prototype.split" => 2.0,
+            | "RegExp.prototype.split"
+            | "String.prototype.replace"
+            | "String.prototype.replaceAll"
+            | "String.prototype.slice"
+            | "String.prototype.split"
+            | "String.prototype.substring"
+            | "String.prototype.substr" => 2.0,
             "Function.prototype.[Symbol.hasInstance]" => 1.0,
             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
             _ => {
@@ -16405,6 +16463,8 @@ fn evaluate_expr_property<'gc>(
             return Ok(Value::String(utf8_to_utf16(&format!("get {}", base))));
         } else if func_name.ends_with("[Symbol.species]") {
             return Ok(Value::String(utf8_to_utf16("get [Symbol.species]")));
+        } else if func_name.ends_with("[Symbol.iterator]") {
+            return Ok(Value::String(utf8_to_utf16("[Symbol.iterator]")));
         } else {
             func_name.rsplit('.').next().unwrap_or(func_name.as_str())
         };
@@ -17766,7 +17826,27 @@ fn evaluate_expr_index<'gc>(
                     | "RegExp.prototype.match"
                     | "RegExp.prototype.matchAll"
                     | "RegExp.prototype.search"
-                    | "RegExp.escape" => 1.0,
+                    | "RegExp.escape"
+                    | "String.prototype.charAt"
+                    | "String.prototype.charCodeAt"
+                    | "String.prototype.codePointAt"
+                    | "String.prototype.concat"
+                    | "String.prototype.endsWith"
+                    | "String.prototype.indexOf"
+                    | "String.prototype.lastIndexOf"
+                    | "String.prototype.localeCompare"
+                    | "String.prototype.match"
+                    | "String.prototype.matchAll"
+                    | "String.prototype.padEnd"
+                    | "String.prototype.padStart"
+                    | "String.prototype.repeat"
+                    | "String.prototype.search"
+                    | "String.prototype.startsWith"
+                    | "String.prototype.at"
+                    | "String.prototype.includes"
+                    | "String.fromCharCode"
+                    | "String.fromCodePoint"
+                    | "String.raw" => 1.0,
                     "Array.prototype.slice"
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
@@ -17807,7 +17887,13 @@ fn evaluate_expr_index<'gc>(
                     | "Reflect.has"
                     | "Reflect.setPrototypeOf"
                     | "RegExp.prototype.replace"
-                    | "RegExp.prototype.split" => 2.0,
+                    | "RegExp.prototype.split"
+                    | "String.prototype.replace"
+                    | "String.prototype.replaceAll"
+                    | "String.prototype.slice"
+                    | "String.prototype.split"
+                    | "String.prototype.substring"
+                    | "String.prototype.substr" => 2.0,
                     "Function.prototype.[Symbol.hasInstance]" => 1.0,
                     "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                     _ => {
@@ -17841,6 +17927,8 @@ fn evaluate_expr_index<'gc>(
                     return Ok(Value::String(utf8_to_utf16(&format!("get {}", base))));
                 } else if func_name.ends_with("[Symbol.species]") {
                     return Ok(Value::String(utf8_to_utf16("get [Symbol.species]")));
+                } else if func_name.ends_with("[Symbol.iterator]") {
+                    return Ok(Value::String(utf8_to_utf16("[Symbol.iterator]")));
                 } else {
                     func_name.rsplit('.').next().unwrap_or(func_name.as_str())
                 };
@@ -21665,6 +21753,12 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "Promise" {
                         return crate::js_promise::handle_promise_constructor_val(mc, &eval_args, env);
                     } else if name_str == "String" {
+                        // new String(symbol) must throw TypeError (spec 22.1.1.1 step 2b)
+                        if let Some(arg) = eval_args.first() {
+                            if matches!(arg, Value::Symbol(_)) {
+                                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                            }
+                        }
                         let val = match crate::js_string::string_constructor(mc, &eval_args, env)? {
                             Value::String(s) => s,
                             _ => Vec::new(),

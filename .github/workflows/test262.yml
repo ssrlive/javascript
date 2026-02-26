@@ -226,8 +226,8 @@ jobs:
               FOCUS='built-ins/RegExp,built-ins/RegExpStringIteratorPrototype,built-ins/ShadowRealm'
               ;;
             37)
-              TITLE='"built-ins/SharedArrayBuffer"'
-              FOCUS='built-ins/SharedArrayBuffer'
+              TITLE='"built-ins/SharedArrayBuffer" - "built-ins/String"'
+              FOCUS='built-ins/SharedArrayBuffer,built-ins/String'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

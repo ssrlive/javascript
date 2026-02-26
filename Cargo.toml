@@ -31,6 +31,7 @@ num-traits = "0.2.19"
 regress = { version = "0.10", features = ["utf16"], git = "https://github.com/ssrlive/regress.git", rev = "26fe374" }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
+unicode-normalization = "0.1.25"
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.182", optional = true }

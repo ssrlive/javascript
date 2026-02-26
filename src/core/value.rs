@@ -509,6 +509,12 @@ pub enum InternalSlot {
     LookupGetter, // __lookupGetter__
     LookupSetter, // __lookupSetter__
 
+    // --- ShadowRealm ---
+    ShadowRealm,        // __shadow_realm  (isolated global env for a ShadowRealm instance)
+    WrappedTarget,      // __wrapped_target (target function of a WrappedFunction)
+    WrappedCallerRealm, // __wrapped_caller_realm
+    WrappedTargetRealm, // __wrapped_target_realm
+
     // --- Dynamic keys (carry runtime data) ---
     ClassField(String),   // __class_field_{suffix}
     ParamBinding(String), // __param_binding__{name}
@@ -678,6 +684,11 @@ pub fn str_to_internal_slot(s: &str) -> Option<InternalSlot> {
         "__eof" => return Some(InternalSlot::Eof),
         "__lookupGetter__" => return Some(InternalSlot::LookupGetter),
         "__lookupSetter__" => return Some(InternalSlot::LookupSetter),
+        // ShadowRealm
+        "__shadow_realm" => return Some(InternalSlot::ShadowRealm),
+        "__wrapped_target" => return Some(InternalSlot::WrappedTarget),
+        "__wrapped_caller_realm" => return Some(InternalSlot::WrappedCallerRealm),
+        "__wrapped_target_realm" => return Some(InternalSlot::WrappedTargetRealm),
         _ => {} // fall through to prefix matching below
     }
 

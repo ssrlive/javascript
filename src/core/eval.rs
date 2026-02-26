@@ -2342,8 +2342,78 @@ fn check_stmt_for_forbidden_assignment(stmt: &Statement) -> bool {
     }
 }
 
-fn check_strict_mode_violations<'gc>(stmts: &[Statement]) -> Result<(), EvalError<'gc>> {
+/// Check an expression tree for assignments to `arguments` or `eval` (strict mode SyntaxError).
+fn check_strict_expr_violations<'gc>(expr: &Expr) -> Result<(), EvalError<'gc>> {
+    match expr {
+        Expr::Assign(lhs, rhs) => {
+            if let Expr::Var(name, _, _) = &**lhs
+                && (name == "arguments" || name == "eval")
+            {
+                return Err(raise_syntax_error!(format!("Unexpected eval or arguments in strict mode")).into());
+            }
+            check_strict_expr_violations(rhs)?;
+        }
+        Expr::AddAssign(lhs, rhs)
+        | Expr::SubAssign(lhs, rhs)
+        | Expr::MulAssign(lhs, rhs)
+        | Expr::DivAssign(lhs, rhs)
+        | Expr::ModAssign(lhs, rhs)
+        | Expr::PowAssign(lhs, rhs)
+        | Expr::BitAndAssign(lhs, rhs)
+        | Expr::BitOrAssign(lhs, rhs)
+        | Expr::BitXorAssign(lhs, rhs)
+        | Expr::LeftShiftAssign(lhs, rhs)
+        | Expr::RightShiftAssign(lhs, rhs)
+        | Expr::UnsignedRightShiftAssign(lhs, rhs)
+        | Expr::LogicalAndAssign(lhs, rhs)
+        | Expr::LogicalOrAssign(lhs, rhs)
+        | Expr::NullishAssign(lhs, rhs) => {
+            if let Expr::Var(name, _, _) = &**lhs
+                && (name == "arguments" || name == "eval")
+            {
+                return Err(raise_syntax_error!(format!("Unexpected eval or arguments in strict mode")).into());
+            }
+            check_strict_expr_violations(rhs)?;
+        }
+        Expr::Increment(inner) | Expr::Decrement(inner) | Expr::PostIncrement(inner) | Expr::PostDecrement(inner) => {
+            if let Expr::Var(name, _, _) = &**inner
+                && (name == "arguments" || name == "eval")
+            {
+                return Err(raise_syntax_error!(format!("Unexpected eval or arguments in strict mode")).into());
+            }
+        }
+        // Recurse into function/arrow bodies
+        Expr::Function(_, _, body) | Expr::GeneratorFunction(_, _, body) | Expr::AsyncFunction(_, _, body) => {
+            check_strict_mode_violations(body)?;
+        }
+        Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => {
+            check_strict_mode_violations(body)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Check destructuring parameter elements for `arguments`/`eval` as binding names.
+fn check_strict_mode_param_names<'gc>(param: &DestructuringElement) -> Result<(), EvalError<'gc>> {
+    if let DestructuringElement::Variable(name, _) = param
+        && (name == "arguments" || name == "eval")
+    {
+        return Err(raise_syntax_error!(format!("Unexpected eval or arguments in strict mode")).into());
+    }
+    Ok(())
+}
+
+pub(crate) fn check_strict_mode_violations<'gc>(stmts: &[Statement]) -> Result<(), EvalError<'gc>> {
     // Minimal enforcement: detect 'with' statements and reserved identifier 'static' in variable declarations when executed in strict mode.
+    // Also detect assignment to 'arguments' and 'eval' which are strict-mode SyntaxErrors.
+    // Also detect FutureReservedWords used as identifiers (public, private, etc.)
+    fn is_strict_reserved(name: &str) -> bool {
+        matches!(
+            name,
+            "static" | "implements" | "interface" | "package" | "private" | "protected" | "public"
+        )
+    }
     for stmt in stmts {
         match &*stmt.kind {
             StatementKind::With(_, _) => {
@@ -2351,26 +2421,36 @@ fn check_strict_mode_violations<'gc>(stmts: &[Statement]) -> Result<(), EvalErro
             }
             StatementKind::Var(decls) => {
                 for (name, _) in decls {
-                    if name == "static" {
+                    if is_strict_reserved(name) {
                         return Err(raise_syntax_error!("Unexpected reserved word in strict mode").into());
                     }
                 }
             }
             StatementKind::Let(decls) => {
                 for (name, _) in decls {
-                    if name == "static" {
+                    if is_strict_reserved(name) {
                         return Err(raise_syntax_error!("Unexpected reserved word in strict mode").into());
                     }
                 }
             }
             StatementKind::Const(decls) => {
                 for (name, _) in decls {
-                    if name == "static" {
+                    if is_strict_reserved(name) {
                         return Err(raise_syntax_error!("Unexpected reserved word in strict mode").into());
                     }
                 }
             }
-            StatementKind::FunctionDeclaration(_, _, body, _, _) => check_strict_mode_violations(body)?,
+            StatementKind::FunctionDeclaration(name, params, body, _, _) => {
+                // Check function name
+                if name == "arguments" || name == "eval" {
+                    return Err(raise_syntax_error!(format!("Unexpected eval or arguments in strict mode")).into());
+                }
+                // Check param names
+                for p in params {
+                    check_strict_mode_param_names(p)?;
+                }
+                check_strict_mode_violations(body)?;
+            }
             StatementKind::Block(stmts) => check_strict_mode_violations(stmts)?,
             StatementKind::If(if_stmt) => {
                 check_strict_mode_violations(&if_stmt.then_body)?;
@@ -2381,23 +2461,16 @@ fn check_strict_mode_violations<'gc>(stmts: &[Statement]) -> Result<(), EvalErro
             StatementKind::For(for_stmt) => {
                 if let Some(init) = &for_stmt.init {
                     match &*init.kind {
-                        StatementKind::Var(decls) => {
+                        StatementKind::Var(decls) | StatementKind::Let(decls) => {
                             for (name, _) in decls {
-                                if name == "static" {
-                                    return Err(raise_syntax_error!("Unexpected reserved word in strict mode").into());
-                                }
-                            }
-                        }
-                        StatementKind::Let(decls) => {
-                            for (name, _) in decls {
-                                if name == "static" {
+                                if is_strict_reserved(name) {
                                     return Err(raise_syntax_error!("Unexpected reserved word in strict mode").into());
                                 }
                             }
                         }
                         StatementKind::Const(decls) => {
                             for (name, _) in decls {
-                                if name == "static" {
+                                if is_strict_reserved(name) {
                                     return Err(raise_syntax_error!("Unexpected reserved word in strict mode").into());
                                 }
                             }
@@ -2438,6 +2511,8 @@ fn check_strict_mode_violations<'gc>(stmts: &[Statement]) -> Result<(), EvalErro
             }
             StatementKind::Label(_, s) => check_strict_mode_violations(std::slice::from_ref(s))?,
             StatementKind::Expr(e) => {
+                // Check for assignment to `arguments` or `eval`
+                check_strict_expr_violations(e)?;
                 // For expressions, check nested function bodies
                 match e {
                     Expr::Function(_, _, body) | Expr::GeneratorFunction(_, _, body) | Expr::AsyncFunction(_, _, body) => {
@@ -12673,6 +12748,11 @@ pub fn evaluate_call_dispatch<'gc>(
                     Value::AsyncGeneratorFunction(_, cl) => Ok(handle_async_generator_function_call(mc, &cl, eval_args, Some(*obj))?),
                     // Native function stored as closure (e.g., eval Object wrapper)
                     Value::Function(name) => {
+                        // ShadowRealm wrapped function trampoline — dispatch with the
+                        // function object as receiver so the handler can read internal slots.
+                        if name == "__shadow_realm_wrapped_fn__" {
+                            return crate::js_shadow_realm::handle_wrapped_function_call(mc, obj, eval_args, env);
+                        }
                         let native_env = crate::js_class::get_function_realm(obj).ok().flatten().unwrap_or(*env);
                         evaluate_call_dispatch(mc, &native_env, &Value::Function(name), this_val, eval_args)
                     }
@@ -19305,6 +19385,11 @@ pub fn call_native_function<'gc>(
         return Ok(Some(crate::js_symbol::handle_symbol_valueof(mc, this_v)?));
     }
 
+    if name == "Symbol.prototype.description.get" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(crate::js_symbol::handle_symbol_description_get(mc, this_v)?));
+    }
+
     if name == "Function.prototype.[Symbol.hasInstance]" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         return Ok(Some(crate::js_function::handle_function_prototype_method(
@@ -19500,6 +19585,32 @@ pub fn call_native_function<'gc>(
     if name == "AbstractModuleSource.prototype.@@toStringTag" {
         return Ok(Some(Value::Undefined));
     }
+
+    // ShadowRealm.prototype.evaluate / importValue
+    if name == "ShadowRealm.prototype.evaluate" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(crate::js_shadow_realm::handle_shadow_realm_evaluate(mc, this_v, args, env)?));
+    }
+    if name == "ShadowRealm.prototype.importValue" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(crate::js_shadow_realm::handle_shadow_realm_import_value(
+            mc, this_v, args, env,
+        )?));
+    }
+    // Wrapped function trampoline for ShadowRealm cross-realm calls
+    if name == "__shadow_realm_wrapped_fn__" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(wrapped_obj) = this_v {
+            return Ok(Some(crate::js_shadow_realm::handle_wrapped_function_call(
+                mc,
+                wrapped_obj,
+                args,
+                env,
+            )?));
+        }
+        return Err(raise_type_error!("wrapped function call requires an object receiver").into());
+    }
+
     Ok(None)
 }
 
@@ -19649,6 +19760,29 @@ pub(crate) fn call_setter<'gc>(
                     }
                     _ => {}
                 }
+            }
+            Err(raise_type_error!("Setter is not a function").into())
+        }
+        Value::Function(name) => {
+            // Native function setter (e.g. Object.prototype.set __proto__)
+            if let Some(env_ptr) = env {
+                // First try call_native_function
+                if let Some(_res) = call_native_function(mc, name, Some(&Value::Object(*receiver)), std::slice::from_ref(val), env_ptr)? {
+                    return Ok(());
+                }
+                // Fall back to handle_global_function (for "set __proto__" etc.)
+                let call_env = prepare_call_env_with_this(
+                    mc,
+                    Some(env_ptr),
+                    Some(&Value::Object(*receiver)),
+                    None,
+                    std::slice::from_ref(val),
+                    None,
+                    Some(env_ptr),
+                    None,
+                )?;
+                let _result = crate::js_function::handle_global_function(mc, name, std::slice::from_ref(val), &call_env)?;
+                return Ok(());
             }
             Err(raise_type_error!("Setter is not a function").into())
         }
@@ -21653,6 +21787,8 @@ fn evaluate_expr_new<'gc>(
                         return Err(raise_type_error!("AbstractModuleSource constructor cannot be invoked").into());
                     } else if name_str == "Symbol" {
                         return Err(raise_type_error!("Symbol is not a constructor").into());
+                    } else if name_str == "ShadowRealm" {
+                        return crate::js_shadow_realm::handle_shadow_realm_constructor(mc, &eval_args, env);
                     }
                 }
                 // If we've reached here, the target object is not a recognized constructor

@@ -80,10 +80,10 @@ if (!buildRes || buildRes.status !== 0) {
 // locate binary
 let BIN = '';
 if (USE_RELEASE) {
-  if (fs.existsSync('target/release/js')) BIN = 'target/release/js';
+  if (fs.existsSync('target/release/js')) BIN = path.resolve('target/release/js');
 }
 if (!BIN) {
-  if (fs.existsSync('target/debug/js')) BIN = 'target/debug/js';
+  if (fs.existsSync('target/debug/js')) BIN = path.resolve('target/debug/js');
 }
 console.log(`JS engine binary: ${BIN}`);
 
@@ -430,16 +430,20 @@ async function runAll(){
     try {
       log(`RUN ${f}`);
       let res;
+      // Set cwd to the directory of the composed test file so that relative
+      // module specifiers (e.g. './import-value_FIXTURE.js' in ShadowRealm
+      // importValue tests) resolve correctly.
+      const testCwd = path.dirname(tmpPath);
       if (BIN) {
         // call the built engine binary directly with the composed test file
         const binArgs = isModule ? ['--module', tmpPath] : [tmpPath];
-        res = spawnSync(BIN, binArgs, {timeout: TIMEOUT_SECS*1000, encoding:'utf8'});
+        res = spawnSync(BIN, binArgs, {timeout: TIMEOUT_SECS*1000, encoding:'utf8', cwd: testCwd});
       } else {
         // fall back to cargo run with appropriate args
         const cargoArgs = ['run', '--all-features', '--package', 'js', '--'];
         if (isModule) cargoArgs.push('--module');
         cargoArgs.push(tmpPath);
-        res = spawnSync('cargo', cargoArgs, {timeout: TIMEOUT_SECS*1000, encoding:'utf8'});
+        res = spawnSync('cargo', cargoArgs, {timeout: TIMEOUT_SECS*1000, encoding:'utf8', cwd: testCwd});
       }
 
       if (res && res.status === 0) {

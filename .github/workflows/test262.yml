@@ -221,8 +221,8 @@ jobs:
               FOCUS='built-ins/Promise,built-ins/Proxy,built-ins/Reflect'
               ;;
             36)
-              TITLE='"built-ins/RegExp"'
-              FOCUS='built-ins/RegExp'
+              TITLE='"built-ins/RegExp" - "built-ins/ShadowRealm"'
+              FOCUS='built-ins/RegExp,built-ins/RegExpStringIteratorPrototype,built-ins/ShadowRealm'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

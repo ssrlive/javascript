@@ -20,6 +20,11 @@ fn is_object_type(val: &Value) -> bool {
         ))
 }
 
+/// Public wrapper: check if a JSProxy is callable (its target has [[Call]])
+pub fn is_callable_proxy(proxy: &crate::core::JSProxy) -> bool {
+    is_callable_target(&proxy.target)
+}
+
 /// Check if a value is a callable target (has [[Call]])
 fn is_callable_target(val: &Value) -> bool {
     match val {
@@ -1309,9 +1314,9 @@ pub(crate) fn ordinary_set<'gc>(
             };
             if let Some(setter) = setter_fn {
                 if let Value::Object(recv_obj) = receiver {
-                    crate::core::call_setter(mc, recv_obj, &setter, value, None)?;
+                    crate::core::call_setter(mc, recv_obj, &setter, value, Some(env))?;
                 } else {
-                    crate::core::call_setter(mc, target_obj, &setter, value, None)?;
+                    crate::core::call_setter(mc, target_obj, &setter, value, Some(env))?;
                 }
                 return Ok(true);
             } else {
@@ -1361,7 +1366,7 @@ pub(crate) fn ordinary_set<'gc>(
                 };
                 if let Some(setter) = setter_fn {
                     if let Value::Object(recv_obj) = receiver {
-                        crate::core::call_setter(mc, recv_obj, &setter, value, None)?;
+                        crate::core::call_setter(mc, recv_obj, &setter, value, Some(env))?;
                     }
                     return Ok(true);
                 } else {

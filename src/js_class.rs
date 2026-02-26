@@ -1632,6 +1632,9 @@ pub(crate) fn evaluate_new<'gc>(
                     "BigInt" | "Symbol" => {
                         return Err(raise_type_error!(format!("{} is not a constructor", name_desc)).into());
                     }
+                    "ShadowRealm" => {
+                        return crate::js_shadow_realm::handle_shadow_realm_constructor(mc, evaluated_args, &ctor_realm_env);
+                    }
                     "Iterator" => {
                         // Per spec: Iterator is an abstract constructor.
                         // If NewTarget is the Iterator constructor itself, throw TypeError.

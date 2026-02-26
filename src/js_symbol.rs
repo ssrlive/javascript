@@ -120,6 +120,16 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     object_set_key_value(mc, &symbol_proto, "valueOf", &val_of)?;
     symbol_proto.borrow_mut(mc).set_non_enumerable("valueOf");
 
+    // description getter (accessor property)
+    let desc_getter = Value::Function("Symbol.prototype.description.get".to_string());
+    let desc_prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(desc_getter)),
+        setter: None,
+    };
+    object_set_key_value(mc, &symbol_proto, "description", &desc_prop)?;
+    symbol_proto.borrow_mut(mc).set_non_enumerable("description");
+
     symbol_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Symbol.for and Symbol.keyFor (static) - register as functions on the constructor
@@ -214,6 +224,32 @@ pub(crate) fn handle_symbol_valueof<'gc>(_mc: &MutationContext<'gc>, this_value:
             Err(crate::raise_type_error!("Symbol.prototype.valueOf called on incompatible receiver"))
         }
         _ => Err(crate::raise_type_error!("Symbol.prototype.valueOf called on incompatible receiver")),
+    }
+}
+
+pub(crate) fn handle_symbol_description_get<'gc>(_mc: &MutationContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+    let sym = match this_value {
+        Value::Symbol(s) => *s,
+        Value::Object(obj) => {
+            if let Some(val) = slot_get_chained(obj, &InternalSlot::PrimitiveValue)
+                && let Value::Symbol(s) = &*val.borrow()
+            {
+                *s
+            } else {
+                return Err(crate::raise_type_error!(
+                    "Symbol.prototype.description getter called on incompatible receiver"
+                ));
+            }
+        }
+        _ => {
+            return Err(crate::raise_type_error!(
+                "Symbol.prototype.description getter called on incompatible receiver"
+            ));
+        }
+    };
+    match sym.description() {
+        Some(desc) => Ok(Value::String(utf8_to_utf16(desc))),
+        None => Ok(Value::Undefined),
     }
 }
 

@@ -1565,12 +1565,11 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         "debugger" => Token::Debugger,
                         "with" => Token::With,
                         "enum" => Token::Enum,
-                        "implements" => Token::Implements,
-                        "interface" => Token::Interface,
-                        "package" => Token::Package,
-                        "private" => Token::Private,
-                        "protected" => Token::Protected,
-                        "public" => Token::Public,
+                        // These are FutureReservedWords in strict mode only.
+                        // In sloppy mode they are valid identifiers.
+                        // Tokenize them as identifiers; strict-mode checks
+                        // are handled later by check_strict_mode_violations.
+                        "implements" | "interface" | "package" | "private" | "protected" | "public" => Token::Identifier(ident.clone()),
                         "function" => {
                             // Check if followed by '*'
                             if i < chars.len() && chars[i] == '*' {

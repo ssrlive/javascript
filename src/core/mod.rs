@@ -135,6 +135,9 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     // Initialize Iterator helpers (Iterator constructor, prototype methods, etc.)
     crate::js_iterator_helpers::initialize_iterator_helpers(mc, env)?;
 
+    // Initialize ShadowRealm constructor
+    crate::js_shadow_realm::initialize_shadow_realm(mc, env)?;
+
     // Create AsyncFunction constructor/prototype so async function objects
     // inherit @@toStringTag = "AsyncFunction" from a distinct prototype.
     {

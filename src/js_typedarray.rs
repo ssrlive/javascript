@@ -785,14 +785,36 @@ pub fn handle_atomics_method<'gc>(
 }
 
 /// Create a SharedArrayBuffer constructor object
-pub fn make_sharedarraybuffer_constructor<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_sharedarraybuffer_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
-    // Set prototype and name
-    object_set_key_value(mc, &obj, "prototype", &Value::Object(make_sharedarraybuffer_prototype(mc)?))?;
-    object_set_key_value(mc, &obj, "name", &Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
+    // Set [[Prototype]] to Function.prototype
+    if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*proto_val.borrow()
+    {
+        obj.borrow_mut(mc).prototype = Some(*func_proto);
+    }
 
-    // Mark as ArrayBuffer constructor and indicate it's the shared variant
+    let proto = make_sharedarraybuffer_prototype(mc, env, &obj)?;
+    object_set_key_value(mc, &obj, "prototype", &Value::Object(proto))?;
+    obj.borrow_mut(mc).set_non_writable("prototype");
+    obj.borrow_mut(mc).set_non_enumerable("prototype");
+    obj.borrow_mut(mc).set_non_configurable("prototype");
+
+    object_set_key_value(mc, &obj, "name", &Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
+    obj.borrow_mut(mc).set_non_writable("name");
+    obj.borrow_mut(mc).set_non_enumerable("name");
+    object_set_key_value(mc, &obj, "length", &Value::Number(1.0))?;
+    obj.borrow_mut(mc).set_non_writable("length");
+    obj.borrow_mut(mc).set_non_enumerable("length");
+
+    // Mark as SharedArrayBuffer constructor
+    slot_set(mc, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::Boolean(true));
     slot_set(mc, &obj, InternalSlot::SharedArrayBuffer, &Value::Boolean(true));
     slot_set(
@@ -801,6 +823,42 @@ pub fn make_sharedarraybuffer_constructor<'gc>(mc: &MutationContext<'gc>) -> Res
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("SharedArrayBuffer")),
     );
+
+    // SharedArrayBuffer[Symbol.species] — accessor getter returning `this`
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_val.borrow()
+        && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
+        && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+    {
+        let getter_fn = new_js_object_data(mc);
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        let getter_closure = ClosureData {
+            env: Some(*env),
+            native_target: Some("SharedArrayBuffer.species".to_string()),
+            enforce_strictness_inheritance: true,
+            ..ClosureData::default()
+        };
+        getter_fn
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, getter_closure)))));
+        let gname_desc =
+            crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "name", &gname_desc)?;
+        let glen_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "length", &glen_desc)?;
+
+        let species_desc_obj = new_js_object_data(mc);
+        object_set_key_value(mc, &species_desc_obj, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(mc, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(mc, &species_desc_obj, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(mc, &obj, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
+    }
 
     Ok(obj)
 }
@@ -860,30 +918,84 @@ pub fn make_arraybuffer_prototype<'gc>(
 }
 
 /// Create the SharedArrayBuffer prototype
-pub fn make_sharedarraybuffer_prototype<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_sharedarraybuffer_prototype<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    ctor: &JSObjectDataPtr<'gc>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let proto = new_js_object_data(mc);
 
-    // Add methods to prototype
-    object_set_key_value(mc, &proto, "constructor", &Value::Function("SharedArrayBuffer".to_string()))?;
+    // Set [[Prototype]] to Object.prototype
+    if let Some(obj_ctor_val) = object_get_key_value(env, "Object")
+        && let Value::Object(obj_ctor) = &*obj_ctor_val.borrow()
+        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
+        && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+    {
+        proto.borrow_mut(mc).prototype = Some(*obj_proto);
+    }
 
-    // byteLength is an accessor property
-    object_set_key_value(
-        mc,
-        &proto,
-        "byteLength",
-        &Value::Property {
-            value: None,
-            getter: Some(Box::new(Value::Function("SharedArrayBuffer.prototype.byteLength".to_string()))),
-            setter: None,
-        },
-    )?;
+    // constructor — actual constructor object reference
+    object_set_key_value(mc, &proto, "constructor", &Value::Object(*ctor))?;
+    proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    object_set_key_value(
-        mc,
-        &proto,
-        "slice",
-        &Value::Function("SharedArrayBuffer.prototype.slice".to_string()),
-    )?;
+    // byteLength — accessor property with proper function-object getter
+    {
+        let getter_fn = new_js_object_data(mc);
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*fp_val.borrow()
+        {
+            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        getter_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
+            mc,
+            Value::Function("SharedArrayBuffer.prototype.byteLength".to_string()),
+        )));
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get byteLength")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "length", &len_desc)?;
+
+        let bl_desc = new_js_object_data(mc);
+        object_set_key_value(mc, &bl_desc, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(mc, &bl_desc, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(mc, &bl_desc, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(mc, &proto, "byteLength", &bl_desc)?;
+    }
+
+    // slice — method function object
+    {
+        let slice_fn = new_js_object_data(mc);
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*fp_val.borrow()
+        {
+            slice_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        slice_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
+            mc,
+            Value::Function("SharedArrayBuffer.prototype.slice".to_string()),
+        )));
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("slice")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &slice_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(2.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &slice_fn, "length", &len_desc)?;
+
+        let sl_desc = crate::core::create_descriptor_object(mc, &Value::Object(slice_fn), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &proto, "slice", &sl_desc)?;
+    }
+
+    // @@toStringTag = "SharedArrayBuffer"
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_val.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        let desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("SharedArrayBuffer")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &proto, PropertyKey::Symbol(*tag_sym), &desc)?;
+    }
 
     Ok(proto)
 }
@@ -1578,7 +1690,8 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
     // Create the SharedArrayBuffer object first
     let obj = new_js_object_data(mc);
 
-    // Set prototype from NewTarget.prototype if present; otherwise fallback to SharedArrayBuffer.prototype
+    // Set prototype from NewTarget.prototype if present; otherwise fallback to
+    // the constructor realm's SharedArrayBuffer.prototype per GetPrototypeFromConstructor.
     let mut proto_from_target: Option<JSObjectDataPtr<'gc>> = None;
     if let Some(Value::Object(nt_obj)) = new_target {
         let proto_val = crate::core::get_property_with_accessors(mc, env, nt_obj, "prototype")?;
@@ -1589,14 +1702,28 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
 
     let proto = if let Some(p) = proto_from_target {
         p
-    } else if let Some(ctor_val) = object_get_key_value(env, "SharedArrayBuffer")
-        && let Value::Object(ctor_obj) = &*ctor_val.borrow()
-        && let Some(p_val) = object_get_key_value(ctor_obj, "prototype")
-        && let Value::Object(p_obj) = &*p_val.borrow()
-    {
-        *p_obj
     } else {
-        make_sharedarraybuffer_prototype(mc)?
+        // OrdinaryCreateFromConstructor fallback: use the constructor's realm.
+        let ctor_realm = if let Some(Value::Object(nt_obj)) = new_target {
+            crate::js_class::get_function_realm(nt_obj).ok().flatten().unwrap_or(*env)
+        } else {
+            *env
+        };
+        if let Some(ctor_val) = object_get_key_value(&ctor_realm, "SharedArrayBuffer")
+            && let Value::Object(ctor_obj) = &*ctor_val.borrow()
+            && let Some(p_val) = object_get_key_value(ctor_obj, "prototype")
+            && let Value::Object(p_obj) = &*p_val.borrow()
+        {
+            *p_obj
+        } else if let Some(ctor_val) = crate::core::env_get(&ctor_realm, "SharedArrayBuffer")
+            && let Value::Object(ctor_obj) = &*ctor_val.borrow()
+            && let Some(p_val) = object_get_key_value(ctor_obj, "prototype")
+            && let Value::Object(p_obj) = &*p_val.borrow()
+        {
+            *p_obj
+        } else {
+            new_js_object_data(mc)
+        }
     };
     obj.borrow_mut(mc).prototype = Some(proto);
 
@@ -2954,6 +3081,162 @@ pub fn handle_arraybuffer_accessor<'gc>(
     }
 }
 
+/// SharedArrayBuffer.prototype.byteLength getter — must be called on a SAB, not a regular AB.
+pub fn handle_sharedarraybuffer_bytelength<'gc>(_mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+    if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
+        && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
+    {
+        // Per spec: must be a SharedArrayBuffer. Reject non-shared.
+        if !(**ab).borrow().shared {
+            return Err(raise_type_error!(
+                "Method SharedArrayBuffer.prototype.byteLength called on incompatible receiver"
+            ));
+        }
+        let len = (**ab).borrow().data.lock().unwrap().len();
+        Ok(Value::Number(len as f64))
+    } else {
+        Err(raise_type_error!(
+            "Method SharedArrayBuffer.prototype.byteLength called on incompatible receiver"
+        ))
+    }
+}
+
+/// SharedArrayBuffer.prototype.slice(start, end)
+pub fn handle_sharedarraybuffer_slice<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, JSError> {
+    // Step 1-3: Validate this is a SharedArrayBuffer
+    let ab_val = slot_get_chained(object, &InternalSlot::ArrayBuffer)
+        .ok_or_else(|| raise_type_error!("SharedArrayBuffer.prototype.slice called on incompatible receiver"))?;
+    let ab_ref = ab_val.borrow();
+    let ab = match &*ab_ref {
+        Value::ArrayBuffer(ab) => *ab,
+        _ => {
+            return Err(raise_type_error!(
+                "SharedArrayBuffer.prototype.slice called on incompatible receiver"
+            ));
+        }
+    };
+    if !ab.borrow().shared {
+        return Err(raise_type_error!(
+            "SharedArrayBuffer.prototype.slice called on incompatible receiver"
+        ));
+    }
+
+    let data = ab.borrow().data.lock().unwrap().clone();
+    let len = data.len() as i64;
+
+    let to_integer_or_infinity = |v: Option<&Value<'gc>>, default: i64| -> Result<i64, JSError> {
+        let raw = match v {
+            None | Some(Value::Undefined) => default as f64,
+            Some(Value::Object(_)) => {
+                let prim = crate::core::to_primitive(mc, v.unwrap(), "number", env).map_err(JSError::from)?;
+                crate::core::to_number(&prim).map_err(JSError::from)?
+            }
+            Some(other) => crate::core::to_number(other).map_err(JSError::from)?,
+        };
+
+        let int = if raw.is_nan() || raw == 0.0 {
+            0
+        } else if !raw.is_finite() {
+            if raw.is_sign_negative() { i64::MIN } else { i64::MAX }
+        } else {
+            raw.trunc() as i64
+        };
+        Ok(int)
+    };
+
+    let start_raw = to_integer_or_infinity(args.first(), 0)?;
+    let end_raw = to_integer_or_infinity(args.get(1), len)?;
+
+    let start = if start_raw < 0 {
+        (len + start_raw).max(0)
+    } else {
+        start_raw.min(len)
+    };
+    let end = if end_raw < 0 { (len + end_raw).max(0) } else { end_raw.min(len) };
+    let new_len = (end - start).max(0) as usize;
+
+    // SpeciesConstructor(O, %SharedArrayBuffer%)
+    let species_ctor = get_species_constructor(mc, env, object).map_err(JSError::from)?;
+
+    let new_obj = if let Some(ctor) = species_ctor {
+        let new_val = crate::js_class::evaluate_new(mc, env, &ctor, &[Value::Number(new_len as f64)], None)?;
+        let new_obj = match new_val {
+            Value::Object(o) => o,
+            _ => return Err(raise_type_error!("Species constructor must return an object")),
+        };
+
+        // Must have [[ArrayBufferData]]
+        if slot_get_chained(&new_obj, &InternalSlot::ArrayBuffer).is_none() {
+            return Err(raise_type_error!(
+                "SharedArrayBuffer species constructor returned a non-ArrayBuffer object"
+            ));
+        }
+
+        // SameValue(new, O) check
+        if Gc::ptr_eq(new_obj, *object) {
+            return Err(raise_type_error!("SharedArrayBuffer species constructor returned the same buffer"));
+        }
+
+        // new.[[ArrayBufferByteLength]] < newLen check
+        if let Some(new_ab_val) = slot_get_chained(&new_obj, &InternalSlot::ArrayBuffer)
+            && let Value::ArrayBuffer(new_ab) = &*new_ab_val.borrow()
+        {
+            let new_byte_len = new_ab.borrow().data.lock().unwrap().len();
+            if new_byte_len < new_len {
+                return Err(raise_type_error!(
+                    "SharedArrayBuffer species constructor returned a buffer that is too small"
+                ));
+            }
+        }
+
+        new_obj
+    } else {
+        // Default: create a new SharedArrayBuffer
+        let new_ab = new_gc_cell_ptr(
+            mc,
+            JSArrayBuffer {
+                data: Arc::new(Mutex::new(vec![0u8; new_len])),
+                shared: true,
+                ..JSArrayBuffer::default()
+            },
+        );
+        let new_obj = new_js_object_data(mc);
+        slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+        // Set prototype from SharedArrayBuffer.prototype
+        if let Some(sab_ctor_val) = crate::core::env_get(env, "SharedArrayBuffer")
+            && let Value::Object(sab_ctor) = &*sab_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(sab_ctor, "prototype")
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            new_obj.borrow_mut(mc).prototype = Some(*proto);
+        } else {
+            new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+        }
+        new_obj
+    };
+
+    // Copy bytes
+    let start_usize = start as usize;
+    let end_usize = (start + new_len as i64) as usize;
+    let slice_bytes = &data[start_usize..end_usize.min(data.len())];
+
+    if let Some(new_ab_val) = slot_get_chained(&new_obj, &InternalSlot::ArrayBuffer)
+        && let Value::ArrayBuffer(new_ab) = &*new_ab_val.borrow()
+    {
+        let new_ab_ref = new_ab.borrow();
+        let mut new_data = new_ab_ref.data.lock().unwrap();
+        let copy_len = slice_bytes.len().min(new_data.len());
+        new_data[..copy_len].copy_from_slice(&slice_bytes[..copy_len]);
+    }
+
+    Ok(Value::Object(new_obj))
+}
+
 pub fn handle_arraybuffer_method<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -2966,6 +3249,10 @@ pub fn handle_arraybuffer_method<'gc>(
             if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
                 && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
             {
+                // Step 3: If IsSharedArrayBuffer(O) is true, throw a TypeError.
+                if (**ab).borrow().shared {
+                    return Err(raise_type_error!("ArrayBuffer.prototype.slice called on a SharedArrayBuffer"));
+                }
                 let data = (**ab).borrow().data.lock().unwrap().clone();
                 let len = data.len() as i64;
 
@@ -4783,7 +5070,7 @@ pub fn initialize_typedarray<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataP
     let atomics = make_atomics_object(mc, env)?;
     crate::core::env_set(mc, env, "Atomics", &Value::Object(atomics))?;
 
-    let shared_ab = make_sharedarraybuffer_constructor(mc)?;
+    let shared_ab = make_sharedarraybuffer_constructor(mc, env)?;
     crate::core::env_set(mc, env, "SharedArrayBuffer", &Value::Object(shared_ab))?;
 
     Ok(())

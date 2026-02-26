@@ -47,6 +47,7 @@ jobs:
           - id: 34
           - id: 35
           - id: 36
+          - id: 37
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -223,6 +224,10 @@ jobs:
             36)
               TITLE='"built-ins/RegExp" - "built-ins/ShadowRealm"'
               FOCUS='built-ins/RegExp,built-ins/RegExpStringIteratorPrototype,built-ins/ShadowRealm'
+              ;;
+            37)
+              TITLE='"built-ins/SharedArrayBuffer"'
+              FOCUS='built-ins/SharedArrayBuffer'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

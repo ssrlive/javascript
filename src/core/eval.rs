@@ -16367,6 +16367,7 @@ fn evaluate_expr_property<'gc>(
             | "Reflect.has"
             | "Reflect.setPrototypeOf"
             | "ArrayBuffer.prototype.slice"
+            | "SharedArrayBuffer.prototype.slice"
             | "JSON.parse"
             | "RegExp.prototype.replace"
             | "RegExp.prototype.split" => 2.0,
@@ -17770,6 +17771,7 @@ fn evaluate_expr_index<'gc>(
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
                     | "ArrayBuffer.prototype.slice"
+                    | "SharedArrayBuffer.prototype.slice"
                     | "Object.assign"
                     | "Object.create"
                     | "Object.defineProperties"
@@ -18805,6 +18807,7 @@ pub fn call_native_function<'gc>(
         "Promise.species"
             | "Array.species"
             | "ArrayBuffer.species"
+            | "SharedArrayBuffer.species"
             | "RegExp.species"
             | "RegExp[Symbol.species]"
             | "Map.species"
@@ -19532,9 +19535,20 @@ pub fn call_native_function<'gc>(
     if name == "SharedArrayBuffer.prototype.byteLength" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         if let Value::Object(obj) = this_v {
-            return Ok(Some(crate::js_typedarray::handle_arraybuffer_accessor(mc, obj, "byteLength")?));
+            // Per spec: the getter must reject non-SharedArrayBuffer objects
+            // (including regular ArrayBuffers).
+            return Ok(Some(crate::js_typedarray::handle_sharedarraybuffer_bytelength(mc, obj)?));
         } else {
-            return Err(raise_eval_error!("TypeError: SharedArrayBuffer.prototype.byteLength called on non-object").into());
+            return Err(raise_type_error!("SharedArrayBuffer.prototype.byteLength called on non-object").into());
+        }
+    }
+
+    if name == "SharedArrayBuffer.prototype.slice" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_sharedarraybuffer_slice(mc, env, obj, args)?));
+        } else {
+            return Err(raise_type_error!("SharedArrayBuffer.prototype.slice called on non-object").into());
         }
     }
 

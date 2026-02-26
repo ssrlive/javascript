@@ -1800,7 +1800,9 @@ pub fn handle_object_method<'gc>(
                             | "RegExp.prototype.exec"
                             | "RegExp.prototype.test"
                             | "RegExp.prototype.match"
-                            | "RegExp.prototype.search" => 1.0,
+                            | "RegExp.prototype.matchAll"
+                            | "RegExp.prototype.search"
+                            | "RegExp.escape" => 1.0,
                             "Array.prototype.slice"
                             | "Array.prototype.splice"
                             | "Array.prototype.copyWithin"
@@ -1879,6 +1881,18 @@ pub fn handle_object_method<'gc>(
                                 let desc_obj = crate::core::create_descriptor_object(
                                     mc,
                                     &Value::String(utf8_to_utf16("[Symbol.split]")),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
+                        } else if func_name == "RegExp.prototype.matchAll" {
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16("[Symbol.matchAll]")),
                                     false,
                                     false,
                                     true,

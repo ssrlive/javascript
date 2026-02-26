@@ -379,21 +379,22 @@ pub enum InternalSlot {
     AsyncGeneratorProto, // __async_generator_proto
 
     // --- Iterator ---
-    IteratorIndex,             // __iterator_index__
-    IteratorKind,              // __iterator_kind__
-    IteratorArray,             // __iterator_array__
-    IteratorMap,               // __iterator_map__
-    IteratorSet,               // __iterator_set__
-    IteratorString,            // __iterator_string__
-    PendingIterator,           // __pending_iterator
-    PendingIteratorDone,       // __pending_iterator_done
-    ArrayIteratorPrototype,    // %ArrayIteratorPrototype%
-    MapIteratorPrototype,      // %MapIteratorPrototype%
-    SetIteratorPrototype,      // %SetIteratorPrototype%
-    StringIteratorPrototype,   // %StringIteratorPrototype%
-    IteratorPrototype,         // %IteratorPrototype%
-    IteratorHelperPrototype,   // %IteratorHelperPrototype%
-    WrapForValidIteratorProto, // %WrapForValidIteratorPrototype%
+    IteratorIndex,                 // __iterator_index__
+    IteratorKind,                  // __iterator_kind__
+    IteratorArray,                 // __iterator_array__
+    IteratorMap,                   // __iterator_map__
+    IteratorSet,                   // __iterator_set__
+    IteratorString,                // __iterator_string__
+    PendingIterator,               // __pending_iterator
+    PendingIteratorDone,           // __pending_iterator_done
+    ArrayIteratorPrototype,        // %ArrayIteratorPrototype%
+    MapIteratorPrototype,          // %MapIteratorPrototype%
+    SetIteratorPrototype,          // %SetIteratorPrototype%
+    StringIteratorPrototype,       // %StringIteratorPrototype%
+    RegExpStringIteratorPrototype, // %RegExpStringIteratorPrototype%
+    IteratorPrototype,             // %IteratorPrototype%
+    IteratorHelperPrototype,       // %IteratorHelperPrototype%
+    WrapForValidIteratorProto,     // %WrapForValidIteratorPrototype%
 
     // --- Iterator Helpers (per-instance slots) ---
     IteratorHelperKind,       // discriminant: "map", "filter", "take", etc.
@@ -444,6 +445,13 @@ pub enum InternalSlot {
     RegexHasIndices,   // __hasIndices
     RegexUnicodeSets,  // __unicodeSets
     IsRegExpPrototype, // marker for RegExp.prototype itself
+
+    // --- RegExp String Iterator ---
+    RegExpIteratorMatcher, // __regexp_iterator_matcher
+    RegExpIteratorString,  // __regexp_iterator_string
+    RegExpIteratorGlobal,  // __regexp_iterator_global
+    RegExpIteratorUnicode, // __regexp_iterator_unicode
+    RegExpIteratorDone,    // __regexp_iterator_done
 
     // --- Date ---
     Timestamp, // __timestamp

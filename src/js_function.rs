@@ -847,6 +847,17 @@ pub fn handle_global_function<'gc>(
             Err(raise_type_error!("StringIterator.prototype.next called without this").into())
         }
 
+        "RegExpStringIterator.prototype.next" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_regexp::handle_regexp_string_iterator_next(mc, &obj, env);
+                }
+                return Err(raise_type_error!("RegExpStringIterator.prototype.next called on non-object").into());
+            }
+            Err(raise_type_error!("RegExpStringIterator.prototype.next called without this").into())
+        }
+
         "SetIterator.prototype.next" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();

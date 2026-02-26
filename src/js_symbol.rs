@@ -74,6 +74,11 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let split_sym = Value::Symbol(split_data);
     object_set_key_value(mc, &symbol_ctor, "split", &split_sym)?;
 
+    // Symbol.matchAll
+    let match_all_data = Gc::new(mc, SymbolData::new(Some("Symbol.matchAll")));
+    let match_all_sym = Value::Symbol(match_all_data);
+    object_set_key_value(mc, &symbol_ctor, "matchAll", &match_all_sym)?;
+
     // Symbol.hasInstance
     let has_instance_data = Gc::new(mc, SymbolData::new(Some("Symbol.hasInstance")));
     let has_instance_sym = Value::Symbol(has_instance_data);
@@ -93,6 +98,7 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         "toStringTag",
         "species",
         "match",
+        "matchAll",
         "replace",
         "search",
         "split",

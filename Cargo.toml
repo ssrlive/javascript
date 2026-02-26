@@ -21,14 +21,14 @@ os = ["libc", "windows-sys"]
 std = []
 
 [dependencies]
-chrono = { version = "0.4.43", features = ["serde"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 crossbeam-channel = "0.5.15"
 gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae" }
 indexmap = "2.13.0"
 log = "0.4.29"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
-regress = { version = "0.10.5", features = ["utf16"] }
+regress = { version = "0.10", features = ["utf16"], git = "https://github.com/ssrlive/regress.git", rev = "26fe374" }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 
@@ -38,8 +38,11 @@ libc = { version = "0.2.182", optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", optional = true, features = ["Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
 
+# [patch.crates-io]
+# regress = { path = "regress-patched" }
+
 [dev-dependencies]
-clap = { version = "4.5.59", features = ["derive", "cargo"] }
+clap = { version = "4.5.60", features = ["derive", "cargo"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 ctor = "0.6.3"
 env_logger = { version = "0.11.9" }

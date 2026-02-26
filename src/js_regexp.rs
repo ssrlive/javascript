@@ -6,6 +6,51 @@ use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use regress::Regex;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// SameValue(x, y) — ES2024 §6.1.6.1.14
+/// Like strict equality but NaN === NaN is true and +0 !== -0.
+fn same_value<'a>(x: &Value<'a>, y: &Value<'a>) -> bool {
+    match (x, y) {
+        (Value::Number(a), Value::Number(b)) => {
+            if a.is_nan() && b.is_nan() {
+                return true;
+            }
+            // Distinguish +0 from -0
+            if *a == 0.0 && *b == 0.0 {
+                return a.is_sign_positive() == b.is_sign_positive();
+            }
+            a == b
+        }
+        _ => crate::core::same_value_zero(x, y),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thread-local cache for compiled regress::Regex objects.
+// Key: (pattern_utf16, regress_flags).  Avoids recompiling the same regex
+// every time exec/test/split/replace is called.
+// ---------------------------------------------------------------------------
+thread_local! {
+    static REGEX_CACHE: RefCell<HashMap<(Vec<u16>, String), Regex>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Compile a regex, returning a cached copy when the same pattern+flags
+/// have been compiled before.
+pub(crate) fn get_or_compile_regex(pattern: &[u16], flags: &str) -> Result<Regex, String> {
+    REGEX_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let key = (pattern.to_vec(), flags.to_string());
+        if let Some(re) = cache.get(&key) {
+            return Ok(re.clone());
+        }
+        let re = create_regex_from_utf16(pattern, flags)?;
+        cache.insert(key, re.clone());
+        Ok(re)
+    })
+}
 
 pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let regexp_ctor = new_js_object_data(mc);
@@ -41,6 +86,13 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     regexp_ctor.borrow_mut(mc).set_non_configurable("prototype");
     object_set_key_value(mc, &regexp_proto, "constructor", &Value::Object(regexp_ctor))?;
 
+    // Register RegExp.escape static method (§22.2.4.3)
+    let escape_fn = Value::Function("RegExp.escape".to_string());
+    object_set_key_value(mc, &regexp_ctor, "escape", &escape_fn)?;
+    regexp_ctor.borrow_mut(mc).set_non_enumerable("escape");
+    // RegExp.escape.length = 1, .name = "escape"
+    // (handled by native function dispatch)
+
     // Register instance methods
     let methods = vec!["exec", "test", "toString"];
 
@@ -61,8 +113,8 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             regexp_proto.borrow_mut(mc).set_non_enumerable(*match_sym);
         }
 
-        // Register Symbol.replace, Symbol.search, Symbol.split on RegExp.prototype
-        for sym_name in ["replace", "search", "split"] {
+        // Register Symbol.replace, Symbol.search, Symbol.split, Symbol.matchAll on RegExp.prototype
+        for sym_name in ["replace", "search", "split", "matchAll"] {
             if let Some(sym_val) = object_get_key_value(sym_ctor, sym_name)
                 && let Value::Symbol(sym) = &*sym_val.borrow()
             {
@@ -276,11 +328,104 @@ fn get_bool_slot<'gc>(obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Value<
 }
 
 pub fn create_regex_from_utf16(pattern: &[u16], flags: &str) -> Result<Regex, String> {
-    let it = std::char::decode_utf16(pattern.iter().cloned()).map(|r| match r {
-        Ok(c) => c as u32,
-        Err(e) => e.unpaired_surrogate() as u32,
-    });
-    Regex::from_unicode(it, flags).map_err(|e| e.to_string())
+    if flags.contains('u') || flags.contains('v') {
+        // Unicode / unicodeSets mode: decode surrogate pairs into code points
+        let it = std::char::decode_utf16(pattern.iter().cloned()).map(|r| match r {
+            Ok(c) => c as u32,
+            Err(e) => e.unpaired_surrogate() as u32,
+        });
+        Regex::from_unicode(it, flags).map_err(|e| e.to_string())
+    } else {
+        // Non-unicode mode: each UTF-16 code unit is a separate element,
+        // EXCEPT inside named group identifiers (?<name> and \k<name>
+        // where surrogate pairs must be decoded so regress accepts them.
+        let processed = preprocess_pattern_non_unicode(pattern);
+        Regex::from_unicode(processed.into_iter(), flags).map_err(|e| e.to_string())
+    }
+}
+
+/// For non-unicode regex patterns, pass raw UTF-16 code units to regress so
+/// that supplementary characters are matched as two separate code units (via
+/// `find_from_ucs2`).  However, named capture group identifiers (`(?<name>`)
+/// and named backreferences (`\k<name>`) require valid Unicode identifier
+/// characters, so surrogate pairs inside those contexts are decoded into full
+/// code points.
+fn preprocess_pattern_non_unicode(pattern: &[u16]) -> Vec<u32> {
+    let mut result = Vec::with_capacity(pattern.len());
+    let mut i = 0;
+    let len = pattern.len();
+
+    while i < len {
+        // ---- named capture group  (?<name>  ---------------------
+        if i + 3 <= len && pattern[i] == b'(' as u16 && pattern[i + 1] == b'?' as u16 && pattern[i + 2] == b'<' as u16 {
+            // Distinguish from look-behind (?<= / (?<!
+            if i + 3 < len && (pattern[i + 3] == b'=' as u16 || pattern[i + 3] == b'!' as u16) {
+                result.push(pattern[i] as u32);
+                i += 1;
+                continue;
+            }
+            // Push (?<
+            result.push(b'(' as u32);
+            result.push(b'?' as u32);
+            result.push(b'<' as u32);
+            i += 3;
+            // Decode surrogates inside the group name (until >)
+            while i < len && pattern[i] != b'>' as u16 {
+                if i + 1 < len && (0xD800..=0xDBFF).contains(&pattern[i]) && (0xDC00..=0xDFFF).contains(&pattern[i + 1]) {
+                    let hi = pattern[i] as u32;
+                    let lo = pattern[i + 1] as u32;
+                    result.push(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00));
+                    i += 2;
+                } else {
+                    result.push(pattern[i] as u32);
+                    i += 1;
+                }
+            }
+            // Push the closing >
+            if i < len {
+                result.push(pattern[i] as u32);
+                i += 1;
+            }
+            continue;
+        }
+
+        // ---- named back-reference  \k<name>  --------------------
+        if i + 3 <= len && pattern[i] == b'\\' as u16 && pattern[i + 1] == b'k' as u16 && pattern[i + 2] == b'<' as u16 {
+            result.push(b'\\' as u32);
+            result.push(b'k' as u32);
+            result.push(b'<' as u32);
+            i += 3;
+            while i < len && pattern[i] != b'>' as u16 {
+                if i + 1 < len && (0xD800..=0xDBFF).contains(&pattern[i]) && (0xDC00..=0xDFFF).contains(&pattern[i + 1]) {
+                    let hi = pattern[i] as u32;
+                    let lo = pattern[i + 1] as u32;
+                    result.push(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00));
+                    i += 2;
+                } else {
+                    result.push(pattern[i] as u32);
+                    i += 1;
+                }
+            }
+            if i < len {
+                result.push(pattern[i] as u32);
+                i += 1;
+            }
+            continue;
+        }
+
+        // ---- escaped character  \X  — skip so \ before ( etc. isn't mis-parsed
+        if pattern[i] == b'\\' as u16 && i + 1 < len {
+            result.push(pattern[i] as u32);
+            result.push(pattern[i + 1] as u32);
+            i += 2;
+            continue;
+        }
+
+        // ---- default: raw code unit
+        result.push(pattern[i] as u32);
+        i += 1;
+    }
+    result
 }
 
 /// EscapeRegExpPattern — escape forward slashes and line terminators so the
@@ -464,15 +609,12 @@ fn create_regexp_object_from_parts<'gc>(
 
     let mut regress_flags = String::new();
     for c in flags.chars() {
-        if "gimsuy".contains(c) {
+        if "gimsuvy".contains(c) {
             regress_flags.push(c);
-        }
-        if c == 'v' {
-            regress_flags.push('u');
         }
     }
 
-    if validate_pattern && let Err(e) = create_regex_from_utf16(&pattern_u16, &regress_flags) {
+    if validate_pattern && let Err(e) = get_or_compile_regex(&pattern_u16, &regress_flags) {
         return Err(raise_syntax_error!(format!("Invalid RegExp: {}", e)).into());
     }
 
@@ -526,25 +668,29 @@ pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[
 
 /// §7.2.8 IsRegExp(argument)
 /// Returns true if the argument has a truthy @@match property, or has [[RegExpMatcher]] internal slot.
-fn is_regexp<'gc>(val: &Value<'gc>, env: Option<&JSObjectDataPtr<'gc>>) -> bool {
+/// Uses proper Get (invokes getters) for @@match check per spec.
+fn is_regexp_with_env<'gc>(
+    mc: &MutationContext<'gc>,
+    val: &Value<'gc>,
+    env: Option<&JSObjectDataPtr<'gc>>,
+) -> Result<bool, EvalError<'gc>> {
     if let Value::Object(obj) = val {
-        // Step 1-2: Check @@match property
+        // Step 1-2: Check @@match property via proper Get
         if let Some(env) = env
             && let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
             && let Value::Object(sym_ctor) = &*sym_ctor_val.borrow()
             && let Some(match_sym_val) = object_get_key_value(sym_ctor, "match")
             && let Value::Symbol(match_sym) = &*match_sym_val.borrow()
-            && let Some(matcher_val) = object_get_key_value(obj, *match_sym)
         {
-            let matcher = matcher_val.borrow().clone();
+            let matcher = crate::core::get_property_with_accessors(mc, env, obj, crate::core::PropertyKey::Symbol(*match_sym))?;
             if !matches!(matcher, Value::Undefined) {
-                return matcher.to_truthy();
+                return Ok(matcher.to_truthy());
             }
         }
         // Step 3: Check [[RegExpMatcher]] internal slot
-        return slot_get(obj, &InternalSlot::Regex).is_some();
+        return Ok(slot_get(obj, &InternalSlot::Regex).is_some());
     }
-    false
+    Ok(false)
 }
 
 /// Extract pattern and flags from a value that might be a RegExp object.
@@ -612,7 +758,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
     }
 
     // Step 5: Else if patternIsRegExp, read source/flags from regexp-like object
-    let pattern_is_regexp = is_regexp(&arg0, env);
+    let pattern_is_regexp = is_regexp_with_env(mc, &arg0, env)?;
     if pattern_is_regexp && let Value::Object(obj) = &arg0 {
         // Step 5a: P = ? Get(pattern, "source")
         let source_val = if let Some(env) = env {
@@ -724,7 +870,7 @@ pub(crate) fn handle_regexp_call_with_env<'gc>(
     let arg1 = args.get(1).cloned();
 
     // Step 1: Let patternIsRegExp = IsRegExp(pattern)
-    let pattern_is_regexp = is_regexp(&arg0, env);
+    let pattern_is_regexp = is_regexp_with_env(mc, &arg0, env)?;
 
     // Step 4b: If patternIsRegExp is true and flags is undefined
     if pattern_is_regexp {
@@ -764,6 +910,7 @@ pub(crate) fn handle_regexp_call_with_env<'gc>(
 
 /// Read the flags string from a RegExp object's internal Flags slot.
 /// ToLength: clamp to integer in [0, 2^53-1] (for primitive values only)
+#[allow(dead_code)]
 fn to_length_primitive(val: &Value) -> usize {
     let n = match val {
         Value::Number(n) => {
@@ -795,15 +942,19 @@ fn to_length_primitive(val: &Value) -> usize {
     n.min((1usize << 53) - 1)
 }
 
-/// ToLength with ToPrimitive for objects: calls valueOf/toString on objects
+/// ToLength with ToPrimitive for objects: calls valueOf/toString on objects.
+/// Throws TypeError for Symbol values (per ToNumber spec).
 fn to_length_with_coercion<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
-    match val {
-        Value::Object(_) => {
-            let prim = crate::core::to_primitive(mc, val, "number", env)?;
-            Ok(to_length_primitive(&prim))
-        }
-        _ => Ok(to_length_primitive(val)),
+    // Use to_number_with_env which properly handles ToPrimitive for objects
+    // and throws TypeError for Symbols
+    let n = crate::core::to_number_with_env(mc, env, val)?;
+    if n.is_nan() || n <= 0.0 {
+        return Ok(0);
     }
+    if n.is_infinite() {
+        return Ok((1usize << 53) - 1);
+    }
+    Ok((n.trunc() as usize).min((1usize << 53) - 1))
 }
 
 /// Try to set lastIndex; throw TypeError if non-writable (strict mode)
@@ -820,6 +971,66 @@ fn set_last_index_checked<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataP
     Ok(())
 }
 
+/// §22.2.4.2 SpeciesConstructor(O, defaultConstructor)
+/// Returns the species constructor for a RegExp-like object.
+fn species_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    // Step 1: Let C = ? Get(O, "constructor")
+    let ctor = crate::core::get_property_with_accessors(mc, env, obj, "constructor")?;
+
+    // Step 2: If C is undefined, return defaultConstructor
+    if matches!(ctor, Value::Undefined) {
+        return Ok(None);
+    }
+
+    // Step 3: If Type(C) is not Object, throw TypeError
+    // (Functions count as objects in JS)
+    let ctor_obj = match &ctor {
+        Value::Object(o) => *o,
+        _ => return Err(raise_type_error!("Species constructor: constructor is not an object").into()),
+    };
+
+    // Step 4: Let S = ? Get(C, @@species)
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
+        && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
+    {
+        let species = crate::core::get_property_with_accessors(mc, env, &ctor_obj, crate::core::PropertyKey::Symbol(*species_sym))?;
+
+        // Step 5: If S is undefined or null, return defaultConstructor
+        if matches!(species, Value::Undefined | Value::Null) {
+            return Ok(None);
+        }
+
+        // Step 6: If IsConstructor(S), return S
+        let is_ctor = match &species {
+            Value::Object(o) => {
+                o.borrow().class_def.is_some()
+                    || slot_get(o, &InternalSlot::IsConstructor).is_some()
+                    || slot_get(o, &InternalSlot::NativeCtor).is_some()
+                    || o.borrow().get_closure().is_some()
+            }
+            Value::Closure(cl) | Value::AsyncClosure(cl) => !cl.is_arrow,
+            Value::Function(_) => true,
+            _ => false,
+        };
+        if is_ctor {
+            return Ok(Some(species));
+        }
+
+        // Step 7: Throw TypeError
+        return Err(raise_type_error!("Species constructor is not a constructor").into());
+    }
+
+    // Symbol.species not available — use default
+    Ok(None)
+}
+
+#[allow(dead_code)]
 fn internal_get_flags_string(object: &JSObjectDataPtr) -> String {
     match slot_get(object, &InternalSlot::Flags) {
         Some(val) => match &*val.borrow() {
@@ -935,15 +1146,12 @@ pub(crate) fn handle_regexp_method<'gc>(
             // Filter flags for regress
             let mut r_flags = String::new();
             for c in flags.chars() {
-                if "gimsuy".contains(c) {
+                if "gimsuvy".contains(c) {
                     r_flags.push(c);
-                }
-                if c == 'v' {
-                    r_flags.push('u');
                 }
             }
 
-            let re = create_regex_from_utf16(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
+            let re = get_or_compile_regex(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
             let full_unicode = flags.contains('u') || flags.contains('v');
 
             // Per spec (22.2.5.2.2): Always read lastIndex via Get (observable)
@@ -1158,15 +1366,12 @@ pub(crate) fn handle_regexp_method<'gc>(
             // Filter flags for regress (same as exec)
             let mut r_flags = String::new();
             for c in flags.chars() {
-                if "gimsuy".contains(c) {
+                if "gimsuvy".contains(c) {
                     r_flags.push(c);
-                }
-                if c == 'v' {
-                    r_flags.push('u');
                 }
             }
 
-            let re = create_regex_from_utf16(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
+            let re = get_or_compile_regex(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
             let full_unicode = flags.contains('u') || flags.contains('v');
 
             // Per spec: Always read lastIndex via Get (observable), then ToLength
@@ -1263,7 +1468,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             }
 
             // Step 6: Global match
-            let full_unicode = flags_str.contains('u');
+            let full_unicode = flags_str.contains('u') || flags_str.contains('v');
 
             // Step 6b: Set lastIndex = 0
             set_last_index_checked(mc, object, 0.0)?;
@@ -1358,7 +1563,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                 other => crate::core::value_to_string(other),
             };
             let global = flags_str.contains('g');
-            let full_unicode = flags_str.contains('u');
+            let full_unicode = flags_str.contains('u') || flags_str.contains('v');
 
             if global {
                 set_last_index_checked(mc, object, 0.0)?;
@@ -1593,133 +1798,134 @@ pub(crate) fn handle_regexp_method<'gc>(
             Ok(Value::String(accumulated))
         }
         "search" => {
-            // §21.2.5.9 RegExp.prototype[@@search](string)
+            // §22.2.5.11 RegExp.prototype[@@search](string)
             let input_str = if args.is_empty() {
                 utf8_to_utf16("undefined")
             } else {
-                match &args[0] {
-                    Value::String(s) => s.clone(),
-                    other => utf8_to_utf16(&crate::core::value_to_string(other)),
-                }
+                crate::js_string::spec_to_string(mc, &args[0], env)?
             };
 
-            // Save lastIndex
-            let previous_last_index = if let Some(li) = object_get_key_value(object, "lastIndex") {
-                li.borrow().clone()
-            } else {
-                Value::Number(0.0)
-            };
+            // Step 4: let previousLastIndex = ? Get(rx, "lastIndex")
+            let previous_last_index = crate::core::get_property_with_accessors(mc, env, object, "lastIndex")?;
 
-            object_set_key_value(mc, object, "lastIndex", &Value::Number(0.0))?;
+            // Step 5: if SameValue(previousLastIndex, +0) is false, Set(rx, "lastIndex", +0, true)
+            if !same_value(&previous_last_index, &Value::Number(0.0)) {
+                crate::core::set_property_with_accessors(mc, env, object, "lastIndex", &Value::Number(0.0), None)?;
+            }
 
+            // Step 6: let result = ? RegExpExec(rx, S)
             let exec_result = regexp_exec_abstract(mc, object, &Value::String(input_str), env)?;
 
-            // Restore lastIndex
-            object_set_key_value(mc, object, "lastIndex", &previous_last_index)?;
+            // Step 7: let currentLastIndex = ? Get(rx, "lastIndex")
+            let current_last_index = crate::core::get_property_with_accessors(mc, env, object, "lastIndex")?;
+
+            // Step 8: if SameValue(currentLastIndex, previousLastIndex) is false, Set(rx, "lastIndex", previousLastIndex, true)
+            if !same_value(&current_last_index, &previous_last_index) {
+                crate::core::set_property_with_accessors(mc, env, object, "lastIndex", &previous_last_index, None)?;
+            }
 
             if matches!(exec_result, Value::Null) {
                 Ok(Value::Number(-1.0))
             } else if let Value::Object(res_obj) = &exec_result {
-                if let Some(v) = object_get_key_value(res_obj, "index") {
-                    Ok(v.borrow().clone())
-                } else {
-                    Ok(Value::Number(-1.0))
-                }
+                // Step 10: Return ? Get(result, "index")
+                Ok(crate::core::get_property_with_accessors(mc, env, res_obj, "index")?)
             } else {
                 Ok(Value::Number(-1.0))
             }
         }
         "split" => {
-            // §21.2.5.11 RegExp.prototype[@@split](string, limit)
+            // §22.2.5.13 RegExp.prototype[@@split](string, limit)
+            // Step 3: Let S = ? ToString(string)
             let input_str = if args.is_empty() {
                 utf8_to_utf16("undefined")
             } else {
-                match &args[0] {
-                    Value::String(s) => s.clone(),
-                    other => utf8_to_utf16(&crate::core::value_to_string(other)),
+                crate::js_string::spec_to_string(mc, &args[0], env)?
+            };
+
+            // Step 5: Let C = ? SpeciesConstructor(rx, %RegExp%)
+            let species_ctor = species_constructor(mc, env, object)?;
+
+            // Step 6: Let flags = ? ToString(? Get(rx, "flags"))
+            let flags_val = crate::core::get_property_with_accessors(mc, env, object, "flags")?;
+            let flags_str = crate::js_string::spec_to_string(mc, &flags_val, env)?;
+            let flags_str_utf8 = utf16_to_utf8(&flags_str);
+
+            // Step 7: unicodeMatching
+            let full_unicode = flags_str_utf8.contains('u') || flags_str_utf8.contains('v');
+
+            // Step 8: newFlags = flags with "y" added
+            let new_flags = if flags_str_utf8.contains('y') {
+                flags_str_utf8.clone()
+            } else {
+                format!("{}y", flags_str_utf8)
+            };
+
+            // Step 9: Let splitter = ? Construct(C, [rx, newFlags])
+            let splitter = if let Some(ctor) = species_ctor {
+                let ctor_args = vec![Value::Object(*object), Value::String(utf8_to_utf16(&new_flags))];
+                let v = crate::js_class::evaluate_new(mc, env, &ctor, &ctor_args, None)?;
+                match v {
+                    Value::Object(o) => o,
+                    _ => return Err(raise_type_error!("[Symbol.split]: species constructor did not return an object").into()),
+                }
+            } else {
+                // Default: construct a new RegExp
+                let ctor_args = vec![Value::Object(*object), Value::String(utf8_to_utf16(&new_flags))];
+                let v = handle_regexp_constructor_with_env(mc, Some(env), &ctor_args)?;
+                match v {
+                    Value::Object(o) => o,
+                    _ => return Err(raise_type_error!("[Symbol.split]: failed to construct splitter RegExp").into()),
                 }
             };
 
+            // Step 10: Let A = ! ArrayCreate(0)
+            let result_array = create_array(mc, env)?;
+
+            // Step 11-12: lengthA = 0
+            let mut arr_len = 0usize;
+
+            // Step 13: Let lim = limit === undefined ? 2^32-1 : ToUint32(limit)
             let limit = if let Some(lim) = args.get(1) {
                 match lim {
                     Value::Undefined => u32::MAX,
-                    Value::Number(n) => *n as u32,
-                    _ => u32::MAX,
+                    _ => crate::core::to_uint32_value_with_env(mc, env, lim)?,
                 }
             } else {
                 u32::MAX
             };
 
-            let result_array = create_array(mc, env)?;
             if limit == 0 {
                 set_array_length(mc, &result_array, 0)?;
                 return Ok(Value::Object(result_array));
             }
 
-            let flags_str = internal_get_flags_string(object);
-            let full_unicode = flags_str.contains('u') || flags_str.contains('v');
+            let size = input_str.len();
 
-            // Build a "sticky" regex for splitting (spec Step 7: add "y" flag)
-            let pattern_u16 = internal_get_regex_pattern(object)?;
-            let mut r_flags = String::new();
-            for c in flags_str.chars() {
-                if "gimsuy".contains(c) {
-                    r_flags.push(c);
-                }
-                if c == 'v' {
-                    r_flags.push('u');
-                }
-            }
-            if !r_flags.contains('y') {
-                r_flags.push('y');
-            }
-            let re = create_regex_from_utf16(&pattern_u16, &r_flags)
-                .map_err(|e| raise_syntax_error!(format!("Invalid RegExp in split: {e}")))?;
-
-            let str_len = input_str.len();
-
-            if input_str.is_empty() {
-                // Empty string: if regex matches empty string, return []; else return [""]
-                let empty_match = if full_unicode {
-                    re.find_from_utf16(&input_str, 0).next().is_some()
-                } else {
-                    re.find_from_ucs2(&input_str, 0).next().is_some()
-                };
-                if empty_match {
-                    set_array_length(mc, &result_array, 0)?;
-                } else {
+            // Step 16: If size = 0
+            if size == 0 {
+                let z = regexp_exec_abstract(mc, &splitter, &Value::String(input_str.clone()), env)?;
+                if matches!(z, Value::Null) {
                     object_set_key_value(mc, &result_array, 0usize, &Value::String(input_str))?;
                     set_array_length(mc, &result_array, 1)?;
                 }
                 return Ok(Value::Object(result_array));
             }
 
-            let mut p = 0usize; // end of last match
-            let mut arr_len = 0usize;
+            // Step 17: Let p = 0
+            let mut p = 0usize;
+            // Step 18: Let q = p
             let mut q = p;
 
-            while q < str_len {
-                // Try sticky match at position q
-                let m = if full_unicode {
-                    re.find_from_utf16(&input_str, q).next()
-                } else {
-                    re.find_from_ucs2(&input_str, q).next()
-                };
-                let m = match m {
-                    Some(m) if m.range.start == q => m, // sticky: must match at q
-                    _ => {
-                        q = if full_unicode {
-                            advance_string_index_unicode(&input_str, q)
-                        } else {
-                            q + 1
-                        };
-                        continue;
-                    }
-                };
+            // Step 19: Repeat, while q < size
+            while q < size {
+                // Step 19.a: Perform ? Set(splitter, "lastIndex", q, true)
+                crate::core::set_property_with_accessors(mc, env, &splitter, "lastIndex", &Value::Number(q as f64), None)?;
 
-                let e = m.range.end;
-                if e == p {
-                    // Empty match at same position as last split point — advance
+                // Step 19.b-c: Let z = ? RegExpExec(splitter, S)
+                let z = regexp_exec_abstract(mc, &splitter, &Value::String(input_str.clone()), env)?;
+
+                // Step 19.d: If z is null
+                if matches!(z, Value::Null) {
                     q = if full_unicode {
                         advance_string_index_unicode(&input_str, q)
                     } else {
@@ -1728,7 +1934,29 @@ pub(crate) fn handle_regexp_method<'gc>(
                     continue;
                 }
 
-                // Add substring before match: input[p..q]
+                // Step 19.e: z is not null
+                let z_obj = match &z {
+                    Value::Object(o) => *o,
+                    _ => return Err(raise_type_error!("[Symbol.split]: exec result is not an object").into()),
+                };
+
+                // Step 19.e.i: Let e = ? ToLength(? Get(splitter, "lastIndex"))
+                let e_val = crate::core::get_property_with_accessors(mc, env, &splitter, "lastIndex")?;
+                let e_raw = to_length_with_coercion(mc, &e_val, env)?;
+                let e = e_raw.min(size);
+
+                // Step 19.e.ii: If e = p, advance q
+                if e == p {
+                    q = if full_unicode {
+                        advance_string_index_unicode(&input_str, q)
+                    } else {
+                        q + 1
+                    };
+                    continue;
+                }
+
+                // Step 19.e.iii: e ≠ p
+                // Add T = S[p..q]
                 let sub = input_str[p..q].to_vec();
                 object_set_key_value(mc, &result_array, arr_len, &Value::String(sub))?;
                 arr_len += 1;
@@ -1737,14 +1965,18 @@ pub(crate) fn handle_regexp_method<'gc>(
                     return Ok(Value::Object(result_array));
                 }
 
-                // Add captures from the match
-                for cap in m.captures.iter() {
-                    if let Some(range) = cap {
-                        let cap_str = input_str[range.start..range.end].to_vec();
-                        object_set_key_value(mc, &result_array, arr_len, &Value::String(cap_str))?;
-                    } else {
-                        object_set_key_value(mc, &result_array, arr_len, &Value::Undefined)?;
-                    }
+                // Step 19.e.iii.7: Let p = e
+                p = e;
+
+                // Step 19.e.iii.8: Let numberOfCaptures = ? ToLength(? Get(z, "length"))
+                let n_cap_val = crate::core::get_property_with_accessors(mc, env, &z_obj, "length")?;
+                let number_of_captures = to_length_with_coercion(mc, &n_cap_val, env)?;
+                let number_of_captures = if number_of_captures > 0 { number_of_captures - 1 } else { 0 };
+
+                // Step 19.e.iii.9-12: Add captures
+                for i in 1..=number_of_captures {
+                    let cap_val = crate::core::get_property_with_accessors(mc, env, &z_obj, i)?;
+                    object_set_key_value(mc, &result_array, arr_len, &cap_val)?;
                     arr_len += 1;
                     if arr_len as u32 >= limit {
                         set_array_length(mc, &result_array, arr_len)?;
@@ -1752,16 +1984,63 @@ pub(crate) fn handle_regexp_method<'gc>(
                     }
                 }
 
-                p = e;
+                // Step 19.e.iii.13: Let q = p
                 q = p;
             }
 
-            // Add tail: input[p..str_len]
-            let sub = input_str[p..str_len].to_vec();
+            // Step 20: Add tail T = S[p..size]
+            let sub = input_str[p..size].to_vec();
             object_set_key_value(mc, &result_array, arr_len, &Value::String(sub))?;
             arr_len += 1;
             set_array_length(mc, &result_array, arr_len)?;
             Ok(Value::Object(result_array))
+        }
+        "matchAll" => {
+            // §22.2.5.9 RegExp.prototype[@@matchAll](string)
+
+            // Step 3: Let S = ? ToString(string)
+            let input_str = if args.is_empty() {
+                utf8_to_utf16("undefined")
+            } else {
+                crate::js_string::spec_to_string(mc, &args[0], env)?
+            };
+
+            // Step 4: Let C = ? SpeciesConstructor(R, %RegExp%)
+            let species_ctor = species_constructor(mc, env, object)?;
+
+            // Step 5: Let flags = ? ToString(? Get(R, "flags"))
+            let flags_val = crate::core::get_property_with_accessors(mc, env, object, "flags")?;
+            let flags_str = utf16_to_utf8(&crate::js_string::spec_to_string(mc, &flags_val, env)?);
+
+            // Step 6: Let matcher = ? Construct(C, [R, flags])
+            let matcher_obj = if let Some(ctor) = species_ctor {
+                let ctor_args = vec![Value::Object(*object), Value::String(utf8_to_utf16(&flags_str))];
+                let v = crate::js_class::evaluate_new(mc, env, &ctor, &ctor_args, None)?;
+                match v {
+                    Value::Object(o) => o,
+                    _ => return Err(raise_type_error!("[Symbol.matchAll]: species constructor did not return an object").into()),
+                }
+            } else {
+                // Default: construct a new RegExp
+                let ctor_args = vec![Value::Object(*object), Value::String(utf8_to_utf16(&flags_str))];
+                let v = handle_regexp_constructor_with_env(mc, Some(env), &ctor_args)?;
+                match v {
+                    Value::Object(o) => o,
+                    _ => return Err(raise_type_error!("[Symbol.matchAll]: failed to construct matcher RegExp").into()),
+                }
+            };
+
+            // Step 7-8: Let lastIndex = ? ToLength(? Get(R, "lastIndex"))
+            let last_index_val = crate::core::get_property_with_accessors(mc, env, object, "lastIndex")?;
+            let last_index = to_length_with_coercion(mc, &last_index_val, env)?;
+            set_last_index_checked(mc, &matcher_obj, last_index as f64)?;
+
+            // Step 9-10: Determine global and fullUnicode
+            let global = flags_str.contains('g');
+            let full_unicode = flags_str.contains('u') || flags_str.contains('v');
+
+            // Step 11: Return CreateRegExpStringIterator(matcher, S, global, fullUnicode)
+            create_regexp_string_iterator(mc, env, matcher_obj, input_str, global, full_unicode)
         }
         _ => Err(raise_eval_error!(format!("RegExp.prototype.{method} is not implemented")).into()),
     }
@@ -1780,6 +2059,183 @@ fn advance_string_index_unicode(s: &[u16], index: usize) -> usize {
         }
     }
     index + 1
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// §22.2.7  RegExp String Iterator Objects
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Create %RegExpStringIteratorPrototype%. Must be called after %IteratorPrototype% exists.
+pub fn initialize_regexp_string_iterator_prototype<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<(), crate::error::JSError> {
+    use crate::core::{PropertyKey, slot_get_chained};
+
+    let proto = new_js_object_data(mc);
+
+    // [[Prototype]] = %IteratorPrototype%
+    if let Some(iter_proto_val) = slot_get_chained(env, &InternalSlot::IteratorPrototype)
+        && let Value::Object(iter_proto) = &*iter_proto_val.borrow()
+    {
+        proto.borrow_mut(mc).prototype = Some(*iter_proto);
+    }
+
+    // next method – non-enumerable
+    object_set_key_value(
+        mc,
+        &proto,
+        "next",
+        &Value::Function("RegExpStringIterator.prototype.next".to_string()),
+    )?;
+    proto.borrow_mut(mc).set_non_enumerable("next");
+
+    // @@toStringTag = "RegExp String Iterator" (non-writable, non-enumerable, configurable)
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
+        && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+    {
+        let tag_desc =
+            crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("RegExp String Iterator")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+    }
+
+    slot_set(mc, env, InternalSlot::RegExpStringIteratorPrototype, &Value::Object(proto));
+
+    Ok(())
+}
+
+/// §22.2.7.1 CreateRegExpStringIterator(R, S, global, fullUnicode)
+fn create_regexp_string_iterator<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    matcher: JSObjectDataPtr<'gc>,
+    string: Vec<u16>,
+    global: bool,
+    full_unicode: bool,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    use crate::core::slot_get_chained;
+
+    let iterator = new_js_object_data(mc);
+
+    // [[Prototype]] = %RegExpStringIteratorPrototype%
+    if let Some(proto_val) = slot_get_chained(env, &InternalSlot::RegExpStringIteratorPrototype)
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        iterator.borrow_mut(mc).prototype = Some(*proto);
+    }
+
+    // Internal slots
+    slot_set(mc, &iterator, InternalSlot::RegExpIteratorMatcher, &Value::Object(matcher));
+    slot_set(mc, &iterator, InternalSlot::RegExpIteratorString, &Value::String(string));
+    slot_set(mc, &iterator, InternalSlot::RegExpIteratorGlobal, &Value::Boolean(global));
+    slot_set(mc, &iterator, InternalSlot::RegExpIteratorUnicode, &Value::Boolean(full_unicode));
+    slot_set(mc, &iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(false));
+
+    Ok(Value::Object(iterator))
+}
+
+/// §22.2.7.2.1 %RegExpStringIterator%.prototype.next()
+pub(crate) fn handle_regexp_string_iterator_next<'gc>(
+    mc: &MutationContext<'gc>,
+    iterator: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // 1. If O.[[Done]] is true, return CreateIterResultObject(undefined, true)
+    let done = match slot_get(iterator, &InternalSlot::RegExpIteratorDone) {
+        Some(v) => matches!(&*v.borrow(), Value::Boolean(true)),
+        None => false,
+    };
+    if done {
+        return create_iter_result(mc, Value::Undefined, true);
+    }
+
+    // 2. Read internal slots
+    let matcher = match slot_get(iterator, &InternalSlot::RegExpIteratorMatcher) {
+        Some(v) => match &*v.borrow() {
+            Value::Object(o) => *o,
+            _ => return Err(raise_type_error!("RegExpStringIterator: matcher is not an object").into()),
+        },
+        None => return Err(raise_type_error!("RegExpStringIterator: missing matcher slot").into()),
+    };
+
+    let s = match slot_get(iterator, &InternalSlot::RegExpIteratorString) {
+        Some(v) => match &*v.borrow() {
+            Value::String(s) => s.clone(),
+            _ => return Err(raise_type_error!("RegExpStringIterator: string is not a string").into()),
+        },
+        None => return Err(raise_type_error!("RegExpStringIterator: missing string slot").into()),
+    };
+
+    let global = match slot_get(iterator, &InternalSlot::RegExpIteratorGlobal) {
+        Some(v) => matches!(&*v.borrow(), Value::Boolean(true)),
+        None => false,
+    };
+
+    let full_unicode = match slot_get(iterator, &InternalSlot::RegExpIteratorUnicode) {
+        Some(v) => matches!(&*v.borrow(), Value::Boolean(true)),
+        None => false,
+    };
+
+    // 3. Let match = ? RegExpExec(R, S)
+    let match_result = regexp_exec_abstract(mc, &matcher, &Value::String(s.clone()), env)?;
+
+    // 4. If match is null:
+    if matches!(match_result, Value::Null) {
+        // 4.a. Set O.[[Done]] to true
+        slot_set(mc, iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(true));
+        // 4.b. Return CreateIterResultObject(undefined, true)
+        return create_iter_result(mc, Value::Undefined, true);
+    }
+
+    // 5. match is not null
+    if global {
+        // 5.a. global is true
+        // 5.a.i. Let matchStr = ? ToString(? Get(match, "0"))
+        let match_val = if let Value::Object(match_obj) = &match_result {
+            crate::core::get_property_with_accessors(mc, env, match_obj, "0")?
+        } else {
+            Value::Undefined
+        };
+        let match_str = match &match_val {
+            Value::String(s) => s.clone(),
+            other => utf8_to_utf16(&crate::core::value_to_string(other)),
+        };
+
+        // 5.a.ii. If matchStr is the empty String, advance lastIndex
+        if match_str.is_empty()
+            && let Value::Object(match_obj) = &match_result
+        {
+            let this_index_val = crate::core::get_property_with_accessors(mc, env, &matcher, "lastIndex")?;
+            let this_index = to_length_with_coercion(mc, &this_index_val, env)?;
+            let next_index = if full_unicode {
+                advance_string_index_unicode(&s, this_index)
+            } else {
+                this_index + 1
+            };
+            set_last_index_checked(mc, &matcher, next_index as f64)?;
+            // Still yield this match
+            let _ = match_obj; // suppress unused warning
+        }
+
+        // 5.a.iii. Return CreateIterResultObject(match, false)
+        create_iter_result(mc, match_result, false)
+    } else {
+        // 5.b. global is false
+        // 5.b.i. Set O.[[Done]] to true
+        slot_set(mc, iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(true));
+        // 5.b.ii. Return CreateIterResultObject(match, false)
+        create_iter_result(mc, match_result, false)
+    }
+}
+
+/// Create a {value, done} iterator result object.
+fn create_iter_result<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, done: bool) -> Result<Value<'gc>, EvalError<'gc>> {
+    let obj = new_js_object_data(mc);
+    object_set_key_value(mc, &obj, "value", &value)?;
+    object_set_key_value(mc, &obj, "done", &Value::Boolean(done))?;
+    Ok(Value::Object(obj))
 }
 
 /// §21.1.3.17.1 GetSubstitution(matched, str, position, captures, namedCaptures, replacementTemplate)
@@ -1933,4 +2389,183 @@ fn map_index_back(original: &[u16], working_index: usize) -> usize {
         }
     }
     o
+}
+
+/// RegExp.escape ( string ) — §22.2.4.3
+/// Returns a new string with regex-special characters escaped.
+pub(crate) fn regexp_escape<'gc>(
+    _mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Step 1: If S is not a String, throw a TypeError exception.
+    let s = if args.is_empty() {
+        return Err(raise_type_error!("RegExp.escape requires a string argument").into());
+    } else {
+        match &args[0] {
+            Value::String(s) => s.clone(),
+            _ => return Err(raise_type_error!("RegExp.escape requires a string argument").into()),
+        }
+    };
+
+    // Syntax characters: ^$\.*+?()[]{}|  plus U+002F (SOLIDUS)
+    const SYNTAX_CHARS: &[u16] = &[
+        b'^' as u16,
+        b'$' as u16,
+        b'\\' as u16,
+        b'.' as u16,
+        b'*' as u16,
+        b'+' as u16,
+        b'?' as u16,
+        b'(' as u16,
+        b')' as u16,
+        b'[' as u16,
+        b']' as u16,
+        b'{' as u16,
+        b'}' as u16,
+        b'|' as u16,
+        b'/' as u16,
+    ];
+
+    // Other punctuators: ,-=<>#&!%:;@~'`"
+    const OTHER_PUNCTUATORS: &[u16] = &[
+        b',' as u16,
+        b'-' as u16,
+        b'=' as u16,
+        b'<' as u16,
+        b'>' as u16,
+        b'#' as u16,
+        b'&' as u16,
+        b'!' as u16,
+        b'%' as u16,
+        b':' as u16,
+        b';' as u16,
+        b'@' as u16,
+        b'~' as u16,
+        b'\'' as u16,
+        b'`' as u16,
+        b'"' as u16,
+    ];
+
+    fn is_whitespace(c: u32) -> bool {
+        matches!(
+            c,
+            0x0009 | 0x000B | 0x000C | 0x0020 | 0x00A0 | 0xFEFF | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x3000
+        )
+    }
+
+    fn is_line_terminator(c: u32) -> bool {
+        matches!(c, 0x000A | 0x000D | 0x2028 | 0x2029)
+    }
+
+    fn is_surrogate(c: u32) -> bool {
+        (0xD800..=0xDFFF).contains(&c)
+    }
+
+    fn is_decimal_digit(c: u32) -> bool {
+        (0x30..=0x39).contains(&c) // '0'..'9'
+    }
+
+    fn is_ascii_letter(c: u32) -> bool {
+        (0x41..=0x5A).contains(&c) || (0x61..=0x7A).contains(&c) // A-Z, a-z
+    }
+
+    // Iterate over code points (decode surrogate pairs)
+    let mut result: Vec<u16> = Vec::with_capacity(s.len() * 2);
+    let mut first = true;
+    let mut i = 0;
+    while i < s.len() {
+        let cu = s[i];
+        // Decode code point from UTF-16
+        let (cp, advance) = if (0xD800..=0xDBFF).contains(&cu) && i + 1 < s.len() && (0xDC00..=0xDFFF).contains(&s[i + 1]) {
+            let hi = cu as u32;
+            let lo = s[i + 1] as u32;
+            ((hi - 0xD800) * 0x400 + (lo - 0xDC00) + 0x10000, 2)
+        } else {
+            (cu as u32, 1)
+        };
+
+        if first {
+            first = false;
+            if is_decimal_digit(cp) || is_ascii_letter(cp) {
+                // Step 4a: Escape initial digit/letter as \xHH
+                result.extend_from_slice(&encode_hex_escape(cp));
+                i += advance;
+                continue;
+            }
+        }
+
+        // Step 4b.i: EncodeForRegExpEscape(c)
+
+        // 1. If c is a SyntaxCharacter, return \c
+        if advance == 1 && SYNTAX_CHARS.contains(&cu) {
+            result.push(b'\\' as u16);
+            result.push(cu);
+        }
+        // 2. ControlEscape: \t, \n, \v, \f, \r
+        else if cp == 0x0009 {
+            result.push(b'\\' as u16);
+            result.push(b't' as u16);
+        } else if cp == 0x000A {
+            result.push(b'\\' as u16);
+            result.push(b'n' as u16);
+        } else if cp == 0x000B {
+            result.push(b'\\' as u16);
+            result.push(b'v' as u16);
+        } else if cp == 0x000C {
+            result.push(b'\\' as u16);
+            result.push(b'f' as u16);
+        } else if cp == 0x000D {
+            result.push(b'\\' as u16);
+            result.push(b'r' as u16);
+        }
+        // 5. otherPunctuators, WhiteSpace, LineTerminator, or surrogate
+        else if (advance == 1 && OTHER_PUNCTUATORS.contains(&cu)) || is_whitespace(cp) || is_line_terminator(cp) || is_surrogate(cp) {
+            if cp <= 0xFF {
+                result.extend_from_slice(&encode_hex_escape(cp));
+            } else {
+                // UTF16EncodeCodePoint then UnicodeEscape each code unit
+                if cp <= 0xFFFF {
+                    result.extend_from_slice(&encode_unicode_escape(cp as u16));
+                } else {
+                    // Surrogate pair
+                    let hi = ((cp - 0x10000) >> 10) as u16 + 0xD800;
+                    let lo = ((cp - 0x10000) & 0x3FF) as u16 + 0xDC00;
+                    result.extend_from_slice(&encode_unicode_escape(hi));
+                    result.extend_from_slice(&encode_unicode_escape(lo));
+                }
+            }
+        }
+        // 6. Pass through: UTF16EncodeCodePoint(c)
+        else {
+            for j in 0..advance {
+                result.push(s[i + j]);
+            }
+        }
+
+        i += advance;
+    }
+
+    Ok(Value::String(result))
+}
+
+/// Encode a code point as \xHH (2-digit hex)
+fn encode_hex_escape(cp: u32) -> [u16; 4] {
+    let hex = format!("{cp:02x}");
+    let bytes = hex.as_bytes();
+    [b'\\' as u16, b'x' as u16, bytes[0] as u16, bytes[1] as u16]
+}
+
+/// Encode a code unit as \uHHHH (4-digit hex)
+fn encode_unicode_escape(cu: u16) -> [u16; 6] {
+    let hex = format!("{cu:04x}");
+    let bytes = hex.as_bytes();
+    [
+        b'\\' as u16,
+        b'u' as u16,
+        bytes[0] as u16,
+        bytes[1] as u16,
+        bytes[2] as u16,
+        bytes[3] as u16,
+    ]
 }

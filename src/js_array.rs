@@ -2414,6 +2414,78 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(out))
         }
         "indexOf" => {
+            // -- Fast path: plain dense array, no proxy, no typed-array --
+            // Avoids get_property_with_accessors per element and reads directly from the IndexMap.
+            // Single borrow to check all guard conditions, avoiding function-call and prototype-chain overhead.
+            let is_plain_dense = {
+                let o = object.borrow();
+                o.properties.contains_key(&PropertyKey::Internal(InternalSlot::IsArray))
+                    && !o.properties.contains_key(&PropertyKey::Internal(InternalSlot::Proxy))
+                    && !o.properties.contains_key(&PropertyKey::Internal(InternalSlot::TypedArray))
+            };
+
+            if is_plain_dense {
+                // Read length directly from own property
+                let current_len = {
+                    let o = object.borrow();
+                    if let Some(len_ptr) = o.properties.get(&PropertyKey::String("length".to_string())) {
+                        match &*len_ptr.borrow() {
+                            Value::Number(n) if *n >= 0.0 && n.is_finite() => n.floor() as usize,
+                            _ => 0,
+                        }
+                    } else {
+                        0
+                    }
+                };
+
+                if current_len == 0 {
+                    return Ok(Value::Number(-1.0));
+                }
+
+                let search_element = args.first().cloned().unwrap_or(Value::Undefined);
+                let from_index = if args.len() > 1 {
+                    let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                    let n = crate::core::to_number(&prim)?;
+                    if n.is_nan() || n == 0.0 {
+                        0isize
+                    } else if n.is_infinite() {
+                        if n.is_sign_negative() { isize::MIN } else { isize::MAX }
+                    } else {
+                        n.trunc() as isize
+                    }
+                } else {
+                    0isize
+                };
+
+                let start = if from_index < 0 {
+                    (current_len as isize + from_index).max(0) as usize
+                } else {
+                    from_index as usize
+                };
+
+                let o = object.borrow();
+                for i in start..current_len {
+                    let key = PropertyKey::String(i.to_string());
+                    if let Some(val_ptr) = o.properties.get(&key) {
+                        let element = val_ptr.borrow();
+                        let is_match = match (&*element, &search_element) {
+                            (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
+                            (Value::String(a), Value::String(b)) => a == b,
+                            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+                            (Value::Null, Value::Null) => true,
+                            (Value::Undefined, Value::Undefined) => true,
+                            _ => false, // strict equality for different types
+                        };
+                        if is_match {
+                            return Ok(Value::Number(i as f64));
+                        }
+                    }
+                    // holes: skip (indexOf skips holes per spec)
+                }
+                return Ok(Value::Number(-1.0));
+            }
+
+            // -- Slow path: typed arrays, proxies, sparse arrays with accessors --
             let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
                     Some(*ta)

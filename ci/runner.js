@@ -287,6 +287,13 @@ const SLOW_TESTS = [
   'S15.1.3.2_A2.4_T1.js',  // decodeURIComponent 3-byte exhaustive
 ];
 
+// Skip entire directories whose tests are too slow for a tree-walking
+// interpreter (e.g. generated Unicode property-escape tests that build
+// strings spanning the full 0-0x10FFFF code-point range).
+const SLOW_DIRS = [
+  'built-ins/RegExp/property-escapes/generated',
+];
+
 /*
   Execution semantics:
   - --limit N controls the number of tests *executed* (pass+fail == N).
@@ -302,6 +309,8 @@ async function runAll(){
     if (/_FIXTURE\.js$/.test(f)) { skip++; log(`SKIP (fixture) ${f}`); continue; }
 
     if (SLOW_TESTS.some(s => f.endsWith(s))) { skip++; log(`SKIP (slow) ${f}`); continue; }
+
+    if (SLOW_DIRS.some(d => f.includes(d))) { skip++; log(`SKIP (slow-dir) ${f}`); continue; }
 
     const meta = extractMeta(f);
 

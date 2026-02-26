@@ -4751,7 +4751,8 @@ fn eval_res<'gc>(
                 false
             };
 
-            if !use_lexical_env && body_has_lexical(&for_stmt.body) {
+            let body_has_lex = body_has_lexical(&for_stmt.body);
+            if !use_lexical_env && body_has_lex {
                 use_lexical_env = true;
             }
 
@@ -4788,6 +4789,18 @@ fn eval_res<'gc>(
                 }
             }
 
+            // Optimisation: skip per-iteration scope creation when the loop body,
+            // test and update expressions do not contain any closure-creating
+            // constructs (function/arrow/class). Per-iteration scopes are only
+            // needed so that closures capture fresh bindings for each iteration.
+            let needs_per_iteration_scope = if per_iteration_names.is_empty() {
+                false
+            } else {
+                stmts_may_create_closure(&for_stmt.body)
+                    || for_stmt.test.as_ref().is_some_and(expr_may_create_closure)
+                    || for_stmt.update.as_ref().is_some_and(|s| stmt_may_create_closure(s))
+            };
+
             if let Some(init_stmt) = &for_stmt.init {
                 evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(init_stmt), labels)?;
             }
@@ -4797,7 +4810,7 @@ fn eval_res<'gc>(
             // body is never evaluated.
             *last_value = Value::Undefined;
             let mut iter_loop_env = loop_env;
-            if !per_iteration_names.is_empty() {
+            if needs_per_iteration_scope {
                 let first_iter_env = new_js_object_data(mc);
                 first_iter_env.borrow_mut(mc).prototype = iter_loop_env.borrow().prototype;
                 for name in per_iteration_names.iter() {
@@ -4822,7 +4835,7 @@ fn eval_res<'gc>(
                         break;
                     }
                 }
-                let iter_body_env = if use_lexical_env {
+                let iter_body_env = if use_lexical_env && body_has_lex {
                     let ie = new_js_object_data(mc);
                     ie.borrow_mut(mc).prototype = Some(iter_loop_env);
                     ie
@@ -4868,7 +4881,7 @@ fn eval_res<'gc>(
                     ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
                     ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                 }
-                if !per_iteration_names.is_empty() {
+                if needs_per_iteration_scope {
                     let next_iter_env = new_js_object_data(mc);
                     next_iter_env.borrow_mut(mc).prototype = iter_loop_env.borrow().prototype;
                     for name in per_iteration_names.iter() {
@@ -12431,6 +12444,11 @@ pub fn evaluate_call_dispatch<'gc>(
                     } else {
                         Err(raise_type_error!("RegExp.prototype method called on non-object receiver").into())
                     }
+                } else if name == "RegExp.escape" {
+                    Ok(crate::js_regexp::regexp_escape(mc, eval_args, env)?)
+                } else if name == "RegExp[Symbol.species]" {
+                    // Symbol.species getter: return `this`
+                    Ok(this_val.cloned().unwrap_or(Value::Undefined))
                 } else {
                     Err(raise_eval_error!(format!("Unknown RegExp function: {}", name)).into())
                 }
@@ -15359,12 +15377,15 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::Object(properties) => evaluate_expr_object(mc, env, properties),
         Expr::Regex(pattern, flags) => {
-            // Instantiate a RegExp object for a regex literal
+            // Fast path for regex literals – bypass the full constructor
+            // (no argument coercion, no is_regexp checks, no re-validation needed).
             let pattern_utf16 = crate::unicode::utf8_to_utf16(pattern);
-            let flags_u16 = crate::unicode::utf8_to_utf16(flags);
-            let arg1 = Value::String(pattern_utf16);
-            let arg2 = Value::String(flags_u16);
-            Ok(crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), &[arg1, arg2])?)
+            Ok(crate::js_regexp::create_regexp_object_fast_for_eval(
+                mc,
+                env,
+                pattern_utf16,
+                flags.clone(),
+            )?)
         }
 
         Expr::Array(elements) => evaluate_expr_array(mc, env, elements),
@@ -16215,7 +16236,9 @@ fn evaluate_expr_property<'gc>(
             | "RegExp.prototype.exec"
             | "RegExp.prototype.test"
             | "RegExp.prototype.match"
-            | "RegExp.prototype.search" => 1.0,
+            | "RegExp.prototype.matchAll"
+            | "RegExp.prototype.search"
+            | "RegExp.escape" => 1.0,
             "Array.prototype.slice"
             | "Array.prototype.splice"
             | "Array.prototype.copyWithin"
@@ -16277,6 +16300,8 @@ fn evaluate_expr_property<'gc>(
             "[Symbol.hasInstance]"
         } else if func_name == "RegExp.prototype.match" {
             return Ok(Value::String(utf8_to_utf16("[Symbol.match]")));
+        } else if func_name == "RegExp.prototype.matchAll" {
+            return Ok(Value::String(utf8_to_utf16("[Symbol.matchAll]")));
         } else if func_name == "RegExp.prototype.replace" {
             return Ok(Value::String(utf8_to_utf16("[Symbol.replace]")));
         } else if func_name == "RegExp.prototype.search" {
@@ -17647,7 +17672,9 @@ fn evaluate_expr_index<'gc>(
                     | "RegExp.prototype.exec"
                     | "RegExp.prototype.test"
                     | "RegExp.prototype.match"
-                    | "RegExp.prototype.search" => 1.0,
+                    | "RegExp.prototype.matchAll"
+                    | "RegExp.prototype.search"
+                    | "RegExp.escape" => 1.0,
                     "Array.prototype.slice"
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
@@ -17708,6 +17735,8 @@ fn evaluate_expr_index<'gc>(
                     "[Symbol.hasInstance]"
                 } else if func_name == "RegExp.prototype.match" {
                     return Ok(Value::String(utf8_to_utf16("[Symbol.match]")));
+                } else if func_name == "RegExp.prototype.matchAll" {
+                    return Ok(Value::String(utf8_to_utf16("[Symbol.matchAll]")));
                 } else if func_name == "RegExp.prototype.replace" {
                     return Ok(Value::String(utf8_to_utf16("[Symbol.replace]")));
                 } else if func_name == "RegExp.prototype.search" {
@@ -19006,9 +19035,26 @@ pub fn call_native_function<'gc>(
                 } else {
                     len_n.floor() as usize
                 };
-                for k in 0..len {
-                    let item = get_property_with_accessors(mc, env, &obj, k)?;
-                    rest_args.push(item);
+                // Fast path: plain dense array — read elements directly from the
+                // properties map to avoid the overhead of get_property_with_accessors
+                // per element (proxy checks, deferred modules, accessor resolution).
+                let is_plain_array = crate::js_array::is_array(mc, &obj) && !slot_has(&obj, &InternalSlot::Proxy);
+                if is_plain_array {
+                    rest_args.reserve(len);
+                    let borrowed = obj.borrow();
+                    for k in 0..len {
+                        let key = PropertyKey::String(k.to_string());
+                        if let Some(val_ptr) = borrowed.properties.get(&key) {
+                            rest_args.push(val_ptr.borrow().clone());
+                        } else {
+                            rest_args.push(Value::Undefined);
+                        }
+                    }
+                } else {
+                    for k in 0..len {
+                        let item = get_property_with_accessors(mc, env, &obj, k)?;
+                        rest_args.push(item);
+                    }
                 }
             }
             _ => {
@@ -19184,6 +19230,14 @@ pub fn call_native_function<'gc>(
             return Ok(Some(crate::js_string::handle_string_iterator_next(mc, obj)?));
         } else {
             return Err(raise_eval_error!("TypeError: StringIterator.prototype.next called on non-object").into());
+        }
+    }
+    if name == "RegExpStringIterator.prototype.next" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_regexp::handle_regexp_string_iterator_next(mc, obj, env)?));
+        } else {
+            return Err(raise_type_error!("RegExpStringIterator.prototype.next called on non-object").into());
         }
     }
     if name == "MapIterator.prototype.next" {
@@ -22327,6 +22381,113 @@ fn evaluate_expr_array<'gc>(
     }
     set_array_length(mc, &arr_obj, index)?;
     Ok(Value::Object(arr_obj))
+}
+
+/// Returns `true` when any statement / expression contained in `stmts`
+/// might create a closure that could capture surrounding variables.
+/// A conservative approximation – false positives are safe (we just skip
+/// the optimisation), false negatives would be a bug.
+fn stmts_may_create_closure(stmts: &[Statement]) -> bool {
+    stmts.iter().any(stmt_may_create_closure)
+}
+
+fn stmt_may_create_closure(stmt: &Statement) -> bool {
+    match &*stmt.kind {
+        StatementKind::Expr(e) => expr_may_create_closure(e),
+        StatementKind::Var(decls) | StatementKind::Let(decls) => decls.iter().any(|(_, e)| e.as_ref().is_some_and(expr_may_create_closure)),
+        StatementKind::Const(decls) => decls.iter().any(|(_, e)| expr_may_create_closure(e)),
+        StatementKind::If(if_stmt) => {
+            expr_may_create_closure(&if_stmt.condition)
+                || stmts_may_create_closure(&if_stmt.then_body)
+                || if_stmt.else_body.as_ref().is_some_and(|b| stmts_may_create_closure(b))
+        }
+        StatementKind::Block(inner) => stmts_may_create_closure(inner),
+        StatementKind::For(for_stmt) => stmts_may_create_closure(&for_stmt.body),
+        StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => stmts_may_create_closure(body),
+        StatementKind::Return(Some(e)) | StatementKind::Throw(e) => expr_may_create_closure(e),
+        StatementKind::TryCatch(tc) => {
+            stmts_may_create_closure(&tc.try_body)
+                || tc.catch_body.as_ref().is_some_and(|b| stmts_may_create_closure(b))
+                || tc.finally_body.as_ref().is_some_and(|b| stmts_may_create_closure(b))
+        }
+        StatementKind::FunctionDeclaration(..) => true,
+        StatementKind::Class(_) => true,
+        _ => false,
+    }
+}
+
+fn expr_may_create_closure(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(..)
+        | Expr::ArrowFunction(..)
+        | Expr::AsyncFunction(..)
+        | Expr::GeneratorFunction(..)
+        | Expr::AsyncGeneratorFunction(..)
+        | Expr::AsyncArrowFunction(..)
+        | Expr::Class(..) => true,
+        Expr::Call(callee, args) => expr_may_create_closure(callee) || args.iter().any(expr_may_create_closure),
+        Expr::New(callee, args) => expr_may_create_closure(callee) || args.iter().any(expr_may_create_closure),
+        Expr::Assign(l, r)
+        | Expr::AddAssign(l, r)
+        | Expr::SubAssign(l, r)
+        | Expr::MulAssign(l, r)
+        | Expr::DivAssign(l, r)
+        | Expr::ModAssign(l, r)
+        | Expr::PowAssign(l, r)
+        | Expr::BitOrAssign(l, r)
+        | Expr::BitAndAssign(l, r)
+        | Expr::BitXorAssign(l, r)
+        | Expr::LeftShiftAssign(l, r)
+        | Expr::RightShiftAssign(l, r)
+        | Expr::UnsignedRightShiftAssign(l, r)
+        | Expr::LogicalAndAssign(l, r)
+        | Expr::LogicalOrAssign(l, r)
+        | Expr::NullishAssign(l, r)
+        | Expr::Binary(l, _, r)
+        | Expr::LogicalAnd(l, r)
+        | Expr::LogicalOr(l, r)
+        | Expr::NullishCoalescing(l, r)
+        | Expr::Mod(l, r)
+        | Expr::Pow(l, r)
+        | Expr::Comma(l, r)
+        | Expr::Index(l, r) => expr_may_create_closure(l) || expr_may_create_closure(r),
+        Expr::Conditional(a, b, c) => expr_may_create_closure(a) || expr_may_create_closure(b) || expr_may_create_closure(c),
+        Expr::Property(e, _)
+        | Expr::OptionalProperty(e, _)
+        | Expr::PrivateMember(e, _)
+        | Expr::OptionalPrivateMember(e, _)
+        | Expr::TypeOf(e)
+        | Expr::Delete(e)
+        | Expr::Void(e)
+        | Expr::Await(e)
+        | Expr::LogicalNot(e)
+        | Expr::UnaryNeg(e)
+        | Expr::UnaryPlus(e)
+        | Expr::BitNot(e)
+        | Expr::Increment(e)
+        | Expr::Decrement(e)
+        | Expr::PostIncrement(e)
+        | Expr::PostDecrement(e)
+        | Expr::Spread(e)
+        | Expr::Getter(e)
+        | Expr::Setter(e)
+        | Expr::YieldStar(e)
+        | Expr::OptionalIndex(e, _) => expr_may_create_closure(e),
+        Expr::Yield(Some(e)) => expr_may_create_closure(e),
+        Expr::Array(elems) => elems.iter().any(|e| e.as_ref().is_some_and(expr_may_create_closure)),
+        Expr::Object(props) => props
+            .iter()
+            .any(|(k, v, _, _)| expr_may_create_closure(k) || expr_may_create_closure(v)),
+        // Conservative: template parts are stored as tokens, not Exprs,
+        // so we cannot recurse. In practice closures in template interpolations
+        // are exceedingly rare, so returning false is acceptable.
+        Expr::TemplateString(_) => false,
+        Expr::OptionalCall(callee, args) => expr_may_create_closure(callee) || args.iter().any(expr_may_create_closure),
+        Expr::TaggedTemplate(e, _, _, _, exprs) => expr_may_create_closure(e) || exprs.iter().any(expr_may_create_closure),
+        Expr::SuperCall(args) | Expr::SuperMethod(_, args) => args.iter().any(expr_may_create_closure),
+        // Terminals
+        _ => false,
+    }
 }
 
 fn body_has_lexical(stmts: &[Statement]) -> bool {

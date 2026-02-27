@@ -1474,6 +1474,8 @@ fn function_constructor<'gc>(
             let mut closure_data = ClosureData::new(params, body, Some(global_env), None);
             // Function constructor created functions should not inherit strict mode from the context
             closure_data.enforce_strictness_inheritance = false;
+            // Propagate "use strict" directive from the body to the closure
+            closure_data.is_strict = body_is_strict;
             let closure_val = Value::Closure(Gc::new(mc, closure_data));
 
             // Create a function object wrapper so it has a proper `prototype` and property attributes
@@ -3691,14 +3693,33 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     let proto_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("")), false, false, true)?;
     crate::js_object::define_property_internal(mc, &func_proto, "name", &proto_name_desc)?;
 
-    // Define restricted 'caller' and 'arguments' accessors that throw a TypeError when accessed or assigned
+    // §10.2.4 Create %ThrowTypeError% intrinsic — a unique frozen function object per realm.
+    let throw_type_error = crate::core::new_js_object_data(mc);
+    throw_type_error.borrow_mut(mc).set_closure(Some(crate::core::new_gc_cell_ptr(
+        mc,
+        Value::Function("Function.prototype.restrictedThrow".to_string()),
+    )));
+    // Set [[Prototype]] to Function.prototype
+    throw_type_error.borrow_mut(mc).prototype = Some(func_proto);
+    // Stamp OriginGlobal so get_function_realm returns this realm's env
+    // (critical for cross-realm ThrowTypeError to throw the correct realm's TypeError).
+    crate::core::slot_set(mc, &throw_type_error, crate::core::InternalSlot::OriginGlobal, &Value::Object(*env));
+    // length = 0: { writable: false, enumerable: false, configurable: false }
+    let tte_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, false)?;
+    crate::js_object::define_property_internal(mc, &throw_type_error, "length", &tte_len_desc)?;
+    // name = "": { writable: false, enumerable: false, configurable: false }
+    let tte_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("")), false, false, false)?;
+    crate::js_object::define_property_internal(mc, &throw_type_error, "name", &tte_name_desc)?;
+    // Make non-extensible
+    throw_type_error.borrow_mut(mc).prevent_extensions();
+    // Store on env for reuse (arguments.callee in strict mode, etc.)
+    crate::core::slot_set(mc, env, crate::core::InternalSlot::ThrowTypeError, &Value::Object(throw_type_error));
+
+    // Define restricted 'caller' and 'arguments' accessors using %ThrowTypeError%
+    let thrower_val = Value::Object(throw_type_error);
     let restricted_desc = crate::core::new_js_object_data(mc);
-    let val = Value::Function("Function.prototype.restrictedThrow".to_string());
-    object_set_key_value(mc, &restricted_desc, "get", &val)?;
-
-    let val = Value::Function("Function.prototype.restrictedThrow".to_string());
-    object_set_key_value(mc, &restricted_desc, "set", &val)?;
-
+    object_set_key_value(mc, &restricted_desc, "get", &thrower_val)?;
+    object_set_key_value(mc, &restricted_desc, "set", &thrower_val)?;
     object_set_key_value(mc, &restricted_desc, "configurable", &Value::Boolean(true))?;
     crate::js_object::define_property_internal(mc, &func_proto, "caller", &restricted_desc)?;
     crate::js_object::define_property_internal(mc, &func_proto, "arguments", &restricted_desc)?;

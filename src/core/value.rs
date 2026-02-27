@@ -503,6 +503,7 @@ pub enum InternalSlot {
     SuppressDynamicImportResult, // __suppress_dynamic_import_result
     SymbolRegistry,              // __symbol_registry
     TemplateRegistry,            // __template_registry
+    ThrowTypeError,              // __throw_type_error
 
     // --- Misc ---
     Eof,          // __eof
@@ -680,6 +681,7 @@ pub fn str_to_internal_slot(s: &str) -> Option<InternalSlot> {
         "__suppress_dynamic_import_result" => return Some(InternalSlot::SuppressDynamicImportResult),
         "__symbol_registry" => return Some(InternalSlot::SymbolRegistry),
         "__template_registry" => return Some(InternalSlot::TemplateRegistry),
+        "__throw_type_error" => return Some(InternalSlot::ThrowTypeError),
         // Misc
         "__eof" => return Some(InternalSlot::Eof),
         "__lookupGetter__" => return Some(InternalSlot::LookupGetter),

@@ -687,7 +687,12 @@ pub fn create_arguments_object<'gc>(
 
     if let Some(callee_val) = callee {
         if crate::core::env_get_strictness(func_env) {
-            let thrower_val = Value::Function("Function.prototype.restrictedThrow".to_string());
+            // Use the realm's %ThrowTypeError% intrinsic if available
+            let thrower_val = if let Some(tte_rc) = crate::core::slot_get_chained(func_env, &crate::core::InternalSlot::ThrowTypeError) {
+                tte_rc.borrow().clone()
+            } else {
+                Value::Function("Function.prototype.restrictedThrow".to_string())
+            };
 
             let prop = crate::core::Value::Property {
                 value: None,

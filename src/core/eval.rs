@@ -17135,21 +17135,10 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                 }
 
                 if obj.borrow().non_configurable.contains(&key_val) {
-                    let is_function_like = obj.borrow().get_closure().is_some();
-                    if is_function_like && (key == "length" || key == "name") {
-                        if let Some(cl_ptr) = obj.borrow().get_closure()
-                            && let Value::Function(func_name) = &*cl_ptr.borrow()
-                        {
-                            mark_builtin_function_virtual_prop_deleted(mc, env, func_name, key)?;
-                        }
-                        let mut o = obj.borrow_mut(mc);
-                        let _ = o.properties.shift_remove(&key_val);
-                        let _ = o.non_configurable.remove(&key_val);
-                        let _ = o.non_writable.remove(&key_val);
-                        let _ = o.non_enumerable.remove(&key_val);
-                        Ok(Value::Boolean(true))
-                    } else {
+                    if env_get_strictness(env) {
                         Err(crate::raise_type_error!(format!("Cannot delete non-configurable property '{key}'",)).into())
+                    } else {
+                        Ok(Value::Boolean(false))
                     }
                 } else {
                     let _ = obj.borrow_mut(mc).properties.shift_remove(&key_val);
@@ -17225,27 +17214,14 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                     return Ok(Value::Boolean(true));
                 }
                 if obj.borrow().non_configurable.contains(&key) {
-                    let is_fn_length_or_name = matches!(&key, PropertyKey::String(s) if s == "length" || s == "name");
-                    let is_function_like = obj.borrow().get_closure().is_some();
-                    if is_function_like && is_fn_length_or_name {
-                        if let PropertyKey::String(s) = &key
-                            && let Some(cl_ptr) = obj.borrow().get_closure()
-                            && let Value::Function(func_name) = &*cl_ptr.borrow()
-                        {
-                            mark_builtin_function_virtual_prop_deleted(mc, env, func_name, s)?;
-                        }
-                        let mut o = obj.borrow_mut(mc);
-                        let _ = o.properties.shift_remove(&key);
-                        let _ = o.non_configurable.remove(&key);
-                        let _ = o.non_writable.remove(&key);
-                        let _ = o.non_enumerable.remove(&key);
-                        Ok(Value::Boolean(true))
-                    } else {
+                    if env_get_strictness(env) {
                         Err(crate::raise_type_error!(format!(
                             "Cannot delete non-configurable property '{}'",
                             value_to_string(&key_val_res)
                         ))
                         .into())
+                    } else {
+                        Ok(Value::Boolean(false))
                     }
                 } else {
                     let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
@@ -19083,7 +19059,13 @@ pub fn call_native_function<'gc>(
 
     // Restricted accessor used to implement the throwing 'caller'/'arguments' accessors on Function.prototype
     if name == "Function.prototype.restrictedThrow" {
-        return Err(raise_type_error!("Access to 'caller' or 'arguments' is restricted").into());
+        // Use the env passed to this function (which is the ThrowTypeError's own realm
+        // when called cross-realm) so the TypeError is instanceof that realm's TypeError.
+        return Err(throw_realm_type_error(
+            mc,
+            env,
+            "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them",
+        ));
     }
 
     if name == "AsyncGenerator.prototype.next" {
@@ -19850,7 +19832,11 @@ pub(crate) fn call_accessor<'gc>(
         Value::Function(name) => {
             // Special-case restricted accessor thrower
             if name == "Function.prototype.restrictedThrow" {
-                return Err(raise_type_error!("Access to 'caller' or 'arguments' is restricted").into());
+                return Err(throw_realm_type_error(
+                    mc,
+                    env,
+                    "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them",
+                ));
             }
             if let Some(res) = call_native_function(mc, name, Some(&Value::Object(*receiver)), &[], env)? {
                 Ok(res)
@@ -19864,7 +19850,11 @@ pub(crate) fn call_accessor<'gc>(
                     Ok(v) => Ok(v),
                     Err(_) => {
                         if name.contains("restrictedThrow") {
-                            Err(raise_type_error!("Access to 'caller' or 'arguments' is restricted").into())
+                            Err(throw_realm_type_error(
+                                mc,
+                                env,
+                                "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them",
+                            ))
                         } else {
                             Err(raise_type_error!(format!("Accessor function {name} not supported")).into())
                         }

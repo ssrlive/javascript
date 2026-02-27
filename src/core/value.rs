@@ -1770,7 +1770,14 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
                 (buf_len - ta.byte_offset) / ta.element_size()
             }
         } else {
-            ta.length
+            // Fixed-length: check if the TA is still in-bounds after a possible resize
+            let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+            let needed = ta.byte_offset + ta.length * ta.element_size();
+            if needed > buf_len {
+                0 // out-of-bounds — no integer index keys
+            } else {
+                ta.length
+            }
         };
         for i in 0..cur_len {
             let s = i.to_string();

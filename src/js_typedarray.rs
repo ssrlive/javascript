@@ -2175,7 +2175,23 @@ pub fn handle_typedarray_constructor<'gc>(
             if let Some(ta_val) = slot_get_chained(first_obj, &InternalSlot::TypedArray) {
                 // TypedArray(typedArray)
                 if let Value::TypedArray(src_ta) = &*ta_val.borrow() {
-                    let src_length = src_ta.length;
+                    // Spec: InitializeTypedArrayFromTypedArray
+                    // If IsTypedArrayOutOfBounds(srcRecord), throw TypeError.
+                    let buf_len = src_ta.buffer.borrow().data.lock().unwrap().len();
+                    let src_length = if src_ta.length_tracking {
+                        // Length-tracking: out-of-bounds when byte_offset > buf_len
+                        if src_ta.byte_offset > buf_len {
+                            return Err(throw_type_error(mc, env, "Source TypedArray is out of bounds"));
+                        }
+                        (buf_len - src_ta.byte_offset) / src_ta.element_size()
+                    } else {
+                        // Fixed-length: out-of-bounds when needed bytes exceed buffer
+                        let needed = src_ta.byte_offset + src_ta.length * src_ta.element_size();
+                        if needed > buf_len {
+                            return Err(throw_type_error(mc, env, "Source TypedArray is out of bounds"));
+                        }
+                        src_ta.length
+                    };
                     let src_is_bigint = is_bigint_typed_array(&src_ta.kind);
                     let mut copied = Vec::with_capacity(src_length);
                     for idx in 0..src_length {

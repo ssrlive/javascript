@@ -8470,29 +8470,15 @@ fn evaluate_expr_assign<'gc>(
             Ok(val)
         }
         Precomputed::Property(base_val, key) => {
-            // Per §6.2.5.6 PutValue and §10.1.9.2 OrdinarySetWithOwnDescriptor step 3:
-            // If the Receiver is not an Object (i.e. a primitive), [[Set]] returns false.
-            // Per step 5d, if strict mode, throw TypeError.
+            // §6.2.5.6 PutValue step 6:
+            // If HasPrimitiveBase(V), set base to ToObject(base).
+            // Then call base.[[Set]](name, W, GetThisValue(V)).
+            // GetThisValue returns the original primitive, not the wrapper.
+            // If [[Set]] returns false (err) and strict, throw; otherwise silently return.
             let is_primitive_base = matches!(
                 *base_val,
                 Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_) | Value::Symbol(_)
             );
-            if is_primitive_base && env_get_strictness(env) {
-                return Err(raise_type_error!(format!(
-                    "Cannot create property '{}' on {} '{}'",
-                    key,
-                    match &*base_val {
-                        Value::Number(_) => "number",
-                        Value::Boolean(_) => "boolean",
-                        Value::String(_) => "string",
-                        Value::BigInt(_) => "bigint",
-                        Value::Symbol(_) => "symbol",
-                        _ => "primitive",
-                    },
-                    value_to_string(&base_val)
-                ))
-                .into());
-            }
             // ToObject semantics: throw on null/undefined, box primitives, or use object directly.
             let obj = match *base_val {
                 Value::Object(o) => o,
@@ -8513,7 +8499,7 @@ fn evaluate_expr_assign<'gc>(
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean");
                     obj
                 }
-                Value::String(s) => {
+                Value::String(ref s) => {
                     let obj = new_js_object_data(mc);
                     object_set_key_value(mc, &obj, "valueOf", &Value::Function("String_valueOf".to_string()))?;
                     object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
@@ -8522,21 +8508,51 @@ fn evaluate_expr_assign<'gc>(
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String");
                     obj
                 }
-                Value::BigInt(h) => {
+                Value::BigInt(ref h) => {
                     let obj = new_js_object_data(mc);
                     slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::BigInt(h.clone()));
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
                     obj
                 }
-                Value::Symbol(sym_rc) => {
+                Value::Symbol(ref sym_rc) => {
                     let obj = new_js_object_data(mc);
-                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Symbol(sym_rc));
+                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Symbol(*sym_rc));
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
                     obj
                 }
                 _ => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
             };
-            set_property_with_accessors(mc, env, &obj, &*key, &val, None)?;
+            if is_primitive_base {
+                // PutValue on primitive base: call [[Set]] with the original
+                // primitive as the receiver (GetThisValue).  If [[Set]] returns
+                // false (propagated as Err), strict mode throws TypeError;
+                // otherwise silently ignore.
+                match set_property_with_accessors(mc, env, &obj, &*key, &val, Some(&base_val)) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if env_get_strictness(env) {
+                            return Err(raise_type_error!(format!(
+                                "Cannot create property '{}' on {} '{}'",
+                                key,
+                                match &*base_val {
+                                    Value::Number(_) => "number",
+                                    Value::Boolean(_) => "boolean",
+                                    Value::String(_) => "string",
+                                    Value::BigInt(_) => "bigint",
+                                    Value::Symbol(_) => "symbol",
+                                    _ => "primitive",
+                                },
+                                value_to_string(&base_val)
+                            ))
+                            .into());
+                        }
+                        // sloppy mode: swallow the error
+                        let _ = e;
+                    }
+                }
+            } else {
+                set_property_with_accessors(mc, env, &obj, &*key, &val, None)?;
+            }
             Ok(val)
         }
         Precomputed::Index(base_val, raw_key) => {
@@ -8557,36 +8573,84 @@ fn evaluate_expr_assign<'gc>(
                 _ => PropertyKey::String(value_to_string(&raw_key)),
             };
 
+            let is_primitive_base_index = matches!(
+                *base_val,
+                Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_) | Value::Symbol(_)
+            );
+
             let obj = match *base_val {
                 Value::Object(o) => o,
                 Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
-                ref prim @ (Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_) | Value::Symbol(_)) => {
-                    // §10.1.9.2 step 3: Receiver is not an Object → [[Set]] returns false.
-                    // §6.2.5.6 step 5d: strict mode → TypeError.
-                    if env_get_strictness(env) {
-                        let type_name = match prim {
-                            Value::Number(_) => "number",
-                            Value::Boolean(_) => "boolean",
-                            Value::String(_) => "string",
-                            Value::BigInt(_) => "bigint",
-                            Value::Symbol(_) => "symbol",
-                            _ => "primitive",
-                        };
-                        return Err(raise_type_error!(format!(
-                            "Cannot create property '{}' on {} '{}'",
-                            value_to_string(&crate::js_proxy::property_key_to_value_pub(&key)),
-                            type_name,
-                            value_to_string(prim)
-                        ))
-                        .into());
-                    }
-                    // Non-strict: silently ignore the assignment per spec
-                    return Ok(val);
+                // §6.2.5.6 PutValue step 6: ToObject + [[Set]] for primitive bases
+                Value::Number(n) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Number_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", &Value::Function("Number_toString".to_string()))?;
+                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Number(n));
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number");
+                    obj
+                }
+                Value::Boolean(b) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
+                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Boolean(b));
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean");
+                    obj
+                }
+                Value::String(ref s) => {
+                    let obj = new_js_object_data(mc);
+                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("String_valueOf".to_string()))?;
+                    object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
+                    object_set_key_value(mc, &obj, "length", &Value::Number(s.len() as f64))?;
+                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::String(s.clone()));
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String");
+                    obj
+                }
+                Value::BigInt(ref h) => {
+                    let obj = new_js_object_data(mc);
+                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::BigInt(h.clone()));
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
+                    obj
+                }
+                Value::Symbol(sym_rc) => {
+                    let obj = new_js_object_data(mc);
+                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Symbol(sym_rc));
+                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
+                    obj
                 }
                 _ => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
             };
 
-            set_property_with_accessors(mc, env, &obj, &key, &val, None)?;
+            if is_primitive_base_index {
+                // PutValue on primitive base: call [[Set]] with the original
+                // primitive as the receiver.  If [[Set]] fails and strict, throw.
+                match set_property_with_accessors(mc, env, &obj, &key, &val, Some(&*base_val)) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if env_get_strictness(env) {
+                            let type_name = match &*base_val {
+                                Value::Number(_) => "number",
+                                Value::Boolean(_) => "boolean",
+                                Value::String(_) => "string",
+                                Value::BigInt(_) => "bigint",
+                                Value::Symbol(_) => "symbol",
+                                _ => "primitive",
+                            };
+                            return Err(raise_type_error!(format!(
+                                "Cannot create property '{}' on {} '{}'",
+                                value_to_string(&crate::js_proxy::property_key_to_value_pub(&key)),
+                                type_name,
+                                value_to_string(&base_val)
+                            ))
+                            .into());
+                        }
+                        let _ = e;
+                    }
+                }
+            } else {
+                set_property_with_accessors(mc, env, &obj, &key, &val, None)?;
+            }
             Ok(val)
         }
         Precomputed::PrivateMember(base_val, name, id) => {
@@ -18466,6 +18530,16 @@ pub(crate) fn set_property_with_accessors<'gc>(
     // Resolve receiver object: if receiver_opt is provided and is an Object use it, else default to obj
     let receiver_obj: crate::core::JSObjectDataPtr<'gc> = if let Some(Value::Object(o)) = receiver_opt { *o } else { *obj };
 
+    // §10.1.9.2 OrdinarySetWithOwnDescriptor step 2b:
+    // "If Receiver is not an Object, return false."
+    // When the original receiver (from PutValue) is a primitive, we must NOT
+    // create an own property on the ToObject wrapper.  Proxy/setter paths may
+    // still succeed, but creating a new data property must be blocked.
+    let receiver_is_primitive = matches!(
+        receiver_opt,
+        Some(Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_) | Value::Symbol(_))
+    );
+
     if let PropertyKey::Private(..) = key {
         // Check prototype chain for private property (fields are own, methods/accessors on prototype)
         if object_get_key_value(obj, key).is_none() {
@@ -18771,7 +18845,9 @@ pub(crate) fn set_property_with_accessors<'gc>(
                 && let Value::Proxy(p) = &*proxy_ptr.borrow()
             {
                 // Pass the original receiver through the proxy [[Set]], not the proxy wrapper
-                let ok = crate::js_proxy::proxy_set_property_with_receiver(mc, p, key, val, Some(&Value::Object(receiver_ptr)))?;
+                let receiver_val_obj = Value::Object(receiver_ptr);
+                let proxy_receiver = receiver_opt.unwrap_or(&receiver_val_obj);
+                let ok = crate::js_proxy::proxy_set_property_with_receiver(mc, p, key, val, Some(proxy_receiver))?;
                 if ok {
                     return Ok(());
                 }
@@ -18977,6 +19053,10 @@ pub(crate) fn set_property_with_accessors<'gc>(
                         }
                     }
                     // Writable on prototype -> create own property on receiver
+                    // §10.1.9.2 step 2b: if receiver is primitive, [[Set]] returns false
+                    if receiver_is_primitive {
+                        return Err(raise_type_error!("Cannot create property on primitive").into());
+                    }
                     object_set_key_value(mc, &receiver_ptr, key, val)?;
                     Ok(())
                 }
@@ -18993,6 +19073,10 @@ pub(crate) fn set_property_with_accessors<'gc>(
                             return Ok(());
                         }
                     }
+                    // §10.1.9.2 step 2b: if receiver is primitive, [[Set]] returns false
+                    if receiver_is_primitive {
+                        return Err(raise_type_error!("Cannot create property on primitive").into());
+                    }
                     object_set_key_value(mc, &receiver_ptr, key, val)?;
                     Ok(())
                 }
@@ -19000,6 +19084,10 @@ pub(crate) fn set_property_with_accessors<'gc>(
         }
     } else {
         // No owner found in chain: create own property
+        // §10.1.9.2 step 2b: if receiver is primitive, [[Set]] returns false
+        if receiver_is_primitive {
+            return Err(raise_type_error!("Cannot create property on primitive").into());
+        }
         let allow_nonextensible_internal_write = if let PropertyKey::String(s) = key {
             is_global_environment(obj) && matches!(s.as_str(), "__test262_global_code_mode" | "__global_lex_env")
         } else {

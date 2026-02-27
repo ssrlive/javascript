@@ -1056,7 +1056,50 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                             Some(desc_obj) => Ok(Value::Object(desc_obj)),
                             None => Ok(Value::Undefined),
                         }
-                    } else if let Some(val_rc) = object_get_key_value(obj, &key_clone) {
+                    } else if let PropertyKey::String(ref s) = key_clone
+                        && let Some(ta_cell) = crate::core::slot_get(obj, &InternalSlot::TypedArray)
+                        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+                    {
+                        // TypedArray [[GetOwnProperty]] for CanonicalNumericIndexString
+                        if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                            let idx = num_idx as usize;
+                            let value = match ta.kind {
+                                crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => {
+                                    let size = ta.element_size();
+                                    let byte_offset = ta.byte_offset + idx * size;
+                                    let buffer = ta.buffer.borrow();
+                                    let data = buffer.data.lock().unwrap();
+                                    if byte_offset + size <= data.len() {
+                                        let bytes = &data[byte_offset..byte_offset + size];
+                                        if matches!(ta.kind, crate::core::TypedArrayKind::BigInt64) {
+                                            let mut b = [0u8; 8];
+                                            b.copy_from_slice(bytes);
+                                            Value::BigInt(Box::new(num_bigint::BigInt::from(i64::from_le_bytes(b))))
+                                        } else {
+                                            let mut b = [0u8; 8];
+                                            b.copy_from_slice(bytes);
+                                            Value::BigInt(Box::new(num_bigint::BigInt::from(u64::from_le_bytes(b))))
+                                        }
+                                    } else {
+                                        Value::Undefined
+                                    }
+                                }
+                                _ => {
+                                    let n = ta.get(idx)?;
+                                    Value::Number(n)
+                                }
+                            };
+                            let desc_obj = crate::core::new_js_object_data(mc);
+                            object_set_key_value(mc, &desc_obj, "value", &value)?;
+                            object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;
+                            object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(true))?;
+                            object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+                            Ok(Value::Object(desc_obj))
+                        } else {
+                            Ok(Value::Undefined)
+                        }
+                    } else if let Some(val_rc) = crate::core::get_own_property(obj, &key_clone) {
                         let val = val_rc.borrow().clone();
                         let desc_obj = crate::core::new_js_object_data(mc);
 
@@ -1286,6 +1329,24 @@ pub(crate) fn ordinary_set<'gc>(
     // Step 1: ownDesc = target.[[GetOwnPropertyDescriptor]](P)
     let own_prop = crate::core::get_own_property(target_obj, key);
 
+    // TypedArray [[GetOwnProperty]] for CanonicalNumericIndex:
+    // If target is a TypedArray and key is a valid numeric index, treat it as a
+    // writable data property even though it's not in the properties map.
+    if own_prop.is_none()
+        && let PropertyKey::String(s) = key
+        && let Some(ta_cell) = crate::core::slot_get(target_obj, &InternalSlot::TypedArray)
+        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+    {
+        if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+            // Synthesize a writable data property — go to create/update on receiver
+            return ordinary_set_create_or_update(mc, key, value, receiver, env);
+        } else {
+            // Invalid numeric index: just return true (silently ignore)
+            return Ok(true);
+        }
+    }
+
     if let Some(own_val_rc) = own_prop {
         let own_val = own_val_rc.borrow().clone();
 
@@ -1340,6 +1401,42 @@ pub(crate) fn ordinary_set<'gc>(
         {
             return proxy_set_property_with_receiver(mc, inner_proxy, key, value, Some(receiver));
         }
+
+        // TypedArray parent: apply TypedArray [[Set]] semantics per ES2024 §10.4.5.5
+        if let PropertyKey::String(s) = key
+            && let Some(ta_cell) = crate::core::slot_get(&parent_obj, &InternalSlot::TypedArray)
+            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+            && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+        {
+            // Check SameValue(O, Receiver) first — spec step 1.b.i
+            let same = match receiver {
+                Value::Object(recv_obj) => crate::core::Gc::ptr_eq(parent_obj, *recv_obj),
+                _ => false,
+            };
+            if same {
+                // TypedArraySetElement: coerce value, then set if valid index
+                if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
+                    let n = crate::js_typedarray::to_bigint_i64(mc, env, value)?;
+                    if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                        ta.set_bigint(mc, num_idx as usize, n)?;
+                    }
+                } else {
+                    let n = crate::core::to_number_with_env(mc, env, value)?;
+                    if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                        ta.set(mc, num_idx as usize, n)?;
+                    }
+                }
+                return Ok(true);
+            } else {
+                // Receiver != TypedArray — spec step 1.b.ii
+                if !crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                    return Ok(true); // invalid index → silently succeed
+                }
+                // Valid index, different receiver → OrdinarySet → create on receiver
+                return ordinary_set_create_or_update(mc, key, value, receiver, env);
+            }
+        }
+
         let parent_prop = crate::core::get_own_property(&parent_obj, key);
         if let Some(parent_val_rc) = parent_prop {
             let parent_val = parent_val_rc.borrow().clone();
@@ -1410,6 +1507,29 @@ fn ordinary_set_create_or_update<'gc>(
                     Ok(ok)
                 }
             } else {
+                // TypedArray receiver: if key is CanonicalNumericIndex, use TypedArray
+                // [[GetOwnProperty]]/[[DefineOwnProperty]] instead of properties map.
+                if let PropertyKey::String(s) = key
+                    && let Some(ta_cell) = crate::core::slot_get(recv_obj, &InternalSlot::TypedArray)
+                    && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                    && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+                {
+                    if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                        // Existing writable data property → IntegerIndexedElementSet
+                        if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
+                            let n = crate::js_typedarray::to_bigint_i64(mc, env, value)?;
+                            ta.set_bigint(mc, num_idx as usize, n)?;
+                        } else {
+                            let n = crate::core::to_number_with_env(mc, env, value)?;
+                            ta.set(mc, num_idx as usize, n)?;
+                        }
+                        return Ok(true);
+                    } else {
+                        // Invalid index → [[DefineOwnProperty]] returns false
+                        return Ok(false);
+                    }
+                }
+
                 // Ordinary receiver
                 let recv_has = crate::core::get_own_property(recv_obj, key);
                 if let Some(recv_val) = recv_has {
@@ -1531,6 +1651,58 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                 // OrdinarySet(target, P, V, Receiver) → OrdinarySetWithOwnDescriptor
                 // Step 1: ownDesc = target.[[GetOwnPropertyDescriptor]](P)
                 let own_prop = crate::core::get_own_property(target_obj, &key_clone);
+
+                // TypedArray target: if target is a TA and key is CanonicalNumericIndex,
+                // synthesize a writable data descriptor from the buffer element.
+                if own_prop.is_none()
+                    && let PropertyKey::String(ref s) = key_clone
+                    && let Some(ta_cell) = crate::core::slot_get(target_obj, &InternalSlot::TypedArray)
+                    && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                    && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+                {
+                    if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                        // Writable data descriptor → create/update on Receiver
+                        if let Some(Value::Object(recv_obj)) = &receiver_clone {
+                            if let Some(rp_cell) = crate::core::slot_get(recv_obj, &InternalSlot::Proxy)
+                                && let Value::Proxy(recv_proxy) = &*rp_cell.borrow()
+                            {
+                                let recv_has = proxy_get_own_property_descriptor(mc, recv_proxy, &key_clone)?;
+                                if recv_has.is_some() {
+                                    let ok = proxy_define_property_value_only(mc, recv_proxy, &key_clone, &value_clone)?;
+                                    return Ok(Value::Boolean(ok));
+                                } else {
+                                    let ok = proxy_define_data_property(mc, recv_proxy, &key_clone, &value_clone)?;
+                                    return Ok(Value::Boolean(ok));
+                                }
+                            } else {
+                                // TypedArray receiver
+                                if let Some(rtc) = crate::core::slot_get(recv_obj, &InternalSlot::TypedArray)
+                                    && let Value::TypedArray(rta) = &*rtc.borrow()
+                                    && let Some(ri) = crate::js_typedarray::canonical_numeric_index_string(s)
+                                {
+                                    if crate::js_typedarray::is_valid_integer_index(rta, ri) {
+                                        let renv = target_obj.borrow().definition_env.unwrap_or(*target_obj);
+                                        if crate::js_typedarray::is_bigint_typed_array(&rta.kind) {
+                                            let n = crate::js_typedarray::to_bigint_i64(mc, &renv, &value_clone)?;
+                                            rta.set_bigint(mc, ri as usize, n)?;
+                                        } else {
+                                            let n = crate::core::to_number_with_env(mc, &renv, &value_clone)?;
+                                            rta.set(mc, ri as usize, n)?;
+                                        }
+                                        return Ok(Value::Boolean(true));
+                                    } else {
+                                        return Ok(Value::Boolean(false));
+                                    }
+                                }
+                                object_set_key_value(mc, recv_obj, &key_clone, &value_clone)?;
+                                return Ok(Value::Boolean(true));
+                            }
+                        }
+                        return Ok(Value::Boolean(false));
+                    } else {
+                        return Ok(Value::Boolean(true)); // Invalid CanonicalNumericIndex → no-op
+                    }
+                }
 
                 if let Some(own_val_rc) = own_prop {
                     let own_val = own_val_rc.borrow().clone();
@@ -1661,6 +1833,40 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                                 receiver_clone.as_ref(),
                             )?));
                         }
+                        // TypedArray parent: apply [[Set]] semantics per §10.4.5.5
+                        if let PropertyKey::String(ref s) = key_clone
+                            && let Some(ta_cell) = crate::core::slot_get(&parent_obj, &InternalSlot::TypedArray)
+                            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                            && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+                        {
+                            let same = match &receiver_clone {
+                                Some(Value::Object(recv_obj)) => crate::core::Gc::ptr_eq(parent_obj, *recv_obj),
+                                _ => false,
+                            };
+                            if same {
+                                // TypedArraySetElement: coerce then set if valid
+                                let env_for_coerce = target_obj.borrow().definition_env.unwrap_or(*target_obj);
+                                if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
+                                    let n = crate::js_typedarray::to_bigint_i64(mc, &env_for_coerce, &value_clone)?;
+                                    if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                                        ta.set_bigint(mc, num_idx as usize, n)?;
+                                    }
+                                } else {
+                                    let n = crate::core::to_number_with_env(mc, &env_for_coerce, &value_clone)?;
+                                    if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                                        ta.set(mc, num_idx as usize, n)?;
+                                    }
+                                }
+                                return Ok(Value::Boolean(true));
+                            } else {
+                                if !crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                                    return Ok(Value::Boolean(true)); // invalid index → no-op
+                                }
+                                // Valid index, different receiver → create on receiver
+                                break; // Fall through to CreateDataProperty on Receiver
+                            }
+                        }
+
                         let parent_prop = crate::core::get_own_property(&parent_obj, &key_clone);
                         if let Some(parent_val_rc) = parent_prop {
                             let parent_val = parent_val_rc.borrow().clone();

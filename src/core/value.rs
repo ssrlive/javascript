@@ -1937,177 +1937,166 @@ pub fn object_set_key_value<'gc>(
         return Err(raise_type_error!("Cannot add property to non-extensible object"));
     }
 
-    // If obj is a typed array and we're setting a numeric index within its length,
+    // If obj is a typed array and we're setting a canonical numeric index within its length,
     // perform a typed-array element write to the underlying buffer instead of
     // creating a new ordinary own property. This matches the semantics of
     // TypedArray indexed stores.
     if let PropertyKey::String(s) = &key
-        && let Ok(idx) = s.parse::<usize>()
+        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
         && let Some(ta_cell) = slot_get(obj, &InternalSlot::TypedArray)
         && let Value::TypedArray(ta) = &*ta_cell.borrow()
+        && crate::js_typedarray::is_valid_integer_index(ta, num_idx)
     {
-        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
-        let cur_len = if ta.length_tracking {
-            if buf_len <= ta.byte_offset {
-                0
-            } else {
-                (buf_len - ta.byte_offset) / ta.element_size()
+        let idx = num_idx as usize;
+        // Perform typed-array write inline into the underlying buffer to avoid
+        // depending on method dispatch on `Gc` wrapper types.
+        let byte_offset = ta.byte_offset + idx * ta.element_size();
+        match ta.kind {
+            crate::core::TypedArrayKind::Int8 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    data[byte_offset] = crate::js_typedarray::js_to_int32(n) as i8 as u8;
+                }
             }
-        } else {
-            let needed = ta.byte_offset + ta.length * ta.element_size();
-            if buf_len < needed { 0 } else { ta.length }
-        };
-        if idx < cur_len {
-            // Perform typed-array write inline into the underlying buffer to avoid
-            // depending on method dispatch on `Gc` wrapper types.
-            let byte_offset = ta.byte_offset + idx * ta.element_size();
-            match ta.kind {
-                crate::core::TypedArrayKind::Int8 => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
-                        let buffer_guard = ta.buffer.borrow();
-                        let mut data = buffer_guard.data.lock().unwrap();
-                        data[byte_offset] = crate::js_typedarray::js_to_int32(n) as i8 as u8;
+            crate::core::TypedArrayKind::Uint8 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    data[byte_offset] = crate::js_typedarray::js_to_int32(n) as u8;
+                }
+            }
+            crate::core::TypedArrayKind::Uint8Clamped => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    #[allow(clippy::if_same_then_else)]
+                    let v = if n.is_nan() {
+                        0u8
+                    } else if n <= 0.0 {
+                        0u8
+                    } else if n >= 255.0 {
+                        255u8
+                    } else {
+                        n.round() as u8
+                    };
+                    data[byte_offset] = v;
+                }
+            }
+            crate::core::TypedArrayKind::Int16 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let bytes = (crate::js_typedarray::js_to_int32(n) as i16).to_le_bytes();
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    data[byte_offset] = bytes[0];
+                    data[byte_offset + 1] = bytes[1];
+                }
+            }
+            crate::core::TypedArrayKind::Uint16 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let bytes = (crate::js_typedarray::js_to_int32(n) as u16).to_le_bytes();
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    data[byte_offset] = bytes[0];
+                    data[byte_offset + 1] = bytes[1];
+                }
+            }
+            crate::core::TypedArrayKind::Int32 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let bytes = crate::js_typedarray::js_to_int32(n).to_le_bytes();
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    data[byte_offset] = bytes[0];
+                    data[byte_offset + 1] = bytes[1];
+                    data[byte_offset + 2] = bytes[2];
+                    data[byte_offset + 3] = bytes[3];
+                }
+            }
+            crate::core::TypedArrayKind::Uint32 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let bytes = (crate::js_typedarray::js_to_int32(n) as u32).to_le_bytes();
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    data[byte_offset] = bytes[0];
+                    data[byte_offset + 1] = bytes[1];
+                    data[byte_offset + 2] = bytes[2];
+                    data[byte_offset + 3] = bytes[3];
+                }
+            }
+            crate::core::TypedArrayKind::Float32 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let bytes = (n as f32).to_le_bytes();
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    data[byte_offset] = bytes[0];
+                    data[byte_offset + 1] = bytes[1];
+                    data[byte_offset + 2] = bytes[2];
+                    data[byte_offset + 3] = bytes[3];
+                }
+            }
+            crate::core::TypedArrayKind::Float64 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let bytes = n.to_le_bytes();
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    for i in 0..8 {
+                        data[byte_offset + i] = bytes[i];
                     }
                 }
-                crate::core::TypedArrayKind::Uint8 => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
+            }
+            crate::core::TypedArrayKind::BigInt64 => {
+                match &val {
+                    Value::BigInt(b) => {
                         let buffer_guard = ta.buffer.borrow();
                         let mut data = buffer_guard.data.lock().unwrap();
-                        data[byte_offset] = crate::js_typedarray::js_to_int32(n) as u8;
-                    }
-                }
-                crate::core::TypedArrayKind::Uint8Clamped => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
-                        let buffer_guard = ta.buffer.borrow();
-                        let mut data = buffer_guard.data.lock().unwrap();
-                        #[allow(clippy::if_same_then_else)]
-                        let v = if n.is_nan() {
-                            0u8
-                        } else if n <= 0.0 {
-                            0u8
-                        } else if n >= 255.0 {
-                            255u8
-                        } else {
-                            n.round() as u8
-                        };
-                        data[byte_offset] = v;
-                    }
-                }
-                crate::core::TypedArrayKind::Int16 => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = (crate::js_typedarray::js_to_int32(n) as i16).to_le_bytes();
-                        let buffer_guard = ta.buffer.borrow();
-                        let mut data = buffer_guard.data.lock().unwrap();
-                        data[byte_offset] = bytes[0];
-                        data[byte_offset + 1] = bytes[1];
-                    }
-                }
-                crate::core::TypedArrayKind::Uint16 => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = (crate::js_typedarray::js_to_int32(n) as u16).to_le_bytes();
-                        let buffer_guard = ta.buffer.borrow();
-                        let mut data = buffer_guard.data.lock().unwrap();
-                        data[byte_offset] = bytes[0];
-                        data[byte_offset + 1] = bytes[1];
-                    }
-                }
-                crate::core::TypedArrayKind::Int32 => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = crate::js_typedarray::js_to_int32(n).to_le_bytes();
-                        let buffer_guard = ta.buffer.borrow();
-                        let mut data = buffer_guard.data.lock().unwrap();
-                        data[byte_offset] = bytes[0];
-                        data[byte_offset + 1] = bytes[1];
-                        data[byte_offset + 2] = bytes[2];
-                        data[byte_offset + 3] = bytes[3];
-                    }
-                }
-                crate::core::TypedArrayKind::Uint32 => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = (crate::js_typedarray::js_to_int32(n) as u32).to_le_bytes();
-                        let buffer_guard = ta.buffer.borrow();
-                        let mut data = buffer_guard.data.lock().unwrap();
-                        data[byte_offset] = bytes[0];
-                        data[byte_offset + 1] = bytes[1];
-                        data[byte_offset + 2] = bytes[2];
-                        data[byte_offset + 3] = bytes[3];
-                    }
-                }
-                crate::core::TypedArrayKind::Float32 => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = (n as f32).to_le_bytes();
-                        let buffer_guard = ta.buffer.borrow();
-                        let mut data = buffer_guard.data.lock().unwrap();
-                        data[byte_offset] = bytes[0];
-                        data[byte_offset + 1] = bytes[1];
-                        data[byte_offset + 2] = bytes[2];
-                        data[byte_offset + 3] = bytes[3];
-                    }
-                }
-                crate::core::TypedArrayKind::Float64 => {
-                    if let Ok(n) = crate::core::eval::to_number(val) {
-                        let bytes = n.to_le_bytes();
-                        let buffer_guard = ta.buffer.borrow();
-                        let mut data = buffer_guard.data.lock().unwrap();
+                        let bytes = b.to_i64().unwrap_or(0i64).to_le_bytes();
                         for i in 0..8 {
                             data[byte_offset + i] = bytes[i];
                         }
                     }
-                }
-                crate::core::TypedArrayKind::BigInt64 => {
-                    match &val {
-                        Value::BigInt(b) => {
+                    _ => {
+                        // Try to convert to BigInt if not already
+                        if let Ok(n) = crate::core::eval::to_number(val) {
                             let buffer_guard = ta.buffer.borrow();
                             let mut data = buffer_guard.data.lock().unwrap();
-                            let bytes = b.to_i64().unwrap_or(0i64).to_le_bytes();
+                            let bytes = (n as i64).to_le_bytes();
                             for i in 0..8 {
                                 data[byte_offset + i] = bytes[i];
-                            }
-                        }
-                        _ => {
-                            // Try to convert to BigInt if not already
-                            if let Ok(n) = crate::core::eval::to_number(val) {
-                                let buffer_guard = ta.buffer.borrow();
-                                let mut data = buffer_guard.data.lock().unwrap();
-                                let bytes = (n as i64).to_le_bytes();
-                                for i in 0..8 {
-                                    data[byte_offset + i] = bytes[i];
-                                }
-                            }
-                        }
-                    }
-                }
-                crate::core::TypedArrayKind::BigUint64 => {
-                    match &val {
-                        Value::BigInt(b) => {
-                            let buffer_guard = ta.buffer.borrow();
-                            let mut data = buffer_guard.data.lock().unwrap();
-                            let bytes = b.to_u64().unwrap_or(0u64).to_le_bytes();
-                            for i in 0..8 {
-                                data[byte_offset + i] = bytes[i];
-                            }
-                        }
-                        _ => {
-                            // Try to convert to BigInt if not already
-                            if let Ok(n) = crate::core::eval::to_number(val) {
-                                let buffer_guard = ta.buffer.borrow();
-                                let mut data = buffer_guard.data.lock().unwrap();
-                                let bytes = (n as u64).to_le_bytes();
-                                for i in 0..8 {
-                                    data[byte_offset + i] = bytes[i];
-                                }
                             }
                         }
                     }
                 }
             }
-            log::debug!(
-                "object_set_key_value: performed typedarray element write idx={} on obj={:p}",
-                idx,
-                &*obj.borrow()
-            );
-            return Ok(());
+            crate::core::TypedArrayKind::BigUint64 => {
+                match &val {
+                    Value::BigInt(b) => {
+                        let buffer_guard = ta.buffer.borrow();
+                        let mut data = buffer_guard.data.lock().unwrap();
+                        let bytes = b.to_u64().unwrap_or(0u64).to_le_bytes();
+                        for i in 0..8 {
+                            data[byte_offset + i] = bytes[i];
+                        }
+                    }
+                    _ => {
+                        // Try to convert to BigInt if not already
+                        if let Ok(n) = crate::core::eval::to_number(val) {
+                            let buffer_guard = ta.buffer.borrow();
+                            let mut data = buffer_guard.data.lock().unwrap();
+                            let bytes = (n as u64).to_le_bytes();
+                            for i in 0..8 {
+                                data[byte_offset + i] = bytes[i];
+                            }
+                        }
+                    }
+                }
+            }
         }
+        log::debug!(
+            "object_set_key_value: performed typedarray element write idx={} on obj={:p}",
+            idx,
+            &*obj.borrow()
+        );
+        return Ok(());
     }
 
     // If obj is an array and we're setting a numeric index, update length accordingly

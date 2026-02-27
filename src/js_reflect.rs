@@ -91,6 +91,44 @@ fn reflect_get_with_receiver<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     use crate::core::{Gc, get_own_property};
 
+    // TypedArray [[Get]]: intercept CanonicalNumericIndexString before prototype walk
+    if let PropertyKey::String(s) = key
+        && let Some(ta_cell) = slot_get(obj, &InternalSlot::TypedArray)
+        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+    {
+        if !crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+            return Ok(Value::Undefined);
+        }
+        let idx = num_idx as usize;
+        match ta.kind {
+            crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => {
+                let size = ta.element_size();
+                let byte_offset = ta.byte_offset + idx * size;
+                let buffer = ta.buffer.borrow();
+                let data = buffer.data.lock().unwrap();
+                if byte_offset + size <= data.len() {
+                    let bytes = &data[byte_offset..byte_offset + size];
+                    let big_int = if matches!(ta.kind, crate::core::TypedArrayKind::BigInt64) {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(bytes);
+                        num_bigint::BigInt::from(i64::from_le_bytes(b))
+                    } else {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(bytes);
+                        num_bigint::BigInt::from(u64::from_le_bytes(b))
+                    };
+                    return Ok(Value::BigInt(Box::new(big_int)));
+                }
+                return Ok(Value::Undefined);
+            }
+            _ => {
+                let n = ta.get(idx)?;
+                return Ok(Value::Number(n));
+            }
+        }
+    }
+
     let mut cur = Some(*obj);
     while let Some(cur_obj) = cur {
         if let Some(val_ptr) = get_own_property(&cur_obj, key) {
@@ -679,6 +717,57 @@ pub fn handle_reflect_method<'gc>(
                         return Ok(Value::Boolean(success));
                     }
 
+                    // TypedArray [[DefineOwnProperty]] — ES2024 §10.4.5.3
+                    if let PropertyKey::String(s) = &prop_key
+                        && slot_get(&obj, &InternalSlot::TypedArray).is_some()
+                        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+                    {
+                        // If it's a CanonicalNumericIndexString, we handle it entirely here
+                        // Check IsValidIntegerIndex
+                        let valid = if let Some(ta_cell) = slot_get(&obj, &InternalSlot::TypedArray)
+                            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                        {
+                            crate::js_typedarray::is_valid_integer_index(ta, num_idx)
+                        } else {
+                            false
+                        };
+                        if !valid {
+                            return Ok(Value::Boolean(false));
+                        }
+                        // If IsAccessorDescriptor(Desc), return false
+                        if requested.get.is_some() || requested.set.is_some() {
+                            return Ok(Value::Boolean(false));
+                        }
+                        // If Desc.[[Configurable]] is false, return false
+                        if requested.configurable == Some(false) {
+                            return Ok(Value::Boolean(false));
+                        }
+                        // If Desc.[[Enumerable]] is false, return false
+                        if requested.enumerable == Some(false) {
+                            return Ok(Value::Boolean(false));
+                        }
+                        // If Desc.[[Writable]] is false, return false
+                        if requested.writable == Some(false) {
+                            return Ok(Value::Boolean(false));
+                        }
+                        // If Desc has a [[Value]] field, perform IntegerIndexedElementSet
+                        if let Some(val) = requested.value
+                            && let Some(ta_cell) = slot_get(&obj, &InternalSlot::TypedArray)
+                            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                        {
+                            let idx = num_idx as usize;
+                            let is_bigint_ta = crate::js_typedarray::is_bigint_typed_array(&ta.kind);
+                            if is_bigint_ta {
+                                let n = crate::js_typedarray::to_bigint_i64(mc, env, &val)?;
+                                ta.set_bigint(mc, idx, n)?;
+                            } else {
+                                let n = crate::core::to_number_with_env(mc, env, &val)?;
+                                ta.set(mc, idx, n)?;
+                            }
+                        }
+                        return Ok(Value::Boolean(true));
+                    }
+
                     match crate::js_object::define_property_internal(mc, &obj, &prop_key, &attr_obj) {
                         Ok(()) => Ok(Value::Boolean(true)),
                         Err(_e) => Ok(Value::Boolean(false)),
@@ -858,6 +947,16 @@ pub fn handle_reflect_method<'gc>(
                     if let PropertyKey::String(s) = &prop_key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
                     }
+
+                    // TypedArray [[HasProperty]]: intercept CanonicalNumericIndexString
+                    if let PropertyKey::String(s) = &prop_key
+                        && let Some(ta_cell) = slot_get(&obj, &InternalSlot::TypedArray)
+                        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+                    {
+                        return Ok(Value::Boolean(crate::js_typedarray::is_valid_integer_index(ta, num_idx)));
+                    }
+
                     let has_prop = object_get_key_value(&obj, &prop_key).is_some();
                     Ok(Value::Boolean(has_prop))
                 }
@@ -959,6 +1058,39 @@ pub fn handle_reflect_method<'gc>(
                     {
                         let ok = crate::js_proxy::proxy_set_property_with_receiver(mc, proxy, &prop_key, &value, Some(&receiver))?;
                         return Ok(Value::Boolean(ok));
+                    }
+
+                    // TypedArray [[Set]] — ES2024 §10.4.5.5
+                    if let PropertyKey::String(s) = &prop_key
+                        && let Some(ta_cell) = slot_get(&obj, &InternalSlot::TypedArray)
+                        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+                    {
+                        // Check if receiver is same object as target
+                        let same = match &receiver {
+                            Value::Object(recv_obj) => crate::core::Gc::ptr_eq(obj, *recv_obj),
+                            _ => false,
+                        };
+                        if same {
+                            // IntegerIndexedElementSet(O, numericIndex, V)
+                            if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                                let idx = num_idx as usize;
+                                if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
+                                    let n = crate::js_typedarray::to_bigint_i64(mc, env, &value)?;
+                                    ta.set_bigint(mc, idx, n)?;
+                                } else {
+                                    let n = crate::core::to_number_with_env(mc, env, &value)?;
+                                    ta.set(mc, idx, n)?;
+                                }
+                            }
+                            return Ok(Value::Boolean(true));
+                        } else {
+                            // Receiver !== target
+                            if !crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                                return Ok(Value::Boolean(true));
+                            }
+                            // Valid index, receiver !== target: fall through to OrdinarySet
+                        }
                     }
 
                     // Non-proxy target: OrdinarySet(target, P, V, Receiver)

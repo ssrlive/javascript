@@ -2007,6 +2007,52 @@ pub fn handle_object_method<'gc>(
                 }
             }
 
+            // TypedArray [[GetOwnProperty]]: synthesize descriptor for canonical numeric index strings
+            if let PropertyKey::String(s) = &key
+                && let Some(ta_cell) = slot_get(&obj, &InternalSlot::TypedArray)
+                && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+            {
+                if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                    let idx = num_idx as usize;
+                    let value = match ta.kind {
+                        crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => {
+                            let size = ta.element_size();
+                            let byte_offset = ta.byte_offset + idx * size;
+                            let buffer = ta.buffer.borrow();
+                            let data = buffer.data.lock().unwrap();
+                            if byte_offset + size <= data.len() {
+                                let bytes = &data[byte_offset..byte_offset + size];
+                                if matches!(ta.kind, crate::core::TypedArrayKind::BigInt64) {
+                                    let mut b = [0u8; 8];
+                                    b.copy_from_slice(bytes);
+                                    Value::BigInt(Box::new(num_bigint::BigInt::from(i64::from_le_bytes(b))))
+                                } else {
+                                    let mut b = [0u8; 8];
+                                    b.copy_from_slice(bytes);
+                                    Value::BigInt(Box::new(num_bigint::BigInt::from(u64::from_le_bytes(b))))
+                                }
+                            } else {
+                                Value::Undefined
+                            }
+                        }
+                        _ => {
+                            let n = ta.get(idx)?;
+                            Value::Number(n)
+                        }
+                    };
+                    // TypedArray indexed elements are always { writable: true, enumerable: true, configurable: true }
+                    let pd = crate::core::PropertyDescriptor::new_data(&value, true, true, true);
+                    let desc_obj = pd.to_object(mc)?;
+                    crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                    return Ok(Value::Object(desc_obj));
+                }
+                // Not a valid integer index — property doesn't exist
+                return Ok(Value::Undefined);
+
+                // Not a canonical numeric index — fall through to ordinary GetOwnProperty
+            }
+
             if let Some(_val_rc) = object_get_key_value(&obj, &key) {
                 if let Some(mut pd) = crate::core::build_property_descriptor(mc, &obj, &key) {
                     let is_deferred_namespace = obj.borrow().deferred_module_path.is_some();
@@ -2254,37 +2300,37 @@ pub fn handle_object_method<'gc>(
                 return Ok(Value::Object(target_obj));
             }
 
-            if let Some(ta_cell) = slot_get_chained(&target_obj, &InternalSlot::TypedArray)
+            if let Some(ta_cell) = slot_get(&target_obj, &InternalSlot::TypedArray)
                 && let Value::TypedArray(ta) = &*ta_cell.borrow()
                 && let PropertyKey::String(s) = &prop_key
-                && let Ok(idx) = s.parse::<usize>()
-                && idx.to_string() == *s
+                && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
             {
+                // TypedArray [[DefineOwnProperty]] for CanonicalNumericIndexString
+                if !crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                    return Err(raise_type_error!("Invalid typed array index").into());
+                }
                 if pd.get.is_some() || pd.set.is_some() {
                     return Err(raise_type_error!("Invalid typed array index descriptor").into());
                 }
-                if pd.configurable == Some(true) || pd.enumerable == Some(false) || pd.writable == Some(false) {
+                if pd.configurable == Some(false) {
                     return Err(raise_type_error!("Invalid typed array index descriptor").into());
                 }
-
-                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
-                let cur_len = if ta.length_tracking {
-                    if buf_len <= ta.byte_offset {
-                        0
-                    } else {
-                        (buf_len - ta.byte_offset) / ta.element_size()
-                    }
-                } else {
-                    let needed = ta.byte_offset + ta.length * ta.element_size();
-                    if buf_len < needed { 0 } else { ta.length }
-                };
-
-                if idx >= cur_len {
-                    return Err(raise_type_error!("Invalid typed array index").into());
+                if pd.enumerable == Some(false) {
+                    return Err(raise_type_error!("Invalid typed array index descriptor").into());
                 }
-
-                let element_val = pd.value.clone().unwrap_or(Value::Undefined);
-                object_set_key_value(mc, &target_obj, s.as_str(), &element_val)?;
+                if pd.writable == Some(false) {
+                    return Err(raise_type_error!("Invalid typed array index descriptor").into());
+                }
+                if let Some(val) = pd.value {
+                    let idx = num_idx as usize;
+                    if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
+                        let n = crate::js_typedarray::to_bigint_i64(mc, env, &val)?;
+                        ta.set_bigint(mc, idx, n)?;
+                    } else {
+                        let n = crate::core::to_number_with_env(mc, env, &val)?;
+                        ta.set(mc, idx, n)?;
+                    }
+                }
                 return Ok(Value::Object(target_obj));
             }
 

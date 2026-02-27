@@ -231,8 +231,8 @@ jobs:
               FOCUS='built-ins/SharedArrayBuffer,built-ins/String,built-ins/StringIteratorPrototype,built-ins/SuppressedError'
               ;;
             38)
-              TITLE='"built-ins/Symbol" - "built-ins/ThrowTypeError"'
-              FOCUS='built-ins/Symbol,built-ins/ThrowTypeError'
+              TITLE='"built-ins/Symbol" - "built-ins/TypedArrayConstructors"'
+              FOCUS='built-ins/Symbol,built-ins/ThrowTypeError,built-ins/TypedArrayConstructors'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

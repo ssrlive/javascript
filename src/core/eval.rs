@@ -1,3 +1,4 @@
+use crate::core::TypedArrayKind;
 use crate::core::{
     Gc, GcCell, InternalSlot, MutationContext, SwitchCase, create_descriptor_object, new_gc_cell_ptr, slot_get, slot_get_chained, slot_has,
     slot_remove, slot_set,
@@ -12977,9 +12978,8 @@ pub fn evaluate_call_dispatch<'gc>(
                             // Promise() called without new must throw TypeError per §27.2.3.1 step 1
                             Err(raise_type_error!("Promise constructor cannot be invoked without 'new'").into())
                         } else if name == crate::unicode::utf8_to_utf16("TypedArray") {
-                            // TypedArray constructors (Int8Array, Uint8Array, etc.) called as function
-                            // via %TypedArray%.from / %TypedArray%.of construct path
-                            Ok(crate::js_typedarray::handle_typedarray_constructor(mc, obj, eval_args, env)?)
+                            // TypedArray constructors called without `new` must throw TypeError per spec
+                            Err(raise_type_error!("Constructor requires 'new'").into())
                         } else {
                             Err(raise_type_error!("Not a function").into())
                         }
@@ -18275,6 +18275,47 @@ pub(crate) fn get_property_with_accessors<'gc>(
         }
     }
 
+    // TypedArray [[Get]]: if the key is a CanonicalNumericIndexString, intercept immediately.
+    // Do NOT walk the prototype chain for numeric index strings on TypedArrays.
+    if let PropertyKey::String(s) = key
+        && let Some(ta_cell) = slot_get(obj, &InternalSlot::TypedArray)
+        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+    {
+        // IntegerIndexedElementGet: return undefined for non-valid indices
+        if !crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+            return Ok(Value::Undefined);
+        }
+        let idx = num_idx as usize;
+        // Read the element
+        match ta.kind {
+            TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => {
+                let size = ta.element_size();
+                let byte_offset = ta.byte_offset + idx * size;
+                let buffer = ta.buffer.borrow();
+                let data = buffer.data.lock().unwrap();
+                if byte_offset + size <= data.len() {
+                    let bytes = &data[byte_offset..byte_offset + size];
+                    let big_int = if matches!(ta.kind, TypedArrayKind::BigInt64) {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(bytes);
+                        num_bigint::BigInt::from(i64::from_le_bytes(b))
+                    } else {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(bytes);
+                        num_bigint::BigInt::from(u64::from_le_bytes(b))
+                    };
+                    return Ok(Value::BigInt(Box::new(big_int)));
+                }
+                return Ok(Value::Undefined);
+            }
+            _ => {
+                let n = ta.get(idx)?;
+                return Ok(Value::Number(n));
+            }
+        }
+    }
+
     let mut cur = Some(*obj);
     while let Some(cur_obj) = cur {
         // If this prototype is a proxy wrapper, delegate through proxy [[Get]]
@@ -18312,62 +18353,43 @@ pub(crate) fn get_property_with_accessors<'gc>(
         }
 
         // If not found in ordinary properties, check for TypedArray indexed elements when
-        // the property key is a canonical numeric index string.
+        // the property key is a canonical numeric index string (spec: TypedArray [[GetOwnProperty]]).
         if let PropertyKey::String(s) = key
-            && let Ok(idx) = s.parse::<usize>()
+            && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
             && let Some(ta_cell) = slot_get(&cur_obj, &InternalSlot::TypedArray)
             && let Value::TypedArray(ta) = &*ta_cell.borrow()
+            && crate::js_typedarray::is_valid_integer_index(ta, num_idx)
         {
-            log::debug!("get_property_with_accessors: TypedArray property access for key={s} idx={idx}");
-            // Compute current length for length-tracking views
-            let cur_len = if ta.length_tracking {
-                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
-                if buf_len <= ta.byte_offset {
-                    0
-                } else {
-                    (buf_len - ta.byte_offset) / ta.element_size()
-                }
-            } else {
-                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
-                let needed = ta.byte_offset + ta.length * ta.element_size();
-                if buf_len < needed { 0 } else { ta.length }
-            };
-            if idx < cur_len {
-                log::trace!("get_property_with_accessors: typedarray idx {} cur_len {}", idx, cur_len);
-                match ta.kind {
-                    crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => {
-                        // For BigInt arrays, read the raw bytes and create a BigInt
-                        let size = ta.element_size();
-                        let byte_offset = ta.byte_offset + idx * size;
-                        let buffer = ta.buffer.borrow();
-                        let data = buffer.data.lock().unwrap();
-                        if byte_offset + size <= data.len() {
-                            let bytes = &data[byte_offset..byte_offset + size];
-                            let big_int = if matches!(ta.kind, crate::core::TypedArrayKind::BigInt64) {
-                                let mut b = [0u8; 8];
-                                b.copy_from_slice(bytes);
-                                num_bigint::BigInt::from(i64::from_le_bytes(b))
-                            } else {
-                                let mut b = [0u8; 8];
-                                b.copy_from_slice(bytes);
-                                num_bigint::BigInt::from(u64::from_le_bytes(b))
-                            };
-                            log::debug!("get_property_with_accessors: returning BigInt {} for idx {}", big_int, idx);
-                            return Ok(Value::BigInt(Box::new(big_int)));
+            let idx = num_idx as usize;
+            match ta.kind {
+                crate::core::TypedArrayKind::BigInt64 | crate::core::TypedArrayKind::BigUint64 => {
+                    let size = ta.element_size();
+                    let byte_offset = ta.byte_offset + idx * size;
+                    let buffer = ta.buffer.borrow();
+                    let data = buffer.data.lock().unwrap();
+                    if byte_offset + size <= data.len() {
+                        let bytes = &data[byte_offset..byte_offset + size];
+                        let big_int = if matches!(ta.kind, crate::core::TypedArrayKind::BigInt64) {
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(bytes);
+                            num_bigint::BigInt::from(i64::from_le_bytes(b))
                         } else {
-                            log::debug!("get_property_with_accessors: out of bounds for idx {}", idx);
-                            return Ok(Value::Undefined);
-                        }
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(bytes);
+                            num_bigint::BigInt::from(u64::from_le_bytes(b))
+                        };
+                        return Ok(Value::BigInt(Box::new(big_int)));
                     }
-                    _ => {
-                        let n = ta.get(idx)?;
-                        log::debug!("get_property_with_accessors: returning Number {n} for idx {idx}");
-                        return Ok(Value::Number(n));
-                    }
+                    return Ok(Value::Undefined);
                 }
-            } else {
-                log::debug!("get_property_with_accessors: idx {idx} >= cur_len {cur_len} for TypedArray");
+                _ => {
+                    let n = ta.get(idx)?;
+                    return Ok(Value::Number(n));
+                }
             }
+
+            // Not a valid integer index on this TA — property doesn't exist here,
+            // continue walking proto chain.
         }
 
         cur = cur_obj.borrow().prototype;
@@ -18654,12 +18676,87 @@ pub(crate) fn set_property_with_accessors<'gc>(
         return Ok(());
     }
 
+    // TypedArray [[Set]] interception — ES2024 §10.4.5.5
+    // Walk from obj through its prototype chain. If any object is a TypedArray
+    // and the key is a CanonicalNumericIndexString, handle it per the spec
+    // BEFORE the normal prototype chain walk to prevent inherited setters on
+    // TA.prototype from being incorrectly invoked.
+    let receiver_ptr = receiver_obj;
+    if let PropertyKey::String(s) = key
+        && let Some(num_idx) = crate::js_typedarray::canonical_numeric_index_string(s)
+    {
+        let mut ta_cur = Some(*obj);
+        while let Some(c) = ta_cur {
+            if let Some(ta_cell) = slot_get(&c, &InternalSlot::TypedArray)
+                && let Value::TypedArray(ta) = &*ta_cell.borrow()
+            {
+                let same = Gc::ptr_eq(c, receiver_ptr);
+                if same {
+                    // TypedArraySetElement(O, numericIndex, V): coerce then set if valid
+                    if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
+                        let n = crate::js_typedarray::to_bigint_i64(mc, _env, val)?;
+                        if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                            ta.set_bigint(mc, num_idx as usize, n)?;
+                        }
+                    } else {
+                        let n = to_number_with_env(mc, _env, val)?;
+                        if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                            ta.set(mc, num_idx as usize, n)?;
+                        }
+                    }
+                    return Ok(());
+                } else {
+                    // Receiver != TypedArray
+                    if !crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
+                        return Ok(()); // invalid CanonicalNumericIndex → no-op
+                    }
+                    // Valid index, different receiver → OrdinarySetWithOwnDescriptor
+                    // ownDesc = {value, writable:true} → create/update on receiver
+                    let recv_own = get_own_property(&receiver_ptr, key);
+                    if let Some(recv_val_rc) = recv_own {
+                        let rv = recv_val_rc.borrow().clone();
+                        let is_accessor = matches!(
+                            &rv,
+                            Value::Getter(..)
+                                | Value::Setter(..)
+                                | Value::Property { getter: Some(_), .. }
+                                | Value::Property {
+                                    setter: Some(_),
+                                    value: None,
+                                    ..
+                                }
+                        );
+                        if is_accessor {
+                            if crate::core::env_get_strictness(_env) {
+                                return Err(raise_type_error!("Cannot set property which has only a getter").into());
+                            }
+                            return Ok(());
+                        }
+                        if !receiver_ptr.borrow().is_writable(key) {
+                            if crate::core::env_get_strictness(_env) {
+                                return Err(raise_type_error!("Cannot assign to read-only property").into());
+                            }
+                            return Ok(());
+                        }
+                    } else if !receiver_ptr.borrow().is_extensible() {
+                        if crate::core::env_get_strictness(_env) {
+                            return Err(raise_type_error!("Cannot add property to non-extensible object").into());
+                        }
+                        return Ok(());
+                    }
+                    object_set_key_value(mc, &receiver_ptr, key, val)?;
+                    return Ok(());
+                }
+            }
+            ta_cur = c.borrow().prototype;
+        }
+    }
+
     // Pre-check prototypes only if the receiver does NOT already have an own property for the key.
     // If the receiver owns the property, the semantics of assignment must first honor the
     // receiver's own property (data or accessor). Only when there is no own property should we
     // consult the prototype chain for inherited setters or non-writable inherited properties.
 
-    let receiver_ptr = receiver_obj;
     if get_own_property(&receiver_ptr, key).is_none() {
         // When receiver != obj (e.g. `super[prop] = v`), the [[Set]] algorithm
         // starts at `obj` itself (the super base). When receiver == obj, we can
@@ -21959,7 +22056,7 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "DataView" {
                         return crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env, None);
                     } else if name_str == "TypedArray" {
-                        return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
+                        return crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env, Some(&obj));
                     } else if name_str == "Function" {
                         // Prefer to execute Function constructor logic in the realm of the
                         // constructor object's base (if this was a property access) or via

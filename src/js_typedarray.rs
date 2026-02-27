@@ -7,7 +7,6 @@ use crate::js_array::is_array;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
 use crate::{JSError, core::EvalError};
-use num_traits::ToPrimitive;
 use std::collections::HashMap;
 use std::sync::Condvar;
 use std::sync::LazyLock;
@@ -279,7 +278,7 @@ fn bigint_to_i64_modular(b: &num_bigint::BigInt) -> i64 {
 /// ToBigInt coercion: convert a Value to BigInt per spec.
 /// Handles BigInt, Boolean, String, and Object (via ToPrimitive).
 /// Returns the value as i64 using modular arithmetic for BigInt types.
-fn to_bigint_i64<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i64, EvalError<'gc>> {
+pub fn to_bigint_i64<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i64, EvalError<'gc>> {
     let prim = match val {
         Value::Object(_) => crate::core::to_primitive(mc, val, "number", env)?,
         other => other.clone(),
@@ -324,7 +323,7 @@ fn is_valid_atomic_type(kind: &TypedArrayKind) -> bool {
 }
 
 /// Returns true if a TypedArrayKind is BigInt64 or BigUint64.
-fn is_bigint_typed_array(kind: &TypedArrayKind) -> bool {
+pub fn is_bigint_typed_array(kind: &TypedArrayKind) -> bool {
     matches!(kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64)
 }
 
@@ -1876,52 +1875,170 @@ pub fn handle_dataview_constructor<'gc>(
     Ok(Value::Object(obj))
 }
 
-/// Handle TypedArray constructor calls
+/// ToIndex per spec (7.1.22): convert to a non-negative integer index or throw RangeError.
+fn to_index<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
+    if matches!(val, Value::Undefined) {
+        return Ok(0);
+    }
+    let prim = if let Value::Object(_) = val {
+        crate::core::to_primitive(mc, val, "number", env)?
+    } else {
+        val.clone()
+    };
+    if matches!(prim, Value::Symbol(_)) {
+        return Err(throw_type_error(mc, env, "Cannot convert a Symbol value to a number"));
+    }
+    if matches!(prim, Value::BigInt(_)) {
+        return Err(throw_type_error(mc, env, "Cannot convert a BigInt value to a number"));
+    }
+    let n = crate::core::to_number(&prim)?;
+    let integer_index = if n.is_nan() || n == 0.0 {
+        0.0
+    } else if n.is_infinite() {
+        n
+    } else {
+        n.trunc()
+    };
+    if integer_index < 0.0 {
+        return Err(throw_range_error(mc, env, "Invalid typed array length"));
+    }
+    const MAX_SAFE: f64 = 9007199254740991.0; // 2^53-1
+    let index = if integer_index > MAX_SAFE { MAX_SAFE } else { integer_index };
+    if integer_index != index {
+        return Err(throw_range_error(mc, env, "Invalid typed array length"));
+    }
+    Ok(integer_index as usize)
+}
+
+/// CanonicalNumericIndexString(argument) — ES2024 §7.1.21
+/// Returns Some(n) if the string is the canonical string representation of a number.
+pub fn canonical_numeric_index_string(s: &str) -> Option<f64> {
+    if s == "-0" {
+        return Some(-0.0_f64);
+    }
+    // Parse as a number
+    let n: f64 = s.parse().ok()?;
+    // Check ToString(n) === s
+    let back = if n.is_nan() {
+        "NaN".to_string()
+    } else if n.is_infinite() {
+        if n.is_sign_negative() {
+            "-Infinity".to_string()
+        } else {
+            "Infinity".to_string()
+        }
+    } else {
+        crate::core::format_js_number(n)
+    };
+    if back == s { Some(n) } else { None }
+}
+
+/// IsValidIntegerIndex(O, index) — ES2024 §10.4.5.11
+/// Returns true if index is a valid element index for the TypedArray.
+pub fn is_valid_integer_index(ta: &crate::core::JSTypedArray, index: f64) -> bool {
+    // 1. If IsIntegralNumber(index) is false, return false
+    if index.is_nan() || index.is_infinite() || index != index.trunc() {
+        return false;
+    }
+    // 2. If index is -0, return false
+    if index == 0.0 && index.is_sign_negative() {
+        return false;
+    }
+    // 3. If index < 0 or index >= length, return false
+    let cur_len = if ta.length_tracking {
+        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+        if buf_len <= ta.byte_offset {
+            0
+        } else {
+            (buf_len - ta.byte_offset) / ta.element_size()
+        }
+    } else {
+        ta.length
+    };
+    if index < 0.0 || (index as usize) >= cur_len {
+        return false;
+    }
+    true
+}
+
+fn kind_from_number(n: i32) -> Option<TypedArrayKind> {
+    match n {
+        0 => Some(TypedArrayKind::Int8),
+        1 => Some(TypedArrayKind::Uint8),
+        2 => Some(TypedArrayKind::Uint8Clamped),
+        3 => Some(TypedArrayKind::Int16),
+        4 => Some(TypedArrayKind::Uint16),
+        5 => Some(TypedArrayKind::Int32),
+        6 => Some(TypedArrayKind::Uint32),
+        7 => Some(TypedArrayKind::Float32),
+        8 => Some(TypedArrayKind::Float64),
+        9 => Some(TypedArrayKind::BigInt64),
+        10 => Some(TypedArrayKind::BigUint64),
+        _ => None,
+    }
+}
+
+fn element_size_for_kind(kind: &TypedArrayKind) -> usize {
+    match kind {
+        TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
+        TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
+        TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
+        TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
+    }
+}
+
+/// Get the TypedArray constructor name for use in GetPrototypeFromConstructor fallback.
+fn kind_to_constructor_name(kind: &TypedArrayKind) -> &'static str {
+    match kind {
+        TypedArrayKind::Int8 => "Int8Array",
+        TypedArrayKind::Uint8 => "Uint8Array",
+        TypedArrayKind::Uint8Clamped => "Uint8ClampedArray",
+        TypedArrayKind::Int16 => "Int16Array",
+        TypedArrayKind::Uint16 => "Uint16Array",
+        TypedArrayKind::Int32 => "Int32Array",
+        TypedArrayKind::Uint32 => "Uint32Array",
+        TypedArrayKind::Float32 => "Float32Array",
+        TypedArrayKind::Float64 => "Float64Array",
+        TypedArrayKind::BigInt64 => "BigInt64Array",
+        TypedArrayKind::BigUint64 => "BigUint64Array",
+    }
+}
+
+/// Handle TypedArray constructor calls.
+/// `constructor_obj` must carry InternalSlot::Kind (the actual TA constructor).
+/// `new_target` is the NewTarget for GetPrototypeFromConstructor. If None, throws TypeError (called without new).
 pub fn handle_typedarray_constructor<'gc>(
     mc: &MutationContext<'gc>,
     constructor_obj: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    // Get the kind from the constructor
+    new_target: Option<&JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Step 1: If NewTarget is undefined, throw a TypeError exception.
+    let new_target = new_target.ok_or_else(|| throw_type_error(mc, env, "Constructor requires 'new'"))?;
+
+    // Get the kind from the constructor (always from constructor_obj, NOT new_target)
     let kind_val = slot_get_chained(constructor_obj, &InternalSlot::Kind);
     let kind = if let Some(kind_val) = kind_val {
         if let Value::Number(kind_num) = *kind_val.borrow() {
-            match kind_num as i32 {
-                0 => TypedArrayKind::Int8,
-                1 => TypedArrayKind::Uint8,
-                2 => TypedArrayKind::Uint8Clamped,
-                3 => TypedArrayKind::Int16,
-                4 => TypedArrayKind::Uint16,
-                5 => TypedArrayKind::Int32,
-                6 => TypedArrayKind::Uint32,
-                7 => TypedArrayKind::Float32,
-                8 => TypedArrayKind::Float64,
-                9 => TypedArrayKind::BigInt64,
-                10 => TypedArrayKind::BigUint64,
-                _ => return Err(raise_type_error!("Invalid TypedArray kind")),
-            }
+            kind_from_number(kind_num as i32).ok_or_else(|| throw_type_error(mc, env, "Invalid TypedArray kind"))?
         } else {
-            return Err(raise_type_error!("Invalid TypedArray constructor"));
+            return Err(throw_type_error(mc, env, "Invalid TypedArray constructor"));
         }
     } else {
-        return Err(raise_type_error!("Invalid TypedArray constructor"));
+        return Err(throw_type_error(mc, env, "Invalid TypedArray constructor"));
     };
 
-    let element_size = match kind {
-        TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
-        TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
-        TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
-        TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
-    };
+    let element_size = element_size_for_kind(&kind);
+    let ctor_name = kind_to_constructor_name(&kind);
+    let is_bigint_ta = is_bigint_typed_array(&kind);
 
     let mut init_values: Option<Vec<Value<'gc>>> = None;
-
-    // Track the source ArrayBuffer wrapper object (if passed), so we can store it as BufferObject.
     let mut buffer_obj_opt: Option<JSObjectDataPtr<'gc>> = None;
 
+    // Spec: dispatch based on firstArgument type
     let (buffer, byte_offset, length) = if args.is_empty() {
-        // new TypedArray() - create empty array
+        // TypedArray() — no args, create empty
         let buffer = new_gc_cell_ptr(
             mc,
             JSArrayBuffer {
@@ -1929,313 +2046,228 @@ pub fn handle_typedarray_constructor<'gc>(
                 ..JSArrayBuffer::default()
             },
         );
-        (buffer, 0, 0)
-    } else if args.len() == 1 {
-        let arg_val = args[0].clone();
-        match arg_val {
-            Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => {
-                // new TypedArray(length)
-                let length = n as usize;
-                let buffer = new_gc_cell_ptr(
-                    mc,
-                    JSArrayBuffer {
-                        data: Arc::new(Mutex::new(vec![0; length * element_size])),
-                        ..JSArrayBuffer::default()
-                    },
-                );
-                (buffer, 0, length)
-            }
-            Value::Object(obj) => {
-                // Check if it's another TypedArray or ArrayBuffer
-                if let Some(ta_val) = slot_get_chained(&obj, &InternalSlot::TypedArray) {
-                    if let Value::TypedArray(ta) = &*ta_val.borrow() {
-                        // new TypedArray(typedArray) - copy constructor
-                        let src_length = ta.length;
-                        let mut copied = Vec::with_capacity(src_length);
-                        for idx in 0..src_length {
-                            let val = if matches!(ta.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) {
-                                let size = ta.element_size();
-                                let byte_offset = ta.byte_offset + idx * size;
-                                let buffer = ta.buffer.borrow();
-                                let data = buffer.data.lock().unwrap();
-                                if byte_offset + size <= data.len() {
-                                    let bytes = &data[byte_offset..byte_offset + size];
-                                    let big_int = if matches!(ta.kind, TypedArrayKind::BigInt64) {
-                                        let mut b = [0u8; 8];
-                                        b.copy_from_slice(bytes);
-                                        num_bigint::BigInt::from(i64::from_le_bytes(b))
-                                    } else {
-                                        let mut b = [0u8; 8];
-                                        b.copy_from_slice(bytes);
-                                        num_bigint::BigInt::from(u64::from_le_bytes(b))
-                                    };
-                                    Value::BigInt(Box::new(big_int))
+        (buffer, 0usize, 0usize)
+    } else {
+        let first = &args[0];
+        if let Value::Object(first_obj) = first {
+            // First arg is an Object
+            if let Some(ta_val) = slot_get_chained(first_obj, &InternalSlot::TypedArray) {
+                // TypedArray(typedArray)
+                if let Value::TypedArray(src_ta) = &*ta_val.borrow() {
+                    let src_length = src_ta.length;
+                    let src_is_bigint = is_bigint_typed_array(&src_ta.kind);
+                    let mut copied = Vec::with_capacity(src_length);
+                    for idx in 0..src_length {
+                        let val = if src_is_bigint {
+                            let size = src_ta.element_size();
+                            let bo = src_ta.byte_offset + idx * size;
+                            let buf = src_ta.buffer.borrow();
+                            let data = buf.data.lock().unwrap();
+                            if bo + size <= data.len() {
+                                let bytes = &data[bo..bo + size];
+                                let big_int = if matches!(src_ta.kind, TypedArrayKind::BigInt64) {
+                                    let mut b = [0u8; 8];
+                                    b.copy_from_slice(bytes);
+                                    num_bigint::BigInt::from(i64::from_le_bytes(b))
                                 } else {
-                                    Value::Undefined
-                                }
+                                    let mut b = [0u8; 8];
+                                    b.copy_from_slice(bytes);
+                                    num_bigint::BigInt::from(u64::from_le_bytes(b))
+                                };
+                                Value::BigInt(Box::new(big_int))
                             } else {
-                                Value::Number(ta.get(idx).unwrap_or(f64::NAN))
-                            };
-                            copied.push(val);
-                        }
-                        init_values = Some(copied);
-                        let buffer = new_gc_cell_ptr(
-                            mc,
-                            JSArrayBuffer {
-                                data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
-                                ..JSArrayBuffer::default()
-                            },
-                        );
-                        (buffer, 0, src_length)
-                    } else {
-                        return Err(raise_type_error!("Invalid TypedArray constructor argument"));
+                                Value::Undefined
+                            }
+                        } else {
+                            Value::Number(src_ta.get(idx).unwrap_or(f64::NAN))
+                        };
+                        copied.push(val);
                     }
-                } else if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
-                    if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
-                        // new TypedArray(buffer)
-                        buffer_obj_opt = Some(obj);
-                        (*ab, 0, (**ab).borrow().data.lock().unwrap().len() / element_size)
-                    } else {
-                        return Err(raise_type_error!("Invalid TypedArray constructor argument"));
-                    }
+                    init_values = Some(copied);
+                    let buffer = new_gc_cell_ptr(
+                        mc,
+                        JSArrayBuffer {
+                            data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
+                            ..JSArrayBuffer::default()
+                        },
+                    );
+                    (buffer, 0, src_length)
                 } else {
-                    // Check if the object has @@iterator (iterable protocol)
-                    let mut iterable_values: Option<Vec<Value<'gc>>> = None;
+                    return Err(throw_type_error(mc, env, "Invalid TypedArray constructor argument"));
+                }
+            } else if let Some(ab_val) = slot_get_chained(first_obj, &InternalSlot::ArrayBuffer) {
+                // TypedArray(buffer [, byteOffset [, length]])
+                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    // Step 7: Let offset = ToIndex(byteOffset)
+                    let offset = if args.len() > 1 { to_index(mc, env, &args[1])? } else { 0 };
+
+                    // Step 8: If offset modulo elementSize ≠ 0, throw RangeError
+                    if element_size > 0 && offset % element_size != 0 {
+                        return Err(throw_range_error(mc, env, "Start offset is not a multiple of the element size"));
+                    }
+
+                    // Step 9: If IsDetachedBuffer(buffer), throw TypeError
+                    if ab.borrow().detached {
+                        return Err(throw_type_error(mc, env, "Cannot construct TypedArray on a detached ArrayBuffer"));
+                    }
+
+                    let buf_byte_len = ab.borrow().data.lock().unwrap().len();
+
+                    // Step 11: If offset > bufferByteLength, throw RangeError
+                    if offset > buf_byte_len {
+                        return Err(throw_range_error(mc, env, "Start offset is outside the bounds of the buffer"));
+                    }
+
+                    let final_length = if args.len() > 2 && !matches!(args[2], Value::Undefined) {
+                        // Explicit length given
+                        let new_length = to_index(mc, env, &args[2])?;
+                        // Step 12b: If IsDetachedBuffer(buffer) is true, throw a TypeError.
+                        // (The length conversion may have detached the buffer via valueOf.)
+                        if ab.borrow().detached {
+                            return Err(throw_type_error(mc, env, "Cannot construct TypedArray on a detached ArrayBuffer"));
+                        }
+                        if offset + new_length * element_size > buf_byte_len {
+                            return Err(throw_range_error(mc, env, "Invalid typed array length"));
+                        }
+                        new_length
+                    } else {
+                        // No length: derive from buffer
+                        if (buf_byte_len - offset) % element_size != 0 {
+                            return Err(throw_range_error(
+                                mc,
+                                env,
+                                "Byte length of buffer minus offset is not a multiple of the element size",
+                            ));
+                        }
+                        (buf_byte_len - offset) / element_size
+                    };
+
+                    buffer_obj_opt = Some(*first_obj);
+                    (*ab, offset, final_length)
+                } else {
+                    return Err(throw_type_error(mc, env, "Invalid TypedArray constructor argument"));
+                }
+            } else {
+                // TypedArray(object) — iterable or array-like
+                let mut iterable_values: Option<Vec<Value<'gc>>> = None;
+                // Try @@iterator
+                let iter_fn_result = (|| -> Result<Option<Value<'gc>>, EvalError<'gc>> {
                     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
                         && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
                         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
-                        && let Ok(iter_fn) = crate::core::get_property_with_accessors(mc, env, &obj, *iter_sym)
-                        && !matches!(iter_fn, Value::Undefined | Value::Null)
                     {
-                        // Use iterator protocol to collect values
-                        let iterator = crate::core::evaluate_call_dispatch(mc, env, &iter_fn, Some(&Value::Object(obj)), &[])?;
-                        if let Value::Object(iter_obj) = iterator {
-                            let mut values = Vec::new();
-                            loop {
-                                let next_fn = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
-                                let next_res = crate::core::evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
-                                if let Value::Object(next_obj) = next_res {
-                                    let done_val = crate::core::get_property_with_accessors(mc, env, &next_obj, "done")?;
-                                    if done_val.to_truthy() {
-                                        break;
-                                    }
-                                    let value = crate::core::get_property_with_accessors(mc, env, &next_obj, "value")?;
-                                    values.push(value);
-                                } else {
+                        let iter_fn = crate::core::get_property_with_accessors(mc, env, first_obj, *iter_sym)?;
+                        if !matches!(iter_fn, Value::Undefined | Value::Null) {
+                            return Ok(Some(iter_fn));
+                        }
+                    }
+                    Ok(None)
+                })();
+                let iter_fn = iter_fn_result?;
+
+                if let Some(iter_fn) = iter_fn {
+                    // Use iterator protocol
+                    let iterator = crate::core::evaluate_call_dispatch(mc, env, &iter_fn, Some(&Value::Object(*first_obj)), &[])?;
+                    if let Value::Object(iter_obj) = iterator {
+                        let mut values = Vec::new();
+                        loop {
+                            let next_fn = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                            let next_res = crate::core::evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
+                            if let Value::Object(next_obj) = next_res {
+                                let done_val = crate::core::get_property_with_accessors(mc, env, &next_obj, "done")?;
+                                if done_val.to_truthy() {
                                     break;
                                 }
+                                let value = crate::core::get_property_with_accessors(mc, env, &next_obj, "value")?;
+                                values.push(value);
+                            } else {
+                                break;
                             }
-                            iterable_values = Some(values);
                         }
-                    }
-
-                    if let Some(values) = iterable_values {
-                        let src_length = values.len();
-                        init_values = Some(values);
-                        let buffer = new_gc_cell_ptr(
-                            mc,
-                            JSArrayBuffer {
-                                data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
-                                ..JSArrayBuffer::default()
-                            },
-                        );
-                        (buffer, 0, src_length)
-                    } else {
-                        // Array-like source (no iterator)
-                        let src_length = crate::core::object_get_length(&obj).unwrap_or_else(|| {
-                            object_get_key_value(&obj, "length")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::Number(n) if *n >= 0.0 && n.is_finite() => Some(*n as usize),
-                                    _ => None,
-                                })
-                                .unwrap_or(0)
-                        });
-
-                        let mut copied = Vec::with_capacity(src_length);
-                        for idx in 0..src_length {
-                            let raw = object_get_key_value(&obj, idx)
-                                .map(|cell| cell.borrow().clone())
-                                .unwrap_or(Value::Undefined);
-                            // Unwrap Value::Property descriptors to get the actual value
-                            let value = match raw {
-                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                                Value::Property { value: None, .. } => Value::Undefined,
-                                other => other,
-                            };
-                            copied.push(value);
-                        }
-                        init_values = Some(copied);
-
-                        let buffer = new_gc_cell_ptr(
-                            mc,
-                            JSArrayBuffer {
-                                data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
-                                ..JSArrayBuffer::default()
-                            },
-                        );
-                        (buffer, 0, src_length)
+                        iterable_values = Some(values);
                     }
                 }
-            }
-            _ => return Err(raise_type_error!("Invalid TypedArray constructor argument")),
-        }
-    } else if args.len() == 2 {
-        // new TypedArray(buffer, byteOffset)
-        let buffer_val = args[0].clone();
-        let offset_val = args[1].clone();
 
-        if let Value::Object(obj) = buffer_val {
-            if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
-                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
-                    if let Value::Number(offset_num) = offset_val {
-                        let offset = offset_num as usize;
-                        if !offset.is_multiple_of(element_size) {
-                            return Err(raise_range_error!("TypedArray byteOffset must be multiple of element size"));
-                        }
-                        // Step 11: If IsDetachedBuffer(buffer) is true, throw a TypeError.
-                        if (**ab).borrow().detached {
-                            return Err(raise_type_error!("Cannot construct TypedArray on a detached ArrayBuffer"));
-                        }
-                        let remaining_bytes = (**ab).borrow().data.lock().unwrap().len() - offset;
-                        let length = remaining_bytes / element_size;
-                        buffer_obj_opt = Some(obj);
-                        (*ab, offset, length)
-                    } else {
-                        return Err(raise_type_error!("TypedArray byteOffset must be a number"));
-                    }
-                } else {
-                    return Err(raise_type_error!("First argument must be an ArrayBuffer"));
-                }
-            } else {
-                return Err(raise_type_error!("First argument must be an ArrayBuffer"));
-            }
-        } else {
-            return Err(raise_type_error!("First argument must be an ArrayBuffer"));
-        }
-    } else if args.len() == 3 {
-        // new TypedArray(buffer, byteOffset, length)
-        let buffer_val = args[0].clone();
-        let offset_val = args[1].clone();
-        let length_val = args[2].clone();
-
-        if let Value::Object(obj) = buffer_val {
-            if let Some(ab_val) = slot_get_chained(&obj, &InternalSlot::ArrayBuffer) {
-                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
-                    let offset_num = match &offset_val {
-                        Value::Number(n) => *n,
-                        Value::Undefined | Value::Null => 0.0,
-                        other => match crate::core::to_number(other) {
-                            Ok(n) => n,
-                            Err(_) => return Err(raise_type_error!("TypedArray byteOffset must be a number")),
+                if let Some(values) = iterable_values {
+                    let src_length = values.len();
+                    init_values = Some(values);
+                    let buffer = new_gc_cell_ptr(
+                        mc,
+                        JSArrayBuffer {
+                            data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
+                            ..JSArrayBuffer::default()
                         },
-                    };
-                    let offset = offset_num as usize;
-                    if !offset.is_multiple_of(element_size) {
-                        return Err(raise_range_error!("TypedArray byteOffset must be multiple of element size"));
-                    }
-                    // Step 11: If IsDetachedBuffer(buffer) is true, throw a TypeError.
-                    if (**ab).borrow().detached {
-                        return Err(raise_type_error!("Cannot construct TypedArray on a detached ArrayBuffer"));
-                    }
-                    let length = match &length_val {
-                        Value::Undefined | Value::Null => {
-                            let buf_len = (**ab).borrow().data.lock().unwrap().len();
-                            if buf_len < offset || !(buf_len - offset).is_multiple_of(element_size) {
-                                return Err(raise_range_error!("TypedArray byte length must be a multiple of element size"));
-                            }
-                            (buf_len - offset) / element_size
-                        }
-                        Value::Number(n) => {
-                            let l = *n as usize;
-                            if l * element_size + offset > (**ab).borrow().data.lock().unwrap().len() {
-                                return Err(raise_range_error!("TypedArray length exceeds buffer size"));
-                            }
-                            l
-                        }
-                        other => {
-                            let n = crate::core::to_number(other).unwrap_or(0.0);
-                            let l = n as usize;
-                            if l * element_size + offset > (**ab).borrow().data.lock().unwrap().len() {
-                                return Err(raise_range_error!("TypedArray length exceeds buffer size"));
-                            }
-                            l
-                        }
-                    };
-                    buffer_obj_opt = Some(obj);
-                    (*ab, offset, length)
+                    );
+                    (buffer, 0, src_length)
                 } else {
-                    return Err(raise_type_error!("First argument must be an ArrayBuffer"));
+                    // Array-like source (no iterator)
+                    let len_val = crate::core::get_property_with_accessors(mc, env, first_obj, "length")?;
+                    let src_length = to_index(mc, env, &len_val)?;
+
+                    let mut copied = Vec::with_capacity(src_length);
+                    for idx in 0..src_length {
+                        let raw = crate::core::get_property_with_accessors(mc, env, first_obj, idx)?;
+                        copied.push(raw);
+                    }
+                    init_values = Some(copied);
+
+                    let buffer = new_gc_cell_ptr(
+                        mc,
+                        JSArrayBuffer {
+                            data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
+                            ..JSArrayBuffer::default()
+                        },
+                    );
+                    (buffer, 0, src_length)
                 }
-            } else {
-                return Err(raise_type_error!("First argument must be an ArrayBuffer"));
             }
         } else {
-            return Err(raise_type_error!("First argument must be an ArrayBuffer"));
+            // First arg is NOT an Object → TypedArray(length)
+            let element_length = to_index(mc, env, first)?;
+            let buffer = new_gc_cell_ptr(
+                mc,
+                JSArrayBuffer {
+                    data: Arc::new(Mutex::new(vec![0; element_length * element_size])),
+                    ..JSArrayBuffer::default()
+                },
+            );
+            (buffer, 0, element_length)
         }
-    } else {
-        return Err(raise_type_error!("TypedArray constructor with more than 3 arguments not supported"));
     };
 
     // Create the TypedArray object
     let obj = new_js_object_data(mc);
 
-    // Set prototype from constructor
-    if let Some(proto_val) = object_get_key_value(constructor_obj, "prototype") {
-        let proto_candidate = match &*proto_val.borrow() {
-            Value::Object(proto_obj) => Some(*proto_obj),
-            Value::Property { value: Some(v), .. } => match &*v.borrow() {
-                Value::Object(proto_obj) => Some(*proto_obj),
-                _ => None,
-            },
-            _ => None,
-        };
-
-        if let Some(proto_obj) = proto_candidate {
-            obj.borrow_mut(mc).prototype = Some(proto_obj);
-            slot_set(mc, &obj, InternalSlot::Proto, &Value::Object(proto_obj));
-        } else {
-            // Fallback: use Object.prototype
-            if let Some(obj_val) = crate::core::env_get(env, "Object")
-                && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                && let Some(op_val) = object_get_key_value(obj_ctor, "prototype")
-                && let Value::Object(op) = &*op_val.borrow()
-            {
-                obj.borrow_mut(mc).prototype = Some(*op);
-            }
-        }
+    // GetPrototypeFromConstructor(newTarget, defaultProto) - use new_target for proto
+    if let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, new_target, env, ctor_name)? {
+        obj.borrow_mut(mc).prototype = Some(proto);
     } else {
-        // Fallback: use Object.prototype
-        if let Some(obj_val) = crate::core::env_get(env, "Object")
-            && let Value::Object(obj_ctor) = &*obj_val.borrow()
-            && let Some(op_val) = object_get_key_value(obj_ctor, "prototype")
-            && let Value::Object(op) = &*op_val.borrow()
+        // Fallback: use the constructor's own prototype
+        if let Some(proto_val) = object_get_key_value(constructor_obj, "prototype")
+            && let Value::Object(proto_obj) = &*proto_val.borrow()
         {
-            obj.borrow_mut(mc).prototype = Some(*op);
+            obj.borrow_mut(mc).prototype = Some(*proto_obj);
         }
     }
 
-    // Determine if this TypedArray should be length-tracking.
-    // Per spec, [[ArrayLength]] is "auto" only when:
-    //   1. The first arg is an ArrayBuffer (not an array-like/TypedArray), AND
-    //   2. No explicit length argument is given (args.len() <= 2), AND
-    //   3. The buffer is resizable (max_byte_length.is_some()).
-    let length_tracking = match args.len() {
-        1 | 2 => match &args[0] {
-            Value::Object(obj) => {
-                if let Some(ab_val) = slot_get_chained(obj, &InternalSlot::ArrayBuffer) {
-                    if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
-                        ab.borrow().max_byte_length.is_some()
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
+    // Determine length-tracking
+    let length_tracking = if !args.is_empty() {
+        if let Value::Object(fo) = &args[0] {
+            if let Some(ab_val) = slot_get_chained(fo, &InternalSlot::ArrayBuffer)
+                && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
+                && ab.borrow().max_byte_length.is_some()
+                && (args.len() <= 2 || matches!(args.get(2), Some(Value::Undefined)))
+            {
+                true
+            } else {
+                false
             }
-            _ => false,
-        },
-        _ => false,
+        } else {
+            false
+        }
+    } else {
+        false
     };
 
     // Create TypedArray instance
@@ -2249,16 +2281,13 @@ pub fn handle_typedarray_constructor<'gc>(
             length_tracking,
         },
     );
-
     slot_set(mc, &obj, InternalSlot::TypedArray, &Value::TypedArray(typed_array));
 
-    // Store a proper ArrayBuffer wrapper object so `ta.buffer` returns a spec-compliant object.
-    let buf_wrapper = if let Some(existing_buf_obj) = buffer_obj_opt {
-        existing_buf_obj
+    // Store buffer wrapper object
+    let buf_wrapper = if let Some(existing) = buffer_obj_opt {
+        existing
     } else {
-        // Create a new wrapper object for the internally-created buffer.
         let buf_obj = new_js_object_data(mc);
-        // Set prototype to ArrayBuffer.prototype if available.
         if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
             && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
@@ -2271,57 +2300,26 @@ pub fn handle_typedarray_constructor<'gc>(
     };
     slot_set(mc, &obj, InternalSlot::BufferObject, &Value::Object(buf_wrapper));
 
-    log::debug!(
-        "created typedarray instance: obj={:p} kind={:?} length_tracking={}",
-        &*obj.borrow(),
-        kind,
-        length_tracking
-    );
-
+    // Initialize elements from init_values
     if let Some(values) = init_values {
         for (idx, v) in values.iter().enumerate() {
             if idx >= length {
                 break;
             }
-
-            if matches!(kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) {
-                let big_value = match v {
-                    Value::BigInt(b) => b.to_i64().unwrap_or(0) as f64,
-                    Value::Number(n) => *n,
-                    Value::Boolean(b) => {
-                        if *b {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    }
-                    Value::Null => 0.0,
-                    Value::Undefined => f64::NAN,
-                    _ => f64::NAN,
-                };
-                typed_array.set(mc, idx, big_value)?;
-                continue;
+            if is_bigint_ta {
+                // Use ToBigInt which properly throws for invalid types
+                let n = to_bigint_i64(mc, env, v)?;
+                typed_array.set_bigint(mc, idx, n).map_err(|e| {
+                    let v = crate::core::js_error_to_value(mc, env, &e);
+                    EvalError::Throw(v, None, None)
+                })?;
+            } else {
+                let num = crate::core::to_number_with_env(mc, env, v)?;
+                typed_array.set(mc, idx, num).map_err(|e| {
+                    let v2 = crate::core::js_error_to_value(mc, env, &e);
+                    EvalError::Throw(v2, None, None)
+                })?;
             }
-
-            let num = match v {
-                Value::Number(n) => *n,
-                Value::Boolean(b) => {
-                    if *b {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                Value::Null => 0.0,
-                Value::Undefined => f64::NAN,
-                Value::BigInt(b) => b.to_f64().unwrap_or(f64::NAN),
-                Value::String(s) => {
-                    let text = crate::unicode::utf16_to_utf8(s);
-                    text.parse::<f64>().unwrap_or(f64::NAN)
-                }
-                _ => f64::NAN,
-            };
-            typed_array.set(mc, idx, num)?;
         }
     }
 
@@ -3778,6 +3776,41 @@ pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val:
     }
 }
 
+/// TypedArrayCreate(constructor, argumentList) — ES2024 §23.2.4.1
+/// 1. Let newTypedArray be ? Construct(constructor, argumentList).
+/// 2. Perform ? ValidateTypedArray(newTypedArray).
+/// 3. If argumentList is a List of a single Number, check newTypedArray.length >= argumentList[0].
+fn typedarray_create<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    constructor: &Value<'gc>,
+    args: &[Value<'gc>],
+    expected_len: Option<usize>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Step 1: Construct(constructor, argumentList)
+    let new_ta = crate::js_class::evaluate_new(mc, env, constructor, args, Some(constructor))?;
+
+    // Step 2: ValidateTypedArray(newTypedArray)
+    let ta_obj = match &new_ta {
+        Value::Object(o) => o,
+        _ => return Err(throw_type_error(mc, env, "TypedArray expected")),
+    };
+    if slot_get(ta_obj, &InternalSlot::TypedArray).is_none() {
+        return Err(throw_type_error(mc, env, "result is not a TypedArray"));
+    }
+
+    // Step 3: If argumentList has one Number, check length >= that number
+    if let Some(expected) = expected_len
+        && let Some(ta_cell) = slot_get(ta_obj, &InternalSlot::TypedArray)
+        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+        && ta.length < expected
+    {
+        return Err(throw_type_error(mc, env, "TypedArray is too small"));
+    }
+
+    Ok(new_ta)
+}
+
 /// Handle %TypedArray%.from() and %TypedArray%.of() static methods
 pub fn handle_typedarray_static_method<'gc>(
     mc: &MutationContext<'gc>,
@@ -3872,35 +3905,88 @@ pub fn handle_typedarray_static_method<'gc>(
                         }
                     }
 
-                    // ES2024 §23.2.2.1 step 5e: apply mapper AFTER collecting all values
-                    if used_iterator && let Some(mfn) = &mapper {
-                        let mut mapped_values = Vec::with_capacity(values.len());
-                        for (i, val) in values.iter().enumerate() {
-                            let mapped = crate::js_promise::call_function_with_this(
-                                mc,
-                                mfn,
-                                Some(&this_arg),
-                                &[val.clone(), Value::Number(i as f64)],
-                                env,
-                            )?;
-                            mapped_values.push(mapped);
+                    // Iterator path: ES2024 §23.2.2.1 step 6
+                    // Step 6c: TypedArrayCreate after collecting raw values
+                    if used_iterator {
+                        let expected_len = values.len();
+                        let len_val = Value::Number(expected_len as f64);
+                        let new_ta = typedarray_create(mc, env, this_val, &[len_val], Some(expected_len))?;
+
+                        // Step 6e: loop — map + set interleaved
+                        if let Value::Object(ta_obj) = &new_ta
+                            && let Some(ta_cell) = slot_get(ta_obj, &InternalSlot::TypedArray)
+                            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                        {
+                            let is_bigint_ta = is_bigint_typed_array(&ta.kind);
+                            for (i, val) in values.iter().enumerate() {
+                                let mapped = if let Some(mfn) = &mapper {
+                                    crate::js_promise::call_function_with_this(
+                                        mc,
+                                        mfn,
+                                        Some(&this_arg),
+                                        &[val.clone(), Value::Number(i as f64)],
+                                        env,
+                                    )?
+                                } else {
+                                    val.clone()
+                                };
+                                if is_bigint_ta {
+                                    let n = match &mapped {
+                                        Value::BigInt(b) => bigint_to_i64_modular(b),
+                                        _ => to_bigint_i64(mc, env, &mapped)?,
+                                    };
+                                    ta.set_bigint(mc, i, n)?;
+                                } else {
+                                    let n = crate::core::to_number_with_env(mc, env, &mapped)?;
+                                    ta.set(mc, i, n)?;
+                                }
+                            }
                         }
-                        values = mapped_values;
+                        return Ok(new_ta);
                     }
 
                     if !used_iterator {
-                        // Array-like source
-                        let len_val = get_property_with_accessors(mc, env, src_obj, "length")?;
-                        let len = crate::core::to_number_with_env(mc, env, &len_val)?.max(0.0) as usize;
-                        for i in 0..len {
-                            let val = get_property_with_accessors(mc, env, src_obj, i)?;
-                            let mapped = if let Some(ref mfn) = mapper {
-                                crate::js_promise::call_function_with_this(mc, mfn, Some(&this_arg), &[val, Value::Number(i as f64)], env)?
-                            } else {
-                                val
-                            };
-                            values.push(mapped);
+                        // Array-like source — spec step 10-12: create TA first, then iterate and set
+                        let len_val_raw = get_property_with_accessors(mc, env, src_obj, "length")?;
+                        let len = crate::core::to_number_with_env(mc, env, &len_val_raw)?.max(0.0) as usize;
+
+                        // Step 10: TypedArrayCreate(C, «len»)
+                        let len_val = Value::Number(len as f64);
+                        let new_ta = typedarray_create(mc, env, this_val, &[len_val], Some(len))?;
+
+                        // Step 12: iterate and set each element
+                        if let Value::Object(ta_obj) = &new_ta
+                            && let Some(ta_cell) = slot_get(ta_obj, &InternalSlot::TypedArray)
+                            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                        {
+                            let is_bigint_ta = is_bigint_typed_array(&ta.kind);
+                            for i in 0..len {
+                                let val = get_property_with_accessors(mc, env, src_obj, i)?;
+                                let mapped = if let Some(ref mfn) = mapper {
+                                    crate::js_promise::call_function_with_this(
+                                        mc,
+                                        mfn,
+                                        Some(&this_arg),
+                                        &[val, Value::Number(i as f64)],
+                                        env,
+                                    )?
+                                } else {
+                                    val
+                                };
+                                if is_bigint_ta {
+                                    let n = match &mapped {
+                                        Value::BigInt(b) => bigint_to_i64_modular(b),
+                                        _ => to_bigint_i64(mc, env, &mapped)?,
+                                    };
+                                    ta.set_bigint(mc, i, n)?;
+                                } else {
+                                    let n = crate::core::to_number_with_env(mc, env, &mapped)?;
+                                    ta.set(mc, i, n)?;
+                                }
+                            }
                         }
+
+                        return Ok(new_ta);
                     }
                 }
                 Value::String(s) => {
@@ -3919,10 +4005,12 @@ pub fn handle_typedarray_static_method<'gc>(
                 }
             }
 
-            // Create the TypedArray via the constructor
-            let len_val = Value::Number(values.len() as f64);
-            let new_ta = crate::core::evaluate_call_dispatch(mc, env, this_val, None, &[len_val])?;
-            // Set elements
+            // TypedArrayCreate(C, «len»): Construct(C, [len]) then ValidateTypedArray
+            let expected_len = values.len();
+            let len_val = Value::Number(expected_len as f64);
+            let new_ta = typedarray_create(mc, env, this_val, &[len_val], Some(expected_len))?;
+
+            // Set elements via ToNumber/ToBigInt (per spec, Set(newObj, Pk, kValue, true))
             if let Value::Object(ta_obj) = &new_ta
                 && let Some(ta_cell) = slot_get(ta_obj, &InternalSlot::TypedArray)
                 && let Value::TypedArray(ta) = &*ta_cell.borrow()
@@ -3936,7 +4024,7 @@ pub fn handle_typedarray_static_method<'gc>(
                         };
                         ta.set_bigint(mc, i, n)?;
                     } else {
-                        let n = crate::core::to_number_with_env(mc, env, val).unwrap_or(0.0);
+                        let n = crate::core::to_number_with_env(mc, env, val)?;
                         ta.set(mc, i, n)?;
                     };
                 }
@@ -3945,8 +4033,11 @@ pub fn handle_typedarray_static_method<'gc>(
         }
         "of" => {
             // %TypedArray%.of(...items)
-            let len_val = Value::Number(args.len() as f64);
-            let new_ta = crate::core::evaluate_call_dispatch(mc, env, this_val, None, &[len_val])?;
+            // TypedArrayCreate(C, «len»): Construct(C, [len]) then ValidateTypedArray
+            let expected_len = args.len();
+            let len_val = Value::Number(expected_len as f64);
+            let new_ta = typedarray_create(mc, env, this_val, &[len_val], Some(expected_len))?;
+
             if let Value::Object(ta_obj) = &new_ta
                 && let Some(ta_cell) = slot_get(ta_obj, &InternalSlot::TypedArray)
                 && let Value::TypedArray(ta) = &*ta_cell.borrow()
@@ -3960,7 +4051,7 @@ pub fn handle_typedarray_static_method<'gc>(
                         };
                         ta.set_bigint(mc, i, n)?;
                     } else {
-                        let n = crate::core::to_number_with_env(mc, env, val).unwrap_or(0.0);
+                        let n = crate::core::to_number_with_env(mc, env, val)?;
                         ta.set(mc, i, n)?;
                     };
                 }

@@ -6,7 +6,6 @@ use crate::core::{
 use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
 use crate::core::{PropertyKey, object_get_key_value, object_set_key_value, remove_private_identifier_prefix, value_to_string};
 use crate::js_boolean::handle_boolean_constructor;
-use crate::js_typedarray::handle_typedarray_constructor;
 use crate::unicode::utf16_to_utf8;
 use crate::{error::JSError, unicode::utf8_to_utf16};
 
@@ -1688,12 +1687,10 @@ pub(crate) fn evaluate_new<'gc>(
 
             // Check if this is a TypedArray constructor
             if slot_get(class_obj, &InternalSlot::Kind).is_some() {
-                let ctor_for_typedarray = if let Some(Value::Object(nt_obj)) = new_target {
-                    nt_obj
-                } else {
-                    class_obj
-                };
-                return Ok(handle_typedarray_constructor(mc, ctor_for_typedarray, evaluated_args, env)?);
+                // constructor_obj = class_obj (the actual TA ctor with Kind),
+                // new_target = newTarget from Reflect.construct, or class_obj itself
+                let nt_obj = if let Some(Value::Object(nt)) = new_target { nt } else { class_obj };
+                return crate::js_typedarray::handle_typedarray_constructor(mc, class_obj, evaluated_args, env, Some(nt_obj));
             }
 
             // Check if this is a class object (inspect internal slot `class_def`)

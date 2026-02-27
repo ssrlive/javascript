@@ -12741,23 +12741,26 @@ pub fn evaluate_call_dispatch<'gc>(
                         if let Some(wm_val) = slot_get_chained(obj, &InternalSlot::WeakMap) {
                             if let Value::WeakMap(wm_ptr) = &*wm_val.borrow() {
                                 Ok(crate::js_weakmap::handle_weakmap_instance_method(
-                                    mc, wm_ptr, method, eval_args, env,
+                                    mc, wm_ptr, method, eval_args, env, this_v,
                                 )?)
                             } else {
-                                Err(raise_eval_error!("TypeError: WeakMap.prototype method called on incompatible receiver").into())
+                                Err(
+                                    raise_type_error!(format!("Method WeakMap.prototype.{} called on incompatible receiver", method))
+                                        .into(),
+                                )
                             }
                         } else {
-                            Err(raise_eval_error!("TypeError: WeakMap.prototype method called on incompatible receiver").into())
+                            Err(raise_type_error!(format!("Method WeakMap.prototype.{} called on incompatible receiver", method)).into())
                         }
                     } else if let Value::WeakMap(wm_ptr) = this_v {
                         Ok(crate::js_weakmap::handle_weakmap_instance_method(
-                            mc, wm_ptr, method, eval_args, env,
+                            mc, wm_ptr, method, eval_args, env, this_v,
                         )?)
                     } else {
-                        Err(raise_eval_error!("TypeError: WeakMap.prototype method called on non-object receiver").into())
+                        Err(raise_type_error!(format!("Method WeakMap.prototype.{} called on incompatible receiver", method)).into())
                     }
                 } else {
-                    Err(raise_eval_error!(format!("Unknown Map function: {}", name)).into())
+                    Err(raise_type_error!(format!("Unknown WeakMap function: {}", name)).into())
                 }
             } else if name.starts_with("WeakSet.") {
                 if let Some(method) = name.strip_prefix("WeakSet.prototype.") {
@@ -12765,20 +12768,27 @@ pub fn evaluate_call_dispatch<'gc>(
                     if let Value::Object(obj) = this_v {
                         if let Some(ws_val) = slot_get_chained(obj, &InternalSlot::WeakSet) {
                             if let Value::WeakSet(ws_ptr) = &*ws_val.borrow() {
-                                Ok(crate::js_weakset::handle_weakset_instance_method(mc, ws_ptr, method, eval_args)?)
+                                Ok(crate::js_weakset::handle_weakset_instance_method(
+                                    mc, ws_ptr, method, eval_args, this_v,
+                                )?)
                             } else {
-                                Err(raise_eval_error!("TypeError: WeakSet.prototype method called on incompatible receiver").into())
+                                Err(
+                                    raise_type_error!(format!("Method WeakSet.prototype.{} called on incompatible receiver", method))
+                                        .into(),
+                                )
                             }
                         } else {
-                            Err(raise_eval_error!("TypeError: WeakSet.prototype method called on incompatible receiver").into())
+                            Err(raise_type_error!(format!("Method WeakSet.prototype.{} called on incompatible receiver", method)).into())
                         }
                     } else if let Value::WeakSet(ws_ptr) = this_v {
-                        Ok(crate::js_weakset::handle_weakset_instance_method(mc, ws_ptr, method, eval_args)?)
+                        Ok(crate::js_weakset::handle_weakset_instance_method(
+                            mc, ws_ptr, method, eval_args, this_v,
+                        )?)
                     } else {
-                        Err(raise_eval_error!("TypeError: WeakSet.prototype method called on non-object receiver").into())
+                        Err(raise_type_error!(format!("Method WeakSet.prototype.{} called on incompatible receiver", method)).into())
                     }
                 } else {
-                    Err(raise_eval_error!(format!("Unknown Map function: {}", name)).into())
+                    Err(raise_type_error!(format!("Unknown WeakSet function: {}", name)).into())
                 }
             } else if name == "Set[Symbol.species]" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
@@ -16450,6 +16460,12 @@ fn evaluate_expr_property<'gc>(
             | "Set.prototype.has"
             | "Set.prototype.delete"
             | "Set.prototype.forEach"
+            | "WeakMap.prototype.get"
+            | "WeakMap.prototype.has"
+            | "WeakMap.prototype.delete"
+            | "WeakSet.prototype.add"
+            | "WeakSet.prototype.has"
+            | "WeakSet.prototype.delete"
             | "Number.isNaN"
             | "Number.isFinite"
             | "Number.isInteger"
@@ -16541,6 +16557,7 @@ fn evaluate_expr_property<'gc>(
             | "DataView.prototype.setBigInt64"
             | "DataView.prototype.setBigUint64"
             | "Map.prototype.set"
+            | "WeakMap.prototype.set"
             | "Math.atan2"
             | "Math.hypot"
             | "Math.imul"
@@ -17895,6 +17912,12 @@ fn evaluate_expr_index<'gc>(
                     | "Set.prototype.has"
                     | "Set.prototype.delete"
                     | "Set.prototype.forEach"
+                    | "WeakMap.prototype.get"
+                    | "WeakMap.prototype.has"
+                    | "WeakMap.prototype.delete"
+                    | "WeakSet.prototype.add"
+                    | "WeakSet.prototype.has"
+                    | "WeakSet.prototype.delete"
                     | "Number.isNaN"
                     | "Number.isFinite"
                     | "Number.isInteger"
@@ -17987,6 +18010,7 @@ fn evaluate_expr_index<'gc>(
                     | "DataView.prototype.setBigUint64"
                     | "JSON.parse"
                     | "Map.prototype.set"
+                    | "WeakMap.prototype.set"
                     | "Math.atan2"
                     | "Math.hypot"
                     | "Math.imul"
@@ -22132,9 +22156,9 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "Proxy" {
                         return crate::js_proxy::handle_proxy_constructor(mc, &eval_args, env);
                     } else if name_str == "WeakMap" {
-                        return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, &eval_args, env)?);
+                        return crate::js_weakmap::handle_weakmap_constructor(mc, &eval_args, env, None);
                     } else if name_str == "WeakSet" {
-                        return Ok(crate::js_weakset::handle_weakset_constructor(mc, &eval_args, env)?);
+                        return crate::js_weakset::handle_weakset_constructor(mc, &eval_args, env, None);
                     } else if name_str == "Set" {
                         return crate::js_set::handle_set_constructor(mc, &eval_args, env, None);
                     } else if name_str == "ArrayBuffer" {

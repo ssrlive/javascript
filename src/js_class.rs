@@ -1597,8 +1597,8 @@ pub(crate) fn evaluate_new<'gc>(
                     "Set" => {
                         return crate::js_set::handle_set_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }
-                    "WeakMap" => return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, &ctor_realm_env)?),
-                    "WeakSet" => return Ok(crate::js_weakset::handle_weakset_constructor(mc, evaluated_args, &ctor_realm_env)?),
+                    "WeakMap" => return crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
+                    "WeakSet" => return crate::js_weakset::handle_weakset_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
                     "ArrayBuffer" => {
                         return crate::js_typedarray::handle_arraybuffer_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }

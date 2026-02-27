@@ -8469,6 +8469,29 @@ fn evaluate_expr_assign<'gc>(
             Ok(val)
         }
         Precomputed::Property(base_val, key) => {
+            // Per §6.2.5.6 PutValue and §10.1.9.2 OrdinarySetWithOwnDescriptor step 3:
+            // If the Receiver is not an Object (i.e. a primitive), [[Set]] returns false.
+            // Per step 5d, if strict mode, throw TypeError.
+            let is_primitive_base = matches!(
+                *base_val,
+                Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_) | Value::Symbol(_)
+            );
+            if is_primitive_base && env_get_strictness(env) {
+                return Err(raise_type_error!(format!(
+                    "Cannot create property '{}' on {} '{}'",
+                    key,
+                    match &*base_val {
+                        Value::Number(_) => "number",
+                        Value::Boolean(_) => "boolean",
+                        Value::String(_) => "string",
+                        Value::BigInt(_) => "bigint",
+                        Value::Symbol(_) => "symbol",
+                        _ => "primitive",
+                    },
+                    value_to_string(&base_val)
+                ))
+                .into());
+            }
             // ToObject semantics: throw on null/undefined, box primitives, or use object directly.
             let obj = match *base_val {
                 Value::Object(o) => o,
@@ -8536,42 +8559,28 @@ fn evaluate_expr_assign<'gc>(
             let obj = match *base_val {
                 Value::Object(o) => o,
                 Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
-                Value::Number(n) => {
-                    let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Number_valueOf".to_string()))?;
-                    object_set_key_value(mc, &obj, "toString", &Value::Function("Number_toString".to_string()))?;
-                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Number(n));
-                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Number");
-                    obj
-                }
-                Value::Boolean(b) => {
-                    let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("Boolean_valueOf".to_string()))?;
-                    object_set_key_value(mc, &obj, "toString", &Value::Function("Boolean_toString".to_string()))?;
-                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Boolean(b));
-                    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
-                    obj
-                }
-                Value::String(s) => {
-                    let obj = new_js_object_data(mc);
-                    object_set_key_value(mc, &obj, "valueOf", &Value::Function("String_valueOf".to_string()))?;
-                    object_set_key_value(mc, &obj, "toString", &Value::Function("String_toString".to_string()))?;
-                    object_set_key_value(mc, &obj, "length", &Value::Number(s.len() as f64))?;
-                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::String(s.clone()));
-                    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "String")?;
-                    obj
-                }
-                Value::BigInt(h) => {
-                    let obj = new_js_object_data(mc);
-                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::BigInt(h.clone()));
-                    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt")?;
-                    obj
-                }
-                Value::Symbol(sym_rc) => {
-                    let obj = new_js_object_data(mc);
-                    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Symbol(sym_rc));
-                    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
-                    obj
+                ref prim @ (Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_) | Value::Symbol(_)) => {
+                    // §10.1.9.2 step 3: Receiver is not an Object → [[Set]] returns false.
+                    // §6.2.5.6 step 5d: strict mode → TypeError.
+                    if env_get_strictness(env) {
+                        let type_name = match prim {
+                            Value::Number(_) => "number",
+                            Value::Boolean(_) => "boolean",
+                            Value::String(_) => "string",
+                            Value::BigInt(_) => "bigint",
+                            Value::Symbol(_) => "symbol",
+                            _ => "primitive",
+                        };
+                        return Err(raise_type_error!(format!(
+                            "Cannot create property '{}' on {} '{}'",
+                            value_to_string(&crate::js_proxy::property_key_to_value_pub(&key)),
+                            type_name,
+                            value_to_string(prim)
+                        ))
+                        .into());
+                    }
+                    // Non-strict: silently ignore the assignment per spec
+                    return Ok(val);
                 }
                 _ => return Err(raise_type_error!("Cannot assign to property of non-object").into()),
             };
@@ -12870,7 +12879,27 @@ pub fn evaluate_call_dispatch<'gc>(
                         } else if name == crate::unicode::utf8_to_utf16("BigInt.asUintN") {
                             Ok(crate::js_bigint::handle_bigint_static_method(mc, "asUintN", eval_args, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("Symbol") {
-                            Ok(crate::js_symbol::handle_symbol_call(mc, eval_args, env)?)
+                            // §20.4.1.1: coerce description via ToString before calling handler
+                            let coerced: Vec<Value<'_>>;
+                            let effective = if let Some(first) = eval_args.first() {
+                                if !matches!(first, Value::Undefined) {
+                                    if let Value::Object(_) = first {
+                                        let prim = crate::core::to_primitive(mc, first, "string", env)?;
+                                        if matches!(prim, Value::Symbol(_)) {
+                                            return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                                        }
+                                        coerced = std::iter::once(prim).chain(eval_args[1..].iter().cloned()).collect();
+                                        &coerced
+                                    } else {
+                                        eval_args
+                                    }
+                                } else {
+                                    eval_args
+                                }
+                            } else {
+                                eval_args
+                            };
+                            Ok(crate::js_symbol::handle_symbol_call(mc, effective, env)?)
                         } else if name == crate::unicode::utf8_to_utf16("Array") {
                             Ok(crate::js_array::handle_array_constructor(mc, eval_args, env, None)?)
                         } else if name == crate::unicode::utf8_to_utf16("Function") {
@@ -16491,6 +16520,8 @@ fn evaluate_expr_property<'gc>(
         }
         let short_name = if func_name.contains("[Symbol.hasInstance]") {
             "[Symbol.hasInstance]"
+        } else if func_name == "Symbol.prototype.[Symbol.toPrimitive]" {
+            return Ok(Value::String(utf8_to_utf16("[Symbol.toPrimitive]")));
         } else if func_name == "RegExp.prototype.match" {
             return Ok(Value::String(utf8_to_utf16("[Symbol.match]")));
         } else if func_name == "RegExp.prototype.matchAll" {
@@ -17937,7 +17968,10 @@ fn evaluate_expr_index<'gc>(
                     | "String.prototype.split"
                     | "String.prototype.substring"
                     | "String.prototype.substr" => 2.0,
-                    "Function.prototype.[Symbol.hasInstance]" => 1.0,
+                    "Function.prototype.[Symbol.hasInstance]"
+                    | "Symbol.for"
+                    | "Symbol.keyFor"
+                    | "Symbol.prototype.[Symbol.toPrimitive]" => 1.0,
                     "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                     _ => {
                         if func_name.starts_with("DataView.prototype.get") {
@@ -17955,6 +17989,8 @@ fn evaluate_expr_index<'gc>(
                 }
                 let short_name = if func_name.contains("[Symbol.hasInstance]") {
                     "[Symbol.hasInstance]"
+                } else if func_name == "Symbol.prototype.[Symbol.toPrimitive]" {
+                    return Ok(Value::String(utf8_to_utf16("[Symbol.toPrimitive]")));
                 } else if func_name == "RegExp.prototype.match" {
                     return Ok(Value::String(utf8_to_utf16("[Symbol.match]")));
                 } else if func_name == "RegExp.prototype.matchAll" {
@@ -19498,11 +19534,49 @@ pub fn call_native_function<'gc>(
     }
 
     if name == "Symbol" {
-        return Ok(Some(crate::js_symbol::handle_symbol_call(mc, args, env)?));
+        // §20.4.1.1 step 2: If description is not undefined, let descString be ? ToString(description).
+        // ToString on objects calls ToPrimitive("string") first, ToString on Symbol throws TypeError.
+        let coerced_args: Vec<Value<'gc>>;
+        let effective_args = if let Some(first) = args.first() {
+            if !matches!(first, Value::Undefined) {
+                if let Value::Object(_) = first {
+                    let prim = crate::core::to_primitive(mc, first, "string", env)?;
+                    if matches!(prim, Value::Symbol(_)) {
+                        return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                    }
+                    coerced_args = std::iter::once(prim).chain(args[1..].iter().cloned()).collect();
+                    &coerced_args
+                } else {
+                    args
+                }
+            } else {
+                args
+            }
+        } else {
+            args
+        };
+        return Ok(Some(crate::js_symbol::handle_symbol_call(mc, effective_args, env)?));
     }
 
     if name == "Symbol.for" {
-        return Ok(Some(crate::js_symbol::handle_symbol_for(mc, args, env)?));
+        // §20.4.2.2 step 1: Let stringKey be ? ToString(key).
+        // ToString on objects calls ToPrimitive("string") first.
+        let coerced_args: Vec<Value<'gc>>;
+        let effective_args = if let Some(first) = args.first() {
+            if let Value::Object(_) = first {
+                let prim = crate::core::to_primitive(mc, first, "string", env)?;
+                if matches!(prim, Value::Symbol(_)) {
+                    return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                }
+                coerced_args = std::iter::once(prim).chain(args[1..].iter().cloned()).collect();
+                &coerced_args
+            } else {
+                args
+            }
+        } else {
+            args
+        };
+        return Ok(Some(crate::js_symbol::handle_symbol_for(mc, effective_args, env)?));
     }
 
     if name == "Symbol.keyFor" {

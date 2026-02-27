@@ -1,6 +1,6 @@
 use crate::core::{
     InternalSlot, JSObjectDataPtr, MutationContext, StatementKind, Value, check_strict_mode_violations, env_set_strictness,
-    evaluate_call_dispatch, evaluate_statements, get_property_with_accessors, initialize_global_constructors, new_gc_cell_ptr,
+    evaluate_call_dispatch, evaluate_statements, get_property_with_accessors, initialize_global_constructors_with_parent, new_gc_cell_ptr,
     new_js_object_data, object_get_key_value, object_set_key_value, parse_statements, slot_get, slot_remove, slot_set, tokenize,
 };
 use crate::error::JSError;
@@ -178,8 +178,9 @@ pub fn handle_shadow_realm_constructor<'gc>(
     // Create a fresh global environment with all built-ins
     let realm_env = new_js_object_data(mc);
 
-    // Initialize all global constructors in the new realm
-    initialize_global_constructors(mc, &realm_env)?;
+    // Initialize all global constructors in the new realm, sharing well-known
+    // symbols from the caller's realm per §6.1.5.1.
+    initialize_global_constructors_with_parent(mc, &realm_env, Some(caller_env))?;
 
     // Per spec: ShadowRealm evaluates in non-strict mode by default.
     // initialize_global_constructors sets strict mode, so we reset it.

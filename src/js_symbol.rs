@@ -3,7 +3,11 @@ use crate::core::{JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_da
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
-pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_symbol<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    parent_env: Option<&JSObjectDataPtr<'gc>>,
+) -> Result<(), JSError> {
     let symbol_ctor = new_js_object_data(mc);
 
     slot_set(mc, &symbol_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
@@ -29,64 +33,100 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     object_set_key_value(mc, &symbol_ctor, "prototype", &Value::Object(symbol_proto))?;
     object_set_key_value(mc, &symbol_proto, "constructor", &Value::Object(symbol_ctor))?;
 
+    // §20.4.2: Symbol.length = 0 (non-writable, non-enumerable, configurable)
+    object_set_key_value(mc, &symbol_ctor, "length", &Value::Number(0.0))?;
+    symbol_ctor.borrow_mut(mc).set_non_enumerable("length");
+    symbol_ctor.borrow_mut(mc).set_non_writable("length");
+
+    // §20.4.2: Symbol.name = "Symbol" (non-writable, non-enumerable, configurable)
+    object_set_key_value(mc, &symbol_ctor, "name", &Value::String(utf8_to_utf16("Symbol")))?;
+    symbol_ctor.borrow_mut(mc).set_non_enumerable("name");
+    symbol_ctor.borrow_mut(mc).set_non_writable("name");
+
+    // prototype descriptor: non-enumerable, non-writable, non-configurable
+    symbol_ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    symbol_ctor.borrow_mut(mc).set_non_writable("prototype");
+    symbol_ctor.borrow_mut(mc).set_non_configurable("prototype");
+
+    // §20.4.2: Symbol's [[Prototype]] is Function.prototype
+    if let Some(func_val) = object_get_key_value(env, "Function")
+        && let Value::Object(func_ctor) = &*func_val.borrow()
+        && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*func_proto_val.borrow()
+    {
+        symbol_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+    }
+
+    // Helper: try to get a well-known symbol from the parent realm's Symbol constructor.
+    // Per §6.1.5.1 well-known symbols are shared across all realms.
+    let parent_sym_ctor: Option<crate::core::JSObjectDataPtr<'gc>> = parent_env.and_then(|penv| {
+        object_get_key_value(penv, "Symbol").and_then(|v| if let Value::Object(obj) = &*v.borrow() { Some(*obj) } else { None })
+    });
+
+    macro_rules! wk_symbol {
+        ($name:expr, $desc:expr) => {{
+            if let Some(ref psc) = parent_sym_ctor {
+                if let Some(val) = object_get_key_value(psc, $name) {
+                    if let Value::Symbol(_) = &*val.borrow() {
+                        val.borrow().clone()
+                    } else {
+                        Value::Symbol(Gc::new(mc, SymbolData::new(Some($desc))))
+                    }
+                } else {
+                    Value::Symbol(Gc::new(mc, SymbolData::new(Some($desc))))
+                }
+            } else {
+                Value::Symbol(Gc::new(mc, SymbolData::new(Some($desc))))
+            }
+        }};
+    }
+
     // Symbol.iterator
-    let iterator_sym_data = Gc::new(mc, SymbolData::new(Some("Symbol.iterator")));
-    let iterator_sym = Value::Symbol(iterator_sym_data);
+    let iterator_sym = wk_symbol!("iterator", "Symbol.iterator");
     object_set_key_value(mc, &symbol_ctor, "iterator", &iterator_sym)?;
 
     // Symbol.asyncIterator
-    let async_iterator_sym_data = Gc::new(mc, SymbolData::new(Some("Symbol.asyncIterator")));
-    let async_iterator_sym = Value::Symbol(async_iterator_sym_data);
+    let async_iterator_sym = wk_symbol!("asyncIterator", "Symbol.asyncIterator");
     object_set_key_value(mc, &symbol_ctor, "asyncIterator", &async_iterator_sym)?;
 
     // Symbol.toPrimitive
-    let to_primitive_data = Gc::new(mc, SymbolData::new(Some("Symbol.toPrimitive")));
-    let to_primitive_sym = Value::Symbol(to_primitive_data);
+    let to_primitive_sym = wk_symbol!("toPrimitive", "Symbol.toPrimitive");
     object_set_key_value(mc, &symbol_ctor, "toPrimitive", &to_primitive_sym)?;
 
     // Symbol.toStringTag
-    let to_string_tag_data = Gc::new(mc, SymbolData::new(Some("Symbol.toStringTag")));
-    let to_string_tag_sym = Value::Symbol(to_string_tag_data);
+    let to_string_tag_sym = wk_symbol!("toStringTag", "Symbol.toStringTag");
     object_set_key_value(mc, &symbol_ctor, "toStringTag", &to_string_tag_sym)?;
 
     // Symbol.species
-    let species_data = Gc::new(mc, SymbolData::new(Some("Symbol.species")));
-    let species_sym = Value::Symbol(species_data);
+    let species_sym = wk_symbol!("species", "Symbol.species");
     object_set_key_value(mc, &symbol_ctor, "species", &species_sym)?;
 
     // Symbol.match
-    let match_data = Gc::new(mc, SymbolData::new(Some("Symbol.match")));
-    let match_sym = Value::Symbol(match_data);
+    let match_sym = wk_symbol!("match", "Symbol.match");
     object_set_key_value(mc, &symbol_ctor, "match", &match_sym)?;
 
     // Symbol.replace
-    let replace_data = Gc::new(mc, SymbolData::new(Some("Symbol.replace")));
-    let replace_sym = Value::Symbol(replace_data);
+    let replace_sym = wk_symbol!("replace", "Symbol.replace");
     object_set_key_value(mc, &symbol_ctor, "replace", &replace_sym)?;
 
     // Symbol.search
-    let search_data = Gc::new(mc, SymbolData::new(Some("Symbol.search")));
-    let search_sym = Value::Symbol(search_data);
+    let search_sym = wk_symbol!("search", "Symbol.search");
     object_set_key_value(mc, &symbol_ctor, "search", &search_sym)?;
 
     // Symbol.split
-    let split_data = Gc::new(mc, SymbolData::new(Some("Symbol.split")));
-    let split_sym = Value::Symbol(split_data);
+    let split_sym = wk_symbol!("split", "Symbol.split");
     object_set_key_value(mc, &symbol_ctor, "split", &split_sym)?;
 
     // Symbol.matchAll
-    let match_all_data = Gc::new(mc, SymbolData::new(Some("Symbol.matchAll")));
-    let match_all_sym = Value::Symbol(match_all_data);
+    let match_all_sym = wk_symbol!("matchAll", "Symbol.matchAll");
     object_set_key_value(mc, &symbol_ctor, "matchAll", &match_all_sym)?;
 
     // Symbol.hasInstance
-    let has_instance_data = Gc::new(mc, SymbolData::new(Some("Symbol.hasInstance")));
-    let has_instance_sym = Value::Symbol(has_instance_data);
+    let has_instance_sym = wk_symbol!("hasInstance", "Symbol.hasInstance");
     object_set_key_value(mc, &symbol_ctor, "hasInstance", &has_instance_sym)?;
 
     // Symbol.unscopables
-    let unscopables_data = Gc::new(mc, SymbolData::new(Some("Symbol.unscopables")));
-    let unscopables_sym = Value::Symbol(unscopables_data);
+    let unscopables_sym = wk_symbol!("unscopables", "Symbol.unscopables");
     object_set_key_value(mc, &symbol_ctor, "unscopables", &unscopables_sym)?;
 
     // All well-known symbol properties on Symbol are non-writable, non-enumerable, non-configurable
@@ -132,37 +172,67 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 
     symbol_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    // Symbol.for and Symbol.keyFor (static) - register as functions on the constructor
-    let for_fn = Value::Function("Symbol.for".to_string());
-    object_set_key_value(mc, &symbol_ctor, "for", &for_fn)?;
-    symbol_ctor.borrow_mut(mc).set_non_enumerable("for");
+    // Symbol.for and Symbol.keyFor (static) — wrap in distinct function objects
+    // so each realm has its own identity (cross-realm tests require notSameValue).
+    {
+        use crate::core::new_gc_cell_ptr;
+        let for_obj = new_js_object_data(mc);
+        for_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("Symbol.for".to_string()))));
+        // length = 1, name = "for" — {writable: false, enumerable: false, configurable: true}
+        object_set_key_value(mc, &for_obj, "length", &Value::Number(1.0))?;
+        for_obj.borrow_mut(mc).set_non_enumerable("length");
+        for_obj.borrow_mut(mc).set_non_writable("length");
+        object_set_key_value(mc, &for_obj, "name", &Value::String(crate::unicode::utf8_to_utf16("for")))?;
+        for_obj.borrow_mut(mc).set_non_enumerable("name");
+        for_obj.borrow_mut(mc).set_non_writable("name");
+        object_set_key_value(mc, &symbol_ctor, "for", &Value::Object(for_obj))?;
+        symbol_ctor.borrow_mut(mc).set_non_enumerable("for");
+    }
 
-    let keyfor_fn = Value::Function("Symbol.keyFor".to_string());
-    object_set_key_value(mc, &symbol_ctor, "keyFor", &keyfor_fn)?;
-    symbol_ctor.borrow_mut(mc).set_non_enumerable("keyFor");
+    {
+        use crate::core::new_gc_cell_ptr;
+        let keyfor_obj = new_js_object_data(mc);
+        keyfor_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("Symbol.keyFor".to_string()))));
+        // length = 1, name = "keyFor" — {writable: false, enumerable: false, configurable: true}
+        object_set_key_value(mc, &keyfor_obj, "length", &Value::Number(1.0))?;
+        keyfor_obj.borrow_mut(mc).set_non_enumerable("length");
+        keyfor_obj.borrow_mut(mc).set_non_writable("length");
+        object_set_key_value(mc, &keyfor_obj, "name", &Value::String(crate::unicode::utf8_to_utf16("keyFor")))?;
+        keyfor_obj.borrow_mut(mc).set_non_enumerable("name");
+        keyfor_obj.borrow_mut(mc).set_non_writable("name");
+        object_set_key_value(mc, &symbol_ctor, "keyFor", &Value::Object(keyfor_obj))?;
+        symbol_ctor.borrow_mut(mc).set_non_enumerable("keyFor");
+    }
 
     // Create per-environment symbol registry object used by Symbol.for / Symbol.keyFor
     let registry_obj = new_js_object_data(mc);
     slot_set(mc, env, InternalSlot::SymbolRegistry, &Value::Object(registry_obj));
 
     // Set Symbol.prototype[@@toStringTag] = "Symbol"
-    // The toStringTag symbol was just created above and stored on symbol_ctor
+    // §20.4.3.6: { writable: false, enumerable: false, configurable: true }
     if let Some(tag_sym_val) = object_get_key_value(&symbol_ctor, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
         object_set_key_value(mc, &symbol_proto, *tag_sym, &Value::String(utf8_to_utf16("Symbol")))?;
         symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+        symbol_proto.borrow_mut(mc).set_non_writable(PropertyKey::Symbol(*tag_sym));
     }
 
     // §20.4.3.5 Symbol.prototype[@@toPrimitive](hint)
     // Returns the primitive Symbol value (thisSymbolValue(this value)).
+    // Descriptor: { writable: false, enumerable: false, configurable: true }
     if let Some(tp_sym_val) = object_get_key_value(&symbol_ctor, "toPrimitive")
         && let Value::Symbol(tp_sym) = &*tp_sym_val.borrow()
     {
         let tp_fn = Value::Function("Symbol.prototype.[Symbol.toPrimitive]".to_string());
         object_set_key_value(mc, &symbol_proto, *tp_sym, &tp_fn)?;
         symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tp_sym));
-        symbol_proto.borrow_mut(mc).set_non_configurable(PropertyKey::Symbol(*tp_sym));
+        symbol_proto.borrow_mut(mc).set_non_writable(PropertyKey::Symbol(*tp_sym));
+        // configurable: true (default) — do NOT set non-configurable
     }
 
     env_set(mc, env, "Symbol", &Value::Object(symbol_ctor))?;
@@ -177,8 +247,13 @@ pub(crate) fn handle_symbol_call<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     let description = if let Some(arg) = args.first() {
         match arg {
-            Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
             Value::Undefined => None,
+            // §20.4.1.1 step 2: If description is not undefined, let descString be ? ToString(description).
+            // ToString on a Symbol throws TypeError.
+            Value::Symbol(_) => {
+                return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
+            }
+            Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
             _ => Some(crate::core::value_to_string(arg)),
         }
     } else {
@@ -269,11 +344,13 @@ pub(crate) fn handle_symbol_for<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    if args.is_empty() {
-        return Err(crate::raise_type_error!("Symbol.for requires one argument"));
+    // §20.4.2.2 Symbol.for(key): step 1 — let stringKey be ? ToString(key).
+    // ToString on a Symbol throws TypeError. On undefined, produces "undefined".
+    let arg = if args.is_empty() { &Value::Undefined } else { &args[0] };
+    if let Value::Symbol(_) = arg {
+        return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
     }
-
-    let key = crate::core::value_to_string(&args[0]);
+    let key = crate::core::value_to_string(arg);
 
     // Retrieve or create registry object on the environment
     let registry_obj = match slot_get_chained(env, &InternalSlot::SymbolRegistry) {
@@ -315,6 +392,7 @@ pub(crate) fn handle_symbol_keyfor<'gc>(
         return Err(crate::raise_type_error!("Symbol.keyFor requires one argument"));
     }
 
+    // §20.4.2.6 step 1: If Type(sym) is not Symbol, throw a TypeError exception.
     match &args[0] {
         Value::Symbol(s) => {
             // Lookup registry object and iterate properties to find matching symbol
@@ -334,6 +412,9 @@ pub(crate) fn handle_symbol_keyfor<'gc>(
             }
             Ok(Value::Undefined)
         }
-        _ => Ok(Value::Undefined),
+        _ => Err(crate::raise_type_error!(format!(
+            "{} is not a symbol",
+            crate::core::value_to_string(&args[0])
+        ))),
     }
 }

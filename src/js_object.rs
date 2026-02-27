@@ -1860,12 +1860,25 @@ pub fn handle_object_method<'gc>(
                             | "String.prototype.substring"
                             | "String.prototype.substr" => 2.0,
                             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
+                            "Symbol.for" | "Symbol.keyFor" | "Symbol.prototype.[Symbol.toPrimitive]" => 1.0,
                             _ => 0.0,
                         };
                         crate::core::create_descriptor_object(mc, &Value::Number(len), false, false, true)?
                     } else if prop_name == "name" {
                         let short_name = if func_name.contains("[Symbol.hasInstance]") {
                             "[Symbol.hasInstance]"
+                        } else if func_name == "Symbol.prototype.[Symbol.toPrimitive]" {
+                            return {
+                                let desc_obj = crate::core::create_descriptor_object(
+                                    mc,
+                                    &Value::String(utf8_to_utf16("[Symbol.toPrimitive]")),
+                                    false,
+                                    false,
+                                    true,
+                                )?;
+                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                Ok(Value::Object(desc_obj))
+                            };
                         } else if func_name == "RegExp.prototype.match" {
                             return {
                                 let desc_obj = crate::core::create_descriptor_object(

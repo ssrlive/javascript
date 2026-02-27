@@ -48,6 +48,7 @@ jobs:
           - id: 35
           - id: 36
           - id: 37
+          - id: 38
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -228,6 +229,10 @@ jobs:
             37)
               TITLE='"built-ins/SharedArrayBuffer" - "built-ins/SuppressedError"'
               FOCUS='built-ins/SharedArrayBuffer,built-ins/String,built-ins/StringIteratorPrototype,built-ins/SuppressedError'
+              ;;
+            38)
+              TITLE='"built-ins/Symbol"'
+              FOCUS='built-ins/Symbol'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

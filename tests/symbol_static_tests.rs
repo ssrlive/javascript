@@ -65,16 +65,14 @@ mod symbol_static_tests {
     }
 
     #[test]
-    fn test_symbol_for_no_args_error() {
+    fn test_symbol_for_no_args_coerces_undefined() {
+        // Per spec, Symbol.for() with no arguments coerces undefined → "undefined"
         let script = r#"
-            try {
-                Symbol.for();
-            } catch (e) {
-                "error"
-            }
+            var s = Symbol.for();
+            Symbol.keyFor(s)
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "\"error\"");
+        assert_eq!(result, "\"undefined\"");
     }
 
     #[test]

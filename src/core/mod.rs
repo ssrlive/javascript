@@ -67,6 +67,14 @@ pub struct JsRoot<'gc> {
 pub type JsArena = gc_arena::Arena<gc_arena::Rootable!['gc => JsRoot<'gc>]>;
 
 pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    initialize_global_constructors_with_parent(mc, env, None)
+}
+
+pub fn initialize_global_constructors_with_parent<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    parent_env: Option<&JSObjectDataPtr<'gc>>,
+) -> Result<(), JSError> {
     crate::js_object::initialize_object_module(mc, env)?;
 
     // Set the global object's [[Prototype]] to Object.prototype per spec.
@@ -98,7 +106,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     initialize_number_module(mc, env)?;
 
-    initialize_symbol(mc, env)?;
+    initialize_symbol(mc, env, parent_env)?;
 
     // Initialize Reflect object with full (implemented) methods
     // (must be after initialize_symbol so Symbol.toStringTag is available)
@@ -110,6 +118,19 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     // Create %StringIteratorPrototype% now that %IteratorPrototype% is available
     crate::js_string::initialize_string_iterator_prototype(mc, env)?;
     crate::js_function::initialize_function(mc, env)?;
+
+    // Fix up Symbol's [[Prototype]] to be Function.prototype now that Function is initialized.
+    // (Symbol is initialized before Function because other builtins need well-known symbols.)
+    if let Some(sym_val) = env_get(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+        && let Some(func_val) = env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_val.borrow()
+        && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*func_proto_val.borrow()
+    {
+        sym_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+    }
+
     initialize_regexp(mc, env)?;
     // Create %RegExpStringIteratorPrototype% now that %IteratorPrototype% is available
     crate::js_regexp::initialize_regexp_string_iterator_prototype(mc, env)?;
@@ -331,7 +352,7 @@ pub fn create_new_realm<'gc>(mc: &MutationContext<'gc>, _parent_env: &JSObjectDa
     let new_env = new_js_object_data(mc);
     new_env.borrow_mut(mc).is_function_scope = true;
 
-    initialize_global_constructors(mc, &new_env)?;
+    initialize_global_constructors_with_parent(mc, &new_env, Some(_parent_env))?;
 
     env_set(mc, &new_env, "globalThis", &Value::Object(new_env))?;
     new_env.borrow_mut(mc).set_non_enumerable("globalThis");

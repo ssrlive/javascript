@@ -6,4 +6,4 @@ try {
   if (typeof sab.grow !== 'function') throw new Error('no grow');
   sab.grow(2);
   console.log('OK');
-} catch (e) { console.log('NO'); }
+} catch (e) { console.log('NO:', e); }

@@ -16672,7 +16672,7 @@ fn evaluate_expr_property<'gc>(
             | "String.prototype.split"
             | "String.prototype.substring"
             | "String.prototype.substr" => 2.0,
-            "Function.prototype.[Symbol.hasInstance]" => 1.0,
+            "Function.prototype.[Symbol.hasInstance]" | "SharedArrayBuffer.prototype.grow" => 1.0,
             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
             _ => {
                 if func_name.starts_with("DataView.prototype.get") {
@@ -18075,7 +18075,8 @@ fn evaluate_expr_index<'gc>(
                     | "String.prototype.includes"
                     | "String.fromCharCode"
                     | "String.fromCodePoint"
-                    | "String.raw" => 1.0,
+                    | "String.raw"
+                    | "SharedArrayBuffer.prototype.grow" => 1.0,
                     "Array.prototype.slice"
                     | "Array.prototype.splice"
                     | "Array.prototype.copyWithin"
@@ -20047,6 +20048,33 @@ pub fn call_native_function<'gc>(
             return Ok(Some(crate::js_typedarray::handle_sharedarraybuffer_slice(mc, env, obj, args)?));
         } else {
             return Err(raise_type_error!("SharedArrayBuffer.prototype.slice called on non-object").into());
+        }
+    }
+
+    if name == "SharedArrayBuffer.prototype.grow" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_sharedarraybuffer_grow(mc, env, obj, args)?));
+        } else {
+            return Err(raise_type_error!("SharedArrayBuffer.prototype.grow called on non-object").into());
+        }
+    }
+
+    if name == "SharedArrayBuffer.prototype.maxByteLength" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_sharedarraybuffer_maxbytelength(mc, obj)?));
+        } else {
+            return Err(raise_type_error!("SharedArrayBuffer.prototype.maxByteLength called on non-object").into());
+        }
+    }
+
+    if name == "SharedArrayBuffer.prototype.growable" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_sharedarraybuffer_growable(mc, obj)?));
+        } else {
+            return Err(raise_type_error!("SharedArrayBuffer.prototype.growable called on non-object").into());
         }
     }
 

@@ -1003,6 +1003,81 @@ pub fn make_sharedarraybuffer_prototype<'gc>(
         crate::js_object::define_property_internal(mc, &proto, "slice", &sl_desc)?;
     }
 
+    // grow — method function object
+    {
+        let grow_fn = new_js_object_data(mc);
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*fp_val.borrow()
+        {
+            grow_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        grow_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
+            mc,
+            Value::Function("SharedArrayBuffer.prototype.grow".to_string()),
+        )));
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("grow")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &grow_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &grow_fn, "length", &len_desc)?;
+
+        let gr_desc = crate::core::create_descriptor_object(mc, &Value::Object(grow_fn), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &proto, "grow", &gr_desc)?;
+    }
+
+    // maxByteLength — accessor property with getter
+    {
+        let getter_fn = new_js_object_data(mc);
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*fp_val.borrow()
+        {
+            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        getter_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
+            mc,
+            Value::Function("SharedArrayBuffer.prototype.maxByteLength".to_string()),
+        )));
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get maxByteLength")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "length", &len_desc)?;
+
+        let mbl_desc = new_js_object_data(mc);
+        object_set_key_value(mc, &mbl_desc, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(mc, &mbl_desc, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(mc, &mbl_desc, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(mc, &proto, "maxByteLength", &mbl_desc)?;
+    }
+
+    // growable — accessor property with getter
+    {
+        let getter_fn = new_js_object_data(mc);
+        if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*fp_val.borrow()
+        {
+            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        getter_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
+            mc,
+            Value::Function("SharedArrayBuffer.prototype.growable".to_string()),
+        )));
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get growable")), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &getter_fn, "length", &len_desc)?;
+
+        let gr_desc = new_js_object_data(mc);
+        object_set_key_value(mc, &gr_desc, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(mc, &gr_desc, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(mc, &gr_desc, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(mc, &proto, "growable", &gr_desc)?;
+    }
+
     // @@toStringTag = "SharedArrayBuffer"
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_val.borrow()
@@ -1703,6 +1778,25 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
 
     let length = if let Some(v) = args.first() { to_index(v)? } else { 0 };
 
+    // Parse optional options object for growable buffers
+    let mut max_byte_length: Option<usize> = None;
+    if args.len() > 1 {
+        let opts = args[1].clone();
+        if let Value::Object(obj) = opts {
+            let max_val = crate::core::get_property_with_accessors(mc, env, &obj, "maxByteLength")?;
+            if !matches!(max_val, Value::Undefined) {
+                let max = to_index(&max_val)?;
+                if max < length {
+                    return Err(crate::raise_range_error!("maxByteLength must be >= length").into());
+                }
+                if max > (u32::MAX as usize) {
+                    return Err(crate::raise_range_error!("maxByteLength is too large").into());
+                }
+                max_byte_length = Some(max);
+            }
+        }
+    }
+
     // Create the SharedArrayBuffer object first
     let obj = new_js_object_data(mc);
 
@@ -1754,6 +1848,7 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
         JSArrayBuffer {
             data: Arc::new(Mutex::new(vec![0; length])),
             shared: true,
+            max_byte_length,
             ..JSArrayBuffer::default()
         },
     );
@@ -1961,17 +2056,26 @@ pub fn is_valid_integer_index(ta: &crate::core::JSTypedArray, index: f64) -> boo
     if index == 0.0 && index.is_sign_negative() {
         return false;
     }
-    // 3. If index < 0 or index >= length, return false
+
+    // For fixed-length views backed by a resizable buffer, check whether
+    // the view has gone out-of-bounds due to a buffer resize.
+    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
     let cur_len = if ta.length_tracking {
-        let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
         if buf_len <= ta.byte_offset {
             0
         } else {
             (buf_len - ta.byte_offset) / ta.element_size()
         }
     } else {
+        // Fixed-length: check if the TA is still in-bounds
+        let needed = ta.byte_offset + ta.length * ta.element_size();
+        if needed > buf_len {
+            // The TA is out-of-bounds — all indices are invalid
+            return false;
+        }
         ta.length
     };
+    // 3. If index < 0 or index >= length, return false
     if index < 0.0 || (index as usize) >= cur_len {
         return false;
     }
@@ -3097,6 +3201,12 @@ pub fn handle_arraybuffer_accessor<'gc>(
         "byteLength" => {
             if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    // Per spec: If IsSharedArrayBuffer(O) is true, throw TypeError
+                    if (**ab).borrow().shared {
+                        return Err(raise_type_error!(
+                            "Method ArrayBuffer.prototype.byteLength called on incompatible receiver"
+                        ));
+                    }
                     let len = (**ab).borrow().data.lock().unwrap().len();
                     Ok(Value::Number(len as f64))
                 } else {
@@ -3113,6 +3223,12 @@ pub fn handle_arraybuffer_accessor<'gc>(
         "maxByteLength" => {
             if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    // Per spec: If IsSharedArrayBuffer(O) is true, throw TypeError
+                    if (**ab).borrow().shared {
+                        return Err(raise_type_error!(
+                            "Method ArrayBuffer.prototype.maxByteLength called on incompatible receiver"
+                        ));
+                    }
                     let b = (**ab).borrow();
                     let len = b.data.lock().unwrap().len();
                     Ok(Value::Number(b.max_byte_length.unwrap_or(len) as f64))
@@ -3130,6 +3246,12 @@ pub fn handle_arraybuffer_accessor<'gc>(
         "resizable" => {
             if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    // Per spec: If IsSharedArrayBuffer(O) is true, throw TypeError
+                    if (**ab).borrow().shared {
+                        return Err(raise_type_error!(
+                            "Method ArrayBuffer.prototype.resizable called on incompatible receiver"
+                        ));
+                    }
                     Ok(Value::Boolean((**ab).borrow().max_byte_length.is_some()))
                 } else {
                     Err(raise_type_error!(
@@ -3164,6 +3286,122 @@ pub fn handle_sharedarraybuffer_bytelength<'gc>(_mc: &MutationContext<'gc>, obje
             "Method SharedArrayBuffer.prototype.byteLength called on incompatible receiver"
         ))
     }
+}
+
+/// SharedArrayBuffer.prototype.maxByteLength getter
+pub fn handle_sharedarraybuffer_maxbytelength<'gc>(
+    _mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
+        && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
+    {
+        if !(**ab).borrow().shared {
+            return Err(raise_type_error!(
+                "Method SharedArrayBuffer.prototype.maxByteLength called on incompatible receiver"
+            ));
+        }
+        let b = (**ab).borrow();
+        let len = b.data.lock().unwrap().len();
+        Ok(Value::Number(b.max_byte_length.unwrap_or(len) as f64))
+    } else {
+        Err(raise_type_error!(
+            "Method SharedArrayBuffer.prototype.maxByteLength called on incompatible receiver"
+        ))
+    }
+}
+
+/// SharedArrayBuffer.prototype.growable getter
+pub fn handle_sharedarraybuffer_growable<'gc>(_mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+    if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
+        && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
+    {
+        if !(**ab).borrow().shared {
+            return Err(raise_type_error!(
+                "Method SharedArrayBuffer.prototype.growable called on incompatible receiver"
+            ));
+        }
+        Ok(Value::Boolean((**ab).borrow().max_byte_length.is_some()))
+    } else {
+        Err(raise_type_error!(
+            "Method SharedArrayBuffer.prototype.growable called on incompatible receiver"
+        ))
+    }
+}
+
+/// SharedArrayBuffer.prototype.grow(newLength)
+pub fn handle_sharedarraybuffer_grow<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, JSError> {
+    // Step 1-2: RequireInternalSlot(O, [[ArrayBufferMaxByteLength]])
+    let ab_val = slot_get_chained(object, &InternalSlot::ArrayBuffer)
+        .ok_or_else(|| raise_type_error!("SharedArrayBuffer.prototype.grow called on incompatible receiver"))?;
+    let ab = match &*ab_val.borrow() {
+        Value::ArrayBuffer(ab) => *ab,
+        _ => {
+            return Err(raise_type_error!(
+                "SharedArrayBuffer.prototype.grow called on incompatible receiver"
+            ));
+        }
+    };
+
+    // Step 3: If IsSharedArrayBuffer(O) is false, throw TypeError
+    if !ab.borrow().shared {
+        return Err(raise_type_error!(
+            "SharedArrayBuffer.prototype.grow called on incompatible receiver"
+        ));
+    }
+
+    // Must have [[ArrayBufferMaxByteLength]] (i.e., be growable)
+    let max = ab.borrow().max_byte_length;
+    if max.is_none() {
+        return Err(raise_type_error!("SharedArrayBuffer is not growable"));
+    }
+    let max = max.unwrap();
+
+    // Step 4: Let newByteLength be ? ToIntegerOrInfinity(newLength)
+    let new_len_val = args.first().cloned().unwrap_or(Value::Undefined);
+    let prim = if let Value::Object(_) = &new_len_val {
+        crate::core::to_primitive(mc, &new_len_val, "number", env).map_err(JSError::from)?
+    } else {
+        new_len_val
+    };
+    let n = crate::core::to_number(&prim).map_err(JSError::from)?;
+    let integer = if n.is_nan() || n == 0.0 {
+        0.0
+    } else if !n.is_finite() {
+        n
+    } else {
+        n.trunc()
+    };
+
+    // Step 5: If newByteLength < 0 or newByteLength > maxByteLength, throw RangeError
+    if integer < 0.0 {
+        return Err(raise_range_error!("new length must be a non-negative integer"));
+    }
+    if !integer.is_finite() || integer > max as f64 {
+        return Err(raise_range_error!("new length exceeds maxByteLength"));
+    }
+
+    let new_len = integer as usize;
+
+    // Step 11: If newByteLength < currentByteLength, throw RangeError (no shrinking)
+    let ab_borrow = ab.borrow();
+    let mut data = ab_borrow.data.lock().unwrap();
+    let cur_len = data.len();
+    if new_len < cur_len {
+        return Err(raise_range_error!("SharedArrayBuffer cannot be shrunk"));
+    }
+
+    // Step 13: Grow the buffer
+    if new_len > cur_len {
+        data.resize(new_len, 0u8);
+    }
+
+    Ok(Value::Undefined)
 }
 
 /// SharedArrayBuffer.prototype.slice(start, end)

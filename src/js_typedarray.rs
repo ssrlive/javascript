@@ -2402,6 +2402,38 @@ pub fn handle_dataview_method<'gc>(
         }
     };
 
+    // ECMAScript modular integer conversion helpers (spec §7.1)
+    // These use modular arithmetic instead of Rust's saturating `as` casts.
+    let f64_to_uint8 = |v: f64| -> u8 {
+        if v.is_nan() || v.is_infinite() || v == 0.0 {
+            return 0;
+        }
+        let n = v.trunc();
+        let n = n % 256.0;
+        (if n < 0.0 { n + 256.0 } else { n }) as u8
+    };
+    let f64_to_int8 = |v: f64| -> i8 { f64_to_uint8(v) as i8 };
+    let f64_to_uint16 = |v: f64| -> u16 {
+        if v.is_nan() || v.is_infinite() || v == 0.0 {
+            return 0;
+        }
+        let n = v.trunc();
+        let m = 65536.0;
+        let n = n % m;
+        (if n < 0.0 { n + m } else { n }) as u16
+    };
+    let f64_to_int16 = |v: f64| -> i16 { f64_to_uint16(v) as i16 };
+    let f64_to_uint32 = |v: f64| -> u32 {
+        if v.is_nan() || v.is_infinite() || v == 0.0 {
+            return 0;
+        }
+        let n = v.trunc();
+        let m = 4294967296.0; // 2^32
+        let n = n % m;
+        (if n < 0.0 { n + m } else { n }) as u32
+    };
+    let f64_to_int32 = |v: f64| -> i32 { f64_to_uint32(v) as i32 };
+
     // Map JSError from check_bounds to EvalError with RangeError
     let bounds_err = |_e: JSError| -> EvalError<'gc> { raise_range_error!("Offset is outside the bounds of the DataView").into() };
 
@@ -2499,14 +2531,14 @@ pub fn handle_dataview_method<'gc>(
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             check_detached()?;
-            data_view_rc.set_int8(offset, val as i8).map_err(bounds_err)?;
+            data_view_rc.set_int8(offset, f64_to_int8(val)).map_err(bounds_err)?;
             Ok(Value::Undefined)
         }
         "setUint8" => {
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             check_detached()?;
-            data_view_rc.set_uint8(offset, val as u8).map_err(bounds_err)?;
+            data_view_rc.set_uint8(offset, f64_to_uint8(val)).map_err(bounds_err)?;
             Ok(Value::Undefined)
         }
         "setInt16" => {
@@ -2514,7 +2546,7 @@ pub fn handle_dataview_method<'gc>(
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
-            data_view_rc.set_int16(offset, val as i16, le).map_err(bounds_err)?;
+            data_view_rc.set_int16(offset, f64_to_int16(val), le).map_err(bounds_err)?;
             Ok(Value::Undefined)
         }
         "setUint16" => {
@@ -2522,7 +2554,7 @@ pub fn handle_dataview_method<'gc>(
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
-            data_view_rc.set_uint16(offset, val as u16, le).map_err(bounds_err)?;
+            data_view_rc.set_uint16(offset, f64_to_uint16(val), le).map_err(bounds_err)?;
             Ok(Value::Undefined)
         }
         "setInt32" => {
@@ -2530,7 +2562,7 @@ pub fn handle_dataview_method<'gc>(
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
-            data_view_rc.set_int32(offset, val as i32, le).map_err(bounds_err)?;
+            data_view_rc.set_int32(offset, f64_to_int32(val), le).map_err(bounds_err)?;
             Ok(Value::Undefined)
         }
         "setUint32" => {
@@ -2538,7 +2570,7 @@ pub fn handle_dataview_method<'gc>(
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
-            data_view_rc.set_uint32(offset, val as u32, le).map_err(bounds_err)?;
+            data_view_rc.set_uint32(offset, f64_to_uint32(val), le).map_err(bounds_err)?;
             Ok(Value::Undefined)
         }
         "setFloat32" => {
@@ -4243,7 +4275,7 @@ pub fn handle_typedarray_method<'gc>(
                 "at" => {
                     let len = get_len();
                     let idx_arg = _args.first().cloned().unwrap_or(Value::Undefined);
-                    let rel = crate::core::to_number(&idx_arg).unwrap_or(0.0);
+                    let rel = crate::core::to_number_with_env(mc, _env, &idx_arg)?;
                     let rel = if rel.is_nan() { 0i64 } else { rel as i64 };
                     let actual = if rel < 0 { len as i64 + rel } else { rel };
                     if actual < 0 || actual as usize >= len {

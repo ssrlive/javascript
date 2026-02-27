@@ -302,6 +302,8 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                 "fill",
                 "find",
                 "findIndex",
+                "findLast",
+                "findLastIndex",
                 "flat",
                 "flatMap",
                 "includes",
@@ -4351,64 +4353,67 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::String(utf8_to_utf16(&result)))
         }
         "flat" => {
-            let depth = if !args.is_empty() {
-                match args[0].clone() {
-                    Value::Number(n) => n as usize,
-                    _ => 1,
-                }
+            // §23.1.3.12  Array.prototype.flat ( [ depth ] )
+            // 1. Let O be ? ToObject(this value).
+            // 2. Let sourceLen be ? LengthOfArrayLike(O).
+            let source_len = length_of_array_like(mc, env, object)?;
+
+            // 3. Let depthNum be 1 (default).
+            // 4. If depth is not undefined, let depthNum be ? ToIntegerOrInfinity(depth).
+            let depth_num: f64 = if args.is_empty() || matches!(args[0], Value::Undefined) {
+                1.0
             } else {
-                1
+                to_integer_or_infinity_local(mc, env, &args[0])?
             };
 
-            let mut result = Vec::new();
-            flatten_array(mc, object, &mut result, depth)?;
-
+            // 5. Let A be ? ArraySpeciesCreate(O, 0).
             let new_array = array_species_create_impl(mc, env, object, 0.0)?;
-            for (i, val) in result.iter().enumerate() {
-                create_data_property_or_throw(mc, &new_array, i, val)?;
+
+            // 6. Perform ? FlattenIntoArray(A, O, sourceLen, 0, depthNum).
+            flatten_into_array_spec(mc, env, &new_array, object, source_len, 0, depth_num, None, None)?;
+
+            // 7. Return A.
+            // For true arrays, update length; for species objects, leave it alone.
+            if is_array(mc, &new_array) {
+                let final_len = object_get_length(&new_array).unwrap_or(0);
+                set_array_length(mc, &new_array, final_len)?;
             }
-            set_array_length(mc, &new_array, result.len())?;
             Ok(Value::Object(new_array))
         }
         "flatMap" => {
-            if args.is_empty() {
-                return Err(raise_eval_error!("Array.flatMap expects at least one argument").into());
+            // §23.1.3.11  Array.prototype.flatMap ( mapperFunction [ , thisArg ] )
+            // 1. Let O be ? ToObject(this value).
+            // 2. Let sourceLen be ? LengthOfArrayLike(O).
+            let source_len = length_of_array_like(mc, env, object)?;
+
+            // 3. If IsCallable(mapperFunction) is false, throw a TypeError exception.
+            let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
+            if !is_callable_val(&callback_val) {
+                return Err(raise_type_error!("flatMap mapper is not a function").into());
             }
 
-            let callback_val = args[0].clone();
-            let current_len = get_array_length(mc, object).unwrap_or(0);
-
-            let mut result = Vec::new();
-            for i in 0..current_len {
-                if let Some(val) = object_get_key_value(object, i) {
-                    // Support inline closures wrapped as objects with internal closure.
-                    let actual_func = if let Value::Object(obj) = &callback_val {
-                        if let Some(prop) = obj.borrow().get_closure() {
-                            prop.borrow().clone()
-                        } else {
-                            callback_val.clone()
-                        }
-                    } else {
-                        callback_val.clone()
-                    };
-
-                    let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(*object)];
-
-                    let mapped_val = match &actual_func {
-                        Value::Closure(cl) => crate::core::call_closure(mc, cl, None, &args, env, None)?,
-                        Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env)?,
-                        _ => return Err(raise_eval_error!("Array.flatMap expects a function").into()),
-                    };
-
-                    flatten_single_value(mc, &mapped_val, &mut result, 1)?;
-                }
-            }
-
+            // 4. Let A be ? ArraySpeciesCreate(O, 0).
             let new_array = array_species_create_impl(mc, env, object, 0.0)?;
-            for (i, val) in result.iter().enumerate() {
-                create_data_property_or_throw(mc, &new_array, i, val)?;
+
+            // 5. Perform ? FlattenIntoArray(A, O, sourceLen, 0, 1, mapperFunction, thisArg).
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            flatten_into_array_spec(
+                mc,
+                env,
+                &new_array,
+                object,
+                source_len,
+                0,
+                1.0,
+                Some(&callback_val),
+                Some(&this_arg),
+            )?;
+
+            // 6. Return A.
+            if is_array(mc, &new_array) {
+                let final_len = object_get_length(&new_array).unwrap_or(0);
+                set_array_length(mc, &new_array, final_len)?;
             }
-            set_array_length(mc, &new_array, result.len())?;
             Ok(Value::Object(new_array))
         }
         "copyWithin" => {
@@ -4630,16 +4635,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
-            let len_num = crate::core::to_number(&len_prim)?;
-            let current_len = if len_num.is_nan() || len_num <= 0.0 {
-                0usize
-            } else if !len_num.is_finite() {
-                usize::MAX
-            } else {
-                len_num.floor() as usize
-            };
+            // 2. Let len be ? LengthOfArrayLike(O).
+            let current_len = length_of_array_like(mc, env, object)?;
 
             let callback_callable = match &callback_val {
                 Value::Closure(_)
@@ -4692,16 +4689,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
-            let len_num = crate::core::to_number(&len_prim)?;
-            let current_len = if len_num.is_nan() || len_num <= 0.0 {
-                0usize
-            } else if !len_num.is_finite() {
-                usize::MAX
-            } else {
-                len_num.floor() as usize
-            };
+            // 2. Let len be ? LengthOfArrayLike(O).
+            let current_len = length_of_array_like(mc, env, object)?;
 
             let callback_callable = match &callback_val {
                 Value::Closure(_)
@@ -4748,48 +4737,156 @@ pub(crate) fn handle_array_instance_method<'gc>(
 }
 
 // Helper functions for array flattening
-fn flatten_array<'gc>(
+/// ToIntegerOrInfinity (local helper for array methods)
+fn to_integer_or_infinity_local<'gc>(
     mc: &MutationContext<'gc>,
-    object: &JSObjectDataPtr<'gc>,
-    result: &mut Vec<Value<'gc>>,
-    depth: usize,
-) -> Result<(), JSError> {
-    let current_len = get_array_length(mc, object).unwrap_or(0);
-
-    for i in 0..current_len {
-        if let Some(val) = object_get_key_value(object, i) {
-            flatten_single_value(mc, &val.borrow(), result, depth)?;
-        }
+    env: &JSObjectDataPtr<'gc>,
+    val: &Value<'gc>,
+) -> Result<f64, EvalError<'gc>> {
+    let n = crate::core::to_number_with_env(mc, env, val)?;
+    if n.is_nan() || n == 0.0 {
+        Ok(0.0)
+    } else if !n.is_finite() {
+        Ok(n)
+    } else {
+        Ok(n.trunc())
     }
-    Ok(())
 }
 
-fn flatten_single_value<'gc>(
+/// LengthOfArrayLike(obj) — spec 7.3.2
+/// Returns ℝ(ToLength(Get(obj, "length"))).
+fn length_of_array_like<'gc>(
     mc: &MutationContext<'gc>,
-    value: &Value<'gc>,
-    result: &mut Vec<Value<'gc>>,
-    depth: usize,
-) -> Result<(), JSError> {
-    if depth == 0 {
-        result.push(value.clone());
-        return Ok(());
+    env: &JSObjectDataPtr<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+) -> Result<usize, EvalError<'gc>> {
+    let len_val = crate::core::get_property_with_accessors(mc, env, obj, "length")?;
+    to_length(mc, env, &len_val)
+}
+
+/// ToLength(argument) — spec 7.1.20
+fn to_length<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
+    let len = to_integer_or_infinity_local(mc, env, val)?;
+    if len <= 0.0 {
+        Ok(0)
+    } else {
+        Ok((len.min(9007199254740991.0)) as usize)
+    }
+}
+
+/// IsCallable check (mirrors spec § 7.2.3)
+fn is_callable_val<'gc>(val: &Value<'gc>) -> bool {
+    match val {
+        Value::Function(_)
+        | Value::Closure(_)
+        | Value::AsyncClosure(_)
+        | Value::GeneratorFunction(..)
+        | Value::AsyncGeneratorFunction(..) => true,
+        Value::Object(obj) => {
+            obj.borrow().get_closure().is_some()
+                || obj.borrow().class_def.is_some()
+                || crate::core::slot_get(obj, &InternalSlot::NativeCtor).is_some()
+                || crate::core::slot_get(obj, &InternalSlot::BoundTarget).is_some()
+                || crate::core::slot_get(obj, &InternalSlot::Callable).is_some()
+        }
+        _ => false,
+    }
+}
+
+/// HasProperty through proxy / TypedArray if needed
+fn has_property_spec<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
+    if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
+        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+    {
+        Ok(crate::js_proxy::proxy_has_property(mc, proxy, key.to_string())?)
+    } else if let Some(ta_cell) = crate::core::slot_get(obj, &InternalSlot::TypedArray) {
+        // TypedArray [[HasProperty]]: check if key is a valid integer index
+        if let Value::TypedArray(ta) = &*ta_cell.borrow()
+            && let Some(idx_f) = crate::js_typedarray::canonical_numeric_index_string(key)
+        {
+            return Ok(crate::js_typedarray::is_valid_integer_index(ta, idx_f));
+        }
+        // Non-numeric key: fall through to own properties
+        Ok(object_get_key_value(obj, key).is_some())
+    } else {
+        Ok(object_get_key_value(obj, key).is_some())
+    }
+}
+
+/// FlattenIntoArray — spec 23.1.3.11.1
+/// target: the result array to populate
+/// source: the current array being flattened
+/// source_len: length of source
+/// start: target start index
+/// depth: remaining depth
+/// mapper_function: optional mapper (for flatMap only)
+/// this_arg: optional thisArg for mapper
+/// Returns: the next target index after insertion
+#[allow(clippy::too_many_arguments)]
+fn flatten_into_array_spec<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &JSObjectDataPtr<'gc>,
+    source: &JSObjectDataPtr<'gc>,
+    source_len: usize,
+    start: usize,
+    depth: f64,
+    mapper_function: Option<&Value<'gc>>,
+    this_arg: Option<&Value<'gc>>,
+) -> Result<usize, EvalError<'gc>> {
+    let mut target_index = start;
+
+    for source_index in 0..source_len {
+        let p = source_index.to_string();
+
+        // b. Let exists be ? HasProperty(source, P).
+        if !has_property_spec(mc, source, &p)? {
+            continue;
+        }
+
+        // c.i. Let element be ? Get(source, P).
+        let mut element = crate::core::get_property_with_accessors(mc, env, source, &*p)?;
+
+        // c.ii. If mapperFunction is present, let element be ? Call(mapperFunction, thisArg, «element, sourceIndex, source»).
+        if let Some(mapper) = mapper_function {
+            let default_this = Value::Undefined;
+            let t = this_arg.unwrap_or(&default_this);
+            let call_args = vec![element, Value::Number(source_index as f64), Value::Object(*source)];
+            element = crate::core::evaluate_call_dispatch(mc, env, mapper, Some(t), &call_args)?;
+        }
+
+        // c.iii. Let shouldFlatten be false.
+        // c.iv. If depth > 0, let shouldFlatten be ? IsArray(element).
+        let should_flatten = if depth > 0.0 {
+            match &element {
+                Value::Object(obj) => is_array_spec(mc, obj)?,
+                _ => false,
+            }
+        } else {
+            false
+        };
+
+        if should_flatten {
+            // c.v. If shouldFlatten is true:
+            //   1. If depth is +∞, let newDepth be +∞. Otherwise, let newDepth be depth - 1.
+            let new_depth = if depth == f64::INFINITY { f64::INFINITY } else { depth - 1.0 };
+            if let Value::Object(inner_obj) = &element {
+                let inner_len = length_of_array_like(mc, env, inner_obj)?;
+                target_index = flatten_into_array_spec(mc, env, target, inner_obj, inner_len, target_index, new_depth, None, None)?;
+            }
+        } else {
+            // c.vi. Else:
+            //   1. If targetIndex ≥ 2^53 - 1, throw a TypeError.
+            if target_index >= 9007199254740991 {
+                return Err(raise_type_error!("FlattenIntoArray: target index exceeds safe integer limit").into());
+            }
+            //   2. Perform ? CreateDataPropertyOrThrow(target, targetIndex, element).
+            create_data_property_or_throw(mc, target, target_index, &element)?;
+            target_index += 1;
+        }
     }
 
-    match value {
-        Value::Object(obj) => {
-            // Check if it's an array-like object
-            let is_arr = { is_array(mc, obj) };
-            if is_arr {
-                flatten_array(mc, obj, result, depth - 1)?;
-            } else {
-                result.push(Value::Object(*obj));
-            }
-        }
-        _ => {
-            result.push(value.clone());
-        }
-    }
-    Ok(())
+    Ok(target_index)
 }
 
 /// Check if an object is an Array

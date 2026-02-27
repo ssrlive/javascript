@@ -12718,7 +12718,9 @@ pub fn evaluate_call_dispatch<'gc>(
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 Ok(this_v.clone())
             } else if name.starts_with("Map.") {
-                if let Some(method) = name.strip_prefix("Map.prototype.") {
+                if name == "Map.groupBy" {
+                    Ok(crate::js_map::handle_map_group_by(mc, eval_args, env)?)
+                } else if let Some(method) = name.strip_prefix("Map.prototype.") {
                     let this_v = this_val.unwrap_or(&Value::Undefined);
                     if let Value::Object(obj) = this_v {
                         if let Some(map_val) = slot_get_chained(obj, &InternalSlot::Map) {
@@ -16412,6 +16414,8 @@ fn evaluate_expr_property<'gc>(
         }
         let len = match func_name.as_str() {
             "Array.prototype.push"
+            | "Array.prototype.at"
+            | "Array.prototype.flatMap"
             | "Array.prototype.indexOf"
             | "Array.prototype.lastIndexOf"
             | "Array.prototype.concat"
@@ -16549,6 +16553,7 @@ fn evaluate_expr_property<'gc>(
             | "Object.create"
             | "Object.defineProperties"
             | "Object.getOwnPropertyDescriptor"
+            | "Map.groupBy"
             | "Object.groupBy"
             | "Object.hasOwn"
             | "Object.is"
@@ -17862,6 +17867,8 @@ fn evaluate_expr_index<'gc>(
                 }
                 let len = match func_name.as_str() {
                     "Array.prototype.push"
+                    | "Array.prototype.at"
+                    | "Array.prototype.flatMap"
                     | "Array.prototype.indexOf"
                     | "Array.prototype.lastIndexOf"
                     | "Array.prototype.concat"
@@ -18001,6 +18008,7 @@ fn evaluate_expr_index<'gc>(
                     | "Object.create"
                     | "Object.defineProperties"
                     | "Object.getOwnPropertyDescriptor"
+                    | "Map.groupBy"
                     | "Object.groupBy"
                     | "Object.hasOwn"
                     | "Object.is"

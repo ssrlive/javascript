@@ -1,7 +1,7 @@
 use crate::core::{
     ClosureData, EvalError, InternalSlot, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, evaluate_call_dispatch,
     get_own_property, get_property_with_accessors, new_js_object_data, object_get_key_value, object_set_key_value,
-    prepare_closure_call_env, prepare_function_call_env, slot_get, slot_get_chained, slot_set,
+    prepare_function_call_env, slot_get, slot_get_chained, slot_set,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
@@ -630,6 +630,25 @@ fn materialize_property_descriptor_object<'gc>(
         }
     }
     Ok(out)
+}
+
+/// IsCallable check that includes Object-wrapped closures and bound functions
+pub fn is_callable_for_from_entries<'gc>(val: &Value<'gc>) -> bool {
+    match val {
+        Value::Function(_)
+        | Value::Closure(_)
+        | Value::AsyncClosure(_)
+        | Value::GeneratorFunction(..)
+        | Value::AsyncGeneratorFunction(..) => true,
+        Value::Object(obj) => {
+            obj.borrow().get_closure().is_some()
+                || obj.borrow().class_def.is_some()
+                || slot_get(obj, &InternalSlot::NativeCtor).is_some()
+                || slot_get(obj, &InternalSlot::BoundTarget).is_some()
+                || slot_get(obj, &InternalSlot::Callable).is_some()
+        }
+        _ => false,
+    }
 }
 
 pub fn handle_object_method<'gc>(
@@ -1412,53 +1431,92 @@ pub fn handle_object_method<'gc>(
             }
         }
         "groupBy" => {
-            if args.len() != 2 {
-                return Err(raise_type_error!("Object.groupBy requires exactly two arguments").into());
+            // §22.1.2.5  Object.groupBy ( items, callbackfn )
+            // GroupBy ( items, callbackfn, coercion )
+            let items_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let callback_val = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            // 2. If IsCallable(callbackfn) is false, throw a TypeError exception.
+            if !is_callable_for_from_entries(&callback_val) {
+                return Err(raise_type_error!("Object.groupBy: callbackfn is not a function").into());
             }
-            let items_val = args[0].clone();
-            let callback_val = args[1].clone();
 
-            let items_obj = match items_val {
-                Value::Object(obj) => obj,
-                _ => return Err(raise_type_error!("Object.groupBy expects an object as first argument").into()),
-            };
-
+            // 3. Let groups be a new empty List.
             let result_obj = new_js_object_data(mc);
-            // Object.groupBy returns a null-prototype object
             result_obj.borrow_mut(mc).prototype = None;
 
-            let len = get_array_length(mc, &items_obj).unwrap_or(0);
+            // 4. Let iteratorRecord be ? GetIterator(items, sync).
+            // Support: Object (use @@iterator), String (iterate code points)
+            let iter_sym = crate::js_iterator_helpers::get_well_known_symbol(env, "iterator")
+                .ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol.iterator not found").into() })?;
 
-            for i in 0..len {
-                if let Some(val_rc) = object_get_key_value(&items_obj, i) {
-                    let val = val_rc.borrow().clone();
-
-                    let key_val = if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
-                        let args = vec![val.clone(), Value::Number(i as f64)];
-                        let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params), &args, Some(env))?;
-                        crate::core::evaluate_statements(mc, &func_env, &body)?
-                    } else {
-                        return Err(raise_type_error!("Object.groupBy expects a function as second argument").into());
-                    };
-
-                    let key = key_val.to_property_key(mc, env)?;
-
-                    let group_arr = if let Some(arr_rc) = object_get_key_value(&result_obj, &key) {
-                        if let Value::Object(arr) = &*arr_rc.borrow() {
-                            *arr
-                        } else {
-                            crate::js_array::create_array(mc, env)?
-                        }
-                    } else {
-                        let arr = crate::js_array::create_array(mc, env)?;
-                        object_set_key_value(mc, &result_obj, &key, &Value::Object(arr))?;
-                        arr
-                    };
-
-                    let current_len = get_array_length(mc, &group_arr).unwrap_or(0);
-                    object_set_key_value(mc, &group_arr, current_len, &val)?;
-                    crate::js_array::set_array_length(mc, &group_arr, current_len + 1)?;
+            let iterable_obj = match &items_val {
+                Value::Object(o) => *o,
+                Value::String(_) => {
+                    // Wrap string in a String object to access @@iterator
+                    let str_obj = crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&items_val), env)?;
+                    match str_obj {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Object.groupBy: cannot iterate over items").into()),
+                    }
                 }
+                _ => return Err(raise_type_error!("Object.groupBy: items is not iterable").into()),
+            };
+
+            let method_val = get_property_with_accessors(mc, env, &iterable_obj, crate::core::PropertyKey::Symbol(iter_sym))?;
+            if matches!(method_val, Value::Undefined | Value::Null) || !is_callable_for_from_entries(&method_val) {
+                return Err(raise_type_error!("Object.groupBy: items is not iterable").into());
+            }
+
+            let iter_result = evaluate_call_dispatch(mc, env, &method_val, Some(&items_val), &[])?;
+            let iter_obj = match &iter_result {
+                Value::Object(o) => *o,
+                _ => return Err(raise_type_error!("Iterator result is not an object").into()),
+            };
+            let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+
+            let mut k: usize = 0;
+            loop {
+                let step = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+                let step_obj = match &step {
+                    Value::Object(o) => *o,
+                    _ => return Err(raise_type_error!("Iterator result is not an object").into()),
+                };
+                let done_val = get_property_with_accessors(mc, env, &step_obj, "done")?;
+                if done_val.to_truthy() {
+                    break;
+                }
+                let val = get_property_with_accessors(mc, env, &step_obj, "value")?;
+
+                // Call callback(value, k)
+                let key_val = evaluate_call_dispatch(
+                    mc,
+                    env,
+                    &callback_val,
+                    Some(&Value::Undefined),
+                    &[val.clone(), Value::Number(k as f64)],
+                )?;
+
+                // For Object.groupBy, coercion is "property" → ToPropertyKey
+                let key = key_val.to_property_key(mc, env)?;
+
+                let group_arr = if let Some(arr_rc) = object_get_key_value(&result_obj, &key) {
+                    if let Value::Object(arr) = &*arr_rc.borrow() {
+                        *arr
+                    } else {
+                        crate::js_array::create_array(mc, env)?
+                    }
+                } else {
+                    let arr = crate::js_array::create_array(mc, env)?;
+                    object_set_key_value(mc, &result_obj, &key, &Value::Object(arr))?;
+                    arr
+                };
+
+                let current_len = get_array_length(mc, &group_arr).unwrap_or(0);
+                object_set_key_value(mc, &group_arr, current_len, &val)?;
+                crate::js_array::set_array_length(mc, &group_arr, current_len + 1)?;
+
+                k += 1;
             }
 
             Ok(Value::Object(result_obj))
@@ -1697,6 +1755,8 @@ pub fn handle_object_method<'gc>(
                     let desc_obj = if prop_name == "length" {
                         let len = match func_name.as_str() {
                             "Array.prototype.push"
+                            | "Array.prototype.at"
+                            | "Array.prototype.flatMap"
                             | "Array.prototype.indexOf"
                             | "Array.prototype.lastIndexOf"
                             | "Array.prototype.concat"
@@ -1837,6 +1897,7 @@ pub fn handle_object_method<'gc>(
                             | "Object.create"
                             | "Object.defineProperties"
                             | "Object.getOwnPropertyDescriptor"
+                            | "Map.groupBy"
                             | "Object.groupBy"
                             | "Object.hasOwn"
                             | "Object.is"
@@ -2570,34 +2631,37 @@ pub fn handle_object_method<'gc>(
             Ok(Value::Boolean(eq))
         }
         "fromEntries" => {
-            // Object.fromEntries(iterable) — creates an object from an iterable of key-value pairs
+            // Object.fromEntries(iterable) — §22.1.2.4
             let iterable = args.first().cloned().unwrap_or(Value::Undefined);
             if matches!(iterable, Value::Undefined | Value::Null) {
                 return Err(raise_type_error!("Object.fromEntries requires an iterable argument").into());
             }
 
             let result = crate::core::new_js_object_data(mc);
+            // Ensure result has Object.prototype
+            if let Some(obj_ctor_rc) = crate::core::env_get(env, "Object")
+                && let Value::Object(obj_ctor) = &*obj_ctor_rc.borrow()
+                && let Some(proto_rc) = object_get_key_value(obj_ctor, "prototype")
+                && let Value::Object(proto) = &*proto_rc.borrow()
+            {
+                result.borrow_mut(mc).prototype = Some(*proto);
+            }
 
-            // Get iterator from iterable
+            // Step: Get @@iterator method from iterable
             let iter_sym = crate::js_iterator_helpers::get_well_known_symbol(env, "iterator")
                 .ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol.iterator not found").into() })?;
-            let method_val = crate::core::get_property_with_accessors(
-                mc,
-                env,
-                &match &iterable {
-                    Value::Object(o) => *o,
-                    _ => return Err(raise_type_error!("Object.fromEntries requires an iterable argument").into()),
-                },
-                crate::core::PropertyKey::Symbol(iter_sym),
-            )?;
-            let method_is_callable = matches!(
-                &method_val,
-                Value::Function(_)
-                    | Value::Closure(_)
-                    | Value::AsyncClosure(_)
-                    | Value::GeneratorFunction(..)
-                    | Value::AsyncGeneratorFunction(..)
-            );
+
+            // Support both Object and non-object iterables. For non-objects (e.g. arrays stored as
+            // Value::Object anyway), convert to object first.
+            let iter_target_obj = match &iterable {
+                Value::Object(o) => *o,
+                _ => return Err(raise_type_error!("Object.fromEntries requires an iterable argument").into()),
+            };
+            let method_val =
+                crate::core::get_property_with_accessors(mc, env, &iter_target_obj, crate::core::PropertyKey::Symbol(iter_sym))?;
+
+            // IsCallable check that includes Object-wrapped closures
+            let method_is_callable = is_callable_for_from_entries(&method_val);
             if matches!(method_val, Value::Undefined | Value::Null) || !method_is_callable {
                 return Err(raise_type_error!("Object.fromEntries requires an iterable argument").into());
             }
@@ -2607,52 +2671,71 @@ pub fn handle_object_method<'gc>(
                 Value::Object(o) => *o,
                 _ => return Err(raise_type_error!("Iterator result is not an object").into()),
             };
-            let next_method =
-                crate::core::get_property_with_accessors(mc, env, &iter_obj, crate::core::PropertyKey::String("next".to_string()))?;
+            let next_method = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
+
+            // Helper to close iterator
+            let close_iterator = |mc2: &MutationContext<'gc>, env2: &JSObjectDataPtr<'gc>, iter_obj2: &JSObjectDataPtr<'gc>| {
+                let return_method = crate::core::get_property_with_accessors(mc2, env2, iter_obj2, "return");
+                if let Ok(ret_fn) = return_method
+                    && is_callable_for_from_entries(&ret_fn)
+                {
+                    let _ = crate::core::evaluate_call_dispatch(mc2, env2, &ret_fn, Some(&Value::Object(*iter_obj2)), &[]);
+                }
+            };
 
             loop {
                 let step = crate::core::evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
-                let done_val = crate::core::get_property_with_accessors(
-                    mc,
-                    env,
-                    &match &step {
-                        Value::Object(o) => *o,
-                        _ => return Err(raise_type_error!("Iterator result is not an object").into()),
-                    },
-                    crate::core::PropertyKey::String("done".to_string()),
-                )?;
-                let is_done = match &done_val {
-                    Value::Boolean(b) => *b,
-                    Value::Undefined | Value::Null => false,
-                    Value::Number(n) => *n != 0.0 && !n.is_nan(),
-                    Value::String(s) => !s.is_empty(),
-                    _ => true,
+                let step_obj = match &step {
+                    Value::Object(o) => *o,
+                    _ => return Err(raise_type_error!("Iterator result is not an object").into()),
                 };
-                if is_done {
+                let done_val = crate::core::get_property_with_accessors(mc, env, &step_obj, "done")?;
+                if done_val.to_truthy() {
                     break;
                 }
-                let pair = crate::core::get_property_with_accessors(
-                    mc,
-                    env,
-                    &match &step {
-                        Value::Object(o) => *o,
-                        _ => return Err(raise_type_error!("Iterator result is not an object").into()),
-                    },
-                    crate::core::PropertyKey::String("value".to_string()),
-                )?;
+                let pair = crate::core::get_property_with_accessors(mc, env, &step_obj, "value")?;
 
-                // Each entry must be an object (array-like with [0] and [1])
+                // Each entry must be an object (array-like with [0] and [1]).
+                // If it's not an object, close the iterator and throw TypeError.
                 let pair_obj = match &pair {
                     Value::Object(o) => *o,
-                    _ => return Err(raise_type_error!("Iterator value is not an object").into()),
+                    _ => {
+                        close_iterator(mc, env, &iter_obj);
+                        return Err(raise_type_error!("Iterator value is not an object").into());
+                    }
                 };
-                let key_val =
-                    crate::core::get_property_with_accessors(mc, env, &pair_obj, crate::core::PropertyKey::String("0".to_string()))?;
-                let val = crate::core::get_property_with_accessors(mc, env, &pair_obj, crate::core::PropertyKey::String("1".to_string()))?;
 
-                // Convert key to property key
-                let key_str = crate::core::value_to_string(&key_val);
-                crate::core::object_set_key_value(mc, &result, &*key_str, &val)?;
+                // Get key ("0") — if this throws, close iterator
+                let key_result = crate::core::get_property_with_accessors(mc, env, &pair_obj, "0");
+                let key_val = match key_result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        close_iterator(mc, env, &iter_obj);
+                        return Err(e);
+                    }
+                };
+
+                // Get value ("1") — if this throws, close iterator
+                let val_result = crate::core::get_property_with_accessors(mc, env, &pair_obj, "1");
+                let val = match val_result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        close_iterator(mc, env, &iter_obj);
+                        return Err(e);
+                    }
+                };
+
+                // Convert key to property key (supports symbols)
+                let key_result2 = key_val.to_property_key(mc, env);
+                let key = match key_result2 {
+                    Ok(k) => k,
+                    Err(e) => {
+                        close_iterator(mc, env, &iter_obj);
+                        return Err(e);
+                    }
+                };
+
+                crate::core::object_set_key_value(mc, &result, &key, &val)?;
             }
 
             Ok(Value::Object(result))

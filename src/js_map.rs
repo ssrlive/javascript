@@ -129,6 +129,10 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 
     env_set(mc, env, "Map", &Value::Object(map_ctor))?;
 
+    // ---- Static method: Map.groupBy ----
+    object_set_key_value(mc, &map_ctor, "groupBy", &Value::Function("Map.groupBy".to_string()))?;
+    map_ctor.borrow_mut(mc).set_non_enumerable("groupBy");
+
     // --- %MapIteratorPrototype% ---
     // [[Prototype]] = %IteratorPrototype%
     let map_iter_proto = new_js_object_data(mc);
@@ -288,6 +292,116 @@ pub(crate) fn handle_map_constructor<'gc>(
             let _ = close_iterator(mc, env, &iter_obj);
             return Err(e);
         }
+    }
+
+    Ok(Value::Object(map_obj))
+}
+
+/// §22.1.2.6  Map.groupBy ( items, callbackfn )
+pub(crate) fn handle_map_group_by<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    use crate::core::{evaluate_call_dispatch, get_property_with_accessors};
+    use crate::js_object::is_callable_for_from_entries;
+
+    let items_val = args.first().cloned().unwrap_or(Value::Undefined);
+    let callback_val = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+    // 2. If IsCallable(callbackfn) is false, throw a TypeError exception.
+    if !is_callable_for_from_entries(&callback_val) {
+        return Err(raise_type_error!("Map.groupBy: callbackfn is not a function").into());
+    }
+
+    // 3. Let groups be a new empty List (we use a Vec of (key, values_array) pairs).
+    let mut groups: Vec<(Value<'gc>, JSObjectDataPtr<'gc>)> = Vec::new();
+
+    // 4. Let iteratorRecord be ? GetIterator(items, sync).
+    let iter_sym = crate::js_iterator_helpers::get_well_known_symbol(env, "iterator")
+        .ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol.iterator not found").into() })?;
+
+    let iterable_obj = match &items_val {
+        Value::Object(o) => *o,
+        Value::String(_) => {
+            let str_obj = crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&items_val), env)?;
+            match str_obj {
+                Value::Object(o) => o,
+                _ => return Err(raise_type_error!("Map.groupBy: cannot iterate over items").into()),
+            }
+        }
+        _ => return Err(raise_type_error!("Map.groupBy: items is not iterable").into()),
+    };
+
+    let method_val = get_property_with_accessors(mc, env, &iterable_obj, crate::core::PropertyKey::Symbol(iter_sym))?;
+    if matches!(method_val, Value::Undefined | Value::Null) || !is_callable_for_from_entries(&method_val) {
+        return Err(raise_type_error!("Map.groupBy: items is not iterable").into());
+    }
+
+    let iter_result = evaluate_call_dispatch(mc, env, &method_val, Some(&items_val), &[])?;
+    let iter_obj = match &iter_result {
+        Value::Object(o) => *o,
+        _ => return Err(raise_type_error!("Iterator result is not an object").into()),
+    };
+    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+
+    let mut k: usize = 0;
+    loop {
+        let step = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+        let step_obj = match &step {
+            Value::Object(o) => *o,
+            _ => return Err(raise_type_error!("Iterator result is not an object").into()),
+        };
+        let done_val = get_property_with_accessors(mc, env, &step_obj, "done")?;
+        if done_val.to_truthy() {
+            break;
+        }
+        let val = get_property_with_accessors(mc, env, &step_obj, "value")?;
+
+        // Call callback(value, k)
+        let key_val = evaluate_call_dispatch(
+            mc,
+            env,
+            &callback_val,
+            Some(&Value::Undefined),
+            &[val.clone(), Value::Number(k as f64)],
+        )?;
+
+        // For Map.groupBy, coercion is "zero" → normalize -0 to +0
+        let key_val = normalize_map_key(key_val);
+
+        // Find existing group using SameValueZero
+        let group_arr = if let Some((_k, arr)) = groups.iter().find(|(existing_key, _)| same_value_zero(existing_key, &key_val)) {
+            *arr
+        } else {
+            let arr = create_array(mc, env)?;
+            groups.push((key_val.clone(), arr));
+            arr
+        };
+
+        let current_len = crate::js_array::get_array_length(mc, &group_arr).unwrap_or(0);
+        object_set_key_value(mc, &group_arr, current_len, &val)?;
+        set_array_length(mc, &group_arr, current_len + 1)?;
+
+        k += 1;
+    }
+
+    // Build the result Map
+    let map_data = JSMap {
+        entries: groups.iter().map(|(k, arr)| Some((k.clone(), Value::Object(*arr)))).collect(),
+    };
+    let map_gc = new_gc_cell_ptr(mc, map_data);
+
+    let map_obj = new_js_object_data(mc);
+    slot_set(mc, &map_obj, InternalSlot::Map, &Value::Map(map_gc));
+
+    // Set prototype to Map.prototype
+    if let Some(mc_val) = object_get_key_value(env, "Map")
+        && let Value::Object(map_ctor) = &*mc_val.borrow()
+        && let Some(proto_val) = object_get_key_value(map_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        map_obj.borrow_mut(mc).prototype = Some(*proto);
     }
 
     Ok(Value::Object(map_obj))

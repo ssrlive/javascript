@@ -12330,9 +12330,10 @@ pub fn evaluate_call_dispatch<'gc>(
                 Ok(Value::Boolean(
                     get_own_property(&this_obj, &key).is_some() && this_obj.borrow().is_enumerable(&key),
                 ))
-            } else if name == "Object.prototype.__lookupGetter__" {
-                let key_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
-                let key = key_val.to_property_key(mc, env)?;
+            } else if name == "Object.prototype.__lookupGetter__" || name == "Object.prototype.__lookupSetter__" {
+                let is_getter = name.contains("Getter");
+                // B.2.2.4/B.2.2.5: 1. Let O be ? ToObject(this value).
+                // Must check this BEFORE ToPropertyKey to avoid calling key.toString
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 let this_obj = match this_v {
                     Value::Object(o) => *o,
@@ -12342,21 +12343,60 @@ pub fn evaluate_call_dispatch<'gc>(
                         _ => return Err(raise_type_error!("Cannot convert value to object").into()),
                     },
                 };
-                let mut cur = Some(this_obj);
+                // 2. Let key be ? ToPropertyKey(P).
+                let key_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                let key = key_val.to_property_key(mc, env)?;
+                // 3. Repeat: walk [[GetPrototypeOf]] chain
+                let mut cur: Option<JSObjectDataPtr<'gc>> = Some(this_obj);
                 while let Some(obj) = cur {
+                    // 3.a. Let desc be ? O.[[GetOwnProperty]](key). — Proxy-aware
+                    if let Some(proxy_cell) = slot_get(&obj, &InternalSlot::Proxy)
+                        && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                    {
+                        let desc_opt = crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &key)?;
+                        if let Some(desc_obj) = desc_opt {
+                            // Extract getter or setter from descriptor object
+                            let accessor_key = if is_getter { "get" } else { "set" };
+                            if let Some(val_rc) = object_get_key_value(&desc_obj, accessor_key) {
+                                let val = val_rc.borrow().clone();
+                                if matches!(val, Value::Undefined) {
+                                    return Ok(Value::Undefined);
+                                }
+                                return Ok(val);
+                            }
+                            return Ok(Value::Undefined);
+                        }
+                        // Not found on this object, get prototype via Proxy trap
+                        let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
+                        cur = match proto_val {
+                            Value::Object(o) => Some(o),
+                            _ => None,
+                        };
+                        continue;
+                    }
+                    // Non-proxy path
                     if let Some(val_rc) = get_own_property(&obj, &key) {
                         return match &*val_rc.borrow() {
-                            Value::Property { getter: Some(g), .. } => Ok((**g).clone()),
-                            Value::Getter(..) => Ok(val_rc.borrow().clone()),
+                            Value::Property { getter, setter, .. } => {
+                                let accessor = if is_getter { getter } else { setter };
+                                if let Some(a) = accessor {
+                                    Ok((**a).clone())
+                                } else {
+                                    Ok(Value::Undefined)
+                                }
+                            }
+                            Value::Getter(..) if is_getter => Ok(val_rc.borrow().clone()),
+                            Value::Setter(..) if !is_getter => Ok(val_rc.borrow().clone()),
                             _ => Ok(Value::Undefined),
                         };
                     }
+                    // [[GetPrototypeOf]] — for non-proxy, just read .prototype
                     cur = obj.borrow().prototype;
                 }
                 Ok(Value::Undefined)
-            } else if name == "Object.prototype.__lookupSetter__" {
-                let key_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
-                let key = key_val.to_property_key(mc, env)?;
+            } else if name == "Object.prototype.__defineGetter__" || name == "Object.prototype.__defineSetter__" {
+                let is_getter = name.contains("Getter");
+                // B.2.2.2/B.2.2.3: 1. Let O be ? ToObject(this value).
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 let this_obj = match this_v {
                     Value::Object(o) => *o,
@@ -12366,17 +12406,46 @@ pub fn evaluate_call_dispatch<'gc>(
                         _ => return Err(raise_type_error!("Cannot convert value to object").into()),
                     },
                 };
-                let mut cur = Some(this_obj);
-                while let Some(obj) = cur {
-                    if let Some(val_rc) = get_own_property(&obj, &key) {
-                        return match &*val_rc.borrow() {
-                            Value::Property { setter: Some(s), .. } => Ok((**s).clone()),
-                            Value::Setter(..) => Ok(val_rc.borrow().clone()),
-                            _ => Ok(Value::Undefined),
-                        };
+                // 2. If IsCallable(getter/setter) is false, throw a TypeError.
+                let func_val = eval_args.get(1).cloned().unwrap_or(Value::Undefined);
+                let is_callable = match &func_val {
+                    Value::Function(_)
+                    | Value::Closure(_)
+                    | Value::AsyncClosure(_)
+                    | Value::GeneratorFunction(..)
+                    | Value::AsyncGeneratorFunction(..) => true,
+                    Value::Object(obj) => {
+                        obj.borrow().get_closure().is_some()
+                            || obj.borrow().class_def.is_some()
+                            || slot_get(obj, &InternalSlot::NativeCtor).is_some()
+                            || slot_get(obj, &InternalSlot::BoundTarget).is_some()
+                            || slot_get(obj, &InternalSlot::Callable).is_some()
                     }
-                    cur = obj.borrow().prototype;
+                    _ => false,
+                };
+                if !is_callable {
+                    return Err(raise_type_error!(format!("{} requires a callable", name)).into());
                 }
+                // 3. Let key be ? ToPropertyKey(P).
+                let key_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                let key = key_val.to_property_key(mc, env)?;
+                // 4. Create accessor property descriptor {[[Get/Set]]: func, [[Enumerable]]: true, [[Configurable]]: true}
+                let desc_obj = new_js_object_data(mc);
+                if is_getter {
+                    object_set_key_value(mc, &desc_obj, "get", &func_val)?;
+                } else {
+                    object_set_key_value(mc, &desc_obj, "set", &func_val)?;
+                }
+                object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(true))?;
+                object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+                // 5. Perform ? DefinePropertyOrThrow(O, key, desc).
+                // Route through Object.defineProperty which handles Proxy traps
+                let define_args = vec![
+                    Value::Object(this_obj),
+                    crate::js_proxy::property_key_to_value_pub(&key),
+                    Value::Object(desc_obj),
+                ];
+                crate::js_object::handle_object_method(mc, "defineProperty", &define_args, env)?;
                 Ok(Value::Undefined)
             } else if name == "Error.prototype.toString" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
@@ -12551,7 +12620,13 @@ pub fn evaluate_call_dispatch<'gc>(
                         "valueOf" => Ok(crate::js_object::handle_value_of_method(mc, this_v, eval_args, env)?),
                         "toString" => Ok(crate::js_object::handle_to_string_method(mc, this_v, eval_args, env)?),
                         "toLocaleString" => call_object_prototype_to_locale_string(mc, env, this_v),
-                        "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable" | "__lookupGetter__" | "__lookupSetter__" => {
+                        "hasOwnProperty"
+                        | "isPrototypeOf"
+                        | "propertyIsEnumerable"
+                        | "__lookupGetter__"
+                        | "__lookupSetter__"
+                        | "__defineGetter__"
+                        | "__defineSetter__" => {
                             if let Value::Object(o) = this_v {
                                 let res_opt = crate::js_object::handle_object_prototype_builtin(mc, name, o, eval_args, env)?;
                                 Ok(res_opt.unwrap_or(Value::Undefined))
@@ -16549,6 +16624,8 @@ fn evaluate_expr_property<'gc>(
             "Array.prototype.slice"
             | "Array.prototype.splice"
             | "Array.prototype.copyWithin"
+            | "Object.prototype.__defineGetter__"
+            | "Object.prototype.__defineSetter__"
             | "Object.assign"
             | "Object.create"
             | "Object.defineProperties"
@@ -18004,6 +18081,8 @@ fn evaluate_expr_index<'gc>(
                     | "Array.prototype.copyWithin"
                     | "ArrayBuffer.prototype.slice"
                     | "SharedArrayBuffer.prototype.slice"
+                    | "Object.prototype.__defineGetter__"
+                    | "Object.prototype.__defineSetter__"
                     | "Object.assign"
                     | "Object.create"
                     | "Object.defineProperties"

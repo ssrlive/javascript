@@ -78,6 +78,8 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
         "toLocaleString",
         "toString",
         "valueOf",
+        "__defineGetter__",
+        "__defineSetter__",
         "__lookupGetter__",
         "__lookupSetter__",
     ];
@@ -1893,6 +1895,8 @@ pub fn handle_object_method<'gc>(
                             | "Array.prototype.splice"
                             | "Array.prototype.copyWithin"
                             | "ArrayBuffer.prototype.slice"
+                            | "Object.prototype.__defineGetter__"
+                            | "Object.prototype.__defineSetter__"
                             | "Object.assign"
                             | "Object.create"
                             | "Object.defineProperties"

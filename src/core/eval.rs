@@ -12485,11 +12485,13 @@ pub fn evaluate_call_dispatch<'gc>(
                     // the @@symbol dispatch on the argument must happen BEFORE ToString(this).
                     // Check for @@symbol method on the first argument before converting this to string.
                     // Note: matchAll is NOT included here because it needs to check IsRegExp + 'g' flag first.
+                    // Note: replaceAll is NOT included here because it needs to check IsRegExp + 'g' flag
+                    // before delegating to @@replace (spec §22.1.3.19 steps 2a-2d).
                     let symbol_name = match method {
                         "split" => Some("split"),
                         "match" => Some("match"),
                         "search" => Some("search"),
-                        "replace" | "replaceAll" => Some("replace"),
+                        "replace" => Some("replace"),
                         _ => None,
                     };
                     if let Some(sym) = symbol_name
@@ -12513,6 +12515,12 @@ pub fn evaluate_call_dispatch<'gc>(
                             };
                             return evaluate_call_dispatch(mc, env, &func, Some(arg0), &call_args);
                         }
+                    }
+                    // Special path for replaceAll: spec steps 2a-2d (IsRegExp/flags check + @@replace)
+                    // must happen BEFORE ToString(this) (step 3). Pass the raw this value so
+                    // string_replace_all_method can control the ordering.
+                    if method == "replaceAll" {
+                        return crate::js_string::string_replace_all_raw(mc, this_v.clone(), eval_args, env);
                     }
                     let s_vec = match this_v {
                         Value::String(s) => s.clone(),

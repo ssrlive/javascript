@@ -231,6 +231,7 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         "trimEnd",
         "trimStart",
         "toWellFormed",
+        "isWellFormed",
     ];
     // normalize has length 0 per spec
     let methods_normalize = vec!["normalize"];
@@ -413,6 +414,7 @@ pub fn handle_string_method<'gc>(
         "matchAll" => string_match_all_method(mc, s, args, env),
         "normalize" => string_normalize_method(mc, s, args, env),
         "toWellFormed" => string_to_well_formed_method(mc, s, args, env),
+        "isWellFormed" => string_is_well_formed_method(mc, s, args, env),
         "replaceAll" => string_replace_all_method(mc, s, args, env),
         "localeCompare" => string_locale_compare_method(mc, s, args, env),
         _ => Err(raise_eval_error!(format!("Unknown string method: {method}")).into()),
@@ -1737,19 +1739,17 @@ fn string_match_all_method<'gc>(
 
     // Step 3: Let S = ? ToString(O) — already done (s parameter)
     // Step 4: Let rx = ? RegExpCreate(regexp, "g")
-    let pattern = if args.is_empty() {
-        Vec::new()
-    } else {
-        spec_to_string(mc, &args[0], env)?
-    };
-    let re_args = vec![Value::String(pattern), Value::String(utf8_to_utf16("g"))];
+    // Pass the original value directly so RegExp constructor handles undefined → empty pattern
+    let pattern_val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
+    let re_args = vec![pattern_val, Value::String(utf8_to_utf16("g"))];
     let val = handle_regexp_constructor_with_env(mc, Some(env), &re_args)?;
     if let Value::Object(obj) = val {
         // Step 5: Return ? Invoke(rx, @@matchAll, « S »)
         if let Some(matcher) = get_well_known_symbol_method(mc, env, &obj, "matchAll")? {
             return evaluate_call_dispatch(mc, env, &matcher, Some(&Value::Object(obj)), &[Value::String(s.to_vec())]);
         }
-        handle_regexp_method(mc, &obj, "matchAll", &[Value::String(s.to_vec())], env)
+        // If @@matchAll is not found (e.g., deleted from RegExp.prototype), Invoke throws TypeError
+        Err(raise_type_error!("[Symbol.matchAll] is not a function").into())
     } else {
         Err(raise_eval_error!("Failed to create RegExp").into())
     }
@@ -1813,6 +1813,33 @@ fn string_normalize_method<'gc>(
     Ok(Value::String(utf8_to_utf16(&normalized)))
 }
 
+/// §22.1.3.8 String.prototype.isWellFormed()
+/// Returns true if the string contains no lone surrogates.
+fn string_is_well_formed_method<'gc>(
+    _mc: &MutationContext<'gc>,
+    s: &[u16],
+    _args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let mut i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if (0xD800..=0xDBFF).contains(&c) {
+            // High surrogate: must be followed by a low surrogate
+            if i + 1 < s.len() && (0xDC00..=0xDFFF).contains(&s[i + 1]) {
+                i += 2;
+                continue;
+            }
+            return Ok(Value::Boolean(false));
+        } else if (0xDC00..=0xDFFF).contains(&c) {
+            // Lone low surrogate
+            return Ok(Value::Boolean(false));
+        }
+        i += 1;
+    }
+    Ok(Value::Boolean(true))
+}
+
 fn string_to_well_formed_method<'gc>(
     _mc: &MutationContext<'gc>,
     s: &[u16],
@@ -1861,225 +1888,213 @@ fn make_array_from_values<'gc>(
     Ok(Value::Object(arr))
 }
 
+/// Entry point for replaceAll when called with a raw (not-yet-stringified) `this` value.
+/// This ensures the correct spec ordering: steps 2a-2d (IsRegExp, flags check, @@replace)
+/// happen BEFORE ToString(this) (step 3).
+pub fn string_replace_all_raw<'gc>(
+    mc: &MutationContext<'gc>,
+    this_val: Value<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // §22.1.3.19 String.prototype.replaceAll ( searchValue, replaceValue )
+    let search_val = args.first().cloned().unwrap_or(Value::Undefined);
+    let replace_val = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+    // Step 2: If searchValue is neither undefined nor null
+    if !matches!(search_val, Value::Undefined | Value::Null)
+        && let Value::Object(obj) = &search_val
+    {
+        // Step 2a: Let isRegExp be ? IsRegExp(searchValue)
+        let is_regexp = is_regexp_like(mc, env, &search_val)?;
+
+        // Step 2b: If isRegExp is true
+        if is_regexp {
+            // i. Let flags be ? Get(searchValue, "flags")
+            let flags_val = crate::core::get_property_with_accessors(mc, env, obj, "flags")?;
+            // ii. Perform ? RequireObjectCoercible(flags)
+            if matches!(flags_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
+            }
+            // iii. If ? ToString(flags) does not contain "g", throw a TypeError
+            let flags_str = utf16_to_utf8(&spec_to_string(mc, &flags_val, env)?);
+            if !flags_str.contains('g') {
+                return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
+            }
+        }
+
+        // Step 2c: Let replacer be ? GetMethod(searchValue, @@replace)
+        // Step 2d: If replacer is not undefined, return ? Call(replacer, searchValue, « O, replaceValue »)
+        if let Some(replacer) = get_well_known_symbol_method(mc, env, obj, "replace")? {
+            return evaluate_call_dispatch(mc, env, &replacer, Some(&search_val), &[this_val, replace_val]);
+        }
+    }
+
+    // Step 3: Let string be ? ToString(O)
+    let s = spec_to_string(mc, &this_val, env)?;
+
+    // Delegate to string path
+    string_replace_all_string_path(mc, &s, &search_val, &replace_val, env)
+}
+
 fn string_replace_all_method<'gc>(
     mc: &MutationContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    // §22.1.3.19 String.prototype.replaceAll ( searchValue, replaceValue )
     let search_val = args.first().cloned().unwrap_or(Value::Undefined);
     let replace_val = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-    if let Value::Object(object) = &search_val {
-        if is_regex_object(object) {
-            // get flags
-            let flags = match slot_get(object, &InternalSlot::Flags) {
-                Some(val) => match &*val.borrow() {
-                    Value::String(s) => utf16_to_utf8(s),
-                    _ => "".to_string(),
-                },
-                None => "".to_string(),
-            };
-            if !flags.contains('g') {
+    // Step 2: If searchValue is neither undefined nor null
+    if !matches!(search_val, Value::Undefined | Value::Null)
+        && let Value::Object(obj) = &search_val
+    {
+        // Step 2a: Let isRegExp be ? IsRegExp(searchValue)
+        let is_regexp = is_regexp_like(mc, env, &search_val)?;
+
+        // Step 2b: If isRegExp is true
+        if is_regexp {
+            // i. Let flags be ? Get(searchValue, "flags")
+            let flags_val = crate::core::get_property_with_accessors(mc, env, obj, "flags")?;
+            // ii. Perform ? RequireObjectCoercible(flags)
+            if matches!(flags_val, Value::Undefined | Value::Null) {
                 return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
             }
-
-            // Extract pattern
-            let pattern_u16 = internal_get_regex_pattern(object)?;
-
-            let re = get_or_compile_regex(&pattern_u16, &flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
-
-            if let Value::String(repl_u16) = replace_val {
-                let repl = utf16_to_utf8(&repl_u16);
-                let mut out: Vec<u16> = Vec::new();
-                let mut last_pos = 0usize;
-
-                let mut offset = 0usize;
-                while let Some(m) = re.find_from_utf16(s, offset).next() {
-                    let start = m.range.start;
-                    let end = m.range.end;
-
-                    let before = &s[..start];
-                    let after = &s[end..];
-                    let matched = &s[start..end];
-
-                    let mut captures = Vec::new();
-                    for cap in m.captures.iter() {
-                        if let Some(range) = cap {
-                            captures.push(Some(s[range.start..range.end].to_vec()));
-                        } else {
-                            captures.push(None);
-                        }
-                    }
-
-                    let mut named_captures: BTreeMap<String, Option<Vec<u16>>> = BTreeMap::new();
-                    for (name, range_opt) in m.named_groups() {
-                        let val = range_opt.map(|range| s[range.start..range.end].to_vec());
-                        named_captures.insert(name.to_string(), val);
-                    }
-                    let named_captures_opt = if named_captures.is_empty() { None } else { Some(&named_captures) };
-
-                    out.extend_from_slice(&s[last_pos..start]);
-                    out.extend_from_slice(&expand_replacement_tokens(
-                        &repl,
-                        matched,
-                        &captures,
-                        named_captures_opt,
-                        before,
-                        after,
-                    ));
-                    last_pos = end;
-
-                    if start == end {
-                        offset = end + 1;
-                    } else {
-                        offset = end;
-                    }
-                    if offset > s.len() {
-                        break;
-                    }
-                }
-
-                out.extend_from_slice(&s[last_pos..]);
-                return Ok(Value::String(out));
-            } else if matches!(
-                replace_val,
-                Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
-            ) || matches!(&replace_val, Value::Object(o) if o.borrow().get_closure().is_some())
-            {
-                let mut out: Vec<u16> = Vec::new();
-                let mut last_pos = 0usize;
-                let mut offset = 0usize;
-
-                while let Some(m) = re.find_from_utf16(s, offset).next() {
-                    let start = m.range.start;
-                    let end = m.range.end;
-
-                    let matched = Value::String(s[start..end].to_vec());
-                    let mut call_args: Vec<Value<'gc>> = vec![matched];
-
-                    for cap in m.captures.iter() {
-                        if let Some(range) = cap {
-                            call_args.push(Value::String(s[range.start..range.end].to_vec()));
-                        } else {
-                            call_args.push(Value::Undefined);
-                        }
-                    }
-
-                    call_args.push(Value::Number(start as f64));
-                    call_args.push(Value::String(s.to_vec()));
-
-                    let mut named_captures: BTreeMap<String, Option<Vec<u16>>> = BTreeMap::new();
-                    for (name, range_opt) in m.named_groups() {
-                        let val = range_opt.map(|range| s[range.start..range.end].to_vec());
-                        named_captures.insert(name.to_string(), val);
-                    }
-
-                    if !named_captures.is_empty() {
-                        let groups_obj = new_js_object_data(mc);
-                        for (name, val_opt) in named_captures {
-                            if let Some(v) = val_opt {
-                                object_set_key_value(mc, &groups_obj, name.as_str(), &Value::String(v))?;
-                            } else {
-                                object_set_key_value(mc, &groups_obj, name.as_str(), &Value::Undefined)?;
-                            }
-                        }
-                        call_args.push(Value::Object(groups_obj));
-                    }
-
-                    let repl_val = evaluate_call_dispatch(mc, env, &replace_val, Some(&Value::Undefined), &call_args)?;
-                    let repl_u16 = utf8_to_utf16(&value_to_string(&repl_val));
-
-                    out.extend_from_slice(&s[last_pos..start]);
-                    out.extend_from_slice(&repl_u16);
-                    last_pos = end;
-
-                    if start == end {
-                        offset = end + 1;
-                    } else {
-                        offset = end;
-                    }
-                    if offset > s.len() {
-                        break;
-                    }
-                }
-
-                out.extend_from_slice(&s[last_pos..]);
-                return Ok(Value::String(out));
-            } else {
-                // Non-callable: coerce replaceValue to string
-                let repl_u16 = spec_to_string(mc, &replace_val, env)?;
-                let repl = utf16_to_utf8(&repl_u16);
-                let mut out: Vec<u16> = Vec::new();
-                let mut last_pos = 0usize;
-                let mut offset = 0usize;
-
-                while let Some(m) = re.find_from_utf16(s, offset).next() {
-                    let start = m.range.start;
-                    let end = m.range.end;
-                    let before = &s[..start];
-                    let after = &s[end..];
-                    let matched = &s[start..end];
-
-                    let mut captures = Vec::new();
-                    for cap in m.captures.iter() {
-                        if let Some(range) = cap {
-                            captures.push(Some(s[range.start..range.end].to_vec()));
-                        } else {
-                            captures.push(None);
-                        }
-                    }
-                    let mut named_captures: BTreeMap<String, Option<Vec<u16>>> = BTreeMap::new();
-                    for (name, range_opt) in m.named_groups() {
-                        let val = range_opt.map(|range| s[range.start..range.end].to_vec());
-                        named_captures.insert(name.to_string(), val);
-                    }
-                    let named_captures_opt = if named_captures.is_empty() { None } else { Some(&named_captures) };
-
-                    out.extend_from_slice(&s[last_pos..start]);
-                    out.extend_from_slice(&expand_replacement_tokens(
-                        &repl,
-                        matched,
-                        &captures,
-                        named_captures_opt,
-                        before,
-                        after,
-                    ));
-                    last_pos = end;
-
-                    if start == end {
-                        offset = end + 1;
-                    } else {
-                        offset = end;
-                    }
-                    if offset > s.len() {
-                        break;
-                    }
-                }
-
-                out.extend_from_slice(&s[last_pos..]);
-                return Ok(Value::String(out));
+            // iii. If ? ToString(flags) does not contain "g", throw a TypeError
+            let flags_str = utf16_to_utf8(&spec_to_string(mc, &flags_val, env)?);
+            if !flags_str.contains('g') {
+                return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
             }
-        } else {
-            // Non-regex object — fall through to string coercion below
+        }
+
+        // Step 2c: Let replacer be ? GetMethod(searchValue, @@replace)
+        // Step 2d: If replacer is not undefined, return ? Call(replacer, searchValue, « O, replaceValue »)
+        if let Some(replacer) = get_well_known_symbol_method(mc, env, obj, "replace")? {
+            return evaluate_call_dispatch(mc, env, &replacer, Some(&search_val), &[Value::String(s.to_vec()), replace_val]);
         }
     }
-    // Coerce both to strings
-    let search = spec_to_string(mc, &search_val, env)?;
-    let replace_str = spec_to_string(mc, &replace_val, env)?;
-    // String replaceAll
-    let mut out = Vec::new();
-    let mut last_pos = 0;
-    let mut start = 0;
-    while let Some(pos) = utf16_find(&s[start..], &search) {
-        let abs_pos = start + pos;
-        out.extend_from_slice(&s[last_pos..abs_pos]);
-        out.extend_from_slice(&replace_str);
-        last_pos = abs_pos + search.len();
-        start = last_pos;
+
+    // Step 3: Let string be ? ToString(O) — already done (s parameter)
+    // Delegate to string path
+    string_replace_all_string_path(mc, s, &search_val, &replace_val, env)
+}
+
+/// Steps 4-16 of §22.1.3.19: the string-based replacement path.
+fn string_replace_all_string_path<'gc>(
+    mc: &MutationContext<'gc>,
+    s: &[u16],
+    search_val: &Value<'gc>,
+    replace_val: &Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Step 4: Let searchString be ? ToString(searchValue)
+    let search = spec_to_string(mc, search_val, env)?;
+
+    // Step 5: Let functionalReplace be IsCallable(replaceValue)
+    let functional_replace = matches!(
+        &replace_val,
+        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) | Value::AsyncGeneratorFunction(..)
+    ) || matches!(&replace_val, Value::Object(o) if o.borrow().get_closure().is_some()
+        || o.borrow().class_def.is_some()
+        || crate::core::slot_get(o, &InternalSlot::BoundTarget).is_some()
+        || crate::core::slot_get(o, &InternalSlot::Callable).is_some());
+
+    // Step 6: If functionalReplace is false, let replaceValue be ? ToString(replaceValue)
+    let replace_str = if !functional_replace {
+        Some(spec_to_string(mc, replace_val, env)?)
+    } else {
+        None
+    };
+
+    // Step 7: Let searchLength be the length of searchString
+    let search_length = search.len();
+
+    // Step 8: Let advanceBy be max(1, searchLength)
+    let advance_by = std::cmp::max(1, search_length);
+
+    // Steps 9-11: Collect all match positions using StringIndexOf
+    let mut match_positions: Vec<usize> = Vec::new();
+    let s_len = s.len();
+    {
+        let mut pos: Option<usize> = string_index_of_u16(s, &search, 0, s_len);
+        while let Some(p) = pos {
+            match_positions.push(p);
+            let next_from = p + advance_by;
+            pos = string_index_of_u16(s, &search, next_from, s_len);
+        }
     }
-    out.extend_from_slice(&s[last_pos..]);
-    Ok(Value::String(out))
+
+    // Steps 12-13
+    let mut end_of_last_match: usize = 0;
+    let mut result: Vec<u16> = Vec::new();
+
+    // Step 14: For each position in matchPositions
+    for &pos in &match_positions {
+        // Step 14c: Let stringSlice be the substring of string from endOfLastMatch to position
+        result.extend_from_slice(&s[end_of_last_match..pos]);
+
+        if functional_replace {
+            // Step 14a: functionalReplace is true
+            // i. Let replacement be ? ToString(? Call(replaceValue, undefined, « searchString, 𝔽(position), string »))
+            let call_args = vec![Value::String(search.clone()), Value::Number(pos as f64), Value::String(s.to_vec())];
+            let repl_val = evaluate_call_dispatch(mc, env, replace_val, Some(&Value::Undefined), &call_args)?;
+            let repl_u16 = spec_to_string(mc, &repl_val, env)?;
+            result.extend_from_slice(&repl_u16);
+        } else {
+            // Step 14b: functionalReplace is false
+            // ii. Let captures be a new empty List
+            // iii. Let replacement be GetSubstitution(searchString, string, position, captures, undefined, replaceValue)
+            let replace_s = replace_str.as_ref().unwrap();
+            let repl_utf8 = utf16_to_utf8(replace_s);
+            let matched = &s[pos..pos + search_length];
+            let before = &s[..pos];
+            let after = &s[pos + search_length..];
+            let empty_captures: Vec<Option<Vec<u16>>> = Vec::new();
+            result.extend_from_slice(&expand_replacement_tokens(
+                &repl_utf8,
+                matched,
+                &empty_captures,
+                None,
+                before,
+                after,
+            ));
+        }
+
+        // Step 14e: Let endOfLastMatch be position + searchLength
+        end_of_last_match = pos + search_length;
+    }
+
+    // Step 15: If endOfLastMatch < length of string
+    if end_of_last_match < s_len {
+        result.extend_from_slice(&s[end_of_last_match..]);
+    }
+
+    // Step 16: Return result
+    Ok(Value::String(result))
+}
+
+/// StringIndexOf spec helper: find `search` in `s` starting at `from_index`.
+/// Returns Some(position) or None if not found.
+fn string_index_of_u16(s: &[u16], search: &[u16], from_index: usize, s_len: usize) -> Option<usize> {
+    if from_index > s_len {
+        return None;
+    }
+    let search_len = search.len();
+    if search_len == 0 {
+        // Empty search string matches at from_index if from_index <= s_len
+        return if from_index <= s_len { Some(from_index) } else { None };
+    }
+    if from_index + search_len > s_len {
+        return None;
+    }
+    for k in from_index..=s_len - search_len {
+        if s[k..k + search_len] == *search {
+            return Some(k);
+        }
+    }
+    None
 }
 
 pub fn string_from_char_code<'gc>(

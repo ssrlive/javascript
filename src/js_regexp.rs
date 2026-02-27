@@ -1414,16 +1414,15 @@ pub(crate) fn handle_regexp_method<'gc>(
             }
         }
         "toString" => {
-            // Get pattern and flags (two-step get to avoid long-lived borrows)
-            let pattern = utf16_to_utf8(&internal_get_regex_pattern(object).unwrap_or_default());
+            // §22.2.5.14 RegExp.prototype.toString()
+            // Step 1: Let R = this value (object).
+            // Step 2: Let pattern = ? ToString(? Get(R, "source"))
+            let source_val = crate::core::get_property_with_accessors(mc, env, object, "source")?;
+            let pattern = utf16_to_utf8(&crate::js_string::spec_to_string(mc, &source_val, env)?);
 
-            let flags = match slot_get(object, &InternalSlot::Flags) {
-                Some(val) => match &*val.borrow() {
-                    Value::String(s) => utf16_to_utf8(s),
-                    _ => "".to_string(),
-                },
-                None => "".to_string(),
-            };
+            // Step 3: Let flags = ? ToString(? Get(R, "flags"))
+            let flags_val = crate::core::get_property_with_accessors(mc, env, object, "flags")?;
+            let flags = utf16_to_utf8(&crate::js_string::spec_to_string(mc, &flags_val, env)?);
 
             let result = format!("/{}/{}", pattern, flags);
             Ok(Value::String(utf8_to_utf16(&result)))

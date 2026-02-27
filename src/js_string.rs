@@ -2220,16 +2220,26 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     mc: &MutationContext<'gc>,
     iterator: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Get string
-    let str_val = slot_get_chained(iterator, &InternalSlot::IteratorString).ok_or(raise_eval_error!("Iterator has no string"))?;
+    // Spec §22.1.5.2.1: If O does not have all of the internal slots of a
+    // String Iterator Instance, throw a TypeError.  Use `slot_get` (own-only)
+    // so that `Object.create(realIterator)` does NOT inherit these slots.
+    let str_val = slot_get(iterator, &InternalSlot::IteratorString).ok_or_else(|| {
+        EvalError::from(crate::raise_type_error!(
+            "StringIterator.prototype.next requires that 'this' be a String Iterator"
+        ))
+    })?;
     let s = if let Value::String(utf16) = &*str_val.borrow() {
         utf16.clone()
     } else {
-        return Err(raise_eval_error!("Iterator string is invalid").into());
+        return Err(crate::raise_type_error!("StringIterator.prototype.next requires that 'this' be a String Iterator").into());
     };
 
-    // Get index
-    let index_val = slot_get_chained(iterator, &InternalSlot::IteratorIndex).ok_or(raise_eval_error!("Iterator has no index"))?;
+    // Get index (own slot only)
+    let index_val = slot_get(iterator, &InternalSlot::IteratorIndex).ok_or_else(|| {
+        EvalError::from(crate::raise_type_error!(
+            "StringIterator.prototype.next requires that 'this' be a String Iterator"
+        ))
+    })?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         if *n < 0.0 { 0 } else { *n as usize }
     } else {

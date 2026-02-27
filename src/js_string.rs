@@ -1,6 +1,6 @@
 use crate::core::js_error::EvalError;
 use crate::core::{
-    InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, evaluate_call_dispatch, get_own_property,
+    InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, evaluate_call_dispatch, get_own_property, new_gc_cell_ptr,
     new_js_object_data, object_get_key_value, object_set_key_value, slot_get, slot_get_chained, slot_set, to_number_with_env, to_primitive,
     value_to_string,
 };
@@ -223,8 +223,6 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     ];
     let methods_len2 = vec!["replace", "replaceAll", "slice", "split", "substring", "substr"];
     let methods_len0 = vec![
-        "toString",
-        "valueOf",
         "toUpperCase",
         "toLowerCase",
         "toLocaleLowerCase",
@@ -237,6 +235,29 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     // normalize has length 0 per spec
     let methods_normalize = vec!["normalize"];
 
+    // toString and valueOf must be wrapped in Object with OriginGlobal so that
+    // cross-realm identity and realm-specific TypeError throwing work correctly.
+    for method in &["toString", "valueOf"] {
+        let fn_obj = new_js_object_data(mc);
+        fn_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(format!("String.prototype.{method}")))));
+        slot_set(mc, &fn_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        // Set Function.prototype as the internal prototype so the object is callable
+        if let Some(func_val_rc) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_val_rc.borrow()
+            && let Some(func_proto_rc) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*func_proto_rc.borrow()
+        {
+            fn_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method)), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "name", &name_desc)?;
+        object_set_key_value(mc, &string_proto, *method, &Value::Object(fn_obj))?;
+        string_proto.borrow_mut(mc).set_non_enumerable(*method);
+    }
     for method in &methods_len0 {
         object_set_key_value(mc, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
         string_proto.borrow_mut(mc).set_non_enumerable(*method);
@@ -1745,9 +1766,12 @@ fn string_locale_compare_method<'gc>(
     } else {
         spec_to_string(mc, &args[0], env)?
     };
-    // Simple lexicographic comparison (locale-independent)
-    let s_str = utf16_to_utf8(s);
-    let t_str = utf16_to_utf8(&that);
+    // NFC-normalize both operands so that canonically equivalent sequences
+    // (e.g. U+006F U+0308 vs U+00F6) compare as equal, as required by the
+    // spec for localeCompare (Unicode canonical equivalence).
+    use unicode_normalization::UnicodeNormalization;
+    let s_str: String = String::from_utf16_lossy(s).nfc().collect();
+    let t_str: String = String::from_utf16_lossy(&that).nfc().collect();
     let result = match s_str.cmp(&t_str) {
         std::cmp::Ordering::Less => -1.0,
         std::cmp::Ordering::Equal => 0.0,

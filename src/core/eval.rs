@@ -12368,34 +12368,44 @@ pub fn evaluate_call_dispatch<'gc>(
 
                     // Use the provided `this` value (from method call) as the receiver; fall back to ToString conversion
                     let this_v = this_val.unwrap_or(&Value::Undefined);
-                    // RequireObjectCoercible: throw TypeError for null/undefined this
-                    if matches!(this_v, Value::Undefined | Value::Null) {
-                        return Err(raise_type_error!(format!("String.prototype.{method} called on null or undefined")).into());
-                    }
                     // toString and valueOf: thisStringValue check — only accepts String or String wrapper object
+                    // Use throw_realm_type_error so the TypeError comes from the function's
+                    // home realm (important for cross-realm tests).
+                    // This check must come BEFORE the generic null/undefined check because
+                    // null/undefined also fail thisStringValue and must throw with the correct realm.
                     if method == "toString" || method == "valueOf" {
                         match this_v {
                             Value::String(_) => {} // OK
                             Value::Object(obj) => {
                                 if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::PrimitiveValue) {
                                     if !matches!(&*val_rc.borrow(), Value::String(_)) {
-                                        return Err(raise_type_error!(format!(
-                                            "String.prototype.{method} requires that 'this' be a String"
-                                        ))
-                                        .into());
+                                        return Err(throw_realm_type_error(
+                                            mc,
+                                            env,
+                                            &format!("String.prototype.{method} requires that 'this' be a String"),
+                                        ));
                                     }
                                 } else {
-                                    return Err(
-                                        raise_type_error!(format!("String.prototype.{method} requires that 'this' be a String")).into(),
-                                    );
+                                    return Err(throw_realm_type_error(
+                                        mc,
+                                        env,
+                                        &format!("String.prototype.{method} requires that 'this' be a String"),
+                                    ));
                                 }
                             }
                             _ => {
-                                return Err(
-                                    raise_type_error!(format!("String.prototype.{method} requires that 'this' be a String")).into(),
-                                );
+                                return Err(throw_realm_type_error(
+                                    mc,
+                                    env,
+                                    &format!("String.prototype.{method} requires that 'this' be a String"),
+                                ));
                             }
                         }
+                    }
+                    // RequireObjectCoercible: throw TypeError for null/undefined this
+                    // (for non-toString/valueOf methods that weren't handled above)
+                    if method != "toString" && method != "valueOf" && matches!(this_v, Value::Undefined | Value::Null) {
+                        return Err(raise_type_error!(format!("String.prototype.{method} called on null or undefined")).into());
                     }
                     // §22.1.3.* spec: For split/match/search/replace,
                     // the @@symbol dispatch on the argument must happen BEFORE ToString(this).

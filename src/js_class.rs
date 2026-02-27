@@ -1522,12 +1522,25 @@ pub(crate) fn evaluate_new<'gc>(
                         return Ok(result);
                     }
                     "String" => {
-                        let str_val = if evaluated_args.is_empty() {
-                            Value::String(utf8_to_utf16(""))
+                        // §22.1.1.1 String ( value )
+                        // Step 2-3: If no arguments, let s = ""; else ToString(value)
+                        // (with special Symbol handling for non-new calls, but here
+                        // we are in `new` so use ToString).
+                        let s = if evaluated_args.is_empty() {
+                            Vec::new()
                         } else {
-                            evaluated_args[0].clone()
+                            crate::js_string::spec_to_string(mc, &evaluated_args[0], &ctor_realm_env)?
                         };
-                        return handle_object_constructor(mc, &[str_val], &ctor_realm_env);
+                        // Step 4: StringCreate(s, proto)
+                        let result = handle_object_constructor(mc, &[Value::String(s)], &ctor_realm_env)?;
+                        // GetPrototypeFromConstructor: override prototype from newTarget
+                        if let Some(Value::Object(nt_obj)) = new_target
+                            && let Value::Object(result_obj) = &result
+                            && let Some(proto) = get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, "String")?
+                        {
+                            result_obj.borrow_mut(mc).prototype = Some(proto);
+                        }
+                        return Ok(result);
                     }
                     "Function" => {
                         // Execute Function constructor in the constructor's realm.

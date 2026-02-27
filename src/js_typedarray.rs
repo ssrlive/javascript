@@ -448,6 +448,19 @@ fn validate_atomic_access<'gc>(
     Ok(idx)
 }
 
+/// Convert raw i64 bits to the correct BigInt value based on the TypedArray kind.
+/// For BigInt64Array, the i64 is the signed value directly.
+/// For BigUint64Array, the i64 bits are reinterpreted as u64 to produce an unsigned BigInt.
+fn raw_i64_to_bigint<'gc>(raw: i64, kind: &TypedArrayKind) -> Value<'gc> {
+    match kind {
+        TypedArrayKind::BigUint64 => {
+            let u = raw as u64;
+            Value::BigInt(Box::new(num_bigint::BigInt::from(u)))
+        }
+        _ => Value::BigInt(Box::new(num_bigint::BigInt::from(raw))),
+    }
+}
+
 /// Handle Atomics.* calls (minimal mutex-backed implementations)
 pub fn handle_atomics_method<'gc>(
     mc: &MutationContext<'gc>,
@@ -512,10 +525,11 @@ pub fn handle_atomics_method<'gc>(
         "load" => {
             let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
             let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
-            let v = ta_obj.get(idx)?;
             if is_bigint {
-                Ok(Value::BigInt(Box::new(num_bigint::BigInt::from(v as i64))))
+                let raw = ta_obj.get_bigint_raw(idx)?;
+                Ok(raw_i64_to_bigint(raw, &ta_obj.kind))
             } else {
+                let v = ta_obj.get(idx)?;
                 Ok(Value::Number(v))
             }
         }
@@ -523,21 +537,20 @@ pub fn handle_atomics_method<'gc>(
             let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
             let val_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
             // Per spec: coerce value BEFORE validating index
-            let (store_val_f64, return_val) = if is_bigint {
+            if is_bigint {
                 let v = to_bigint_i64(mc, env, &val_arg)?;
-                (v as f64, Value::BigInt(Box::new(num_bigint::BigInt::from(v))))
+                let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+                ta_obj.set_bigint(mc, idx, v)?;
+                // Atomics.store returns the coerced value (ToBigInt result)
+                Ok(Value::BigInt(Box::new(num_bigint::BigInt::from(v))))
             } else {
                 let n = crate::core::to_number_with_env(mc, env, &val_arg)?;
-                // Spec: return ToIntegerOrInfinity(v) which normalizes -0 to +0
-                // and truncates. For integer types the return value is ToInteger.
                 let int_n = if n.is_nan() || n == 0.0 { 0.0 } else { n.trunc() };
-                // Normalize: -0.0 → +0.0
                 let int_n = if int_n == 0.0 { 0.0 } else { int_n };
-                (n, Value::Number(int_n))
-            };
-            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
-            ta_obj.set(mc, idx, store_val_f64)?;
-            Ok(return_val)
+                let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+                ta_obj.set(mc, idx, n)?;
+                Ok(Value::Number(int_n))
+            }
         }
         "compareExchange" => {
             let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -545,35 +558,31 @@ pub fn handle_atomics_method<'gc>(
             let replacement_arg = args.get(3).cloned().unwrap_or(Value::Undefined);
             // Spec order: ValidateAtomicAccess THEN coerce values
             let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
-            let (expected_f64, replacement_f64) = if is_bigint {
-                let e = to_bigint_i64(mc, env, &expected_arg)? as f64;
-                let r = to_bigint_i64(mc, env, &replacement_arg)? as f64;
-                (e, r)
-            } else {
-                let e = crate::core::to_number_with_env(mc, env, &expected_arg)?;
-                let r = crate::core::to_number_with_env(mc, env, &replacement_arg)?;
-                (e, r)
-            };
-            let old = ta_obj.get(idx)?;
-            // Compare at element-type width: convert expected through the same
-            // NumericToRawBytes truncation as the stored value for proper modular comparison.
-            let matches = match ta_obj.kind {
-                TypedArrayKind::Int8 => (js_to_int32(old) as i8) == (js_to_int32(expected_f64) as i8),
-                TypedArrayKind::Uint8 => (js_to_int32(old) as u8) == (js_to_int32(expected_f64) as u8),
-                TypedArrayKind::Int16 => (js_to_int32(old) as i16) == (js_to_int32(expected_f64) as i16),
-                TypedArrayKind::Uint16 => (js_to_int32(old) as u16) == (js_to_int32(expected_f64) as u16),
-                TypedArrayKind::Int32 => js_to_int32(old) == js_to_int32(expected_f64),
-                TypedArrayKind::Uint32 => (js_to_int32(old) as u32) == (js_to_int32(expected_f64) as u32),
-                TypedArrayKind::BigInt64 => (old as i64) == (expected_f64 as i64),
-                TypedArrayKind::BigUint64 => (old as u64) == (expected_f64 as u64),
-                _ => old == expected_f64,
-            };
-            if matches {
-                ta_obj.set(mc, idx, replacement_f64)?;
-            }
             if is_bigint {
-                Ok(Value::BigInt(Box::new(num_bigint::BigInt::from(old as i64))))
+                let expected_i64 = to_bigint_i64(mc, env, &expected_arg)?;
+                let replacement_i64 = to_bigint_i64(mc, env, &replacement_arg)?;
+                let old_raw = ta_obj.get_bigint_raw(idx)?;
+                // Compare raw i64 bits (works for both signed and unsigned)
+                if old_raw == expected_i64 {
+                    ta_obj.set_bigint(mc, idx, replacement_i64)?;
+                }
+                Ok(raw_i64_to_bigint(old_raw, &ta_obj.kind))
             } else {
+                let expected_f64 = crate::core::to_number_with_env(mc, env, &expected_arg)?;
+                let replacement_f64 = crate::core::to_number_with_env(mc, env, &replacement_arg)?;
+                let old = ta_obj.get(idx)?;
+                let matches = match ta_obj.kind {
+                    TypedArrayKind::Int8 => (js_to_int32(old) as i8) == (js_to_int32(expected_f64) as i8),
+                    TypedArrayKind::Uint8 => (js_to_int32(old) as u8) == (js_to_int32(expected_f64) as u8),
+                    TypedArrayKind::Int16 => (js_to_int32(old) as i16) == (js_to_int32(expected_f64) as i16),
+                    TypedArrayKind::Uint16 => (js_to_int32(old) as u16) == (js_to_int32(expected_f64) as u16),
+                    TypedArrayKind::Int32 => js_to_int32(old) == js_to_int32(expected_f64),
+                    TypedArrayKind::Uint32 => (js_to_int32(old) as u32) == (js_to_int32(expected_f64) as u32),
+                    _ => old == expected_f64,
+                };
+                if matches {
+                    ta_obj.set(mc, idx, replacement_f64)?;
+                }
                 Ok(Value::Number(old))
             }
         }
@@ -582,25 +591,33 @@ pub fn handle_atomics_method<'gc>(
             let val_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
             // Spec order: ValidateAtomicAccess THEN coerce value
             let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
-            let operand = if is_bigint {
-                to_bigint_i64(mc, env, &val_arg)?
-            } else {
-                crate::core::to_number_with_env(mc, env, &val_arg)? as i64
-            };
-            let old = ta_obj.get(idx)?;
-            let new_val = match method {
-                "add" => (old as i64).wrapping_add(operand) as f64,
-                "sub" => (old as i64).wrapping_sub(operand) as f64,
-                "and" => ((old as i64) & operand) as f64,
-                "or" => ((old as i64) | operand) as f64,
-                "xor" => ((old as i64) ^ operand) as f64,
-                "exchange" => operand as f64,
-                _ => old,
-            };
-            ta_obj.set(mc, idx, new_val)?;
             if is_bigint {
-                Ok(Value::BigInt(Box::new(num_bigint::BigInt::from(old as i64))))
+                let operand = to_bigint_i64(mc, env, &val_arg)?;
+                let old_raw = ta_obj.get_bigint_raw(idx)?;
+                let new_raw = match method {
+                    "add" => old_raw.wrapping_add(operand),
+                    "sub" => old_raw.wrapping_sub(operand),
+                    "and" => old_raw & operand,
+                    "or" => old_raw | operand,
+                    "xor" => old_raw ^ operand,
+                    "exchange" => operand,
+                    _ => old_raw,
+                };
+                ta_obj.set_bigint(mc, idx, new_raw)?;
+                Ok(raw_i64_to_bigint(old_raw, &ta_obj.kind))
             } else {
+                let operand = crate::core::to_number_with_env(mc, env, &val_arg)? as i64;
+                let old = ta_obj.get(idx)?;
+                let new_val = match method {
+                    "add" => (old as i64).wrapping_add(operand) as f64,
+                    "sub" => (old as i64).wrapping_sub(operand) as f64,
+                    "and" => ((old as i64) & operand) as f64,
+                    "or" => ((old as i64) | operand) as f64,
+                    "xor" => ((old as i64) ^ operand) as f64,
+                    "exchange" => operand as f64,
+                    _ => old,
+                };
+                ta_obj.set(mc, idx, new_val)?;
                 Ok(Value::Number(old))
             }
         }
@@ -3018,6 +3035,24 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
             }
         }
         Ok(())
+    }
+
+    /// Read a BigInt typed array element as raw i64 (preserving all 64 bits).
+    /// For BigUint64Array the bits are reinterpreted as i64 for storage/arithmetic;
+    /// the caller must convert back to unsigned BigInt when returning to JS.
+    pub fn get_bigint_raw(&self, idx: usize) -> Result<i64, crate::error::JSError> {
+        let size = self.element_size();
+        let byte_offset = self.byte_offset + idx * size;
+        let buffer = self.buffer.borrow();
+        let data = buffer.data.lock().unwrap();
+
+        if byte_offset + size > data.len() {
+            return Ok(0);
+        }
+
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&data[byte_offset..byte_offset + 8]);
+        Ok(i64::from_le_bytes(b))
     }
 }
 

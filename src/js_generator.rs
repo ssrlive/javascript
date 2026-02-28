@@ -4049,13 +4049,48 @@ pub fn generator_next<'gc>(
             }
 
             // Execute the (possibly modified) tail and interpret completion per spec
-            let (cf, _last) = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tail, &[])?;
-            log::trace!("DEBUG: evaluate_statements result (control flow): {:?}", cf);
+            let tail_result = crate::core::evaluate_statements_with_context_and_last_value(mc, &func_env, &tail, &[]);
+            log::trace!("DEBUG: evaluate_statements result: {:?}", tail_result);
             gen_obj.state = GeneratorState::Completed;
-            match cf {
-                crate::core::ControlFlow::Return(v) => Ok(create_iterator_result(mc, &func_env, &v, true)?),
-                crate::core::ControlFlow::Normal(_) => Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?),
-                crate::core::ControlFlow::Throw(v, l, c) => Err(crate::core::EvalError::Throw(v, l, c)),
+
+            // Per GeneratorStart spec step 4.i-j: dispose resources on generator
+            // body's LexicalEnvironment before returning.
+            let (cf, _last) = match tail_result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // Tail evaluation threw via EvalError — try to dispose, then propagate.
+                    let thrown = eval_error_to_value(mc, &func_env, e);
+                    let _ = crate::core::dispose_resources_with_completion(mc, &func_env, Some(thrown.clone()));
+                    return Err(crate::core::EvalError::Throw(thrown, None, None));
+                }
+            };
+
+            // Extract throw value if the body ended with a throw completion.
+            let thrown_val = if let crate::core::ControlFlow::Throw(ref v, _, _) = cf {
+                Some(v.clone())
+            } else {
+                None
+            };
+
+            // Dispose resources, merging any disposal errors with the body completion.
+            let dispose_result = crate::core::dispose_resources_with_completion(mc, &func_env, thrown_val.clone());
+
+            match (&cf, dispose_result) {
+                // Body threw AND disposal threw → disposal already produced SuppressedError
+                (crate::core::ControlFlow::Throw(_, _, _), Err(crate::core::EvalError::Throw(v, l, c))) => {
+                    Err(crate::core::EvalError::Throw(v, l, c))
+                }
+                // Body threw, disposal ok → propagate original throw
+                (crate::core::ControlFlow::Throw(v, l, c), _) => Err(crate::core::EvalError::Throw(v.clone(), *l, *c)),
+                // Body normal, disposal threw → propagate disposal error
+                (_, Err(crate::core::EvalError::Throw(v, l, c))) => Err(crate::core::EvalError::Throw(v, l, c)),
+                // Body returned, disposal ok → normal return
+                (crate::core::ControlFlow::Return(v), Ok(())) => Ok(create_iterator_result(mc, &func_env, v, true)?),
+                // Body normal, disposal ok → normal completion
+                (crate::core::ControlFlow::Normal(_), Ok(())) => Ok(create_iterator_result(mc, &func_env, &Value::Undefined, true)?),
+                // Other disposal errors
+                (_, Err(e)) => Err(e),
+                // Other control flows
                 _ => Err(raise_eval_error!("Unexpected control flow after evaluating generator tail").into()),
             }
         }

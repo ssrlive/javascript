@@ -310,6 +310,37 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         crate::js_object::define_property_internal(mc, &async_iter_proto, *async_iter_sym, &desc_method)?;
     }
 
+    // Register Symbol.asyncDispose on %AsyncIteratorPrototype%
+    // Per spec: %AsyncIteratorPrototype% [ @@asyncDispose ] ( ) — returns a Promise
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(async_dispose_sym_val) = object_get_key_value(sym_obj, "asyncDispose")
+        && let Value::Symbol(async_dispose_sym) = &*async_dispose_sym_val.borrow()
+    {
+        let fn_obj = new_js_object_data(mc);
+        fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
+            mc,
+            Value::Function("AsyncIteratorPrototype.asyncDispose".to_string()),
+        )));
+        slot_set(mc, &fn_obj, InternalSlot::Callable, &Value::Boolean(true));
+        if let Some(fp) = func_proto_opt {
+            fn_obj.borrow_mut(mc).prototype = Some(fp);
+        }
+        let desc_name = crate::core::create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("[Symbol.asyncDispose]")),
+            false,
+            false,
+            true,
+        )?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
+
+        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &async_iter_proto, *async_dispose_sym, &desc_method)?;
+    }
+
     // Set AsyncGenerator.prototype[@@toStringTag] = "AsyncGenerator"
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()

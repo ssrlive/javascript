@@ -270,6 +270,212 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         *index += 1;
     }
 
+    // Check for `using` or `await using` in the for-head
+    // `for (using x = expr; ...; ...)` or `for (using x of iterable)` or
+    // `for (await using x of iterable)` or `for (await using x = expr; ...; ...)`
+    {
+        // Detect `await using` inside the parens: `for (await using ...)`
+        // In this case, `await` is NOT the `for await` syntax but an `await using` declaration.
+        let is_await_using_in_parens = matches!(t[*index].token, Token::Await) && {
+            let mut pk = *index + 1;
+            while pk < t.len() && matches!(t[pk].token, Token::LineTerminator) {
+                pk += 1;
+            }
+            matches!(&t[pk].token, Token::Identifier(n) if n == "using")
+        };
+        if is_await_using_in_parens {
+            // Consume `await`; the `using` handling below will pick up the rest.
+            // Mark this as an await-using declaration context.
+            *index += 1;
+            while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
+            is_for_await = true;
+        }
+
+        let is_using_kw = matches!(&t[*index].token, Token::Identifier(n) if n == "using");
+        if is_using_kw {
+            // Peek ahead: `using` followed by an identifier means a using declaration
+            let mut peek = *index + 1;
+            while peek < t.len() && matches!(t[peek].token, Token::LineTerminator) {
+                peek += 1;
+            }
+            let next_is_ident = peek < t.len() && matches!(&t[peek].token, Token::Identifier(_));
+
+            // Special case: `for (using of ...` where `of` is the identifier after `using`.
+            // Per spec, `using of` is only a using-declaration if followed by `=`
+            // (i.e., `for (using of = expr; ...; ...)`). Otherwise, `using` is just
+            // an identifier and `of` is the for-of keyword.
+            let is_using_of = next_is_ident && matches!(&t[peek].token, Token::Identifier(n) if n == "of");
+            let using_of_is_decl = if is_using_of {
+                let mut peek2 = peek + 1;
+                while peek2 < t.len() && matches!(t[peek2].token, Token::LineTerminator) {
+                    peek2 += 1;
+                }
+                peek2 < t.len() && matches!(t[peek2].token, Token::Assign)
+            } else {
+                false
+            };
+
+            let enter_using_path = next_is_ident && (is_await_using_in_parens || !is_using_of || using_of_is_decl);
+
+            if enter_using_path {
+                *index += 1; // consume `using`
+                // Skip line terminators
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                // Parse the first binding name
+                let first_name = match &t[*index].token {
+                    Token::Identifier(n) => n.clone(),
+                    _ => return Err(raise_parse_error_at!(t.get(*index))),
+                };
+                *index += 1;
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+
+                // Check if followed by `of` (for-of/for-await-of with using)
+                if *index < t.len() && matches!(&t[*index].token, Token::Identifier(n) if n == "of") {
+                    *index += 1; // consume `of`
+                    let iterable = parse_assignment(t, index)?;
+                    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                        *index += 1;
+                    }
+                    if !matches!(t[*index].token, Token::RParen) {
+                        return Err(raise_parse_error_at!(t.get(*index)));
+                    }
+                    *index += 1; // consume )
+                    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                        *index += 1;
+                    }
+                    let body = parse_statement_item(t, index)?;
+                    let body_stmts = match *body.kind {
+                        StatementKind::Block(b) => b,
+                        _ => vec![body],
+                    };
+                    let kind = if is_for_await {
+                        StatementKind::ForAwaitOf(Some(crate::core::VarDeclKind::AwaitUsing), first_name, iterable, body_stmts)
+                    } else {
+                        StatementKind::ForOf(Some(crate::core::VarDeclKind::Using), first_name, iterable, body_stmts)
+                    };
+                    return Ok(Statement {
+                        kind: Box::new(kind),
+                        line,
+                        column,
+                    });
+                }
+
+                // C-style for with using: `for (using x = expr, ...; test; update) body`
+                if !matches!(t[*index].token, Token::Assign) {
+                    return Err(raise_parse_error!("using declarations must have an initializer", line, column));
+                }
+                *index += 1; // consume `=`
+                let first_init = parse_assignment(t, index)?;
+                let mut using_decls = vec![(first_name, first_init)];
+
+                // Check for comma-separated additional declarations
+                while *index < t.len() && matches!(t[*index].token, Token::Comma) {
+                    *index += 1;
+                    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                        *index += 1;
+                    }
+                    let next_name = match &t[*index].token {
+                        Token::Identifier(n) => n.clone(),
+                        _ => return Err(raise_parse_error_at!(t.get(*index))),
+                    };
+                    *index += 1;
+                    if !matches!(t[*index].token, Token::Assign) {
+                        return Err(raise_parse_error!("using declarations must have an initializer", line, column));
+                    }
+                    *index += 1; // consume `=`
+                    let next_init = parse_assignment(t, index)?;
+                    using_decls.push((next_name, next_init));
+                }
+
+                // Skip line terminators before the first semicolon
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                if !matches!(t[*index].token, Token::Semicolon) {
+                    return Err(raise_parse_error_at!(t.get(*index)));
+                }
+                *index += 1; // consume ;
+
+                // Parse test expression
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                let test = if !matches!(t[*index].token, Token::Semicolon) {
+                    Some(parse_expression(t, index)?)
+                } else {
+                    None
+                };
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                if !matches!(t[*index].token, Token::Semicolon) {
+                    return Err(raise_parse_error_at!(t.get(*index)));
+                }
+                *index += 1; // consume ;
+
+                // Parse update expression
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                let update = if !matches!(t[*index].token, Token::RParen) {
+                    Some(parse_expression(t, index)?)
+                } else {
+                    None
+                };
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                if !matches!(t[*index].token, Token::RParen) {
+                    return Err(raise_parse_error_at!(t.get(*index)));
+                }
+                *index += 1; // consume )
+
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                let body = parse_statement_item(t, index)?;
+                let body_stmts = match *body.kind {
+                    StatementKind::Block(b) => b,
+                    _ => vec![body],
+                };
+
+                let init_stmt = Some(Box::new(Statement {
+                    kind: Box::new(if is_for_await {
+                        StatementKind::AwaitUsing(using_decls)
+                    } else {
+                        StatementKind::Using(using_decls)
+                    }),
+                    line,
+                    column,
+                }));
+                let update_stmt = update.map(|e| {
+                    Box::new(Statement {
+                        kind: Box::new(StatementKind::Expr(e)),
+                        line,
+                        column,
+                    })
+                });
+
+                return Ok(Statement {
+                    kind: Box::new(StatementKind::For(Box::new(ForStatement {
+                        init: init_stmt,
+                        test,
+                        update: update_stmt,
+                        body: body_stmts,
+                    }))),
+                    line,
+                    column,
+                });
+            }
+        }
+    }
+
     // Check for declaration
     let is_decl = matches!(t[*index].token, Token::Var | Token::Let | Token::Const);
     log::trace!("parse_for_statement: is_decl={} token={:?}", is_decl, t.get(*index));

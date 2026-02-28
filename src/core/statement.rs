@@ -55,11 +55,13 @@ pub enum StatementKind {
     AwaitUsing(Vec<(String, Expr)>),      // await using declarations: await using x = expr;
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VarDeclKind {
     Var,
     Let,
     Const,
+    Using,
+    AwaitUsing,
 }
 
 unsafe impl<'gc> Collect<'gc> for VarDeclKind {

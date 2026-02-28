@@ -397,6 +397,41 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         iterator_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
     }
 
+    // Add [Symbol.dispose] to %IteratorPrototype%
+    // Per spec: %IteratorPrototype% [ @@dispose ] ( ) — calls this.return() if present
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+        && let Some(dispose_sym_val) = object_get_key_value(sym_ctor, "dispose")
+        && let Value::Symbol(dispose_sym) = &*dispose_sym_val.borrow()
+    {
+        let dispose_fn_obj = new_js_object_data(mc);
+        if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*proto_val.borrow()
+        {
+            dispose_fn_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        dispose_fn_obj.borrow_mut(mc).set_closure(Some(crate::core::new_gc_cell_ptr(
+            mc,
+            Value::Function("IteratorPrototype.dispose".to_string()),
+        )));
+        slot_set(mc, &dispose_fn_obj, InternalSlot::Callable, &Value::Boolean(true));
+        let name_desc = crate::core::create_descriptor_object(
+            mc,
+            &Value::String(crate::unicode::utf8_to_utf16("[Symbol.dispose]")),
+            false,
+            false,
+            true,
+        )?;
+        crate::js_object::define_property_internal(mc, &dispose_fn_obj, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &dispose_fn_obj, "length", &len_desc)?;
+
+        let desc = crate::core::create_descriptor_object(mc, &Value::Object(dispose_fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(mc, &iterator_proto, PropertyKey::Symbol(*dispose_sym), &desc)?;
+    }
+
     // Store %IteratorPrototype% in env so Iterator helpers init can find it
     slot_set(mc, env, InternalSlot::IteratorPrototype, &Value::Object(iterator_proto));
 

@@ -3677,9 +3677,18 @@ fn eval_res<'gc>(
             // StatementKind::Block; here we just create the bindings and
             // stash each disposable resource in an env-internal list.
             for (name, expr) in decls {
-                let val = match evaluate_expr(mc, env, expr) {
-                    Ok(v) => v,
-                    Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
+                let val = if let Expr::Class(class_def) = expr
+                    && class_def.name.is_empty()
+                {
+                    crate::js_class::create_class_object(mc, name, &class_def.extends, &class_def.members, env, false)
+                        .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?
+                } else {
+                    let v = match evaluate_expr(mc, env, expr) {
+                        Ok(v) => v,
+                        Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
+                    };
+                    set_name_if_anonymous(mc, &v, expr, name)?;
+                    v
                 };
 
                 // Bind as const
@@ -3695,9 +3704,18 @@ fn eval_res<'gc>(
         StatementKind::AwaitUsing(decls) => {
             // `await using x = expr;` — same as using but marks as async disposal.
             for (name, expr) in decls {
-                let val = match evaluate_expr(mc, env, expr) {
-                    Ok(v) => v,
-                    Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
+                let val = if let Expr::Class(class_def) = expr
+                    && class_def.name.is_empty()
+                {
+                    crate::js_class::create_class_object(mc, name, &class_def.extends, &class_def.members, env, false)
+                        .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?
+                } else {
+                    let v = match evaluate_expr(mc, env, expr) {
+                        Ok(v) => v,
+                        Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
+                    };
+                    set_name_if_anonymous(mc, &v, expr, name)?;
+                    v
                 };
 
                 object_set_key_value(mc, env, name, &val)?;
@@ -4534,30 +4552,80 @@ fn eval_res<'gc>(
                 p = cur.borrow().prototype;
             }
 
-            let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &block_env, &stmts_clone, labels)?;
+            let eval_result = evaluate_statements_with_context_and_last_value(mc, &block_env, &stmts_clone, labels);
 
-            // Dispose resources registered by `using` declarations in this block
-            let dispose_err = dispose_resources(mc, &block_env).err();
+            // Extract the block's completion and any thrown error value
+            let (block_cf, vbody, block_thrown_val) = match eval_result {
+                Ok((cf, vbody)) => {
+                    let thrown = if let ControlFlow::Throw(ref val, _, _) = cf {
+                        Some(val.clone())
+                    } else {
+                        None
+                    };
+                    (cf, vbody, thrown)
+                }
+                Err(EvalError::Throw(val, line, col)) => {
+                    // Expression evaluation threw (e.g. initializer error)
+                    (ControlFlow::Throw(val.clone(), line, col), Value::Undefined, Some(val))
+                }
+                Err(EvalError::Js(js_err)) => {
+                    let val = js_error_to_value(mc, env, &js_err);
+                    (
+                        ControlFlow::Throw(val.clone(), js_err.inner.js_line, js_err.inner.js_column),
+                        Value::Undefined,
+                        Some(val),
+                    )
+                }
+            };
 
-            match res {
+            // Dispose resources, passing the block's thrown error (if any) so it can
+            // be combined with disposal errors using SuppressedError per spec.
+            let dispose_result = dispose_resources_with_completion(mc, &block_env, block_thrown_val);
+
+            match block_cf {
                 ControlFlow::Normal(_) => {
-                    if let Some(e) = dispose_err {
+                    if let Err(e) = dispose_result {
                         return Err(e);
                     }
-                    if !stmts_clone.is_empty() {
+                    // Per spec, declarations (var/let/const/using/function/class)
+                    // produce NormalCompletion(empty), which does not override the
+                    // prior completion value. Only update last_value when the
+                    // block contains non-declaration statements.
+                    let block_only_declarations = stmts_clone.iter().all(|s| {
+                        matches!(
+                            &*s.kind,
+                            StatementKind::Let(..)
+                                | StatementKind::Const(..)
+                                | StatementKind::Var(..)
+                                | StatementKind::Using(..)
+                                | StatementKind::AwaitUsing(..)
+                                | StatementKind::FunctionDeclaration(..)
+                                | StatementKind::Class(..)
+                                | StatementKind::Import(..)
+                                | StatementKind::Export(..)
+                        )
+                    });
+                    if !stmts_clone.is_empty() && !block_only_declarations {
                         *last_value = vbody;
                     }
                     Ok(None)
+                }
+                ControlFlow::Throw(_, line, col) => {
+                    // Both the block's throw and any disposal errors are combined
+                    // inside dispose_resources_with_completion. If it returns Err,
+                    // that's the (possibly SuppressedError-wrapped) combined error.
+                    // Preserve the original throw's line/column.
+                    dispose_result.map_err(|e| match e {
+                        EvalError::Throw(val, _, _) => EvalError::Throw(val, line, col),
+                        other => other,
+                    })?;
+                    Ok(None) // unreachable when block threw
                 }
                 other => {
                     if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(vbody, Value::Undefined) {
                         *last_value = vbody;
                     }
-                    // If dispose threw, wrap: the block's abrupt completion becomes the
-                    // suppressed error and the dispose error becomes the primary.
-                    if let Some(dispose_e) = dispose_err {
-                        return Err(dispose_e);
-                    }
+                    dispose_result?;
                     Ok(Some(other))
                 }
             }
@@ -4644,6 +4712,32 @@ fn eval_res<'gc>(
                     EvalError::Throw(val, line, column) => ControlFlow::Throw(val, line, column),
                 },
             };
+
+            // Dispose any `using` resources registered in the try body environment.
+            // If the try body threw, pass the thrown value so it can be combined
+            // with disposal errors via SuppressedError (per spec DisposeResources).
+            {
+                let try_thrown = if let ControlFlow::Throw(ref v, _, _) = result {
+                    Some(v.clone())
+                } else {
+                    None
+                };
+                let dispose_result = dispose_resources_with_completion(mc, &try_env, try_thrown);
+                match &result {
+                    ControlFlow::Throw(_, line, col) => {
+                        // Replace the original throw with the combined error from disposal
+                        if let Err(EvalError::Throw(val, _, _)) = dispose_result {
+                            result = ControlFlow::Throw(val, *line, *col);
+                        }
+                    }
+                    _ => {
+                        // Try body completed normally but disposal threw
+                        if let Err(EvalError::Throw(val, line, col)) = dispose_result {
+                            result = ControlFlow::Throw(val, line, col);
+                        }
+                    }
+                }
+            }
 
             if let ControlFlow::Throw(val, ..) = &result
                 && let Some(catch_stmts) = &tc_stmt.catch_body
@@ -4867,6 +4961,8 @@ fn eval_res<'gc>(
                     &*init_stmt.kind,
                     StatementKind::Let(..)
                         | StatementKind::Const(..)
+                        | StatementKind::Using(..)
+                        | StatementKind::AwaitUsing(..)
                         | StatementKind::LetDestructuringArray(..)
                         | StatementKind::ConstDestructuringArray(..)
                         | StatementKind::LetDestructuringObject(..)
@@ -4927,8 +5023,24 @@ fn eval_res<'gc>(
                     || for_stmt.init.as_ref().is_some_and(|s| stmt_may_create_closure(s))
             };
 
+            let is_using_init = for_stmt
+                .init
+                .as_ref()
+                .is_some_and(|s| matches!(&*s.kind, StatementKind::Using(..) | StatementKind::AwaitUsing(..)));
+
             if let Some(init_stmt) = &for_stmt.init {
-                evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(init_stmt), labels)?;
+                let init_result = evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(init_stmt), labels);
+                if let Err(e) = init_result {
+                    if is_using_init {
+                        // Spec step 8b: if using declaration init throws, dispose before propagating
+                        let thrown_val = match &e {
+                            EvalError::Throw(val, _, _) => Some(val.clone()),
+                            EvalError::Js(js_err) => Some(js_error_to_value(mc, env, js_err)),
+                        };
+                        let _ = dispose_resources_with_completion(mc, &loop_env, thrown_val);
+                    }
+                    return Err(e);
+                }
             }
             // The `for` statement's completion value is `undefined` if the loop
             // is not entered. Reset `last_value` after the init so it doesn't
@@ -4953,6 +5065,7 @@ fn eval_res<'gc>(
                 iter_loop_env = first_iter_env;
             }
             let should_accumulate_completion = for_stmt.test.is_some() || for_stmt.update.is_some();
+            let mut deferred_exit: Option<ControlFlow> = None;
             loop {
                 if let Some(test_expr) = &for_stmt.test {
                     let cond_val = evaluate_expr(mc, &iter_loop_env, test_expr)?;
@@ -4982,13 +5095,10 @@ fn eval_res<'gc>(
                             }
                             break;
                         }
-                        // If break has label, check if it matches us? No, breaks targets are handled by Label stmt or loop.
-                        // But loops can be targets of breaks too if labeled.
-                        // However, Label stmt handles breaks. Loops only handle unlabeled breaks (implicit break of current loop).
-                        // If we have label, we pass it up to Label stmt.
-
-                        // Wait, if I have `L: while` and `break L`, the Label stmt handles it.
-                        // So loop just returns Break(L).
+                        if is_using_init {
+                            deferred_exit = Some(ControlFlow::Break(label));
+                            break;
+                        }
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
@@ -4999,13 +5109,29 @@ fn eval_res<'gc>(
                             if own_labels.contains(l) {
                                 // Match! Continue this loop.
                             } else {
+                                if is_using_init {
+                                    deferred_exit = Some(ControlFlow::Continue(label));
+                                    break;
+                                }
                                 return Ok(Some(ControlFlow::Continue(label)));
                             }
                         }
                         // Continue loop (either unlabeled or matched label)
                     }
-                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                    ControlFlow::Return(v) => {
+                        if is_using_init {
+                            deferred_exit = Some(ControlFlow::Return(v));
+                            break;
+                        }
+                        return Ok(Some(ControlFlow::Return(v)));
+                    }
+                    ControlFlow::Throw(v, l, c) => {
+                        if is_using_init {
+                            deferred_exit = Some(ControlFlow::Throw(v, l, c));
+                            break;
+                        }
+                        return Ok(Some(ControlFlow::Throw(v, l, c)));
+                    }
                 }
                 if needs_per_iteration_scope {
                     let next_iter_env = new_js_object_data(mc);
@@ -5027,6 +5153,30 @@ fn eval_res<'gc>(
                 if let Some(update_stmt) = &for_stmt.update {
                     evaluate_statements_with_context(mc, &iter_loop_env, std::slice::from_ref(update_stmt), labels)?;
                 }
+            }
+
+            // Dispose using resources when the for loop exits (spec step 9b)
+            if is_using_init {
+                let thrown_val = deferred_exit.as_ref().and_then(|cf| {
+                    if let ControlFlow::Throw(v, _, _) = cf {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
+                });
+                let dispose_result = dispose_resources_with_completion(mc, &loop_env, thrown_val);
+                // If disposal changed the error (combined with SuppressedError), update deferred_exit
+                if let Err(EvalError::Throw(val, line, col)) = dispose_result {
+                    if let Some(ControlFlow::Throw(_, orig_line, orig_col)) = &deferred_exit {
+                        deferred_exit = Some(ControlFlow::Throw(val, *orig_line, *orig_col));
+                    } else if deferred_exit.is_none() || !matches!(deferred_exit, Some(ControlFlow::Throw(..))) {
+                        deferred_exit = Some(ControlFlow::Throw(val, line, col));
+                    }
+                }
+            }
+
+            if let Some(cf) = deferred_exit {
+                return Ok(Some(cf));
             }
             Ok(None)
         }
@@ -5160,7 +5310,11 @@ fn eval_res<'gc>(
             // iterable expression is evaluated with this head env to ensure TDZ accesses
             // throw ReferenceError as per spec.
             let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
-            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+            if let Some(crate::core::VarDeclKind::Let)
+            | Some(crate::core::VarDeclKind::Const)
+            | Some(crate::core::VarDeclKind::Using)
+            | Some(crate::core::VarDeclKind::AwaitUsing) = decl_kind_opt
+            {
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
                 object_set_key_value(mc, &he, var_name, &Value::Uninitialized)?;
@@ -5252,15 +5406,47 @@ fn eval_res<'gc>(
                                     }
                                 }
                             }
-                            Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                            Some(crate::core::VarDeclKind::Let)
+                            | Some(crate::core::VarDeclKind::Const)
+                            | Some(crate::core::VarDeclKind::Using)
+                            | Some(crate::core::VarDeclKind::AwaitUsing) => {
                                 // create a fresh lexical env for each iteration
                                 let iter_env = new_js_object_data(mc);
                                 iter_env.borrow_mut(mc).prototype = Some(*env);
                                 object_set_key_value(mc, &iter_env, var_name, &value)?;
-                                if matches!(decl_kind_opt, Some(crate::core::VarDeclKind::Const)) {
+                                if matches!(
+                                    decl_kind_opt,
+                                    Some(crate::core::VarDeclKind::Const)
+                                        | Some(crate::core::VarDeclKind::Using)
+                                        | Some(crate::core::VarDeclKind::AwaitUsing)
+                                ) {
                                     iter_env.borrow_mut(mc).set_const(var_name.to_string());
                                 }
+                                // For using/await-using, register the resource for disposal
+                                if matches!(
+                                    decl_kind_opt,
+                                    Some(crate::core::VarDeclKind::Using) | Some(crate::core::VarDeclKind::AwaitUsing)
+                                ) {
+                                    let is_async = matches!(decl_kind_opt, Some(crate::core::VarDeclKind::AwaitUsing));
+                                    let _ = register_disposable_resource(mc, &iter_env, &value, is_async);
+                                }
                                 let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
+                                // Dispose resources at end of each iteration for using/await-using
+                                if matches!(
+                                    decl_kind_opt,
+                                    Some(crate::core::VarDeclKind::Using) | Some(crate::core::VarDeclKind::AwaitUsing)
+                                ) {
+                                    let thrown_val = if let ControlFlow::Throw(ref val, _, _) = res {
+                                        Some(val.clone())
+                                    } else {
+                                        None
+                                    };
+                                    let dispose_result = dispose_resources_with_completion(mc, &iter_env, thrown_val);
+                                    if let Err(EvalError::Throw(val, l, c)) = dispose_result {
+                                        let _ = iterator_close(mc, env, &iter_obj);
+                                        return Ok(Some(ControlFlow::Throw(val, l, c)));
+                                    }
+                                }
                                 match res {
                                     ControlFlow::Normal(_) => v = vbody.clone(),
                                     ControlFlow::Break(label) => {
@@ -5349,7 +5535,10 @@ fn eval_res<'gc>(
                                 ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                             }
                         }
-                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                        Some(crate::core::VarDeclKind::Let)
+                        | Some(crate::core::VarDeclKind::Const)
+                        | Some(crate::core::VarDeclKind::Using)
+                        | Some(crate::core::VarDeclKind::AwaitUsing) => {
                             let iter_env = new_js_object_data(mc);
                             iter_env.borrow_mut(mc).prototype = Some(*env);
                             object_set_key_value(mc, &iter_env, var_name, &val)?;
@@ -5399,7 +5588,11 @@ fn eval_res<'gc>(
             }
 
             let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
-            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+            if let Some(crate::core::VarDeclKind::Let)
+            | Some(crate::core::VarDeclKind::Const)
+            | Some(crate::core::VarDeclKind::Using)
+            | Some(crate::core::VarDeclKind::AwaitUsing) = decl_kind_opt
+            {
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
                 object_set_key_value(mc, &he, var_name, &Value::Uninitialized)?;
@@ -5522,14 +5715,45 @@ fn eval_res<'gc>(
                                     ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                                 }
                             }
-                            Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                            Some(crate::core::VarDeclKind::Let)
+                            | Some(crate::core::VarDeclKind::Const)
+                            | Some(crate::core::VarDeclKind::Using)
+                            | Some(crate::core::VarDeclKind::AwaitUsing) => {
                                 let iter_env = new_js_object_data(mc);
                                 iter_env.borrow_mut(mc).prototype = Some(*env);
                                 object_set_key_value(mc, &iter_env, var_name, &value)?;
-                                if matches!(decl_kind_opt, Some(crate::core::VarDeclKind::Const)) {
+                                if matches!(
+                                    decl_kind_opt,
+                                    Some(crate::core::VarDeclKind::Const)
+                                        | Some(crate::core::VarDeclKind::Using)
+                                        | Some(crate::core::VarDeclKind::AwaitUsing)
+                                ) {
                                     iter_env.borrow_mut(mc).set_const(var_name.to_string());
                                 }
+                                // For using/await-using, register the resource for disposal at end of each iteration
+                                if matches!(
+                                    decl_kind_opt,
+                                    Some(crate::core::VarDeclKind::Using) | Some(crate::core::VarDeclKind::AwaitUsing)
+                                ) {
+                                    let is_async = matches!(decl_kind_opt, Some(crate::core::VarDeclKind::AwaitUsing));
+                                    let _ = register_disposable_resource(mc, &iter_env, &value, is_async);
+                                }
                                 let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
+                                // Dispose resources at end of each iteration for using/await-using
+                                if matches!(
+                                    decl_kind_opt,
+                                    Some(crate::core::VarDeclKind::Using) | Some(crate::core::VarDeclKind::AwaitUsing)
+                                ) {
+                                    let thrown_val = if let ControlFlow::Throw(ref val, _, _) = res {
+                                        Some(val.clone())
+                                    } else {
+                                        None
+                                    };
+                                    let dispose_result = dispose_resources_with_completion(mc, &iter_env, thrown_val);
+                                    if let Err(EvalError::Throw(val, l, c)) = dispose_result {
+                                        return Ok(Some(ControlFlow::Throw(val, l, c)));
+                                    }
+                                }
                                 match res {
                                     ControlFlow::Normal(_) => v = vbody.clone(),
                                     ControlFlow::Break(label) => {
@@ -5847,7 +6071,11 @@ fn eval_res<'gc>(
             // TDZ binding for the loop variable so that iterable evaluation will see the
             // binding as uninitialized and throw ReferenceError on access.
             let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
-            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind {
+            if let Some(crate::core::VarDeclKind::Let)
+            | Some(crate::core::VarDeclKind::Const)
+            | Some(crate::core::VarDeclKind::Using)
+            | Some(crate::core::VarDeclKind::AwaitUsing) = decl_kind
+            {
                 let he = new_js_object_data(mc);
                 he.borrow_mut(mc).prototype = Some(*env);
                 object_set_key_value(mc, &he, var_name, &Value::Uninitialized)?;
@@ -6029,7 +6257,10 @@ fn eval_res<'gc>(
                     }
                     // `let` / `const` declaration: create a fresh lexical environment for
                     // each iteration so closures capture a distinct binding per iteration.
-                    Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                    Some(crate::core::VarDeclKind::Let)
+                    | Some(crate::core::VarDeclKind::Const)
+                    | Some(crate::core::VarDeclKind::Using)
+                    | Some(crate::core::VarDeclKind::AwaitUsing) => {
                         for k in &keys {
                             // Skip keys that were deleted (or otherwise no longer exist)
                             let mut key_present = obj_is_proxy;
@@ -11781,6 +12012,27 @@ fn handle_eval_function<'gc>(
             .any(|s| matches!(&*s.kind, StatementKind::Import(..) | StatementKind::Export(..)))
         {
             let msg = "Import/Export declarations may not appear in eval code";
+            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+            let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
+                v.borrow().clone()
+            } else {
+                return Err(EvalError::Js(raise_syntax_error!(msg)));
+            };
+            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+                Ok(crate::core::Value::Object(obj)) => return Err(EvalError::Throw(crate::core::Value::Object(obj), None, None)),
+                Ok(other) => return Err(EvalError::Throw(other, None, None)),
+                Err(_) => return Err(EvalError::Js(raise_syntax_error!(msg))),
+            }
+        }
+
+        // Early error: using/await using declarations are not allowed at the
+        // top level of a Script (eval always parses as Script).  They must
+        // appear inside a Block, ForStatement, or similar construct.
+        if statements
+            .iter()
+            .any(|s| matches!(&*s.kind, StatementKind::Using(..) | StatementKind::AwaitUsing(..)))
+        {
+            let msg = "using declarations may not appear at the top level of eval code";
             let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
@@ -19540,6 +19792,54 @@ pub fn call_native_function<'gc>(
         return Ok(Some(this_v));
     }
 
+    // %AsyncIteratorPrototype% [ @@asyncDispose ] ( )
+    // Returns a Promise that, when fulfilled, calls this.return() if present.
+    if name == "AsyncIteratorPrototype.asyncDispose" {
+        let this_v = this_val.cloned().unwrap_or(Value::Undefined);
+        // Try to call this.return()
+        let return_result = if let Value::Object(obj) = &this_v {
+            let return_method = get_property_with_accessors(mc, env, obj, "return")?;
+            if !matches!(return_method, Value::Undefined | Value::Null) {
+                Some(evaluate_call_dispatch(mc, env, &return_method, Some(&this_v), &[Value::Undefined])?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // Wrap result in a resolved Promise
+        if let Some(promise_ctor) = env_get(env, "Promise")
+            && let Value::Object(promise_obj) = &*promise_ctor.borrow()
+        {
+            let resolve_fn = get_property_with_accessors(mc, env, promise_obj, "resolve")?;
+            if !matches!(resolve_fn, Value::Undefined | Value::Null) {
+                let resolve_val = return_result.unwrap_or(Value::Undefined);
+                let promise = evaluate_call_dispatch(mc, env, &resolve_fn, Some(&promise_ctor.borrow().clone()), &[resolve_val])?;
+                // Chain .then(()=>undefined) to unwrap the result
+                if let Value::Object(p_obj) = &promise {
+                    let then_fn = get_property_with_accessors(mc, env, p_obj, "then")?;
+                    if !matches!(then_fn, Value::Undefined | Value::Null) {
+                        // Create a closure that returns undefined
+                        let unwrap_fn = new_js_object_data(mc);
+                        unwrap_fn
+                            .borrow_mut(mc)
+                            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("__asyncDispose_unwrap".to_string()))));
+                        slot_set(mc, &unwrap_fn, InternalSlot::Callable, &Value::Boolean(true));
+                        let result = evaluate_call_dispatch(mc, env, &then_fn, Some(&promise), &[Value::Object(unwrap_fn)])?;
+                        return Ok(Some(result));
+                    }
+                }
+                return Ok(Some(promise));
+            }
+        }
+        // Fallback: just return undefined
+        return Ok(Some(Value::Undefined));
+    }
+
+    if name == "__asyncDispose_unwrap" {
+        return Ok(Some(Value::Undefined));
+    }
+
     if name == "call" || name == "Function.prototype.call" {
         let this = this_val.ok_or_else(|| EvalError::Js(raise_eval_error!("Cannot call call without this")))?;
         let new_this = args.first().unwrap_or(&Value::Undefined);
@@ -19878,6 +20178,21 @@ pub fn call_native_function<'gc>(
     }
     if name == "IteratorSelf" {
         return Ok(Some(this_val.unwrap_or(&Value::Undefined).clone()));
+    }
+    // %IteratorPrototype% [ @@dispose ] ( )
+    // 1. Let O be the this value.
+    // 2. Let return be ? GetMethod(O, "return").
+    // 3. If return is not undefined, then a. Perform ? Call(return, O, « »).
+    // 4. Return undefined.
+    if name == "IteratorPrototype.dispose" {
+        let this_v = this_val.cloned().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = &this_v {
+            let return_method = get_property_with_accessors(mc, env, obj, "return")?;
+            if !matches!(return_method, Value::Undefined | Value::Null) {
+                evaluate_call_dispatch(mc, env, &return_method, Some(&this_v), &[])?;
+            }
+        }
+        return Ok(Some(Value::Undefined));
     }
     // --- Iterator Helpers dispatch ---
     if let Some(result) = crate::js_iterator_helpers::handle_iterator_helper_dispatch(mc, name, this_val, args, env)? {
@@ -21192,10 +21507,53 @@ pub fn call_closure<'gc>(
     }
     let body_clone = cl.body.clone();
     // Use the lower-level evaluator to distinguish an explicit `return`
-    match evaluate_statements_with_labels(mc, &var_env, &body_clone, &[], &[])? {
-        ControlFlow::Return(val) => Ok(val),
-        ControlFlow::Normal(_) => Ok(Value::Undefined),
-        ControlFlow::Throw(v, line, column) => Err(EvalError::Throw(v, line, column)),
+    let body_result = evaluate_statements_with_labels(mc, &var_env, &body_clone, &[], &[]);
+
+    // Dispose resources registered by `using` declarations in this function body.
+    // Per spec: FunctionBody → DisposeResources(env.[[DisposeCapability]], result)
+    let (cf, body_thrown) = match body_result {
+        Ok(cf) => {
+            let thrown = if let ControlFlow::Throw(ref val, _, _) = cf {
+                Some(val.clone())
+            } else {
+                None
+            };
+            (cf, thrown)
+        }
+        Err(EvalError::Throw(val, line, col)) => (ControlFlow::Throw(val.clone(), line, col), Some(val)),
+        Err(EvalError::Js(js_err)) => {
+            let val = js_error_to_value(mc, &var_env, &js_err);
+            (
+                ControlFlow::Throw(val.clone(), js_err.inner.js_line, js_err.inner.js_column),
+                Some(val),
+            )
+        }
+    };
+
+    let dispose_result = dispose_resources_with_completion(mc, &var_env, body_thrown);
+
+    match cf {
+        ControlFlow::Return(val) => {
+            if let Err(e) = dispose_result {
+                return Err(e);
+            }
+            Ok(val)
+        }
+        ControlFlow::Normal(_) => {
+            if let Err(e) = dispose_result {
+                return Err(e);
+            }
+            Ok(Value::Undefined)
+        }
+        ControlFlow::Throw(_, line, col) => {
+            // Block throw + dispose errors combined in dispose_result.
+            // Preserve the original throw's line/column.
+            dispose_result.map_err(|e| match e {
+                EvalError::Throw(val, _, _) => EvalError::Throw(val, line, col),
+                other => other,
+            })?;
+            Ok(Value::Undefined) // unreachable when body threw
+        }
         ControlFlow::Break(_) => Err(raise_syntax_error!("break statement not in loop or switch").into()),
         ControlFlow::Continue(_) => Err(raise_syntax_error!("continue statement not in loop").into()),
     }
@@ -23429,9 +23787,34 @@ fn body_has_lexical(stmts: &[Statement]) -> bool {
 // Explicit Resource Management helpers
 // ---------------------------------------------------------------------------
 
+/// Check if a value is callable (function, closure, or object with closure/Callable slot).
+fn resource_is_callable<'gc>(val: &Value<'gc>) -> bool {
+    match val {
+        Value::Closure(_)
+        | Value::AsyncClosure(_)
+        | Value::GeneratorFunction(_, _)
+        | Value::AsyncGeneratorFunction(_, _)
+        | Value::Function(_) => true,
+        Value::Object(obj) => {
+            let has_closure = if let Ok(b) = obj.try_borrow() {
+                b.get_closure().is_some()
+            } else {
+                false
+            };
+            has_closure
+                || slot_get_chained(obj, &InternalSlot::Callable).is_some()
+                || slot_get_chained(obj, &InternalSlot::Function).is_some()
+                || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
+        }
+        _ => false,
+    }
+}
+
 /// Register a value for disposal when the enclosing block exits.
-/// Stores `(value, is_async)` pairs in the `DisposableResources` slot of `env`.
-/// If the value is `null` or `undefined`, it is silently skipped.
+/// Stores `(value, is_async, cached_method)` in the `DisposableResources` slot of `env`.
+/// If the value is `null` or `undefined`, it is silently skipped (per spec).
+/// If the value is not an object, throws TypeError.
+/// If the value doesn't have a callable [Symbol.dispose]/[Symbol.asyncDispose], throws TypeError.
 fn register_disposable_resource<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -23441,6 +23824,88 @@ fn register_disposable_resource<'gc>(
     // null / undefined are allowed — they are silently ignored per spec
     if matches!(val, Value::Undefined | Value::Null) {
         return Ok(());
+    }
+
+    // Per spec: If V is not an Object, throw a TypeError exception.
+    if !matches!(val, Value::Object(_)) {
+        return Err(raise_type_error!("Resource must be an object or null/undefined").into());
+    }
+
+    // Look up the dispose method and validate it's callable.
+    // For async: try Symbol.asyncDispose first, fall back to Symbol.dispose.
+    // For sync: only Symbol.dispose.
+    let sym_ctor = env_get(env, "Symbol").ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol not found").into() })?;
+    let sym_obj = match &*sym_ctor.borrow() {
+        Value::Object(o) => *o,
+        _ => return Err(raise_type_error!("Symbol is not an object").into()),
+    };
+
+    let mut dispose_method;
+    let actual_is_async;
+
+    if is_async {
+        // Try Symbol.asyncDispose first
+        let mut found = false;
+        if let Some(async_dispose_sym_cell) = object_get_key_value(&sym_obj, "asyncDispose")
+            && let Value::Symbol(sym_data) = &*async_dispose_sym_cell.borrow()
+        {
+            let m = match val {
+                Value::Object(obj) => get_property_with_accessors(mc, env, obj, sym_data)?,
+                _ => Value::Undefined,
+            };
+            if !matches!(m, Value::Undefined | Value::Null) {
+                dispose_method = m;
+                actual_is_async = true;
+                found = true;
+            } else {
+                // fall through to Symbol.dispose
+                dispose_method = Value::Undefined;
+                actual_is_async = false;
+            }
+        } else {
+            dispose_method = Value::Undefined;
+            actual_is_async = false;
+        }
+
+        if !found {
+            // Fall back to Symbol.dispose
+            let dispose_sym_cell = object_get_key_value(&sym_obj, "dispose")
+                .ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol.dispose not found").into() })?;
+            if let Value::Symbol(sym_data) = &*dispose_sym_cell.borrow() {
+                let m = match val {
+                    Value::Object(obj) => get_property_with_accessors(mc, env, obj, sym_data)?,
+                    _ => Value::Undefined,
+                };
+                if matches!(m, Value::Undefined | Value::Null) {
+                    return Err(raise_type_error!("Resource does not have a [Symbol.dispose]() method").into());
+                }
+                dispose_method = m;
+            } else {
+                return Err(raise_type_error!("Symbol.dispose is not a symbol").into());
+            }
+        }
+    } else {
+        // Sync disposal: only Symbol.dispose
+        let dispose_sym_cell = object_get_key_value(&sym_obj, "dispose")
+            .ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol.dispose not found").into() })?;
+        if let Value::Symbol(sym_data) = &*dispose_sym_cell.borrow() {
+            let m = match val {
+                Value::Object(obj) => get_property_with_accessors(mc, env, obj, sym_data)?,
+                _ => Value::Undefined,
+            };
+            if matches!(m, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Resource does not have a [Symbol.dispose]() method").into());
+            }
+            dispose_method = m;
+        } else {
+            return Err(raise_type_error!("Symbol.dispose is not a symbol").into());
+        }
+        actual_is_async = false;
+    }
+
+    // Verify the dispose method is actually callable
+    if !matches!(dispose_method, Value::Undefined | Value::Null) && !resource_is_callable(&dispose_method) {
+        return Err(raise_type_error!("Property [Symbol.dispose] is not a function").into());
     }
 
     // Grab or create the disposable-resources list on this env
@@ -23458,10 +23923,12 @@ fn register_disposable_resource<'gc>(
         arr
     };
 
-    // Each disposable resource entry: small object { __value, __is_async }
+    // Each disposable resource entry: { __value, __is_async, __dispose_method }
     let entry = new_js_object_data(mc);
     slot_set(mc, &entry, InternalSlot::PrimitiveValue, val);
-    if is_async {
+    // Cache the dispose method so it's resolved at registration time
+    object_set_key_value(mc, &entry, "__dispose_method", &dispose_method)?;
+    if is_async || actual_is_async {
         object_set_key_value(mc, &entry, "__is_async_dispose", &Value::Boolean(true))?;
     }
 
@@ -23476,24 +23943,49 @@ fn register_disposable_resource<'gc>(
 /// Dispose all resources registered in the given environment.
 /// Called on block exit.  Resources are disposed in reverse order.
 /// If multiple dispose calls throw, errors are combined using SuppressedError.
+/// `initial_error` is the block's completion error (if the block threw), which
+/// will be combined with disposal errors per the DisposeResources spec algorithm.
+#[allow(dead_code)]
 pub fn dispose_resources<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
+    dispose_resources_with_completion(mc, env, None)
+}
+
+/// Dispose resources, optionally combining with an initial completion error.
+pub fn dispose_resources_with_completion<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    initial_error: Option<Value<'gc>>,
+) -> Result<(), EvalError<'gc>> {
     let list = match slot_get(env, &InternalSlot::DisposableResources) {
         Some(cell) => {
             if let Value::Object(arr) = &*cell.borrow() {
                 *arr
             } else {
+                if let Some(err) = initial_error {
+                    return Err(EvalError::Throw(err, None, None));
+                }
                 return Ok(());
             }
         }
-        None => return Ok(()),
+        None => {
+            if let Some(err) = initial_error {
+                return Err(EvalError::Throw(err, None, None));
+            }
+            return Ok(());
+        }
     };
 
     let len = object_get_length(&list).unwrap_or(0);
     if len == 0 {
+        // Clear the slot
+        slot_remove(mc, env, &InternalSlot::DisposableResources);
+        if let Some(err) = initial_error {
+            return Err(EvalError::Throw(err, None, None));
+        }
         return Ok(());
     }
 
-    let mut completion_error: Option<Value<'gc>> = None;
+    let mut completion_error: Option<Value<'gc>> = initial_error;
 
     // Dispose in reverse order (LIFO)
     for i in (0..len).rev() {
@@ -23513,12 +24005,23 @@ pub fn dispose_resources<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             None => continue,
         };
 
+        // Use cached dispose method if available
+        let cached_method = object_get_key_value(&entry, "__dispose_method")
+            .map(|c| c.borrow().clone())
+            .unwrap_or(Value::Undefined);
+
         let is_async_dispose = object_get_key_value(&entry, "__is_async_dispose")
             .map(|c| matches!(&*c.borrow(), Value::Boolean(true)))
             .unwrap_or(false);
 
-        // Look up the dispose method
-        let dispose_result = call_dispose_method(mc, env, &resource_val, is_async_dispose);
+        let dispose_result = if !matches!(cached_method, Value::Undefined | Value::Null) {
+            // Call the cached method directly
+            evaluate_call_dispatch(mc, env, &cached_method, Some(&resource_val), &[])
+        } else {
+            // Fallback to dynamic lookup (for resources registered without caching, e.g. DisposableStack)
+            call_dispose_method(mc, env, &resource_val, is_async_dispose)
+        };
+
         match dispose_result {
             Ok(_) => {}
             Err(e) => {
@@ -23691,24 +24194,22 @@ pub fn create_suppressed_error_value<'gc>(
     error: &Value<'gc>,
     suppressed: &Value<'gc>,
 ) -> Value<'gc> {
-    // Try to use the proper SuppressedError constructor
-    if let Some(se_ctor) = env_get(env, "SuppressedError") {
-        let result = evaluate_call_dispatch(
-            mc,
-            env,
-            &se_ctor.borrow().clone(),
-            None,
-            &[error.clone(), suppressed.clone(), Value::String(utf8_to_utf16(""))],
-        );
-        if let Ok(val) = result {
-            return val;
+    // Use create_suppressed_error directly to ensure correct property ordering
+    match crate::core::js_error::create_suppressed_error(
+        mc,
+        env,
+        None,
+        error.clone(),
+        suppressed.clone(),
+        None, // no message
+    ) {
+        Ok(val) => val,
+        Err(_) => {
+            // Fallback: create a simple error object
+            let obj = new_js_object_data(mc);
+            let _ = object_set_key_value(mc, &obj, "error", error);
+            let _ = object_set_key_value(mc, &obj, "suppressed", suppressed);
+            Value::Object(obj)
         }
     }
-
-    // Fallback: create a simple error object
-    let obj = new_js_object_data(mc);
-    let _ = object_set_key_value(mc, &obj, "error", error);
-    let _ = object_set_key_value(mc, &obj, "suppressed", suppressed);
-    let _ = object_set_key_value(mc, &obj, "message", &Value::String(utf8_to_utf16("")));
-    Value::Object(obj)
 }

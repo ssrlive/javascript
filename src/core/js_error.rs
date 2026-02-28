@@ -257,6 +257,7 @@ fn initialize_suppressed_error<'gc>(
 }
 
 /// Create a SuppressedError instance: new SuppressedError(error, suppressed, message)
+/// Per spec, own properties must appear in order: message, error, suppressed.
 pub fn create_suppressed_error<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -291,19 +292,42 @@ pub fn create_suppressed_error<'gc>(
         None
     };
 
-    let err_obj_val = create_error(mc, proto, message_value).map_err(EvalError::from)?;
-    let err_obj = match &err_obj_val {
-        Value::Object(o) => *o,
-        _ => return Ok(err_obj_val),
+    // Build the error object manually to ensure correct property order:
+    // message, error, suppressed  (then stack, constructor).
+    let err_obj = new_js_object_data(mc);
+    err_obj.borrow_mut(mc).prototype = proto;
+
+    // 1. message — only set if not undefined
+    let msg_str = match &message_value {
+        Value::Undefined => String::new(),
+        Value::String(s) => {
+            object_set_key_value(mc, &err_obj, "message", &Value::String(s.clone())).map_err(EvalError::from)?;
+            err_obj.borrow_mut(mc).set_non_enumerable("message");
+            utf16_to_utf8(s)
+        }
+        other => {
+            let s = utf8_to_utf16(&value_to_string(other));
+            object_set_key_value(mc, &err_obj, "message", &Value::String(s.clone())).map_err(EvalError::from)?;
+            err_obj.borrow_mut(mc).set_non_enumerable("message");
+            utf16_to_utf8(&s)
+        }
     };
 
-    // Set .error property (writable, enumerable, configurable — per spec non-enumerable actually)
+    // 2. error
     object_set_key_value(mc, &err_obj, "error", &error).map_err(EvalError::from)?;
     err_obj.borrow_mut(mc).set_non_enumerable("error");
 
-    // Set .suppressed property
+    // 3. suppressed
     object_set_key_value(mc, &err_obj, "suppressed", &suppressed).map_err(EvalError::from)?;
     err_obj.borrow_mut(mc).set_non_enumerable("suppressed");
+
+    // 4. stack (implementation-defined, after the spec-required properties)
+    let stack_str = format!("SuppressedError: {msg_str}");
+    object_set_key_value(mc, &err_obj, "stack", &Value::String(utf8_to_utf16(&stack_str))).map_err(EvalError::from)?;
+    err_obj.borrow_mut(mc).set_non_enumerable("stack");
+
+    // Internal marker
+    slot_set(mc, &err_obj, InternalSlot::IsError, &Value::Boolean(true));
 
     Ok(Value::Object(err_obj))
 }

@@ -205,11 +205,11 @@ pub fn initialize_async_disposable_stack<'gc>(mc: &MutationContext<'gc>, env: &J
     object_set_key_value(mc, &ctor, "length", &Value::Number(0.0))?;
     ctor.borrow_mut(mc).set_non_enumerable("length");
     ctor.borrow_mut(mc).set_non_writable("length");
-    ctor.borrow_mut(mc).set_non_configurable("length");
+    // length is configurable per spec
     object_set_key_value(mc, &ctor, "name", &Value::String(utf8_to_utf16("AsyncDisposableStack")))?;
     ctor.borrow_mut(mc).set_non_enumerable("name");
     ctor.borrow_mut(mc).set_non_writable("name");
-    ctor.borrow_mut(mc).set_non_configurable("name");
+    // name is configurable per spec
 
     if let Some(func_val) = object_get_key_value(env, "Function")
         && let Value::Object(func_ctor) = &*func_val.borrow()
@@ -241,15 +241,22 @@ pub fn initialize_async_disposable_stack<'gc>(mc: &MutationContext<'gc>, env: &J
     object_set_key_value(mc, &proto, "constructor", &Value::Object(ctor))?;
     proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    for method in &["use", "adopt", "defer", "disposeAsync", "move"] {
+    let mut dispose_async_fn_obj = None;
+    for &(method, arity) in &[("use", 1), ("adopt", 2), ("defer", 1), ("disposeAsync", 0), ("move", 0)] {
         let fn_name = format!("AsyncDisposableStack.prototype.{}", method);
-        object_set_key_value(mc, &proto, *method, &Value::Function(fn_name))?;
-        proto.borrow_mut(mc).set_non_enumerable(*method);
+        let fn_obj = create_builtin_method(mc, env, &fn_name, arity, method)?;
+        if method == "disposeAsync" {
+            dispose_async_fn_obj = Some(fn_obj);
+        }
+        object_set_key_value(mc, &proto, method, &Value::Object(fn_obj))?;
+        proto.borrow_mut(mc).set_non_enumerable(method);
     }
 
+    // `disposed` accessor — getter must be a proper function with name "get disposed"
+    let disposed_getter = create_builtin_method(mc, env, "AsyncDisposableStack.prototype.disposed", 0, "get disposed")?;
     let disposed_prop = Value::Property {
         value: None,
-        getter: Some(Box::new(Value::Function("AsyncDisposableStack.prototype.disposed".into()))),
+        getter: Some(Box::new(Value::Object(disposed_getter))),
         setter: None,
     };
     object_set_key_value(mc, &proto, "disposed", &disposed_prop)?;
@@ -260,14 +267,9 @@ pub fn initialize_async_disposable_stack<'gc>(mc: &MutationContext<'gc>, env: &J
     {
         if let Some(dispose_sym) = object_get_key_value(sym_obj, "asyncDispose")
             && let Value::Symbol(s) = &*dispose_sym.borrow()
+            && let Some(da_fn) = dispose_async_fn_obj
         {
-            let desc = crate::core::create_descriptor_object(
-                mc,
-                &Value::Function("AsyncDisposableStack.prototype.disposeAsync".into()),
-                true,
-                false,
-                true,
-            )?;
+            let desc = crate::core::create_descriptor_object(mc, &Value::Object(da_fn), true, false, true)?;
             crate::js_object::define_property_internal(mc, &proto, PropertyKey::Symbol(*s), &desc)?;
         }
         if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")

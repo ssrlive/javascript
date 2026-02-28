@@ -1933,14 +1933,14 @@ pub fn handle_dataview_constructor<'gc>(
     }
 
     // Step 10-13: Compute viewByteLength
-    let byte_length = if args.len() > 2 && !matches!(args[2], Value::Undefined) {
+    let (byte_length, dv_length_tracking) = if args.len() > 2 && !matches!(args[2], Value::Undefined) {
         let len = to_index(&args[2])?;
         if byte_offset + len > buffer_byte_length {
             return Err(raise_range_error!("Invalid DataView length").into());
         }
-        len
+        (len, false)
     } else {
-        buffer_byte_length - byte_offset
+        (buffer_byte_length - byte_offset, buffer.borrow().max_byte_length.is_some())
     };
 
     // Create the DataView object
@@ -1969,6 +1969,23 @@ pub fn handle_dataview_constructor<'gc>(
         return Err(raise_type_error!("Cannot construct DataView on a detached ArrayBuffer").into());
     }
 
+    // Spec step 13-14: Re-check buffer bounds after GetPrototypeFromConstructor
+    // (prototype access could have resized the buffer)
+    let buffer_byte_length2 = buffer.borrow().data.lock().unwrap().len();
+    let byte_length = if dv_length_tracking {
+        // Auto-length: recompute from current buffer size
+        if byte_offset > buffer_byte_length2 {
+            return Err(raise_range_error!("Start offset is outside the bounds of the buffer").into());
+        }
+        buffer_byte_length2 - byte_offset
+    } else {
+        // Fixed-length: check that offset + byteLength still fits
+        if byte_offset + byte_length > buffer_byte_length2 {
+            return Err(raise_range_error!("Invalid DataView length").into());
+        }
+        byte_length
+    };
+
     // Create DataView internal data
     let data_view = Gc::new(
         mc,
@@ -1976,6 +1993,7 @@ pub fn handle_dataview_constructor<'gc>(
             buffer,
             byte_offset,
             byte_length,
+            length_tracking: dv_length_tracking,
         },
     );
 
@@ -2268,15 +2286,23 @@ pub fn handle_typedarray_constructor<'gc>(
                         }
                         new_length
                     } else {
-                        // No length: derive from buffer
-                        if (buf_byte_len - offset) % element_size != 0 {
-                            return Err(throw_range_error(
-                                mc,
-                                env,
-                                "Byte length of buffer minus offset is not a multiple of the element size",
-                            ));
+                        // No explicit length: derive from buffer
+                        if ab.borrow().max_byte_length.is_some() {
+                            // Resizable buffer with auto-length: per spec step 20,
+                            // no byte alignment check. Length computed dynamically as
+                            // floor((bufferByteLength - offset) / elementSize).
+                            (buf_byte_len - offset) / element_size
+                        } else {
+                            // Fixed-size buffer: require exact alignment
+                            if (buf_byte_len - offset) % element_size != 0 {
+                                return Err(throw_range_error(
+                                    mc,
+                                    env,
+                                    "Byte length of buffer minus offset is not a multiple of the element size",
+                                ));
+                            }
+                            (buf_byte_len - offset) / element_size
                         }
-                        (buf_byte_len - offset) / element_size
                     };
 
                     buffer_obj_opt = Some(*first_obj);
@@ -2494,6 +2520,19 @@ pub fn handle_dataview_method<'gc>(
         if data_view_rc.buffer.borrow().detached {
             return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
         }
+        // IsViewOutOfBounds check for resizable buffers
+        let buf_len = data_view_rc.buffer.borrow().data.lock().unwrap().len();
+        if data_view_rc.length_tracking {
+            // Auto-length DataView: OOB when byte_offset > buffer length
+            if data_view_rc.byte_offset > buf_len {
+                return Err(raise_type_error!("DataView is out of bounds").into());
+            }
+        } else {
+            // Fixed-length DataView: OOB when byte_offset + byte_length > buffer length
+            if data_view_rc.byte_offset + data_view_rc.byte_length > buf_len {
+                return Err(raise_type_error!("DataView is out of bounds").into());
+            }
+        }
     }
 
     // ToIndex helper (spec 7.1.22) — uses ToNumber with valueOf support
@@ -2557,10 +2596,19 @@ pub fn handle_dataview_method<'gc>(
     // Map JSError from check_bounds to EvalError with RangeError
     let bounds_err = |_e: JSError| -> EvalError<'gc> { raise_range_error!("Offset is outside the bounds of the DataView").into() };
 
-    // Check for detached buffer — must be called after argument coercion per spec ordering
+    // Check for detached buffer and OOB — must be called after argument coercion per spec ordering
     let check_detached = || -> Result<(), EvalError<'gc>> {
         if data_view_rc.buffer.borrow().detached {
             return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
+        }
+        // IsViewOutOfBounds check for resizable buffers
+        let buf_len = data_view_rc.buffer.borrow().data.lock().unwrap().len();
+        if data_view_rc.length_tracking {
+            if data_view_rc.byte_offset > buf_len {
+                return Err(raise_type_error!("DataView is out of bounds").into());
+            }
+        } else if data_view_rc.byte_offset + data_view_rc.byte_length > buf_len {
+            return Err(raise_type_error!("DataView is out of bounds").into());
         }
         Ok(())
     };
@@ -2736,7 +2784,14 @@ pub fn handle_dataview_method<'gc>(
                 Ok(Value::ArrayBuffer(data_view_rc.buffer))
             }
         }
-        "byteLength" => Ok(Value::Number(data_view_rc.byte_length as f64)),
+        "byteLength" => {
+            if data_view_rc.length_tracking {
+                let buf_len = data_view_rc.buffer.borrow().data.lock().unwrap().len();
+                Ok(Value::Number((buf_len - data_view_rc.byte_offset) as f64))
+            } else {
+                Ok(Value::Number(data_view_rc.byte_length as f64))
+            }
+        }
         "byteOffset" => Ok(Value::Number(data_view_rc.byte_offset as f64)),
         _ => Err(raise_type_error!(format!("DataView method '{method}' not implemented")).into()),
     }
@@ -2744,14 +2799,22 @@ pub fn handle_dataview_method<'gc>(
 
 impl<'gc> JSDataView<'gc> {
     fn check_bounds(&self, offset: usize, size: usize) -> Result<usize, JSError> {
-        // Per spec: check against the DataView's own byte_length, not the full buffer
-        if offset + size > self.byte_length {
+        let buffer = self.buffer.borrow();
+        let buffer_len = buffer.data.lock().unwrap().len();
+        // Compute effective byte length: for length-tracking views, use current buffer size
+        let effective_byte_length = if self.length_tracking {
+            if self.byte_offset > buffer_len {
+                return Err(raise_range_error!("Offset is outside the bounds of the DataView"));
+            }
+            buffer_len - self.byte_offset
+        } else {
+            self.byte_length
+        };
+        if offset + size > effective_byte_length {
             return Err(raise_range_error!("Offset is outside the bounds of the DataView"));
         }
         let start = self.byte_offset + offset;
         let end = start + size;
-        let buffer = self.buffer.borrow();
-        let buffer_len = buffer.data.lock().unwrap().len();
         if end > buffer_len {
             return Err(raise_range_error!("Offset is outside the bounds of the DataView"));
         }
@@ -3009,6 +3072,26 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
         }
     }
 
+    /// Check if a usize index is valid for this TypedArray.
+    /// Returns false if the TA is OOB (fixed-length after buffer shrink) or index >= current length.
+    pub fn is_valid_integer_index(&self, idx: usize) -> bool {
+        let buf_len = self.buffer.borrow().data.lock().unwrap().len();
+        if self.length_tracking {
+            if buf_len <= self.byte_offset {
+                return false; // byte_offset exceeds buffer
+            }
+            let cur_len = (buf_len - self.byte_offset) / self.element_size();
+            idx < cur_len
+        } else {
+            // Fixed-length: check if the whole TA is still in-bounds
+            let needed = self.byte_offset + self.length * self.element_size();
+            if needed > buf_len {
+                return false; // TA is OOB
+            }
+            idx < self.length
+        }
+    }
+
     pub fn get(&self, idx: usize) -> Result<f64, crate::error::JSError> {
         let size = self.element_size();
         let byte_offset = self.byte_offset + idx * size;
@@ -3079,6 +3162,10 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
     }
 
     pub fn set(&self, mc: &crate::core::MutationContext<'gc>, idx: usize, val: f64) -> Result<(), crate::error::JSError> {
+        // Per spec IntegerIndexedElementSet: if not IsValidIntegerIndex, silently return.
+        if !self.is_valid_integer_index(idx) {
+            return Ok(());
+        }
         let size = self.element_size();
         let byte_offset = self.byte_offset + idx * size;
         let buffer = self.buffer.borrow_mut(mc);
@@ -3163,6 +3250,10 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
     /// Set a BigInt value directly using i64 (no f64 intermediary).
     /// This avoids precision loss for large BigInt values.
     pub fn set_bigint(&self, mc: &crate::core::MutationContext<'gc>, idx: usize, val: i64) -> Result<(), crate::error::JSError> {
+        // Per spec IntegerIndexedElementSet: if not IsValidIntegerIndex, silently return.
+        if !self.is_valid_integer_index(idx) {
+            return Ok(());
+        }
         let size = self.element_size();
         let byte_offset = self.byte_offset + idx * size;
         let buffer = self.buffer.borrow_mut(mc);
@@ -3829,13 +3920,34 @@ fn typed_array_species_create<'gc>(
         if slot_get_chained(&new_obj, &InternalSlot::TypedArray).is_none() {
             return Err(raise_type_error!("TypedArray species constructor did not return a TypedArray").into());
         }
-        // Step 3: If argumentList is a List of a single Number, then
-        //   a. If newTypedArray.[[ArrayLength]] < argumentList[0], throw TypeError.
+        // Steps 2-5: Check IsTypedArrayOutOfBounds and compare current length
         if let Some(ta_cell) = slot_get_chained(&new_obj, &InternalSlot::TypedArray)
             && let Value::TypedArray(rta) = &*ta_cell.borrow()
-            && rta.length < length
         {
-            return Err(raise_type_error!("TypedArray species constructor returned a TypedArray that is too small").into());
+            // Check detached
+            if rta.buffer.borrow().detached {
+                return Err(raise_type_error!("TypedArray species constructor returned a detached TypedArray").into());
+            }
+            // Check OOB
+            let buf_len = rta.buffer.borrow().data.lock().unwrap().len();
+            let oob = if rta.length_tracking {
+                rta.byte_offset > buf_len
+            } else {
+                rta.byte_offset + rta.length * rta.element_size() > buf_len
+            };
+            if oob {
+                return Err(raise_type_error!("TypedArray species constructor returned an out-of-bounds TypedArray").into());
+            }
+            // Compute current length (TypedArrayLength)
+            let current_len = if rta.length_tracking {
+                buf_len.saturating_sub(rta.byte_offset) / rta.element_size()
+            } else {
+                rta.length
+            };
+            // Step 5: If newLength < requested length, throw TypeError
+            if current_len < length {
+                return Err(raise_type_error!("TypedArray species constructor returned a TypedArray that is too small").into());
+            }
         }
         Ok(new_obj)
     } else {
@@ -3941,6 +4053,18 @@ pub fn handle_typedarray_accessor<'gc>(
                 "byteOffset" => {
                     if is_detached {
                         return Ok(Value::Number(0.0));
+                    }
+                    // Per spec: if IsTypedArrayOutOfBounds, return 0
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    if ta.length_tracking {
+                        if ta.byte_offset > buf_len {
+                            return Ok(Value::Number(0.0));
+                        }
+                    } else {
+                        let needed = ta.byte_offset + ta.length * ta.element_size();
+                        if needed > buf_len {
+                            return Ok(Value::Number(0.0));
+                        }
                     }
                     Ok(Value::Number(ta.byte_offset as f64))
                 }
@@ -4397,27 +4521,65 @@ pub fn handle_typedarray_method<'gc>(
             let ta = *_ta;
             let is_bigint = is_bigint_typed_array(&ta.kind);
 
-            // ValidateTypedArray: check if buffer is detached
+            // ValidateTypedArray: check if buffer is detached or out-of-bounds
             // Per spec, subarray does NOT call ValidateTypedArray (it coerces args
             // first, then the species constructor checks detached).
-            if method != "subarray" && ta.buffer.borrow().detached {
-                return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
+            if method != "subarray" {
+                if ta.buffer.borrow().detached {
+                    return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
+                }
+                // IsTypedArrayOutOfBounds check for resizable buffers
+                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                if ta.length_tracking {
+                    if ta.byte_offset > buf_len {
+                        return Err(raise_type_error!("TypedArray is out of bounds").into());
+                    }
+                } else {
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if needed > buf_len {
+                        return Err(raise_type_error!("TypedArray is out of bounds").into());
+                    }
+                }
             }
 
-            // Helper: get the current length (handles length-tracking)
+            // Helper: get the current length (handles length-tracking and resizable buffers)
             let get_len = || -> usize {
                 if ta.length_tracking {
                     let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
                     buf_len.saturating_sub(ta.byte_offset) / ta.element_size()
                 } else {
-                    ta.length
+                    // Fixed-length: check if the TA is still in-bounds after possible resize
+                    let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if needed > buf_len { 0 } else { ta.length }
+                }
+            };
+
+            // Helper: re-validate after argument coercion (which may resize the buffer).
+            // Throws TypeError if detached or out-of-bounds. Returns current length.
+            let recheck_oob = || -> Result<usize, EvalError<'gc>> {
+                if ta.buffer.borrow().detached {
+                    return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
+                }
+                let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
+                if ta.length_tracking {
+                    if ta.byte_offset > buf_len {
+                        return Err(raise_type_error!("TypedArray is out of bounds").into());
+                    }
+                    Ok(buf_len.saturating_sub(ta.byte_offset) / ta.element_size())
+                } else {
+                    let needed = ta.byte_offset + ta.length * ta.element_size();
+                    if needed > buf_len {
+                        return Err(raise_type_error!("TypedArray is out of bounds").into());
+                    }
+                    Ok(ta.length)
                 }
             };
 
             // Helper: read element at index as Value (BigInt for BigInt arrays, Number otherwise)
+            // Uses IsValidIntegerIndex to handle detached buffers and OOB after resize.
             let get_val = |idx: usize| -> Result<Value<'gc>, JSError> {
-                // Per spec: if buffer is detached, return undefined (IntegerIndexedElementGet)
-                if ta.buffer.borrow().detached {
+                if !is_valid_integer_index(&ta, idx as f64) {
                     return Ok(Value::Undefined);
                 }
                 if is_bigint {
@@ -4503,10 +4665,8 @@ pub fn handle_typedarray_method<'gc>(
                                 crate::js_typedarray::to_bigint_i64(mc, _env, &fill_val)?
                             }
                         };
-                        // Per spec: check if buffer was detached during value/start/end coercion
-                        if ta.buffer.borrow().detached {
-                            return Err(raise_type_error!("Cannot perform fill on a detached ArrayBuffer").into());
-                        }
+                        // Per spec: recheck OOB after value/start/end coercion
+                        let len = recheck_oob()?;
                         let start = resolve_index(start_rel, len);
                         let end = resolve_index(end_rel, len);
                         for i in start..end {
@@ -4514,10 +4674,8 @@ pub fn handle_typedarray_method<'gc>(
                         }
                     } else {
                         let fill_f64 = crate::core::to_number_with_env(mc, _env, &fill_val)?;
-                        // Per spec: check if buffer was detached during value/start/end coercion
-                        if ta.buffer.borrow().detached {
-                            return Err(raise_type_error!("Cannot perform fill on a detached ArrayBuffer").into());
-                        }
+                        // Per spec: recheck OOB after value/start/end coercion
+                        let len = recheck_oob()?;
                         let start = resolve_index(start_rel, len);
                         let end = resolve_index(end_rel, len);
                         for i in start..end {
@@ -4801,25 +4959,29 @@ pub fn handle_typedarray_method<'gc>(
                     } else {
                         0
                     };
+                    // Use original len for negative index resolution (no recheck_oob)
                     let start = if from < 0 {
                         (len as i64 + from).max(0) as usize
                     } else {
                         from as usize
                     };
                     for i in start..len {
-                        let val = get_val(i)?;
-                        let eq = match (&val, &search) {
-                            (Value::Number(a), Value::Number(b)) => a == b,
-                            (Value::BigInt(a), Value::BigInt(b)) => **a == **b,
-                            (Value::String(a), Value::String(b)) => a == b,
-                            (Value::Boolean(a), Value::Boolean(b)) => a == b,
-                            (Value::Null, Value::Null) => true,
-                            (Value::Undefined, Value::Undefined) => true,
-                            (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
-                            _ => false,
-                        };
-                        if eq {
-                            return Ok(Value::Number(i as f64));
+                        // Per spec step 11a: HasProperty via IsValidIntegerIndex
+                        if ta.is_valid_integer_index(i) {
+                            let val = get_val(i)?;
+                            let eq = match (&val, &search) {
+                                (Value::Number(a), Value::Number(b)) => a == b,
+                                (Value::BigInt(a), Value::BigInt(b)) => **a == **b,
+                                (Value::String(a), Value::String(b)) => a == b,
+                                (Value::Boolean(a), Value::Boolean(b)) => a == b,
+                                (Value::Null, Value::Null) => true,
+                                (Value::Undefined, Value::Undefined) => true,
+                                (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
+                                _ => false,
+                            };
+                            if eq {
+                                return Ok(Value::Number(i as f64));
+                            }
                         }
                     }
                     Ok(Value::Number(-1.0))
@@ -4836,6 +4998,7 @@ pub fn handle_typedarray_method<'gc>(
                     } else {
                         len as i64 - 1
                     };
+                    // Use original len for index resolution (no recheck_oob)
                     let k = if from >= 0 {
                         (from as usize).min(len - 1)
                     } else {
@@ -4846,19 +5009,22 @@ pub fn handle_typedarray_method<'gc>(
                         k_signed as usize
                     };
                     for i in (0..=k).rev() {
-                        let val = get_val(i)?;
-                        let eq = match (&val, &search) {
-                            (Value::Number(a), Value::Number(b)) => a == b,
-                            (Value::BigInt(a), Value::BigInt(b)) => **a == **b,
-                            (Value::String(a), Value::String(b)) => a == b,
-                            (Value::Boolean(a), Value::Boolean(b)) => a == b,
-                            (Value::Null, Value::Null) => true,
-                            (Value::Undefined, Value::Undefined) => true,
-                            (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
-                            _ => false,
-                        };
-                        if eq {
-                            return Ok(Value::Number(i as f64));
+                        // Per spec: HasProperty via IsValidIntegerIndex before comparing
+                        if ta.is_valid_integer_index(i) {
+                            let val = get_val(i)?;
+                            let eq = match (&val, &search) {
+                                (Value::Number(a), Value::Number(b)) => a == b,
+                                (Value::BigInt(a), Value::BigInt(b)) => **a == **b,
+                                (Value::String(a), Value::String(b)) => a == b,
+                                (Value::Boolean(a), Value::Boolean(b)) => a == b,
+                                (Value::Null, Value::Null) => true,
+                                (Value::Undefined, Value::Undefined) => true,
+                                (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
+                                _ => false,
+                            };
+                            if eq {
+                                return Ok(Value::Number(i as f64));
+                            }
                         }
                     }
                     Ok(Value::Number(-1.0))
@@ -4913,10 +5079,16 @@ pub fn handle_typedarray_method<'gc>(
                     } else {
                         ",".to_string()
                     };
+                    // Use original len (no recheck_oob). Per spec: Get returns undefined
+                    // for OOB reads → map to empty string.
                     let mut parts = Vec::with_capacity(len);
                     for i in 0..len {
                         let val = get_val(i)?;
-                        parts.push(crate::core::value_to_string(&val));
+                        if matches!(val, Value::Undefined) {
+                            parts.push(String::new());
+                        } else {
+                            parts.push(crate::core::value_to_string(&val));
+                        }
                     }
                     Ok(Value::String(utf8_to_utf16(&parts.join(&sep))))
                 }
@@ -4942,12 +5114,19 @@ pub fn handle_typedarray_method<'gc>(
                     let end = resolve_index(end_rel, len);
                     let count = end.saturating_sub(start);
                     let result_ta = typed_array_species_create(mc, _env, obj, count)?;
+                    // Recheck OOB after coercion + species create (which may resize buffer)
+                    let len = recheck_oob()?;
                     if let Some(rta_cell) = slot_get_chained(&result_ta, &InternalSlot::TypedArray)
                         && let Value::TypedArray(rta) = &*rta_cell.borrow()
                     {
-                        for i in 0..count {
-                            let v = ta.get(start + i)?;
-                            rta.set(mc, i, v)?;
+                        let actual_count = count.min(len.saturating_sub(start));
+                        for i in 0..actual_count {
+                            let v = get_val(start + i)?;
+                            match v {
+                                Value::Number(n) => rta.set(mc, i, n)?,
+                                Value::BigInt(b) => rta.set_bigint(mc, i, bigint_to_i64_modular(&b))?,
+                                _ => rta.set(mc, i, 0.0)?,
+                            }
                         }
                     }
                     Ok(Value::Object(result_ta))
@@ -4957,18 +5136,30 @@ pub fn handle_typedarray_method<'gc>(
                     let target_rel = relative_index(_args.first(), 0, len)?;
                     let start_rel = relative_index(_args.get(1), 0, len)?;
                     let end_rel = relative_index(_args.get(2), len as i64, len)?;
+                    // Resolve indices with ORIGINAL len (per spec steps 5-16)
                     let target_idx = resolve_index(target_rel, len);
                     let start = resolve_index(start_rel, len);
                     let end = resolve_index(end_rel, len);
-                    let count = (end.saturating_sub(start)).min(len.saturating_sub(target_idx));
+                    let mut count = (end.saturating_sub(start)).min(len.saturating_sub(target_idx));
+                    // Recheck OOB after argument coercion (spec steps 17-19)
+                    let new_len = recheck_oob()?;
+                    // Clamp count with new len (spec steps 20-21)
+                    count = count.min(new_len.saturating_sub(target_idx));
+                    count = count.min(new_len.saturating_sub(start));
                     if count > 0 {
                         // Collect values first to handle overlap
                         let mut vals = Vec::with_capacity(count);
                         for i in 0..count {
-                            vals.push(ta.get(start + i)?);
+                            if is_valid_integer_index(&ta, (start + i) as f64) {
+                                vals.push(ta.get(start + i)?);
+                            } else {
+                                vals.push(0.0);
+                            }
                         }
                         for (i, v) in vals.into_iter().enumerate() {
-                            ta.set(mc, target_idx + i, v)?;
+                            if is_valid_integer_index(&ta, (target_idx + i) as f64) {
+                                ta.set(mc, target_idx + i, v)?;
+                            }
                         }
                     }
                     Ok(Value::Object(*obj))
@@ -5105,9 +5296,19 @@ pub fn handle_typedarray_method<'gc>(
                                     return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
                                 }
 
+                                // Check if source is out-of-bounds (spec step 18)
+                                let src_buf_len = src_ta.buffer.borrow().data.lock().unwrap().len();
+                                let src_oob = if src_ta.length_tracking {
+                                    src_ta.byte_offset > src_buf_len
+                                } else {
+                                    src_ta.byte_offset + src_ta.length * src_ta.element_size() > src_buf_len
+                                };
+                                if src_oob {
+                                    return Err(raise_type_error!("Source typed array is out of bounds").into());
+                                }
+
                                 let src_len = if src_ta.length_tracking {
-                                    let buf_len = src_ta.buffer.borrow().data.lock().unwrap().len();
-                                    buf_len.saturating_sub(src_ta.byte_offset) / src_ta.element_size()
+                                    src_buf_len.saturating_sub(src_ta.byte_offset) / src_ta.element_size()
                                 } else {
                                     src_ta.length
                                 };
@@ -5411,32 +5612,50 @@ pub fn handle_typedarray_method<'gc>(
                     Ok(Value::Object(result_ta))
                 }
                 "with" => {
-                    let len = get_len();
+                    // Step 3: capture len BEFORE value conversion
+                    let orig_len = get_len();
                     let idx_arg = _args.first().cloned().unwrap_or(Value::Undefined);
                     let rel = crate::core::to_number(&idx_arg).unwrap_or(0.0) as i64;
-                    let actual = if rel < 0 { len as i64 + rel } else { rel };
-                    if actual < 0 || actual as usize >= len {
+                    let actual = if rel < 0 { orig_len as i64 + rel } else { rel };
+
+                    // Step 7-8: convert value BEFORE checking index bounds
+                    // (valueOf may resize the buffer)
+                    let value = _args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let numeric_value = if is_bigint {
+                        match &value {
+                            Value::BigInt(b) => Value::BigInt(b.clone()),
+                            _ => Value::BigInt(Box::new(num_bigint::BigInt::from(to_bigint_i64(mc, _env, &value)?))),
+                        }
+                    } else {
+                        Value::Number(crate::core::to_number_with_env(mc, _env, &value).unwrap_or(0.0))
+                    };
+
+                    // Step 9: Use IsValidIntegerIndex (checks current buffer state)
+                    if actual < 0 || !ta.is_valid_integer_index(actual as usize) {
                         return Err(raise_range_error!("TypedArray.prototype.with: index out of range").into());
                     }
-                    let value = _args.get(1).cloned().unwrap_or(Value::Undefined);
-                    let result_ta_obj = create_same_type_typedarray(mc, _env, obj, len)?;
+
+                    // Step 10: create result with ORIGINAL length
+                    let result_ta_obj = create_same_type_typedarray(mc, _env, obj, orig_len)?;
                     if let Some(rta_cell) = slot_get_chained(&result_ta_obj, &InternalSlot::TypedArray)
                         && let Value::TypedArray(rta) = &*rta_cell.borrow()
                     {
-                        for i in 0..len {
+                        for i in 0..orig_len {
                             if i == actual as usize {
                                 if is_bigint {
-                                    let n = match &value {
-                                        Value::BigInt(b) => bigint_to_i64_modular(b),
-                                        _ => to_bigint_i64(mc, _env, &value)?,
-                                    };
-                                    rta.set_bigint(mc, i, n)?;
-                                } else {
-                                    let n = crate::core::to_number_with_env(mc, _env, &value).unwrap_or(0.0);
+                                    if let Value::BigInt(b) = &numeric_value {
+                                        rta.set_bigint(mc, i, bigint_to_i64_modular(b))?;
+                                    }
+                                } else if let Value::Number(n) = numeric_value {
                                     rta.set(mc, i, n)?;
                                 }
                             } else {
-                                rta.set(mc, i, ta.get(i)?)?;
+                                let v = get_val(i)?;
+                                match v {
+                                    Value::Number(n) => rta.set(mc, i, n)?,
+                                    Value::BigInt(b) => rta.set_bigint(mc, i, bigint_to_i64_modular(&b))?,
+                                    _ => rta.set(mc, i, 0.0)?,
+                                }
                             }
                         }
                     }

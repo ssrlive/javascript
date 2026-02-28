@@ -3654,9 +3654,35 @@ pub(crate) fn evaluate_super_call<'gc>(
             }
 
             // If we reach here the parent class had no explicit constructor defined.
-            // Per spec there is an implicit default constructor — treat this as a
-            // successful super() call that simply initializes instance fields and
-            // binds `this` into the constructor environment.
+            // Per spec, derived class default constructor is: constructor(...args) { super(...args); }
+            // So for derived classes, we must forward to the grandparent constructor.
+            let parent_is_derived = parent_class_def_ptr.borrow().extends.is_some();
+
+            if parent_is_derived {
+                // Derived default constructor: forward super() call to the grandparent.
+                // The grandparent constructor is the internal prototype of parent_class_obj.
+                if let Some(grandparent_ctor) = parent_class_obj.borrow().prototype {
+                    let new_target_val = if let Some(nt_val) = find_binding(env, "__new_target") {
+                        nt_val
+                    } else {
+                        current_function.clone()
+                    };
+                    let parent_inst = evaluate_new(mc, env, &Value::Object(grandparent_ctor), evaluated_args, Some(&new_target_val))?;
+                    if let Value::Object(new_instance) = parent_inst {
+                        if already_initialized {
+                            return Err(raise_reference_error!("super() called after this is initialized").into());
+                        }
+                        // Initialize parent class instance fields on the returned object
+                        initialize_instance_elements(mc, &new_instance, &parent_class_obj)?;
+                        bind_this_after_super(mc, Some(new_instance))?;
+                        if let Some(ctor_obj) = ctor_for_fields {
+                            initialize_instance_elements(mc, &new_instance, &ctor_obj)?;
+                        }
+                        return Ok(Value::Object(new_instance));
+                    }
+                }
+            }
+            // Base class default constructor (empty) — just bind this and return.
             if already_initialized {
                 return Err(raise_reference_error!("super() called after this is initialized").into());
             }

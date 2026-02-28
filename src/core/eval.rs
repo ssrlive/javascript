@@ -15031,6 +15031,20 @@ fn evaluate_expr_binary<'gc>(
                     let present = crate::js_proxy::proxy_has_property(mc, p, prop_key)?;
                     return Ok(Value::Boolean(present));
                 }
+
+                // TypedArray [[HasProperty]] for integer indices — use IsValidIntegerIndex
+                if let PropertyKey::String(ref s) = prop_key
+                    && let Some(ta_cell) = slot_get(&obj, &InternalSlot::TypedArray)
+                    && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                    && let Ok(n) = s.parse::<f64>()
+                {
+                    // Canonical numeric string check
+                    if crate::core::value_to_string(&Value::Number(n)) == *s {
+                        let valid = crate::js_typedarray::is_valid_integer_index(ta, n);
+                        return Ok(Value::Boolean(valid));
+                    }
+                }
+
                 // Check own property first, then walk prototype chain (checking for proxy at each level)
                 if object_get_key_value(&obj, &prop_key).is_some() {
                     return Ok(Value::Boolean(true));

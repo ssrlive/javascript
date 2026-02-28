@@ -146,6 +146,9 @@ pub struct JSDataView<'gc> {
     pub buffer: GcPtr<'gc, JSArrayBuffer>,
     pub byte_offset: usize,
     pub byte_length: usize,
+    /// Whether this DataView was constructed without an explicit byteLength
+    /// (i.e. it tracks the buffer's current size minus offset).
+    pub length_tracking: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Collect)]

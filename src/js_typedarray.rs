@@ -17,6 +17,122 @@ use std::sync::{Arc, Mutex};
 #[allow(clippy::type_complexity)]
 static WAITERS: LazyLock<Mutex<HashMap<(usize, usize), Vec<Arc<(Mutex<bool>, Condvar)>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// IEEE 754 binary16 (half-precision float) conversion helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Convert an f64 to IEEE 754 binary16 (half-precision) stored as u16.
+/// Implements the spec's "SetValueInBuffer" for Float16: round to nearest, ties to even.
+pub(crate) fn f64_to_f16(val: f64) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 63) & 1) as u16;
+    let exp = ((bits >> 52) & 0x7FF) as i32;
+    let frac = bits & 0x000F_FFFF_FFFF_FFFF;
+
+    // NaN
+    if exp == 0x7FF && frac != 0 {
+        return (sign << 15) | 0x7E00; // quiet NaN
+    }
+    // Infinity
+    if exp == 0x7FF {
+        return (sign << 15) | 0x7C00;
+    }
+
+    // Unbias from f64 (bias 1023), rebias to f16 (bias 15)
+    let unbiased = exp - 1023;
+
+    // Too large → Infinity
+    if unbiased > 15 {
+        return (sign << 15) | 0x7C00;
+    }
+
+    // Normal range for f16: unbiased in [-14, 15]
+    if unbiased >= -14 {
+        // Normal f16 number
+        let f16_exp = (unbiased + 15) as u16;
+        // We have 52 fraction bits, need 10. Take top 10 and use bit 11 for rounding.
+        let f16_frac = (frac >> 42) as u16; // top 10 bits
+        let round_bit = (frac >> 41) & 1; // bit 11
+        let sticky = frac & ((1u64 << 41) - 1); // remaining bits
+        let mut result = (sign << 15) | (f16_exp << 10) | f16_frac;
+        // Round to nearest, ties to even
+        if round_bit != 0 && (sticky != 0 || (f16_frac & 1) != 0) {
+            result += 1;
+        }
+        return result;
+    }
+
+    // Subnormal f16: unbiased < -14
+    // The number is 1.frac * 2^unbiased, we need to represent as 0.xxx * 2^(-14)
+    let shift = -14 - unbiased; // how many positions to shift right
+    if shift > 24 {
+        // Too small: rounds to zero
+        return sign << 15;
+    }
+    // Add implicit leading 1 bit: significand = (1 << 10) | top-10-frac-bits
+    // But we need more precision for rounding, so work with 11 extra bits
+    let full_sig = (1u64 << 52) | frac; // 53-bit significand
+    // We want 10 bits of mantissa after shifting right by (shift) positions from position 52
+    // Total right shift from 52-bit position = 42 + shift
+    let total_shift = 42 + shift as u64;
+    let f16_frac = if total_shift >= 53 {
+        0u16
+    } else {
+        (full_sig >> total_shift) as u16 & 0x3FF
+    };
+    let round_bit = if total_shift >= 54 || total_shift == 0 {
+        0
+    } else {
+        (full_sig >> (total_shift - 1)) & 1
+    };
+    let sticky_mask = if total_shift <= 1 { 0 } else { (1u64 << (total_shift - 1)) - 1 };
+    let sticky = full_sig & sticky_mask;
+    let mut result = (sign << 15) | f16_frac;
+    if round_bit != 0 && (sticky != 0 || (f16_frac & 1) != 0) {
+        result += 1;
+    }
+    result
+}
+
+/// Convert an IEEE 754 binary16 (half-precision) u16 to f64.
+pub(crate) fn f16_to_f64(bits: u16) -> f64 {
+    let sign = ((bits >> 15) & 1) as u64;
+    let exp = ((bits >> 10) & 0x1F) as u64;
+    let frac = (bits & 0x3FF) as u64;
+
+    if exp == 0x1F {
+        // Infinity or NaN
+        if frac == 0 {
+            return f64::from_bits((sign << 63) | (0x7FFu64 << 52));
+        } else {
+            // NaN: preserve quiet bit and payload
+            return f64::from_bits((sign << 63) | (0x7FFu64 << 52) | (frac << 42));
+        }
+    }
+
+    if exp == 0 {
+        if frac == 0 {
+            // ±0
+            return f64::from_bits(sign << 63);
+        }
+        // Subnormal: value = (-1)^sign * 2^(-14) * (frac / 1024)
+        // Normalize: find leading 1 bit in frac (10-bit)
+        let mut f = frac;
+        let mut e = -14i64 + 1023; // start with f16 subnormal exponent rebiased
+        // Shift frac left until the leading bit is at position 10
+        while f & 0x400 == 0 {
+            f <<= 1;
+            e -= 1;
+        }
+        f &= 0x3FF; // remove the implicit leading 1
+        return f64::from_bits((sign << 63) | ((e as u64) << 52) | (f << 42));
+    }
+
+    // Normal number: rebias exponent from f16 (bias 15) to f64 (bias 1023)
+    let f64_exp = (exp as i64 - 15 + 1023) as u64;
+    f64::from_bits((sign << 63) | (f64_exp << 52) | (frac << 42))
+}
+
 /// Create an ArrayBuffer constructor object
 pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
@@ -1203,6 +1319,7 @@ pub fn make_dataview_prototype<'gc>(
         ("getUint32", 1),
         ("getFloat32", 1),
         ("getFloat64", 1),
+        ("getFloat16", 1),
         ("getBigInt64", 1),
         ("getBigUint64", 1),
         ("setInt8", 2),
@@ -1213,6 +1330,7 @@ pub fn make_dataview_prototype<'gc>(
         ("setUint32", 2),
         ("setFloat32", 2),
         ("setFloat64", 2),
+        ("setFloat16", 2),
         ("setBigInt64", 2),
         ("setBigUint64", 2),
     ];
@@ -1481,6 +1599,7 @@ pub fn make_typedarray_constructors<'gc>(
         ("Uint16Array", TypedArrayKind::Uint16),
         ("Int32Array", TypedArrayKind::Int32),
         ("Uint32Array", TypedArrayKind::Uint32),
+        ("Float16Array", TypedArrayKind::Float16),
         ("Float32Array", TypedArrayKind::Float32),
         ("Float64Array", TypedArrayKind::Float64),
         ("BigInt64Array", TypedArrayKind::BigInt64),
@@ -1506,10 +1625,11 @@ fn typedarray_kind_to_number(kind: &TypedArrayKind) -> i32 {
         TypedArrayKind::Uint16 => 4,
         TypedArrayKind::Int32 => 5,
         TypedArrayKind::Uint32 => 6,
-        TypedArrayKind::Float32 => 7,
-        TypedArrayKind::Float64 => 8,
-        TypedArrayKind::BigInt64 => 9,
-        TypedArrayKind::BigUint64 => 10,
+        TypedArrayKind::Float16 => 7,
+        TypedArrayKind::Float32 => 8,
+        TypedArrayKind::Float64 => 9,
+        TypedArrayKind::BigInt64 => 10,
+        TypedArrayKind::BigUint64 => 11,
     }
 }
 
@@ -1546,7 +1666,7 @@ fn make_typedarray_constructor<'gc>(
     // BYTES_PER_ELEMENT on constructor (non-writable, non-enumerable, non-configurable)
     let bytes_per_element = match kind {
         TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
-        TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
+        TypedArrayKind::Int16 | TypedArrayKind::Uint16 | TypedArrayKind::Float16 => 2,
         TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
         TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
     } as f64;
@@ -1591,10 +1711,11 @@ fn make_typedarray_prototype<'gc>(
         TypedArrayKind::Uint16 => 4,
         TypedArrayKind::Int32 => 5,
         TypedArrayKind::Uint32 => 6,
-        TypedArrayKind::Float32 => 7,
-        TypedArrayKind::Float64 => 8,
-        TypedArrayKind::BigInt64 => 9,
-        TypedArrayKind::BigUint64 => 10,
+        TypedArrayKind::Float16 => 7,
+        TypedArrayKind::Float32 => 8,
+        TypedArrayKind::Float64 => 9,
+        TypedArrayKind::BigInt64 => 10,
+        TypedArrayKind::BigUint64 => 11,
     };
     slot_set(mc, &proto, InternalSlot::Kind, &Value::Number(kind_value as f64));
 
@@ -2109,10 +2230,11 @@ fn kind_from_number(n: i32) -> Option<TypedArrayKind> {
         4 => Some(TypedArrayKind::Uint16),
         5 => Some(TypedArrayKind::Int32),
         6 => Some(TypedArrayKind::Uint32),
-        7 => Some(TypedArrayKind::Float32),
-        8 => Some(TypedArrayKind::Float64),
-        9 => Some(TypedArrayKind::BigInt64),
-        10 => Some(TypedArrayKind::BigUint64),
+        7 => Some(TypedArrayKind::Float16),
+        8 => Some(TypedArrayKind::Float32),
+        9 => Some(TypedArrayKind::Float64),
+        10 => Some(TypedArrayKind::BigInt64),
+        11 => Some(TypedArrayKind::BigUint64),
         _ => None,
     }
 }
@@ -2120,7 +2242,7 @@ fn kind_from_number(n: i32) -> Option<TypedArrayKind> {
 fn element_size_for_kind(kind: &TypedArrayKind) -> usize {
     match kind {
         TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
-        TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
+        TypedArrayKind::Int16 | TypedArrayKind::Uint16 | TypedArrayKind::Float16 => 2,
         TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
         TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
     }
@@ -2136,6 +2258,7 @@ fn kind_to_constructor_name(kind: &TypedArrayKind) -> &'static str {
         TypedArrayKind::Uint16 => "Uint16Array",
         TypedArrayKind::Int32 => "Int32Array",
         TypedArrayKind::Uint32 => "Uint32Array",
+        TypedArrayKind::Float16 => "Float16Array",
         TypedArrayKind::Float32 => "Float32Array",
         TypedArrayKind::Float64 => "Float64Array",
         TypedArrayKind::BigInt64 => "BigInt64Array",
@@ -2676,6 +2799,15 @@ pub fn handle_dataview_method<'gc>(
             check_detached()?;
             data_view_rc.get_float64(offset, le).map(Value::Number).map_err(bounds_err)
         }
+        "getFloat16" => {
+            let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
+            let le = to_bool(args.get(1).unwrap_or(&Value::Undefined));
+            check_detached()?;
+            data_view_rc
+                .get_float16(offset, le)
+                .map(|v| Value::Number(f16_to_f64(v)))
+                .map_err(bounds_err)
+        }
         "getBigInt64" => {
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(1).unwrap_or(&Value::Undefined));
@@ -2755,6 +2887,14 @@ pub fn handle_dataview_method<'gc>(
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_float64(offset, val, le).map_err(bounds_err)?;
+            Ok(Value::Undefined)
+        }
+        "setFloat16" => {
+            let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
+            check_detached()?;
+            data_view_rc.set_float16(offset, f64_to_f16(val), le).map_err(bounds_err)?;
             Ok(Value::Undefined)
         }
         "setBigInt64" => {
@@ -2859,6 +2999,18 @@ impl<'gc> JSDataView<'gc> {
         })
     }
 
+    pub fn get_float16(&self, offset: usize, little_endian: bool) -> Result<u16, JSError> {
+        let idx = self.check_bounds(offset, 2)?;
+        let buffer = self.buffer.borrow();
+        let data = buffer.data.lock().unwrap();
+        let bytes = [data[idx], data[idx + 1]];
+        Ok(if little_endian {
+            u16::from_le_bytes(bytes)
+        } else {
+            u16::from_be_bytes(bytes)
+        })
+    }
+
     pub fn get_int32(&self, offset: usize, little_endian: bool) -> Result<i32, JSError> {
         let idx = self.check_bounds(offset, 4)?;
         let buffer = self.buffer.borrow();
@@ -2943,6 +3095,16 @@ impl<'gc> JSDataView<'gc> {
     }
 
     pub fn set_uint16(&self, offset: usize, value: u16, little_endian: bool) -> Result<(), JSError> {
+        let idx = self.check_bounds(offset, 2)?;
+        let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
+        let buffer = self.buffer.borrow();
+        let mut data = buffer.data.lock().unwrap();
+        data[idx] = bytes[0];
+        data[idx + 1] = bytes[1];
+        Ok(())
+    }
+
+    pub fn set_float16(&self, offset: usize, value: u16, little_endian: bool) -> Result<(), JSError> {
         let idx = self.check_bounds(offset, 2)?;
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
         let buffer = self.buffer.borrow();
@@ -3066,7 +3228,7 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
     pub fn element_size(&self) -> usize {
         match self.kind {
             TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
-            TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
+            TypedArrayKind::Int16 | TypedArrayKind::Uint16 | TypedArrayKind::Float16 => 2,
             TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
             TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
         }
@@ -3127,6 +3289,10 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
             TypedArrayKind::Uint16 => {
                 let bytes = [data[byte_offset], data[byte_offset + 1]];
                 Ok(u16::from_le_bytes(bytes) as f64)
+            }
+            TypedArrayKind::Float16 => {
+                let bytes = [data[byte_offset], data[byte_offset + 1]];
+                Ok(f16_to_f64(u16::from_le_bytes(bytes)))
             }
             TypedArrayKind::Int32 => {
                 let mut b = [0u8; 4];
@@ -3216,6 +3382,11 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
             }
             TypedArrayKind::Uint16 => {
                 let b = (js_to_int32(val) as u16).to_le_bytes();
+                data[byte_offset] = b[0];
+                data[byte_offset + 1] = b[1];
+            }
+            TypedArrayKind::Float16 => {
+                let b = f64_to_f16(val).to_le_bytes();
                 data[byte_offset] = b[0];
                 data[byte_offset + 1] = b[1];
             }
@@ -4095,6 +4266,7 @@ pub fn handle_typedarray_accessor<'gc>(
                         TypedArrayKind::Uint16 => "Uint16Array",
                         TypedArrayKind::Int32 => "Int32Array",
                         TypedArrayKind::Uint32 => "Uint32Array",
+                        TypedArrayKind::Float16 => "Float16Array",
                         TypedArrayKind::Float32 => "Float32Array",
                         TypedArrayKind::Float64 => "Float64Array",
                         TypedArrayKind::BigInt64 => "BigInt64Array",

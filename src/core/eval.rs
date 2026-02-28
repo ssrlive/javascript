@@ -2032,6 +2032,7 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
                         crate::core::TypedArrayKind::Uint16 => "Uint16Array".to_string(),
                         crate::core::TypedArrayKind::Int32 => "Int32Array".to_string(),
                         crate::core::TypedArrayKind::Uint32 => "Uint32Array".to_string(),
+                        crate::core::TypedArrayKind::Float16 => "Float16Array".to_string(),
                         crate::core::TypedArrayKind::Float32 => "Float32Array".to_string(),
                         crate::core::TypedArrayKind::Float64 => "Float64Array".to_string(),
                         crate::core::TypedArrayKind::BigInt64 => "BigInt64Array".to_string(),
@@ -16951,6 +16952,7 @@ fn evaluate_expr_property<'gc>(
             | "Math.expm1"
             | "Math.floor"
             | "Math.fround"
+            | "Math.f16round"
             | "Math.log"
             | "Math.log1p"
             | "Math.log2"
@@ -18422,6 +18424,7 @@ fn evaluate_expr_index<'gc>(
                     | "Math.expm1"
                     | "Math.floor"
                     | "Math.fround"
+                    | "Math.f16round"
                     | "Math.log"
                     | "Math.log1p"
                     | "Math.log2"

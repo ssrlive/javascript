@@ -2732,6 +2732,19 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                     }
                                 }
                             }
+                            crate::core::TypedArrayKind::Float16 => {
+                                for i in start..end {
+                                    let byte_offset = base + i * 2;
+                                    if byte_offset + 2 > data.len() {
+                                        break;
+                                    }
+                                    let mut b = [0u8; 2];
+                                    b.copy_from_slice(&data[byte_offset..byte_offset + 2]);
+                                    if crate::js_typedarray::f16_to_f64(u16::from_le_bytes(b)) == search_n {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                            }
                             crate::core::TypedArrayKind::Int32 => {
                                 for i in start..end {
                                     let byte_offset = base + i * 4;
@@ -4162,6 +4175,16 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                         let mut b = [0u8; 2];
                                         b.copy_from_slice(&data[byte_offset..byte_offset + 2]);
                                         (u16::from_le_bytes(b) as f64) == search_n
+                                    }
+                                }
+                                crate::core::TypedArrayKind::Float16 => {
+                                    let byte_offset = base + idx * 2;
+                                    if byte_offset + 2 > data.len() {
+                                        false
+                                    } else {
+                                        let mut b = [0u8; 2];
+                                        b.copy_from_slice(&data[byte_offset..byte_offset + 2]);
+                                        crate::js_typedarray::f16_to_f64(u16::from_le_bytes(b)) == search_n
                                     }
                                 }
                                 crate::core::TypedArrayKind::Int32 => {

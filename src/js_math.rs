@@ -94,7 +94,7 @@ pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
     let methods = [
         "floor", "ceil", "round", "abs", "sqrt", "pow", "sin", "cos", "tan", "random", "clz32", "imul", "max", "min", "asin", "acos",
         "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "exp", "expm1", "log", "log10", "log1p", "log2", "fround",
-        "trunc", "cbrt", "hypot", "sign",
+        "trunc", "cbrt", "hypot", "sign", "f16round",
     ];
     for name in methods {
         object_set_key_value(mc, &math_obj, name, &Value::Function(format!("Math.{name}")))?;
@@ -229,6 +229,10 @@ pub fn handle_math_call<'gc>(
         "fround" => {
             let n = arg_to_number(mc, env, args, 0)?;
             Ok(Value::Number((n as f32) as f64))
+        }
+        "f16round" => {
+            let n = arg_to_number(mc, env, args, 0)?;
+            Ok(Value::Number(crate::js_typedarray::f16_to_f64(crate::js_typedarray::f64_to_f16(n))))
         }
         "trunc" => {
             let n = arg_to_number(mc, env, args, 0)?;

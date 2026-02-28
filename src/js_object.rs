@@ -1857,6 +1857,7 @@ pub fn handle_object_method<'gc>(
                             | "Math.expm1"
                             | "Math.floor"
                             | "Math.fround"
+                            | "Math.f16round"
                             | "Math.log"
                             | "Math.log1p"
                             | "Math.log2"

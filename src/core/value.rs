@@ -161,6 +161,7 @@ pub enum TypedArrayKind {
     Uint16,
     Int32,
     Uint32,
+    Float16,
     Float32,
     Float64,
     BigInt64,
@@ -2009,6 +2010,15 @@ pub fn object_set_key_value<'gc>(
             crate::core::TypedArrayKind::Uint16 => {
                 if let Ok(n) = crate::core::eval::to_number(val) {
                     let bytes = (crate::js_typedarray::js_to_int32(n) as u16).to_le_bytes();
+                    let buffer_guard = ta.buffer.borrow();
+                    let mut data = buffer_guard.data.lock().unwrap();
+                    data[byte_offset] = bytes[0];
+                    data[byte_offset + 1] = bytes[1];
+                }
+            }
+            crate::core::TypedArrayKind::Float16 => {
+                if let Ok(n) = crate::core::eval::to_number(val) {
+                    let bytes = crate::js_typedarray::f64_to_f16(n).to_le_bytes();
                     let buffer_guard = ta.buffer.borrow();
                     let mut data = buffer_guard.data.lock().unwrap();
                     data[byte_offset] = bytes[0];

@@ -64,7 +64,19 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     object_set_key_value(mc, &map_proto, "constructor", &Value::Object(map_ctor))?;
 
     // Register instance methods
-    let methods = vec!["set", "get", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
+    let methods = vec![
+        "set",
+        "get",
+        "has",
+        "delete",
+        "clear",
+        "keys",
+        "values",
+        "entries",
+        "forEach",
+        "getOrInsert",
+        "getOrInsertComputed",
+    ];
 
     for method in methods {
         object_set_key_value(mc, &map_proto, method, &Value::Function(format!("Map.prototype.{}", method)))?;
@@ -521,6 +533,61 @@ pub(crate) fn handle_map_instance_method<'gc>(
                 i += 1;
             }
             Ok(Value::Undefined)
+        }
+        "getOrInsert" => {
+            // Map.prototype.getOrInsert(key, default)
+            let key = normalize_map_key(args.first().cloned().unwrap_or(Value::Undefined));
+            let default_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            // If key already exists, return existing value
+            for (k, v) in map.borrow().entries.iter().flatten() {
+                if same_value_zero(k, &key) {
+                    return Ok(v.clone());
+                }
+            }
+            // Insert and return the default
+            map.borrow_mut(mc).entries.push(Some((key, default_value.clone())));
+            Ok(default_value)
+        }
+        "getOrInsertComputed" => {
+            // Map.prototype.getOrInsertComputed(key, callbackFn)
+            let key = normalize_map_key(args.first().cloned().unwrap_or(Value::Undefined));
+            let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            // Validate callback is callable
+            let is_callable_val = match &callback {
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::Callable).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
+                }
+                Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) => true,
+                _ => false,
+            };
+            if !is_callable_val {
+                return Err(raise_type_error!("Map.prototype.getOrInsertComputed: callback is not a function").into());
+            }
+
+            // If key already exists, return existing value
+            for (k, v) in map.borrow().entries.iter().flatten() {
+                if same_value_zero(k, &key) {
+                    return Ok(v.clone());
+                }
+            }
+            // Call callback(key) to compute the value
+            let computed = crate::core::evaluate_call_dispatch(mc, env, &callback, None, std::slice::from_ref(&key))?;
+            // Re-check: if callback caused insertion of same key, OVERWRITE with computed value
+            for entry in map.borrow_mut(mc).entries.iter_mut() {
+                if let Some((k, v)) = entry
+                    && same_value_zero(k, &key)
+                {
+                    *v = computed.clone();
+                    return Ok(computed);
+                }
+            }
+            map.borrow_mut(mc).entries.push(Some((key, computed.clone())));
+            Ok(computed)
         }
         _ => Err(raise_type_error!(format!("Map.prototype.{} is not a function", method)).into()),
     }

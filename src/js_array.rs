@@ -260,6 +260,10 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         "entries",
         "toString",
         "toLocaleString",
+        "toReversed",
+        "toSorted",
+        "toSpliced",
+        "with",
     ];
 
     for method in methods {
@@ -4766,6 +4770,207 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             Ok(Value::Number(-1.0))
+        }
+        // --- change-array-by-copy methods ---
+        "toReversed" => {
+            // §23.1.3.32 Array.prototype.toReversed()
+            let len = length_of_array_like(mc, env, object)?;
+            if len as u64 > 0xFFFF_FFFF {
+                return Err(raise_range_error!("Invalid array length").into());
+            }
+            let new_arr = create_array(mc, env)?;
+            for i in 0..len {
+                let from_index = len - 1 - i;
+                let val = crate::core::get_property_with_accessors(mc, env, object, from_index)?;
+                object_set_key_value(mc, &new_arr, i, &val)?;
+            }
+            set_array_length(mc, &new_arr, len)?;
+            Ok(Value::Object(new_arr))
+        }
+        "toSorted" => {
+            // §23.1.3.33 Array.prototype.toSorted(comparefn)
+            let compare_fn = args.first().cloned().unwrap_or(Value::Undefined);
+            let has_compare_fn = !matches!(compare_fn, Value::Undefined);
+            if has_compare_fn && !is_callable_val(&compare_fn) {
+                return Err(raise_type_error!("The comparison function must be either a function or undefined").into());
+            }
+            let len = length_of_array_like(mc, env, object)?;
+            if len as u64 > 0xFFFF_FFFF {
+                return Err(raise_range_error!("Invalid array length").into());
+            }
+            // Collect all elements (no holes -- undefined for missing)
+            let mut items: Vec<Value<'gc>> = Vec::with_capacity(len);
+            for i in 0..len {
+                items.push(crate::core::get_property_with_accessors(mc, env, object, i)?);
+            }
+            // Insertion sort (same approach as sort)
+            let compare_items = |a: &Value<'gc>, b: &Value<'gc>| -> Result<std::cmp::Ordering, EvalError<'gc>> {
+                if matches!(a, Value::Undefined) && matches!(b, Value::Undefined) {
+                    return Ok(std::cmp::Ordering::Equal);
+                }
+                if matches!(a, Value::Undefined) {
+                    return Ok(std::cmp::Ordering::Greater);
+                }
+                if matches!(b, Value::Undefined) {
+                    return Ok(std::cmp::Ordering::Less);
+                }
+                if has_compare_fn {
+                    let res = evaluate_call_dispatch(mc, env, &compare_fn, None, &[a.clone(), b.clone()])?;
+                    let n = match &res {
+                        Value::Number(n) => *n,
+                        _ => {
+                            let p = crate::core::to_primitive(mc, &res, "number", env)?;
+                            crate::core::to_number(&p)?
+                        }
+                    };
+                    if n.is_nan() || n == 0.0 {
+                        return Ok(std::cmp::Ordering::Equal);
+                    }
+                    if n < 0.0 {
+                        return Ok(std::cmp::Ordering::Less);
+                    }
+                    return Ok(std::cmp::Ordering::Greater);
+                }
+                let sa = crate::core::value_to_string(a);
+                let sb = crate::core::value_to_string(b);
+                Ok(sa.cmp(&sb))
+            };
+            let mut i = 1;
+            while i < items.len() {
+                let mut j = i;
+                while j > 0 {
+                    let ord = compare_items(&items[j - 1], &items[j])?;
+                    if ord == std::cmp::Ordering::Greater {
+                        items.swap(j - 1, j);
+                        j -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            let new_arr = create_array(mc, env)?;
+            for (idx, val) in items.iter().enumerate() {
+                object_set_key_value(mc, &new_arr, idx, val)?;
+            }
+            set_array_length(mc, &new_arr, items.len())?;
+            Ok(Value::Object(new_arr))
+        }
+        "toSpliced" => {
+            // §23.1.3.34 Array.prototype.toSpliced(start, skipCount, ...items)
+            let len = length_of_array_like(mc, env, object)?;
+            let len_i = len as i128;
+
+            let relative_start = if let Some(start_arg) = args.first() {
+                let p = crate::core::to_primitive(mc, start_arg, "number", env)?;
+                let n = crate::core::to_number(&p)?;
+                if n.is_nan() || n == 0.0 {
+                    0i128
+                } else if n.is_infinite() {
+                    if n < 0.0 { 0 } else { len_i }
+                } else {
+                    n.trunc() as i128
+                }
+            } else {
+                0
+            };
+            let actual_start = if relative_start < 0 {
+                (len_i + relative_start).max(0) as usize
+            } else {
+                (relative_start).min(len_i) as usize
+            };
+
+            let insert_count = args.len().saturating_sub(2);
+            let actual_delete_count = if args.is_empty() {
+                0usize
+            } else if args.len() == 1 {
+                len.saturating_sub(actual_start)
+            } else {
+                let p = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                let n = crate::core::to_number(&p)?;
+                let dc = if n.is_nan() || n == 0.0 || n == f64::NEG_INFINITY {
+                    0i128
+                } else if n == f64::INFINITY {
+                    (len - actual_start) as i128
+                } else {
+                    (n.trunc() as i128).max(0)
+                };
+                dc.min((len - actual_start) as i128) as usize
+            };
+
+            let new_len = len.wrapping_add(insert_count).wrapping_sub(actual_delete_count);
+            if new_len as f64 > 9007199254740991.0 {
+                return Err(raise_type_error!("Array length exceeds maximum safe integer").into());
+            }
+            if new_len as u64 > 0xFFFF_FFFF {
+                return Err(raise_range_error!("Invalid array length").into());
+            }
+
+            let new_arr = create_array(mc, env)?;
+            let mut to = 0usize;
+            // Copy [0, actual_start)
+            for i in 0..actual_start {
+                let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                object_set_key_value(mc, &new_arr, to, &val)?;
+                to += 1;
+            }
+            // Insert new items
+            for item in args.iter().skip(2) {
+                object_set_key_value(mc, &new_arr, to, item)?;
+                to += 1;
+            }
+            // Copy [actual_start + actual_delete_count, len)
+            for i in (actual_start + actual_delete_count)..len {
+                let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                object_set_key_value(mc, &new_arr, to, &val)?;
+                to += 1;
+            }
+            set_array_length(mc, &new_arr, new_len)?;
+            Ok(Value::Object(new_arr))
+        }
+        "with" => {
+            // §23.1.3.37 Array.prototype.with(index, value)
+            let len = length_of_array_like(mc, env, object)?;
+            let relative_index = if let Some(idx_arg) = args.first() {
+                let p = crate::core::to_primitive(mc, idx_arg, "number", env)?;
+                let n = crate::core::to_number(&p)?;
+                if n.is_nan() || n == 0.0 {
+                    0i64
+                } else if n.is_infinite() {
+                    if n < 0.0 { i64::MIN } else { i64::MAX }
+                } else {
+                    n.trunc() as i64
+                }
+            } else {
+                0
+            };
+            let actual_index = if relative_index >= 0 {
+                relative_index as usize
+            } else {
+                let ai = (len as i64) + relative_index;
+                if ai < 0 {
+                    return Err(raise_range_error!("Invalid index").into());
+                }
+                ai as usize
+            };
+            if actual_index >= len {
+                return Err(raise_range_error!("Invalid index").into());
+            }
+            if len as u64 > 0xFFFF_FFFF {
+                return Err(raise_range_error!("Invalid array length").into());
+            }
+            let replace_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let new_arr = create_array(mc, env)?;
+            for i in 0..len {
+                if i == actual_index {
+                    object_set_key_value(mc, &new_arr, i, &replace_value)?;
+                } else {
+                    let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    object_set_key_value(mc, &new_arr, i, &val)?;
+                }
+            }
+            set_array_length(mc, &new_arr, len)?;
+            Ok(Value::Object(new_arr))
         }
         _ => Err(raise_eval_error!(format!("Array.{method} not found")).into()),
     }

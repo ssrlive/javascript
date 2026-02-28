@@ -63,7 +63,22 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     object_set_key_value(mc, &set_proto, "constructor", &Value::Object(set_ctor))?;
 
     // Register instance methods
-    let methods = vec!["add", "has", "delete", "clear", "values", "entries", "forEach"];
+    let methods = vec![
+        "add",
+        "has",
+        "delete",
+        "clear",
+        "values",
+        "entries",
+        "forEach",
+        "union",
+        "intersection",
+        "difference",
+        "symmetricDifference",
+        "isSubsetOf",
+        "isSupersetOf",
+        "isDisjointFrom",
+    ];
 
     for method in methods {
         object_set_key_value(mc, &set_proto, method, &Value::Function(format!("Set.prototype.{}", method)))?;
@@ -360,8 +375,403 @@ pub(crate) fn handle_set_instance_method<'gc>(
             }
             Ok(Value::Undefined)
         }
+        // --- Set methods (TC39 proposal, now stage 4 / ES2025) ---
+        "union" | "intersection" | "difference" | "symmetricDifference" | "isSubsetOf" | "isSupersetOf" | "isDisjointFrom" => {
+            handle_set_method(mc, set, method, args, env, this_obj)
+        }
         _ => Err(raise_type_error!(format!("Set.prototype.{} is not a function", method)).into()),
     }
+}
+
+/// GetSetRecord(obj): read .size, .has, .keys from 'other' argument
+fn get_set_record<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    other: &Value<'gc>,
+) -> Result<(JSObjectDataPtr<'gc>, Value<'gc>, Value<'gc>, usize), EvalError<'gc>> {
+    let obj = match other {
+        Value::Object(o) => *o,
+        _ => return Err(raise_type_error!("other is not an object").into()),
+    };
+
+    // 1. Get size via accessor
+    let raw_size = crate::core::get_property_with_accessors(mc, env, &obj, "size")?;
+    if matches!(raw_size, Value::Undefined) {
+        return Err(raise_type_error!("other.size is undefined").into());
+    }
+    let size_prim = crate::core::to_primitive(mc, &raw_size, "number", env)?;
+    let size_num = crate::core::to_number(&size_prim)?;
+    if size_num.is_nan() {
+        return Err(raise_type_error!("other.size is not a number").into());
+    }
+    let int_size = if size_num < 0.0 { 0usize } else { size_num.floor() as usize };
+
+    // 2. Get has method
+    let has_fn = crate::core::get_property_with_accessors(mc, env, &obj, "has")?;
+    if !is_callable(&has_fn) {
+        return Err(raise_type_error!("other.has is not a function").into());
+    }
+
+    // 3. Get keys method
+    let keys_fn = crate::core::get_property_with_accessors(mc, env, &obj, "keys")?;
+    if !is_callable(&keys_fn) {
+        return Err(raise_type_error!("other.keys is not a function").into());
+    }
+
+    Ok((obj, has_fn, keys_fn, int_size))
+}
+
+fn is_callable(val: &Value) -> bool {
+    match val {
+        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) => true,
+        Value::Object(obj) => {
+            obj.borrow().get_closure().is_some()
+                || crate::core::slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                || crate::core::slot_get_chained(obj, &InternalSlot::Callable).is_some()
+                || crate::core::slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Iterate the keys of 'other' by calling keys_fn then iterating.
+/// If the callback returns false, the iterator is closed via .return() and iteration stops.
+fn iterate_other_keys<'gc, F>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    other_obj: &JSObjectDataPtr<'gc>,
+    keys_fn: &Value<'gc>,
+    mut callback: F,
+) -> Result<(), EvalError<'gc>>
+where
+    F: FnMut(&MutationContext<'gc>, Value<'gc>) -> Result<bool, EvalError<'gc>>,
+{
+    let keys_result = crate::core::evaluate_call_dispatch(mc, env, keys_fn, Some(&Value::Object(*other_obj)), &[])?;
+    let iter_obj = match &keys_result {
+        Value::Object(o) => *o,
+        _ => return Err(raise_type_error!("keys() did not return an object").into()),
+    };
+    let next_fn = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
+    loop {
+        let result = crate::js_map::call_iterator_next(mc, env, &iter_obj, &next_fn)?;
+        let done = crate::js_map::get_iterator_done(mc, env, &result)?;
+        if done {
+            break;
+        }
+        let value = crate::js_map::get_iterator_value(mc, env, &result)?;
+        let cont = callback(mc, value)?;
+        if !cont {
+            // Close the iterator per spec (IteratorClose)
+            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Handle set methods: union, intersection, difference, symmetricDifference,
+/// isSubsetOf, isSupersetOf, isDisjointFrom
+fn handle_set_method<'gc>(
+    mc: &MutationContext<'gc>,
+    set: &GcPtr<'gc, JSSet<'gc>>,
+    method: &str,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+    _this_obj: &Value<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let other_arg = args.first().cloned().unwrap_or(Value::Undefined);
+    let (other_obj, has_fn, keys_fn, _other_size) = get_set_record(mc, env, &other_arg)?;
+
+    match method {
+        "union" => {
+            // Create new Set, copy all this entries, then add all other entries
+            let result_set = new_gc_cell_ptr(mc, JSSet { values: Vec::new() });
+            // Copy this set's values
+            for v in set.borrow().values.iter().flatten() {
+                result_set.borrow_mut(mc).values.push(Some(v.clone()));
+            }
+            // Add values from other via keys() iterator
+            iterate_other_keys(mc, env, &other_obj, &keys_fn, |mc, value| {
+                let normalized = normalize_set_value(value);
+                let exists = result_set
+                    .borrow()
+                    .values
+                    .iter()
+                    .any(|e| e.as_ref().is_some_and(|v| same_value_zero(v, &normalized)));
+                if !exists {
+                    result_set.borrow_mut(mc).values.push(Some(normalized));
+                }
+                Ok(true)
+            })?;
+            Ok(wrap_set_as_object(mc, env, result_set)?)
+        }
+        "intersection" => {
+            let result_set = new_gc_cell_ptr(mc, JSSet { values: Vec::new() });
+            let this_size = set.borrow().values.iter().filter(|e| e.is_some()).count();
+            if this_size <= _other_size {
+                // Iterate this, check other.has
+                // Use index-based iteration so mid-iteration mutations are visible
+                let set_ref = *set;
+                let mut i = 0;
+                loop {
+                    let len = set_ref.borrow().values.len();
+                    if i >= len {
+                        break;
+                    }
+                    let entry = set_ref.borrow().values[i].clone();
+                    i += 1;
+                    if let Some(v) = entry {
+                        let in_other = crate::core::evaluate_call_dispatch(
+                            mc,
+                            env,
+                            &has_fn,
+                            Some(&Value::Object(other_obj)),
+                            std::slice::from_ref(&v),
+                        )?;
+                        if in_other.to_truthy() {
+                            let normalized = normalize_set_value(v.clone());
+                            result_set.borrow_mut(mc).values.push(Some(normalized));
+                        }
+                    }
+                }
+            } else {
+                // Iterate other.keys(), check this.has
+                let set_ref = *set;
+                iterate_other_keys(mc, env, &other_obj, &keys_fn, |mc, value| {
+                    let normalized = normalize_set_value(value);
+                    let in_this = set_ref
+                        .borrow()
+                        .values
+                        .iter()
+                        .any(|e| e.as_ref().is_some_and(|v| same_value_zero(v, &normalized)));
+                    if in_this {
+                        // Don't add duplicates to result
+                        let already_in_result = result_set
+                            .borrow()
+                            .values
+                            .iter()
+                            .any(|e| e.as_ref().is_some_and(|v| same_value_zero(v, &normalized)));
+                        if !already_in_result {
+                            result_set.borrow_mut(mc).values.push(Some(normalize_set_value(normalized)));
+                        }
+                    }
+                    Ok(true)
+                })?;
+            }
+            Ok(wrap_set_as_object(mc, env, result_set)?)
+        }
+        "difference" => {
+            let result_set = new_gc_cell_ptr(mc, JSSet { values: Vec::new() });
+            let this_size = set.borrow().values.iter().filter(|e| e.is_some()).count();
+            if this_size <= _other_size {
+                // Iterate this, skip if other.has
+                // Use index-based iteration so mid-iteration mutations are visible
+                let set_ref = *set;
+                let mut i = 0;
+                loop {
+                    let len = set_ref.borrow().values.len();
+                    if i >= len {
+                        break;
+                    }
+                    let entry = set_ref.borrow().values[i].clone();
+                    i += 1;
+                    if let Some(v) = entry {
+                        let in_other = crate::core::evaluate_call_dispatch(
+                            mc,
+                            env,
+                            &has_fn,
+                            Some(&Value::Object(other_obj)),
+                            std::slice::from_ref(&v),
+                        )?;
+                        if !in_other.to_truthy() {
+                            result_set.borrow_mut(mc).values.push(Some(v.clone()));
+                        }
+                    }
+                }
+            } else {
+                // Copy all, then remove keys from other
+                for v in set.borrow().values.iter().flatten() {
+                    result_set.borrow_mut(mc).values.push(Some(v.clone()));
+                }
+                let result_ref = result_set;
+                iterate_other_keys(mc, env, &other_obj, &keys_fn, |mc, value| {
+                    let normalized = normalize_set_value(value);
+                    // Tombstone matching entry
+                    for entry in result_ref.borrow_mut(mc).values.iter_mut() {
+                        if let Some(v) = entry
+                            && same_value_zero(v, &normalized)
+                        {
+                            *entry = None;
+                            break;
+                        }
+                    }
+                    Ok(true)
+                })?;
+            }
+            Ok(wrap_set_as_object(mc, env, result_set)?)
+        }
+        "symmetricDifference" => {
+            let result_set = new_gc_cell_ptr(mc, JSSet { values: Vec::new() });
+            // Copy all from this
+            for v in set.borrow().values.iter().flatten() {
+                result_set.borrow_mut(mc).values.push(Some(v.clone()));
+            }
+            // For each key in other: check LIVE O.[[SetData]] for membership
+            let set_ref = *set;
+            iterate_other_keys(mc, env, &other_obj, &keys_fn, |mc, value| {
+                let normalized = normalize_set_value(value.clone());
+                // Check the LIVE set, not the result copy
+                let in_live = set_ref
+                    .borrow()
+                    .values
+                    .iter()
+                    .any(|e| e.as_ref().is_some_and(|v| same_value_zero(v, &normalized)));
+                if in_live {
+                    // Remove from result (tombstone)
+                    for entry in result_set.borrow_mut(mc).values.iter_mut() {
+                        if let Some(v) = entry
+                            && same_value_zero(v, &normalized)
+                        {
+                            *entry = None;
+                            break;
+                        }
+                    }
+                } else {
+                    // Add to result only if not already present (Set semantics)
+                    let already = result_set
+                        .borrow()
+                        .values
+                        .iter()
+                        .any(|e| e.as_ref().is_some_and(|v| same_value_zero(v, &normalized)));
+                    if !already {
+                        result_set.borrow_mut(mc).values.push(Some(normalized));
+                    }
+                }
+                Ok(true)
+            })?;
+            Ok(wrap_set_as_object(mc, env, result_set)?)
+        }
+        "isSubsetOf" => {
+            let this_size = set.borrow().values.iter().filter(|e| e.is_some()).count();
+            if this_size > _other_size {
+                return Ok(Value::Boolean(false));
+            }
+            // Every element in this must be in other
+            // Use index-based iteration so mid-iteration mutations are visible
+            let set_ref = *set;
+            let mut i = 0;
+            loop {
+                let len = set_ref.borrow().values.len();
+                if i >= len {
+                    break;
+                }
+                let entry = set_ref.borrow().values[i].clone();
+                i += 1;
+                if let Some(v) = entry {
+                    let in_other =
+                        crate::core::evaluate_call_dispatch(mc, env, &has_fn, Some(&Value::Object(other_obj)), std::slice::from_ref(&v))?;
+                    if !in_other.to_truthy() {
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+            }
+            Ok(Value::Boolean(true))
+        }
+        "isSupersetOf" => {
+            // Per spec: if thisSize < otherSize, return false immediately
+            let this_size = set.borrow().values.iter().filter(|e| e.is_some()).count();
+            if this_size < _other_size {
+                return Ok(Value::Boolean(false));
+            }
+            // Every element in other must be in this — iterate other.keys()
+            let set_ref = *set;
+            let mut result = true;
+            iterate_other_keys(mc, env, &other_obj, &keys_fn, |_mc, value| {
+                let normalized = normalize_set_value(value);
+                let in_this = set_ref
+                    .borrow()
+                    .values
+                    .iter()
+                    .any(|e| e.as_ref().is_some_and(|v| same_value_zero(v, &normalized)));
+                if !in_this {
+                    result = false;
+                    return Ok(false); // short-circuit
+                }
+                Ok(true)
+            })?;
+            Ok(Value::Boolean(result))
+        }
+        "isDisjointFrom" => {
+            let this_size = set.borrow().values.iter().filter(|e| e.is_some()).count();
+            if this_size <= _other_size {
+                // Iterate this, check other.has
+                // Use index-based iteration so mid-iteration mutations are visible
+                let set_ref = *set;
+                let mut i = 0;
+                loop {
+                    let len = set_ref.borrow().values.len();
+                    if i >= len {
+                        break;
+                    }
+                    let entry = set_ref.borrow().values[i].clone();
+                    i += 1;
+                    if let Some(v) = entry {
+                        let in_other = crate::core::evaluate_call_dispatch(
+                            mc,
+                            env,
+                            &has_fn,
+                            Some(&Value::Object(other_obj)),
+                            std::slice::from_ref(&v),
+                        )?;
+                        if in_other.to_truthy() {
+                            return Ok(Value::Boolean(false));
+                        }
+                    }
+                }
+            } else {
+                // Iterate other.keys(), check this.has
+                let set_ref = *set;
+                let mut disjoint = true;
+                iterate_other_keys(mc, env, &other_obj, &keys_fn, |_mc, value| {
+                    let normalized = normalize_set_value(value);
+                    let in_this = set_ref
+                        .borrow()
+                        .values
+                        .iter()
+                        .any(|e| e.as_ref().is_some_and(|v| same_value_zero(v, &normalized)));
+                    if in_this {
+                        disjoint = false;
+                        return Ok(false); // short-circuit
+                    }
+                    Ok(true)
+                })?;
+                if !disjoint {
+                    return Ok(Value::Boolean(false));
+                }
+            }
+            Ok(Value::Boolean(true))
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Wrap a JSSet GcPtr in a proper Set object with prototype
+fn wrap_set_as_object<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    set: GcPtr<'gc, JSSet<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let obj = new_js_object_data(mc);
+    slot_set(mc, &obj, InternalSlot::Set, &Value::Set(set));
+    // Set prototype to Set.prototype
+    if let Some(set_ctor) = object_get_key_value(env, "Set")
+        && let Value::Object(ctor) = &*set_ctor.borrow()
+        && let Some(proto) = object_get_key_value(ctor, "prototype")
+        && let Value::Object(proto_obj) = &*proto.borrow()
+    {
+        obj.borrow_mut(mc).prototype = Some(*proto_obj);
+    }
+    Ok(Value::Object(obj))
 }
 
 fn create_set_iterator<'gc>(

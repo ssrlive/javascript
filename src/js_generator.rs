@@ -2099,6 +2099,12 @@ pub fn generator_next<'gc>(
 
             slot_set(mc, &func_env, InternalSlot::InGenerator, &Value::Boolean(true));
 
+            // Hoist var declarations from the entire body so that `var` bindings
+            // inside for-await-of (and other constructs) are visible before
+            // execution begins — mirrors what evaluate_statements does for
+            // normal function calls via hoist_declarations.
+            crate::core::hoist_var_declarations(mc, &func_env, &gen_obj.body, false)?;
+
             if let Some((idx, decl_kind_opt, var_name, iterable, body)) = find_first_for_await_in_statements(&gen_obj.body)
                 && idx == 0
             {

@@ -979,28 +979,22 @@ fn dynamic_import_source_function<'gc>(
     let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
     let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
 
+    // Per spec (16.2.1.7.2 GetModuleSource), Source Text Module Records do not
+    // support source phase imports — always reject with SyntaxError.
+    // But first evaluate the specifier for observable side effects (ToString).
     let import_result = (|| -> Result<Value<'gc>, EvalError<'gc>> {
         let prim = crate::core::to_primitive(mc, &args[0], "string", env)?;
-        let module_name = match prim {
+        match prim {
             Value::Symbol(_) => {
                 return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
             }
-            _ => crate::core::value_to_string(&prim),
+            _ => {
+                let _ = crate::core::value_to_string(&prim);
+            }
         };
 
-        if module_name == "<module source>" {
-            return Ok(crate::js_abstract_module_source::create_module_source_placeholder(mc, env)?);
-        }
-
-        let base_path = if let Some(cell) = crate::core::slot_get_chained(env, &InternalSlot::Filepath)
-            && let Value::String(s) = cell.borrow().clone()
-        {
-            Some(utf16_to_utf8(&s))
-        } else {
-            None
-        };
-
-        crate::js_module::load_module_deferred_namespace(mc, &module_name, base_path.as_deref(), Some(*env))
+        // GetModuleSource for Source Text Module Records always throws SyntaxError
+        Err(raise_syntax_error!("Source phase import is not supported for Source Text Module Records").into())
     })();
 
     match import_result {
@@ -1013,6 +1007,11 @@ fn dynamic_import_source_function<'gc>(
                 EvalError::Js(js_err) => crate::core::js_error_to_value(mc, env, &js_err),
             };
             crate::js_promise::reject_promise(mc, &promise, reason, env);
+            // Mark this promise as "handled" so that the exit-logic does not
+            // surface the rejection as a script error.  import.source() always
+            // rejects for Source Text Module Records; callers who care will
+            // attach a .catch() handler.
+            promise.borrow_mut(mc).handled = true;
         }
     }
 

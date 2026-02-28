@@ -742,6 +742,350 @@ pub(crate) fn resolve_module_path(module_name: &str, base_path: Option<&str>) ->
     }
 }
 
+/// Result of the ResolveExport algorithm (spec 16.2.1.6.3)
+#[derive(Debug)]
+enum ExportResolution {
+    /// Export resolved to a specific binding in a specific module
+    Found { module_path: String, binding_name: String },
+    /// Resolution not found (circular or simply absent)
+    Null,
+    /// Ambiguous resolution from multiple star exports
+    Ambiguous,
+}
+
+/// Implements the ResolveExport abstract operation (spec 16.2.1.6.3).
+/// Given a module file path and an export name, determines whether the export
+/// can be resolved to a unique binding, is ambiguous, or is absent/circular.
+fn resolve_export(module_path: &str, export_name: &str, resolve_set: &mut Vec<(String, String)>) -> Result<ExportResolution, JSError> {
+    // Step 2: Circular reference check
+    if resolve_set.iter().any(|(m, n)| m == module_path && n == export_name) {
+        return Ok(ExportResolution::Null);
+    }
+
+    // Step 3: Add to resolve set
+    resolve_set.push((module_path.to_string(), export_name.to_string()));
+
+    // Parse the module
+    let content = std::fs::read_to_string(module_path)
+        .map_err(|e| crate::raise_eval_error!(format!("Failed to read module '{}': {e}", module_path)))?;
+    let tokens = crate::core::tokenize(&content)?;
+    let mut index = 0;
+    crate::core::push_await_context();
+    let parse_result = crate::core::parse_statements(&tokens, &mut index);
+    crate::core::pop_await_context();
+    let statements = parse_result?;
+
+    // Collect imported local names to distinguish local vs imported bindings
+    let mut imported_locals = std::collections::HashSet::new();
+    for stmt in &statements {
+        if let StatementKind::Import(specifiers, _) = &*stmt.kind {
+            for spec in specifiers {
+                match spec {
+                    crate::core::ImportSpecifier::Named(name, alias) => {
+                        imported_locals.insert(alias.as_ref().unwrap_or(name).clone());
+                    }
+                    crate::core::ImportSpecifier::Default(name) | crate::core::ImportSpecifier::Namespace(name) => {
+                        imported_locals.insert(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 5: Check local export entries
+    for stmt in &statements {
+        if let StatementKind::Export(specifiers, inner_stmt, source) = &*stmt.kind {
+            if source.is_some() {
+                continue; // re-exports are not local
+            }
+            // Check inner declarations (export var/let/const/function/class)
+            if let Some(inner) = inner_stmt {
+                let found = match &*inner.kind {
+                    StatementKind::Var(decls) | StatementKind::Let(decls) => decls.iter().any(|(name, _)| name == export_name),
+                    StatementKind::Const(decls) => decls.iter().any(|(name, _)| name == export_name),
+                    StatementKind::FunctionDeclaration(name, ..) => name == export_name,
+                    StatementKind::Class(class_def) => class_def.name == export_name,
+                    _ => false,
+                };
+                if found {
+                    return Ok(ExportResolution::Found {
+                        module_path: module_path.to_string(),
+                        binding_name: export_name.to_string(),
+                    });
+                }
+            }
+            // Check `export default expr` (via Default specifier)
+            for spec in specifiers {
+                match spec {
+                    ExportSpecifier::Default(_) if export_name == "default" => {
+                        return Ok(ExportResolution::Found {
+                            module_path: module_path.to_string(),
+                            binding_name: "default".to_string(),
+                        });
+                    }
+                    ExportSpecifier::Named(local_name, alias) => {
+                        let out_name = alias.as_ref().unwrap_or(local_name);
+                        if out_name == export_name && !imported_locals.contains(local_name) {
+                            return Ok(ExportResolution::Found {
+                                module_path: module_path.to_string(),
+                                binding_name: local_name.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Step 6: Check indirect export entries
+    for stmt in &statements {
+        if let StatementKind::Export(specifiers, _, Some(source)) = &*stmt.kind {
+            for spec in specifiers {
+                match spec {
+                    ExportSpecifier::Named(import_name, alias) => {
+                        let out_name = alias.as_ref().unwrap_or(import_name);
+                        if out_name == export_name {
+                            let resolved_path = resolve_module_path(source, Some(module_path))?;
+                            return resolve_export(&resolved_path, import_name, resolve_set);
+                        }
+                    }
+                    ExportSpecifier::Namespace(name) => {
+                        if name == export_name {
+                            return Ok(ExportResolution::Found {
+                                module_path: module_path.to_string(),
+                                binding_name: "*namespace*".to_string(),
+                            });
+                        }
+                    }
+                    _ => {} // Star handled below
+                }
+            }
+        }
+        // Also handle `export { x }` where x is imported (indirect re-export)
+        if let StatementKind::Export(specifiers, _, None) = &*stmt.kind {
+            for spec in specifiers {
+                if let ExportSpecifier::Named(local_name, alias) = spec {
+                    let out_name = alias.as_ref().unwrap_or(local_name);
+                    if out_name == export_name && imported_locals.contains(local_name) {
+                        // Find the import source for local_name
+                        for imp_stmt in &statements {
+                            if let StatementKind::Import(imp_specs, imp_source) = &*imp_stmt.kind {
+                                for imp_spec in imp_specs {
+                                    let (imp_name, local) = match imp_spec {
+                                        crate::core::ImportSpecifier::Named(name, al) => {
+                                            (name.clone(), al.as_ref().unwrap_or(name).clone())
+                                        }
+                                        crate::core::ImportSpecifier::Default(name) => ("default".to_string(), name.clone()),
+                                        crate::core::ImportSpecifier::Namespace(name) => ("*".to_string(), name.clone()),
+                                    };
+                                    if local == *local_name {
+                                        let resolved_path = resolve_module_path(imp_source, Some(module_path))?;
+                                        if imp_name == "*" {
+                                            return Ok(ExportResolution::Found {
+                                                module_path: resolved_path,
+                                                binding_name: "*namespace*".to_string(),
+                                            });
+                                        }
+                                        return resolve_export(&resolved_path, &imp_name, resolve_set);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 7: "default" is not provided by export * from "mod"
+    if export_name == "default" {
+        return Ok(ExportResolution::Null);
+    }
+
+    // Steps 8-9: Check star export entries
+    let mut star_resolution: Option<(String, String)> = None; // (module_path, binding_name)
+    for stmt in &statements {
+        if let StatementKind::Export(specifiers, _, Some(source)) = &*stmt.kind
+            && specifiers.iter().any(|s| matches!(s, ExportSpecifier::Star))
+        {
+            let resolved_path = resolve_module_path(source, Some(module_path))?;
+            let resolution = resolve_export(&resolved_path, export_name, resolve_set)?;
+            match resolution {
+                ExportResolution::Ambiguous => return Ok(ExportResolution::Ambiguous),
+                ExportResolution::Found {
+                    module_path: m,
+                    binding_name: b,
+                } => {
+                    if let Some((ref sm, ref sb)) = star_resolution {
+                        if sm != &m || sb != &b {
+                            return Ok(ExportResolution::Ambiguous);
+                        }
+                    } else {
+                        star_resolution = Some((m, b));
+                    }
+                }
+                ExportResolution::Null => {}
+            }
+        }
+    }
+
+    match star_resolution {
+        Some((m, b)) => Ok(ExportResolution::Found {
+            module_path: m,
+            binding_name: b,
+        }),
+        None => Ok(ExportResolution::Null),
+    }
+}
+
+/// Validate indirect export entries for a module (spec 16.2.1.6.4 InitializeEnvironment step 5).
+/// For each `export { name } from 'source'`, verify that the export can be resolved
+/// in the source module (not ambiguous or circular).
+fn validate_indirect_export_entries(statements: &[Statement], module_path: &str) -> Result<(), JSError> {
+    for stmt in statements {
+        if let StatementKind::Export(specifiers, _, Some(source)) = &*stmt.kind {
+            for spec in specifiers {
+                if let ExportSpecifier::Named(import_name, alias) = spec {
+                    let out_name = alias.as_ref().unwrap_or(import_name);
+                    // Seed resolve_set with the current module to detect circular back-references
+                    let mut resolve_set = vec![(module_path.to_string(), out_name.clone())];
+                    let resolved_path = resolve_module_path(source, Some(module_path))?;
+                    let resolution = resolve_export(&resolved_path, import_name, &mut resolve_set)?;
+                    match resolution {
+                        ExportResolution::Null | ExportResolution::Ambiguous => {
+                            return Err(crate::raise_syntax_error!(format!(
+                                "The requested module '{}' does not provide an export named '{}'",
+                                source, import_name
+                            )));
+                        }
+                        ExportResolution::Found { .. } => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate module-level declarations per ECMAScript spec early errors:
+/// - In module code, function/generator/async declarations are *lexically* scoped
+/// - No name may appear in both LexicallyDeclaredNames and VarDeclaredNames
+/// - LexicallyDeclaredNames must not contain duplicates
+fn validate_module_declarations(statements: &[Statement]) -> Result<(), JSError> {
+    use std::collections::HashSet;
+
+    let mut var_names = HashSet::new();
+    let mut lex_names = HashSet::new();
+
+    fn collect_binding_names_from_destr_elements(elems: &[DestructuringElement], names: &mut HashSet<String>) {
+        for elem in elems {
+            match elem {
+                DestructuringElement::Variable(name, _) => {
+                    names.insert(name.clone());
+                }
+                DestructuringElement::Rest(name) => {
+                    names.insert(name.clone());
+                }
+                DestructuringElement::RestPattern(inner) => {
+                    collect_binding_names_from_destr_elements(std::slice::from_ref(inner), names);
+                }
+                DestructuringElement::NestedArray(inner, _) => {
+                    collect_binding_names_from_destr_elements(inner, names);
+                }
+                DestructuringElement::NestedObject(inner, _) => {
+                    collect_binding_names_from_destr_elements(inner, names);
+                }
+                DestructuringElement::Property(_, inner) => {
+                    collect_binding_names_from_destr_elements(std::slice::from_ref(inner), names);
+                }
+                DestructuringElement::ComputedProperty(_, inner) => {
+                    collect_binding_names_from_destr_elements(std::slice::from_ref(inner), names);
+                }
+                DestructuringElement::Empty => {}
+            }
+        }
+    }
+
+    fn collect_binding_names_from_obj_destr(elems: &[crate::core::ObjectDestructuringElement], names: &mut HashSet<String>) {
+        for elem in elems {
+            match elem {
+                crate::core::ObjectDestructuringElement::Property { value, .. }
+                | crate::core::ObjectDestructuringElement::ComputedProperty { value, .. } => {
+                    collect_binding_names_from_destr_elements(std::slice::from_ref(value), names);
+                }
+                crate::core::ObjectDestructuringElement::Rest(name) => {
+                    names.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    for stmt in statements {
+        // Unwrap Export to get the inner declaration
+        let inner = if let StatementKind::Export(_, Some(inner_stmt), _) = &*stmt.kind {
+            &*inner_stmt.kind
+        } else {
+            &*stmt.kind
+        };
+
+        match inner {
+            // Var declarations go into VarDeclaredNames
+            StatementKind::Var(decls) => {
+                for (name, _) in decls {
+                    var_names.insert(name.clone());
+                }
+            }
+            StatementKind::VarDestructuringArray(elems, _) => {
+                collect_binding_names_from_destr_elements(elems, &mut var_names);
+            }
+            StatementKind::VarDestructuringObject(elems, _) => {
+                collect_binding_names_from_obj_destr(elems, &mut var_names);
+            }
+
+            // In module code, function/class/let/const declarations are LexicallyDeclaredNames
+            StatementKind::FunctionDeclaration(name, ..) => {
+                lex_names.insert(name.clone());
+            }
+            StatementKind::Class(class_def) => {
+                if !class_def.name.is_empty() {
+                    lex_names.insert(class_def.name.clone());
+                }
+            }
+            StatementKind::Let(decls) => {
+                for (name, _) in decls {
+                    lex_names.insert(name.clone());
+                }
+            }
+            StatementKind::Const(decls) => {
+                for (name, _) in decls {
+                    lex_names.insert(name.clone());
+                }
+            }
+            StatementKind::LetDestructuringArray(elems, _) | StatementKind::ConstDestructuringArray(elems, _) => {
+                collect_binding_names_from_destr_elements(elems, &mut lex_names);
+            }
+            StatementKind::LetDestructuringObject(elems, _) | StatementKind::ConstDestructuringObject(elems, _) => {
+                collect_binding_names_from_obj_destr(elems, &mut lex_names);
+            }
+
+            _ => {}
+        }
+    }
+
+    // Check for names appearing in both LexicallyDeclaredNames and VarDeclaredNames
+    for name in &lex_names {
+        if var_names.contains(name) {
+            return Err(crate::raise_syntax_error!(format!(
+                "Identifier '{}' has already been declared",
+                name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn execute_module<'gc>(
     mc: &MutationContext<'gc>,
     content: &str,
@@ -815,6 +1159,16 @@ fn execute_module<'gc>(
     let parse_result = crate::core::parse_statements(&tokens, &mut index);
     crate::core::pop_await_context();
     let statements = parse_result.map_err(EvalError::from)?;
+
+    // Module early error checks per spec:
+    // - LexicallyDeclaredNames must not contain any duplicates
+    // - No name may appear in both LexicallyDeclaredNames and VarDeclaredNames
+    // In module code, function/class declarations are lexically scoped (not var-scoped).
+    validate_module_declarations(&statements).map_err(EvalError::from)?;
+
+    // Validate indirect export entries: for each `export { x } from '...'`,
+    // verify that `x` can be resolved in the source module (not ambiguous or circular).
+    validate_indirect_export_entries(&statements, module_path).map_err(EvalError::from)?;
 
     if preload_tla_async && let Some(first_tla_idx) = statements.iter().position(stmt_contains_top_level_await) {
         if first_tla_idx > 0 {

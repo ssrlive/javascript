@@ -770,47 +770,54 @@ where
                 };
 
                 if let Some(promise) = promise_ref {
+                    let p_handled = promise.borrow().handled;
                     match &promise.borrow().state {
                         crate::core::PromiseState::Fulfilled(val) => result = val.clone(),
                         crate::core::PromiseState::Rejected(val) => {
-                            let mut is_error_like = false;
-                            if let Value::Object(obj) = val {
-                                if let Some(is_err_rc) = slot_get_chained(obj, &InternalSlot::IsError)
-                                    && let Value::Boolean(true) = *is_err_rc.borrow()
-                                {
-                                    is_error_like = true;
-                                }
-                                if !is_error_like && slot_get_chained(obj, &InternalSlot::Line).is_some() {
-                                    is_error_like = true;
-                                }
-                            }
-
-                            if !is_error_like {
+                            // If the Promise was explicitly marked as handled
+                            // (e.g. import.source()), skip the error surfacing.
+                            if p_handled {
                                 result = val.clone();
                             } else {
-                                let mut err = crate::raise_throw_error!(val.clone());
+                                let mut is_error_like = false;
                                 if let Value::Object(obj) = val {
-                                    if let Some(line_rc) = slot_get_chained(obj, &InternalSlot::Line)
-                                        && let Value::Number(line) = *line_rc.borrow()
+                                    if let Some(is_err_rc) = slot_get_chained(obj, &InternalSlot::IsError)
+                                        && let Value::Boolean(true) = *is_err_rc.borrow()
                                     {
-                                        let mut column = 0usize;
-                                        if let Some(col_rc) = slot_get_chained(obj, &InternalSlot::Column)
-                                            && let Value::Number(col) = *col_rc.borrow()
-                                        {
-                                            column = col as usize;
-                                        }
-                                        err.set_js_location(line as usize, column);
+                                        is_error_like = true;
                                     }
-                                    if let Some(stack_str) = obj.borrow().get_property("stack") {
-                                        let lines: Vec<String> = stack_str
-                                            .lines()
-                                            .map(|s| s.trim().to_string())
-                                            .filter(|s| s.starts_with("at "))
-                                            .collect();
-                                        err.inner.stack = lines;
+                                    if !is_error_like && slot_get_chained(obj, &InternalSlot::Line).is_some() {
+                                        is_error_like = true;
                                     }
                                 }
-                                return Err(err);
+
+                                if !is_error_like {
+                                    result = val.clone();
+                                } else {
+                                    let mut err = crate::raise_throw_error!(val.clone());
+                                    if let Value::Object(obj) = val {
+                                        if let Some(line_rc) = slot_get_chained(obj, &InternalSlot::Line)
+                                            && let Value::Number(line) = *line_rc.borrow()
+                                        {
+                                            let mut column = 0usize;
+                                            if let Some(col_rc) = slot_get_chained(obj, &InternalSlot::Column)
+                                                && let Value::Number(col) = *col_rc.borrow()
+                                            {
+                                                column = col as usize;
+                                            }
+                                            err.set_js_location(line as usize, column);
+                                        }
+                                        if let Some(stack_str) = obj.borrow().get_property("stack") {
+                                            let lines: Vec<String> = stack_str
+                                                .lines()
+                                                .map(|s| s.trim().to_string())
+                                                .filter(|s| s.starts_with("at "))
+                                                .collect();
+                                            err.inner.stack = lines;
+                                        }
+                                    }
+                                    return Err(err);
+                                }
                             }
                         }
                         _ => {}

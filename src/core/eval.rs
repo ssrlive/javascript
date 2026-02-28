@@ -1323,7 +1323,7 @@ fn hoist_name<'gc>(
     Ok(())
 }
 
-fn hoist_var_declarations<'gc>(
+pub(crate) fn hoist_var_declarations<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
@@ -6852,7 +6852,9 @@ fn eval_res<'gc>(
                         e.borrow_mut(mc).prototype = Some(*env);
                         e
                     } else {
-                        new_js_object_data(mc)
+                        let e = new_js_object_data(mc);
+                        e.borrow_mut(mc).prototype = Some(*env);
+                        e
                     };
 
                     for elem in pattern {
@@ -7243,7 +7245,13 @@ fn eval_res<'gc>(
                         e.borrow_mut(mc).prototype = Some(*env);
                         e
                     } else {
-                        new_js_object_data(mc)
+                        // For var declarations (and bare assignment), use an
+                        // environment that inherits the enclosing scope so that
+                        // Symbol.iterator and other globals are accessible
+                        // during destructuring.
+                        let e = new_js_object_data(mc);
+                        e.borrow_mut(mc).prototype = Some(*env);
+                        e
                     };
 
                     let pattern_expr = Expr::Array(convert_array_pattern_inner(pattern));

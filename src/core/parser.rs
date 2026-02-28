@@ -5330,7 +5330,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             pop_await_context();
                             return Ok(Expr::AsyncArrowFunction(p, body));
                         } else {
-                            let body_expr = parse_assignment(tokens, index)?;
+                            push_await_context();
+                            let body_expr = parse_assignment(tokens, index);
+                            pop_await_context();
+                            let body_expr = body_expr?;
                             return Ok(Expr::AsyncArrowFunction(
                                 p,
                                 vec![Statement::from(StatementKind::Return(Some(body_expr)))],
@@ -5392,7 +5395,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     // For async arrow functions, we need to create a special async closure
                     // For now, we'll treat them as regular arrow functions but mark them as async
                     // This will need to be handled in evaluation
-                    Expr::AsyncArrowFunction(params, parse_arrow_body(tokens, index)?)
+                    Expr::AsyncArrowFunction(params, parse_async_arrow_body(tokens, index)?)
                 } else {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
@@ -5410,7 +5413,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         *index = j + 1;
                         return Ok(Expr::AsyncArrowFunction(
                             vec![DestructuringElement::Variable(ident_name, None)],
-                            parse_arrow_body(tokens, index)?,
+                            parse_async_arrow_body(tokens, index)?,
                         ));
                     }
                 }
@@ -5906,20 +5909,42 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
 }
 
 fn parse_arrow_body(tokens: &[TokenData], index: &mut usize) -> Result<Vec<Statement>, JSError> {
+    parse_arrow_body_inner(tokens, index, false)
+}
+
+fn parse_async_arrow_body(tokens: &[TokenData], index: &mut usize) -> Result<Vec<Statement>, JSError> {
+    parse_arrow_body_inner(tokens, index, true)
+}
+
+fn parse_arrow_body_inner(tokens: &[TokenData], index: &mut usize, is_async: bool) -> Result<Vec<Statement>, JSError> {
     // Skip optional line terminators between `=>` and the body
     while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
         *index += 1;
     }
     if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
         *index += 1;
-        let body = with_cleared_await_context(|| parse_statements(tokens, index))?;
+        let body = if is_async {
+            push_await_context();
+            let r = parse_statements(tokens, index);
+            pop_await_context();
+            r?
+        } else {
+            with_cleared_await_context(|| parse_statements(tokens, index))?
+        };
         if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
             return Err(raise_parse_error_at!(tokens.get(*index)));
         }
         *index += 1;
         Ok(body)
     } else {
-        let expr = with_cleared_await_context(|| parse_assignment(tokens, index))?;
+        let expr = if is_async {
+            push_await_context();
+            let r = parse_assignment(tokens, index);
+            pop_await_context();
+            r?
+        } else {
+            with_cleared_await_context(|| parse_assignment(tokens, index))?
+        };
         Ok(vec![Statement::from(StatementKind::Return(Some(expr)))])
     }
 }

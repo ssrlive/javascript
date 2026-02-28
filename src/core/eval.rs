@@ -3670,6 +3670,43 @@ fn eval_res<'gc>(
             // *last_value = _last_init;
             Ok(None)
         }
+        StatementKind::Using(decls) => {
+            // `using x = expr;` — bind like const, and register
+            // the value for synchronous disposal when the containing block exits.
+            // The actual disposal is handled by the block-exit logic in
+            // StatementKind::Block; here we just create the bindings and
+            // stash each disposable resource in an env-internal list.
+            for (name, expr) in decls {
+                let val = match evaluate_expr(mc, env, expr) {
+                    Ok(v) => v,
+                    Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
+                };
+
+                // Bind as const
+                object_set_key_value(mc, env, name, &val)?;
+                env.borrow_mut(mc).set_const(name.clone());
+
+                // Register for disposal: store (value, is_async=false) in the
+                // __disposable_resources list on the *current* environment.
+                register_disposable_resource(mc, env, &val, false)?;
+            }
+            Ok(None)
+        }
+        StatementKind::AwaitUsing(decls) => {
+            // `await using x = expr;` — same as using but marks as async disposal.
+            for (name, expr) in decls {
+                let val = match evaluate_expr(mc, env, expr) {
+                    Ok(v) => v,
+                    Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
+                };
+
+                object_set_key_value(mc, env, name, &val)?;
+                env.borrow_mut(mc).set_const(name.clone());
+
+                register_disposable_resource(mc, env, &val, true)?;
+            }
+            Ok(None)
+        }
         StatementKind::Class(class_def) => {
             // Evaluate class definition and bind to environment
             // This initializes the class binding which was hoisted as Uninitialized
@@ -4498,8 +4535,15 @@ fn eval_res<'gc>(
             }
 
             let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &block_env, &stmts_clone, labels)?;
+
+            // Dispose resources registered by `using` declarations in this block
+            let dispose_err = dispose_resources(mc, &block_env).err();
+
             match res {
                 ControlFlow::Normal(_) => {
+                    if let Some(e) = dispose_err {
+                        return Err(e);
+                    }
                     if !stmts_clone.is_empty() {
                         *last_value = vbody;
                     }
@@ -4508,6 +4552,11 @@ fn eval_res<'gc>(
                 other => {
                     if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(vbody, Value::Undefined) {
                         *last_value = vbody;
+                    }
+                    // If dispose threw, wrap: the block's abrupt completion becomes the
+                    // suppressed error and the dispose error becomes the primary.
+                    if let Some(dispose_e) = dispose_err {
+                        return Err(dispose_e);
                     }
                     Ok(Some(other))
                 }
@@ -7367,7 +7416,7 @@ fn refresh_error_by_additional_stack_frame<'gc>(
     e
 }
 
-fn get_primitive_prototype_property<'gc>(
+pub(crate) fn get_primitive_prototype_property<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_val: &Value<'gc>,
@@ -12899,6 +12948,18 @@ pub fn evaluate_call_dispatch<'gc>(
                 } else {
                     Err(raise_eval_error!(format!("Unknown Set function: {}", name)).into())
                 }
+            } else if name.starts_with("DisposableStack.prototype.") {
+                if let Some(method) = name.strip_prefix("DisposableStack.prototype.") {
+                    crate::js_disposable::handle_disposable_stack_method(mc, this_val, method, eval_args, env)
+                } else {
+                    Err(raise_eval_error!(format!("Unknown DisposableStack function: {}", name)).into())
+                }
+            } else if name.starts_with("AsyncDisposableStack.prototype.") {
+                if let Some(method) = name.strip_prefix("AsyncDisposableStack.prototype.") {
+                    crate::js_disposable::handle_async_disposable_stack_method(mc, this_val, method, eval_args, env)
+                } else {
+                    Err(raise_eval_error!(format!("Unknown AsyncDisposableStack function: {}", name)).into())
+                }
             } else if name.starts_with("Function.") {
                 if let Some(method) = name.strip_prefix("Function.prototype.") {
                     if method == "call" {
@@ -13100,6 +13161,37 @@ pub fn evaluate_call_dispatch<'gc>(
                                 }
                             } else {
                                 crate::core::js_error::create_aggregate_error(mc, env, None, errors_val, message_val, options_val)
+                            }
+                        } else if name == crate::unicode::utf8_to_utf16("SuppressedError") {
+                            let error_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                            let suppressed_val = eval_args.get(1).cloned().unwrap_or(Value::Undefined);
+                            let message_val = eval_args.get(2).cloned().unwrap_or(Value::Undefined);
+                            if let Some(prototype_rc) = object_get_key_value(obj, "prototype") {
+                                let prototype_val = match &*prototype_rc.borrow() {
+                                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                    other => other.clone(),
+                                };
+                                if let Value::Object(proto_ptr) = prototype_val {
+                                    crate::core::js_error::create_suppressed_error(
+                                        mc,
+                                        env,
+                                        Some(proto_ptr),
+                                        error_val,
+                                        suppressed_val,
+                                        Some(message_val),
+                                    )
+                                } else {
+                                    crate::core::js_error::create_suppressed_error(
+                                        mc,
+                                        env,
+                                        None,
+                                        error_val,
+                                        suppressed_val,
+                                        Some(message_val),
+                                    )
+                                }
+                            } else {
+                                crate::core::js_error::create_suppressed_error(mc, env, None, error_val, suppressed_val, Some(message_val))
                             }
                         } else if name == crate::unicode::utf8_to_utf16("Error")
                             || name == crate::unicode::utf8_to_utf16("TypeError")
@@ -19984,6 +20076,21 @@ pub fn call_native_function<'gc>(
         }
     }
 
+    if name.starts_with("DisposableStack.prototype.")
+        && let Some(method) = name.strip_prefix("DisposableStack.prototype.")
+    {
+        return Ok(Some(crate::js_disposable::handle_disposable_stack_method(
+            mc, this_val, method, args, env,
+        )?));
+    }
+    if name.starts_with("AsyncDisposableStack.prototype.")
+        && let Some(method) = name.strip_prefix("AsyncDisposableStack.prototype.")
+    {
+        return Ok(Some(crate::js_disposable::handle_async_disposable_stack_method(
+            mc, this_val, method, args, env,
+        )?));
+    }
+
     if name.starts_with("Atomics.")
         && let Some(method) = name.strip_prefix("Atomics.")
     {
@@ -22207,6 +22314,32 @@ fn evaluate_expr_new<'gc>(
                         let err_val =
                             crate::core::js_error::create_aggregate_error(mc, env, prototype, errors_val, message_val, options_val)?;
                         return Ok(err_val);
+                    } else if name_str == "SuppressedError" {
+                        let error_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                        let suppressed_val = eval_args.get(1).cloned().unwrap_or(Value::Undefined);
+                        let message_val = eval_args.get(2).cloned().unwrap_or(Value::Undefined);
+                        let prototype = if let Some(proto_val) = object_get_key_value(&obj, "prototype") {
+                            let prototype_val = match &*proto_val.borrow() {
+                                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                other => other.clone(),
+                            };
+                            if let Value::Object(proto_obj) = prototype_val {
+                                Some(proto_obj)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let err_val = crate::core::js_error::create_suppressed_error(
+                            mc,
+                            env,
+                            prototype,
+                            error_val,
+                            suppressed_val,
+                            Some(message_val),
+                        )?;
+                        return Ok(err_val);
                     } else if name_str == "Object" {
                         let ctor_realm = crate::js_class::get_function_realm(&obj).ok().flatten().unwrap_or(*env);
                         return crate::js_class::handle_object_constructor(mc, &eval_args, &ctor_realm);
@@ -22357,6 +22490,12 @@ fn evaluate_expr_new<'gc>(
                         return Err(raise_type_error!("Symbol is not a constructor").into());
                     } else if name_str == "ShadowRealm" {
                         return crate::js_shadow_realm::handle_shadow_realm_constructor(mc, &eval_args, env);
+                    } else if name_str == "DisposableStack" {
+                        let nt = Value::Object(obj);
+                        return crate::js_disposable::handle_disposable_stack_constructor(mc, &eval_args, env, Some(&nt));
+                    } else if name_str == "AsyncDisposableStack" {
+                        let nt = Value::Object(obj);
+                        return crate::js_disposable::handle_async_disposable_stack_constructor(mc, &eval_args, env, Some(&nt));
                     }
                 }
                 // If we've reached here, the target object is not a recognized constructor
@@ -23284,4 +23423,292 @@ fn body_has_lexical(stmts: &[Statement]) -> bool {
         }
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Explicit Resource Management helpers
+// ---------------------------------------------------------------------------
+
+/// Register a value for disposal when the enclosing block exits.
+/// Stores `(value, is_async)` pairs in the `DisposableResources` slot of `env`.
+/// If the value is `null` or `undefined`, it is silently skipped.
+fn register_disposable_resource<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    val: &Value<'gc>,
+    is_async: bool,
+) -> Result<(), EvalError<'gc>> {
+    // null / undefined are allowed — they are silently ignored per spec
+    if matches!(val, Value::Undefined | Value::Null) {
+        return Ok(());
+    }
+
+    // Grab or create the disposable-resources list on this env
+    let list = if let Some(existing) = slot_get(env, &InternalSlot::DisposableResources) {
+        if let Value::Object(arr) = &*existing.borrow() {
+            *arr
+        } else {
+            let arr = new_js_object_data(mc);
+            slot_set(mc, env, InternalSlot::DisposableResources, &Value::Object(arr));
+            arr
+        }
+    } else {
+        let arr = new_js_object_data(mc);
+        slot_set(mc, env, InternalSlot::DisposableResources, &Value::Object(arr));
+        arr
+    };
+
+    // Each disposable resource entry: small object { __value, __is_async }
+    let entry = new_js_object_data(mc);
+    slot_set(mc, &entry, InternalSlot::PrimitiveValue, val);
+    if is_async {
+        object_set_key_value(mc, &entry, "__is_async_dispose", &Value::Boolean(true))?;
+    }
+
+    // Append to the list.  We use numeric string keys "0", "1", ... and a length.
+    let len = object_get_length(&list).unwrap_or(0);
+    object_set_key_value(mc, &list, len, &Value::Object(entry))?;
+    object_set_length(mc, &list, len + 1)?;
+
+    Ok(())
+}
+
+/// Dispose all resources registered in the given environment.
+/// Called on block exit.  Resources are disposed in reverse order.
+/// If multiple dispose calls throw, errors are combined using SuppressedError.
+pub fn dispose_resources<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
+    let list = match slot_get(env, &InternalSlot::DisposableResources) {
+        Some(cell) => {
+            if let Value::Object(arr) = &*cell.borrow() {
+                *arr
+            } else {
+                return Ok(());
+            }
+        }
+        None => return Ok(()),
+    };
+
+    let len = object_get_length(&list).unwrap_or(0);
+    if len == 0 {
+        return Ok(());
+    }
+
+    let mut completion_error: Option<Value<'gc>> = None;
+
+    // Dispose in reverse order (LIFO)
+    for i in (0..len).rev() {
+        let entry = match object_get_key_value(&list, i) {
+            Some(cell) => {
+                if let Value::Object(e) = &*cell.borrow() {
+                    *e
+                } else {
+                    continue;
+                }
+            }
+            None => continue,
+        };
+
+        let resource_val = match slot_get(&entry, &InternalSlot::PrimitiveValue) {
+            Some(cell) => cell.borrow().clone(),
+            None => continue,
+        };
+
+        let is_async_dispose = object_get_key_value(&entry, "__is_async_dispose")
+            .map(|c| matches!(&*c.borrow(), Value::Boolean(true)))
+            .unwrap_or(false);
+
+        // Look up the dispose method
+        let dispose_result = call_dispose_method(mc, env, &resource_val, is_async_dispose);
+        match dispose_result {
+            Ok(_) => {}
+            Err(e) => {
+                let new_error = match e {
+                    EvalError::Throw(thrown_val, _, _) => thrown_val,
+                    _ => Value::String(utf8_to_utf16(&format!("{:?}", e))),
+                };
+                if let Some(prev_error) = completion_error.take() {
+                    // Create SuppressedError(new_error, prev_error)
+                    completion_error = Some(create_suppressed_error_value(mc, env, &new_error, &prev_error));
+                } else {
+                    completion_error = Some(new_error);
+                }
+            }
+        }
+    }
+
+    // Clear the list
+    slot_remove(mc, env, &InternalSlot::DisposableResources);
+
+    if let Some(err) = completion_error {
+        return Err(EvalError::Throw(err, None, None));
+    }
+
+    Ok(())
+}
+
+/// Dispose all async resources.  Returns a Vec of promises from asyncDispose
+/// calls, or errors synchronously if something goes wrong.
+#[allow(dead_code)]
+pub fn dispose_resources_async<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Vec<Value<'gc>>, EvalError<'gc>> {
+    let list = match slot_get(env, &InternalSlot::DisposableResources) {
+        Some(cell) => {
+            if let Value::Object(arr) = &*cell.borrow() {
+                *arr
+            } else {
+                return Ok(vec![]);
+            }
+        }
+        None => return Ok(vec![]),
+    };
+
+    let len = object_get_length(&list).unwrap_or(0);
+    if len == 0 {
+        return Ok(vec![]);
+    }
+
+    let mut promises = Vec::new();
+    let mut completion_error: Option<Value<'gc>> = None;
+
+    // Dispose in reverse order (LIFO)
+    for i in (0..len).rev() {
+        let entry = match object_get_key_value(&list, i) {
+            Some(cell) => {
+                if let Value::Object(e) = &*cell.borrow() {
+                    *e
+                } else {
+                    continue;
+                }
+            }
+            None => continue,
+        };
+
+        let resource_val = match slot_get(&entry, &InternalSlot::PrimitiveValue) {
+            Some(cell) => cell.borrow().clone(),
+            None => continue,
+        };
+
+        let is_async_dispose = object_get_key_value(&entry, "__is_async_dispose")
+            .map(|c| matches!(&*c.borrow(), Value::Boolean(true)))
+            .unwrap_or(false);
+
+        let dispose_result = call_dispose_method(mc, env, &resource_val, is_async_dispose);
+        match dispose_result {
+            Ok(v) => {
+                if is_async_dispose {
+                    promises.push(v);
+                }
+            }
+            Err(e) => {
+                let new_error = match e {
+                    EvalError::Throw(thrown_val, _, _) => thrown_val,
+                    _ => Value::String(utf8_to_utf16(&format!("{:?}", e))),
+                };
+                if let Some(prev_error) = completion_error.take() {
+                    completion_error = Some(create_suppressed_error_value(mc, env, &new_error, &prev_error));
+                } else {
+                    completion_error = Some(new_error);
+                }
+            }
+        }
+    }
+
+    slot_remove(mc, env, &InternalSlot::DisposableResources);
+
+    if let Some(err) = completion_error {
+        return Err(EvalError::Throw(err, None, None));
+    }
+
+    Ok(promises)
+}
+
+/// Call [Symbol.dispose]() or [Symbol.asyncDispose]() on a value.
+fn call_dispose_method<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    val: &Value<'gc>,
+    is_async: bool,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Get the Symbol constructor from the environment
+    let sym_ctor = env_get(env, "Symbol").ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol not found").into() })?;
+
+    let sym_obj = match &*sym_ctor.borrow() {
+        Value::Object(o) => *o,
+        _ => return Err(raise_type_error!("Symbol is not an object").into()),
+    };
+
+    // First try Symbol.asyncDispose if is_async, then fall back to Symbol.dispose
+    let method = if is_async {
+        // Try asyncDispose first
+        let async_dispose_sym = object_get_key_value(&sym_obj, "asyncDispose");
+        if let Some(sym_cell) = async_dispose_sym
+            && let Value::Symbol(sym_data) = &*sym_cell.borrow()
+        {
+            let m = match val {
+                Value::Object(obj) => get_property_with_accessors(mc, env, obj, sym_data)?,
+                _ => get_primitive_prototype_property(mc, env, val, sym_data)?,
+            };
+            if !matches!(m, Value::Undefined | Value::Null) {
+                Some(m)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // If no async method yet, try Symbol.dispose
+    let method = match method {
+        Some(m) => m,
+        None => {
+            let dispose_sym = object_get_key_value(&sym_obj, "dispose")
+                .ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol.dispose not found").into() })?;
+            if let Value::Symbol(sym_data) = &*dispose_sym.borrow() {
+                let m = match val {
+                    Value::Object(obj) => get_property_with_accessors(mc, env, obj, sym_data)?,
+                    _ => get_primitive_prototype_property(mc, env, val, sym_data)?,
+                };
+                if matches!(m, Value::Undefined | Value::Null) {
+                    return Err(raise_type_error!("Resource does not have a [Symbol.dispose]() method").into());
+                }
+                m
+            } else {
+                return Err(raise_type_error!("Symbol.dispose is not a symbol").into());
+            }
+        }
+    };
+
+    // Call the dispose method with `this` = the resource value
+    evaluate_call_dispatch(mc, env, &method, Some(val), &[])
+}
+
+/// Create a SuppressedError value from (error, suppressed).
+pub fn create_suppressed_error_value<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    error: &Value<'gc>,
+    suppressed: &Value<'gc>,
+) -> Value<'gc> {
+    // Try to use the proper SuppressedError constructor
+    if let Some(se_ctor) = env_get(env, "SuppressedError") {
+        let result = evaluate_call_dispatch(
+            mc,
+            env,
+            &se_ctor.borrow().clone(),
+            None,
+            &[error.clone(), suppressed.clone(), Value::String(utf8_to_utf16(""))],
+        );
+        if let Ok(val) = result {
+            return val;
+        }
+    }
+
+    // Fallback: create a simple error object
+    let obj = new_js_object_data(mc);
+    let _ = object_set_key_value(mc, &obj, "error", error);
+    let _ = object_set_key_value(mc, &obj, "suppressed", suppressed);
+    let _ = object_set_key_value(mc, &obj, "message", &Value::String(utf8_to_utf16("")));
+    Value::Object(obj)
 }

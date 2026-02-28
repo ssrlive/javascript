@@ -12,6 +12,7 @@ pub(crate) mod js_boolean;
 pub(crate) mod js_class;
 pub(crate) mod js_console;
 pub(crate) mod js_date;
+pub(crate) mod js_disposable;
 pub(crate) mod js_function;
 pub(crate) mod js_generator;
 pub(crate) mod js_iterator_helpers;

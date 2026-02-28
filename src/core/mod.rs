@@ -146,6 +146,8 @@ pub fn initialize_global_constructors_with_parent<'gc>(
     initialize_weakset(mc, env)?;
     initialize_set(mc, env)?;
     crate::js_promise::initialize_promise(mc, env)?;
+    crate::js_disposable::initialize_disposable_stack(mc, env)?;
+    crate::js_disposable::initialize_async_disposable_stack(mc, env)?;
     crate::js_abstract_module_source::initialize_abstract_module_source(mc, env)?;
 
     // Initialize generator prototype/constructor

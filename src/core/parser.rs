@@ -121,6 +121,26 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
             })
         }
         _ => {
+            // Check for `using` declaration: `using x = expr;`
+            // `using` is a contextual keyword — it's a declaration when followed by an identifier.
+            if let Token::Identifier(ref name) = start_token.token
+                && name == "using"
+                && *index + 1 < t.len()
+                && matches!(t[*index + 1].token, Token::Identifier(_))
+            {
+                return parse_using_statement(t, index);
+            }
+
+            // Check for `await using` declaration: `await using x = expr;`
+            if matches!(start_token.token, Token::Await)
+                && *index + 1 < t.len()
+                && matches!(&t[*index + 1].token, Token::Identifier(n) if n == "using")
+                && *index + 2 < t.len()
+                && matches!(t[*index + 2].token, Token::Identifier(_))
+            {
+                return parse_await_using_statement(t, index);
+            }
+
             let label_name_opt = match &start_token.token {
                 Token::Identifier(name) => Some(name.clone()),
                 Token::Await => Some("await".to_string()),
@@ -1952,6 +1972,123 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
 
     Ok(Statement {
         kind: Box::new(StatementKind::Export(specifiers, inner_stmt, source)),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+/// Parse `using x = expr, y = expr;` declaration
+fn parse_using_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume `using` identifier
+
+    let mut decls = Vec::new();
+    loop {
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+        if *index >= t.len() {
+            return Err(raise_parse_error!(
+                "Expected identifier in using declaration",
+                t[start].line,
+                t[start].column
+            ));
+        }
+        let name = match &t[*index].token {
+            Token::Identifier(n) => n.clone(),
+            _ => {
+                return Err(raise_parse_error_with_token!(
+                    t.get(*index).unwrap(),
+                    "Expected identifier in using declaration"
+                ));
+            }
+        };
+        *index += 1;
+
+        if *index >= t.len() || !matches!(t[*index].token, Token::Assign) {
+            return Err(raise_parse_error!(
+                "using declarations must have an initializer",
+                t[start].line,
+                t[start].column
+            ));
+        }
+        *index += 1; // consume `=`
+
+        let init = parse_assignment(t, index)?;
+        decls.push((name, init));
+
+        // Check for comma (multiple declarations)
+        if *index < t.len() && matches!(t[*index].token, Token::Comma) {
+            *index += 1;
+        } else {
+            break;
+        }
+    }
+
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+
+    Ok(Statement {
+        kind: Box::new(StatementKind::Using(decls)),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+/// Parse `await using x = expr;` declaration
+fn parse_await_using_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 2; // consume `await` and `using`
+
+    let mut decls = Vec::new();
+    loop {
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+        if *index >= t.len() {
+            return Err(raise_parse_error!(
+                "Expected identifier in await using declaration",
+                t[start].line,
+                t[start].column
+            ));
+        }
+        let name = match &t[*index].token {
+            Token::Identifier(n) => n.clone(),
+            _ => {
+                return Err(raise_parse_error_with_token!(
+                    t.get(*index).unwrap(),
+                    "Expected identifier in await using declaration"
+                ));
+            }
+        };
+        *index += 1;
+
+        if *index >= t.len() || !matches!(t[*index].token, Token::Assign) {
+            return Err(raise_parse_error!(
+                "await using declarations must have an initializer",
+                t[start].line,
+                t[start].column
+            ));
+        }
+        *index += 1; // consume `=`
+
+        let init = parse_assignment(t, index)?;
+        decls.push((name, init));
+
+        if *index < t.len() && matches!(t[*index].token, Token::Comma) {
+            *index += 1;
+        } else {
+            break;
+        }
+    }
+
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+
+    Ok(Statement {
+        kind: Box::new(StatementKind::AwaitUsing(decls)),
         line: t[start].line,
         column: t[start].column,
     })

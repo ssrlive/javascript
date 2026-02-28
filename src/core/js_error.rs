@@ -146,6 +146,7 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     initialize_native_error(mc, env, "EvalError", &error_ctor_val, &error_proto_val)?;
     initialize_native_error(mc, env, "URIError", &error_ctor_val, &error_proto_val)?;
     initialize_native_error(mc, env, "AggregateError", &error_ctor_val, &error_proto_val)?;
+    initialize_suppressed_error(mc, env, &error_ctor_val, &error_proto_val)?;
 
     Ok(())
 }
@@ -208,6 +209,103 @@ fn initialize_native_error<'gc>(
 
     env_set(mc, env, name, &Value::Object(ctor))?;
     Ok(())
+}
+
+/// Initialize the SuppressedError constructor.
+/// SuppressedError(error, suppressed, message) creates an error with
+/// .error, .suppressed, .message properties.
+fn initialize_suppressed_error<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    parent_ctor: &Value<'gc>,
+    parent_proto: &Value<'gc>,
+) -> Result<(), JSError> {
+    let name = "SuppressedError";
+    let ctor = new_js_object_data(mc);
+    if let Value::Object(parent_ctor_obj) = parent_ctor {
+        ctor.borrow_mut(mc).prototype = Some(*parent_ctor_obj);
+    }
+    slot_set(mc, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(mc, &ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16(name)));
+
+    let proto = new_js_object_data(mc);
+    if let Value::Object(parent_p_obj) = parent_proto {
+        proto.borrow_mut(mc).prototype = Some(*parent_p_obj);
+    }
+
+    object_set_key_value(mc, &ctor, "prototype", &Value::Object(proto))?;
+    ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    ctor.borrow_mut(mc).set_non_writable("prototype");
+    ctor.borrow_mut(mc).set_non_configurable("prototype");
+    object_set_key_value(mc, &proto, "constructor", &Value::Object(ctor))?;
+    object_set_key_value(mc, &proto, "name", &Value::String(utf8_to_utf16(name)))?;
+    object_set_key_value(mc, &proto, "message", &Value::String(utf8_to_utf16("")))?;
+
+    proto.borrow_mut(mc).set_non_enumerable("constructor");
+    proto.borrow_mut(mc).set_non_enumerable("name");
+    proto.borrow_mut(mc).set_non_enumerable("message");
+
+    // length = 3 (error, suppressed, message)
+    let len_desc = create_descriptor_object(mc, &Value::Number(3.0), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &ctor, "length", &len_desc)?;
+
+    let name_desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(name)), false, false, true)?;
+    crate::js_object::define_property_internal(mc, &ctor, "name", &name_desc)?;
+
+    env_set(mc, env, name, &Value::Object(ctor))?;
+    Ok(())
+}
+
+/// Create a SuppressedError instance: new SuppressedError(error, suppressed, message)
+pub fn create_suppressed_error<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    prototype: Option<JSObjectDataPtr<'gc>>,
+    error: Value<'gc>,
+    suppressed: Value<'gc>,
+    message: Option<Value<'gc>>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let message_value = if let Some(msg_val) = message {
+        if matches!(msg_val, Value::Undefined) {
+            Value::Undefined
+        } else {
+            let prim = to_primitive(mc, &msg_val, "string", env)?;
+            if matches!(prim, Value::Symbol(_)) {
+                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+            }
+            Value::String(utf8_to_utf16(&value_to_string(&prim)))
+        }
+    } else {
+        Value::Undefined
+    };
+
+    let proto = if let Some(p) = prototype {
+        Some(p)
+    } else if let Some(se_ctor_val) = env_get(env, "SuppressedError")
+        && let Value::Object(se_ctor) = &*se_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(se_ctor, "prototype")
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        Some(*proto_obj)
+    } else {
+        None
+    };
+
+    let err_obj_val = create_error(mc, proto, message_value).map_err(EvalError::from)?;
+    let err_obj = match &err_obj_val {
+        Value::Object(o) => *o,
+        _ => return Ok(err_obj_val),
+    };
+
+    // Set .error property (writable, enumerable, configurable — per spec non-enumerable actually)
+    object_set_key_value(mc, &err_obj, "error", &error).map_err(EvalError::from)?;
+    err_obj.borrow_mut(mc).set_non_enumerable("error");
+
+    // Set .suppressed property
+    object_set_key_value(mc, &err_obj, "suppressed", &suppressed).map_err(EvalError::from)?;
+    err_obj.borrow_mut(mc).set_non_enumerable("suppressed");
+
+    Ok(Value::Object(err_obj))
 }
 
 pub fn create_aggregate_error<'gc>(

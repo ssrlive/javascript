@@ -258,6 +258,8 @@ fn stmt_contains_top_level_await(stmt: &Statement) -> bool {
         | StatementKind::LetDestructuringObject(_, _)
         | StatementKind::VarDestructuringObject(_, _)
         | StatementKind::ConstDestructuringObject(_, _) => false,
+        StatementKind::Using(decls) => decls.iter().any(|(_, expr)| expr_contains_top_level_await(expr)),
+        StatementKind::AwaitUsing(_) => true,
     }
 }
 

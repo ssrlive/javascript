@@ -51,6 +51,8 @@ pub enum StatementKind {
     Label(String, Box<Statement>),
     Import(Vec<ImportSpecifier>, String), // import specifiers, module name
     Export(Vec<ExportSpecifier>, Option<Box<Statement>>, Option<String>), // export specifiers, optional inner declaration, optional source
+    Using(Vec<(String, Expr)>),           // using declarations: using x = expr, y = expr;
+    AwaitUsing(Vec<(String, Expr)>),      // await using declarations: await using x = expr;
 }
 
 #[derive(Clone, Copy, Debug)]

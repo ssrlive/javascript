@@ -1599,6 +1599,17 @@ pub(crate) fn evaluate_new<'gc>(
                     }
                     "WeakMap" => return crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
                     "WeakSet" => return crate::js_weakset::handle_weakset_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
+                    "DisposableStack" => {
+                        return crate::js_disposable::handle_disposable_stack_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
+                    }
+                    "AsyncDisposableStack" => {
+                        return crate::js_disposable::handle_async_disposable_stack_constructor(
+                            mc,
+                            evaluated_args,
+                            &ctor_realm_env,
+                            new_target,
+                        );
+                    }
                     "ArrayBuffer" => {
                         return crate::js_typedarray::handle_arraybuffer_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }
@@ -1609,7 +1620,7 @@ pub(crate) fn evaluate_new<'gc>(
                         return crate::js_typedarray::handle_dataview_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }
                     "Error" | "TypeError" | "ReferenceError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError"
-                    | "AggregateError" => {
+                    | "AggregateError" | "SuppressedError" => {
                         // GetPrototypeFromConstructor for Error types
                         let prototype: Option<JSObjectDataPtr<'_>> = if let Some(Value::Object(nt_obj)) = new_target {
                             get_prototype_from_constructor(mc, nt_obj, &ctor_realm_env, &name_desc)?
@@ -1631,6 +1642,20 @@ pub(crate) fn evaluate_new<'gc>(
                                 errors_val,
                                 message_val,
                                 options_val,
+                            );
+                        }
+
+                        if name_desc == "SuppressedError" {
+                            let error_val = evaluated_args.first().cloned().unwrap_or(Value::Undefined);
+                            let suppressed_val = evaluated_args.get(1).cloned().unwrap_or(Value::Undefined);
+                            let message_val = evaluated_args.get(2).cloned().unwrap_or(Value::Undefined);
+                            return crate::core::js_error::create_suppressed_error(
+                                mc,
+                                &ctor_realm_env,
+                                prototype,
+                                error_val,
+                                suppressed_val,
+                                Some(message_val),
                             );
                         }
 

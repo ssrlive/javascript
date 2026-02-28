@@ -129,6 +129,14 @@ pub fn initialize_symbol<'gc>(
     let unscopables_sym = wk_symbol!("unscopables", "Symbol.unscopables");
     object_set_key_value(mc, &symbol_ctor, "unscopables", &unscopables_sym)?;
 
+    // Symbol.dispose
+    let dispose_sym = wk_symbol!("dispose", "Symbol.dispose");
+    object_set_key_value(mc, &symbol_ctor, "dispose", &dispose_sym)?;
+
+    // Symbol.asyncDispose
+    let async_dispose_sym = wk_symbol!("asyncDispose", "Symbol.asyncDispose");
+    object_set_key_value(mc, &symbol_ctor, "asyncDispose", &async_dispose_sym)?;
+
     // All well-known symbol properties on Symbol are non-writable, non-enumerable, non-configurable
     // per the ECMAScript spec (they are immutable values, not methods).
     for wk in &[
@@ -144,6 +152,8 @@ pub fn initialize_symbol<'gc>(
         "split",
         "hasInstance",
         "unscopables",
+        "dispose",
+        "asyncDispose",
     ] {
         symbol_ctor.borrow_mut(mc).set_non_enumerable(*wk);
         symbol_ctor.borrow_mut(mc).set_non_writable(*wk);

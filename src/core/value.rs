@@ -513,6 +513,10 @@ pub enum InternalSlot {
     LookupGetter, // __lookupGetter__
     LookupSetter, // __lookupSetter__
 
+    // --- Explicit Resource Management ---
+    DisposableResources, // __disposable_resources (Vec of (value, is_async) pairs)
+    DisposableType,      // "sync" or "async" — distinguishes DisposableStack from AsyncDisposableStack
+
     // --- ShadowRealm ---
     ShadowRealm,        // __shadow_realm  (isolated global env for a ShadowRealm instance)
     WrappedTarget,      // __wrapped_target (target function of a WrappedFunction)

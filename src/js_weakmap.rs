@@ -165,7 +165,7 @@ pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     object_set_key_value(mc, &weakmap_proto, "constructor", &Value::Object(weakmap_ctor))?;
 
     // Register instance methods
-    let methods = vec!["set", "get", "has", "delete", "toString"];
+    let methods = vec!["set", "get", "has", "delete", "toString", "getOrInsert", "getOrInsertComputed"];
 
     for method in methods {
         let val = Value::Function(format!("WeakMap.prototype.{method}"));
@@ -287,6 +287,72 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             Ok(Value::Boolean(weakmap_delete_key(mc, weakmap, key_obj_rc)))
         }
         "toString" => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
+        "getOrInsert" => {
+            // WeakMap.prototype.getOrInsert(key, value)
+            let key = args.first().cloned().unwrap_or(Value::Undefined);
+            let default_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            let key_obj_rc = match &key {
+                Value::Object(obj) => *obj,
+                _ => return Err(raise_type_error!("Invalid value used as weak map key").into()),
+            };
+
+            // If key already exists, return existing value
+            for (k, v) in &weakmap.borrow().entries {
+                if k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, key_obj_rc)) {
+                    return Ok(v.clone());
+                }
+            }
+            // Insert and return the default
+            weakmap
+                .borrow_mut(mc)
+                .entries
+                .push((Gc::downgrade(key_obj_rc), default_value.clone()));
+            Ok(default_value)
+        }
+        "getOrInsertComputed" => {
+            // WeakMap.prototype.getOrInsertComputed(key, callbackFn)
+            let key = args.first().cloned().unwrap_or(Value::Undefined);
+            let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            let key_obj_rc = match &key {
+                Value::Object(obj) => *obj,
+                _ => return Err(raise_type_error!("Invalid value used as weak map key").into()),
+            };
+
+            // Validate callback is callable
+            let is_callable = match &callback {
+                Value::Object(obj) => {
+                    obj.borrow().get_closure().is_some()
+                        || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                        || slot_get_chained(obj, &InternalSlot::Callable).is_some()
+                        || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
+                }
+                Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) => true,
+                _ => false,
+            };
+            if !is_callable {
+                return Err(raise_type_error!("WeakMap.prototype.getOrInsertComputed: callback is not a function").into());
+            }
+
+            // If key already exists, return existing value
+            for (k, v) in &weakmap.borrow().entries {
+                if k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, key_obj_rc)) {
+                    return Ok(v.clone());
+                }
+            }
+            // Call callback(key) to compute the value
+            let computed = crate::core::evaluate_call_dispatch(mc, _env, &callback, None, std::slice::from_ref(&key))?;
+            // Re-check: if callback caused insertion of same key, OVERWRITE with computed value
+            for (k, v) in &mut weakmap.borrow_mut(mc).entries {
+                if k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, key_obj_rc)) {
+                    *v = computed.clone();
+                    return Ok(computed);
+                }
+            }
+            weakmap.borrow_mut(mc).entries.push((Gc::downgrade(key_obj_rc), computed.clone()));
+            Ok(computed)
+        }
         _ => Err(raise_type_error!(format!("WeakMap.prototype.{} is not a function", method)).into()),
     }
 }

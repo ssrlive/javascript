@@ -5520,6 +5520,21 @@ pub fn handle_typedarray_method<'gc>(
                 "toSorted" => {
                     let len = get_len();
                     let comparefn = _args.first().cloned();
+
+                    // Step 1: If comparefn is not undefined and IsCallable(comparefn) is false, throw TypeError
+                    if let Some(ref cmp) = comparefn
+                        && !matches!(cmp, Value::Undefined)
+                    {
+                        let callable = match cmp {
+                            Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) => true,
+                            Value::Object(o) => o.borrow().get_closure().is_some() || slot_get(o, &InternalSlot::BoundTarget).is_some(),
+                            _ => false,
+                        };
+                        if !callable {
+                            return Err(raise_type_error!("comparefn is not a function").into());
+                        }
+                    }
+
                     let mut vals: Vec<f64> = Vec::with_capacity(len);
                     for i in 0..len {
                         vals.push(ta.get(i)?);
@@ -5614,11 +5629,22 @@ pub fn handle_typedarray_method<'gc>(
                 "with" => {
                     // Step 3: capture len BEFORE value conversion
                     let orig_len = get_len();
+
+                    // Step 4: Let relativeIndex be ? ToIntegerOrInfinity(index).
                     let idx_arg = _args.first().cloned().unwrap_or(Value::Undefined);
-                    let rel = crate::core::to_number(&idx_arg).unwrap_or(0.0) as i64;
+                    let idx_num = crate::core::to_number_with_env(mc, _env, &idx_arg)?;
+                    let rel = if idx_num.is_nan() || idx_num == 0.0 {
+                        0i64
+                    } else if !idx_num.is_finite() {
+                        if idx_num.is_sign_negative() { i64::MIN } else { i64::MAX }
+                    } else {
+                        idx_num.trunc() as i64
+                    };
+
+                    // Steps 5-6: compute actualIndex
                     let actual = if rel < 0 { orig_len as i64 + rel } else { rel };
 
-                    // Step 7-8: convert value BEFORE checking index bounds
+                    // Steps 7-8: convert value BEFORE checking index bounds
                     // (valueOf may resize the buffer)
                     let value = _args.get(1).cloned().unwrap_or(Value::Undefined);
                     let numeric_value = if is_bigint {
@@ -5627,7 +5653,7 @@ pub fn handle_typedarray_method<'gc>(
                             _ => Value::BigInt(Box::new(num_bigint::BigInt::from(to_bigint_i64(mc, _env, &value)?))),
                         }
                     } else {
-                        Value::Number(crate::core::to_number_with_env(mc, _env, &value).unwrap_or(0.0))
+                        Value::Number(crate::core::to_number_with_env(mc, _env, &value)?)
                     };
 
                     // Step 9: Use IsValidIntegerIndex (checks current buffer state)

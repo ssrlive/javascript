@@ -312,6 +312,9 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                 "flatMap",
                 "includes",
                 "keys",
+                "toReversed",
+                "toSorted",
+                "toSpliced",
                 "values",
             ] {
                 object_set_key_value(mc, &unscopables_obj, name, &Value::Boolean(true))?;

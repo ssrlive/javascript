@@ -1920,6 +1920,8 @@ pub fn handle_object_method<'gc>(
                             | "Map.prototype.getOrInsert"
                             | "Map.prototype.getOrInsertComputed"
                             | "WeakMap.prototype.set"
+                            | "WeakMap.prototype.getOrInsert"
+                            | "WeakMap.prototype.getOrInsertComputed"
                             | "Array.prototype.toSpliced"
                             | "Array.prototype.with"
                             | "Math.atan2"

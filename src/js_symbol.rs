@@ -137,6 +137,10 @@ pub fn initialize_symbol<'gc>(
     let async_dispose_sym = wk_symbol!("asyncDispose", "Symbol.asyncDispose");
     object_set_key_value(mc, &symbol_ctor, "asyncDispose", &async_dispose_sym)?;
 
+    // Symbol.isConcatSpreadable
+    let is_concat_spreadable_sym = wk_symbol!("isConcatSpreadable", "Symbol.isConcatSpreadable");
+    object_set_key_value(mc, &symbol_ctor, "isConcatSpreadable", &is_concat_spreadable_sym)?;
+
     // All well-known symbol properties on Symbol are non-writable, non-enumerable, non-configurable
     // per the ECMAScript spec (they are immutable values, not methods).
     for wk in &[
@@ -154,6 +158,7 @@ pub fn initialize_symbol<'gc>(
         "unscopables",
         "dispose",
         "asyncDispose",
+        "isConcatSpreadable",
     ] {
         symbol_ctor.borrow_mut(mc).set_non_enumerable(*wk);
         symbol_ctor.borrow_mut(mc).set_non_writable(*wk);

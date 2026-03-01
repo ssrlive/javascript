@@ -455,7 +455,7 @@ fn serialize_json_property<'gc>(
     match &value {
         Value::Null => Ok(Some("null".to_string())),
         Value::Boolean(b) => Ok(Some(if *b { "true".to_string() } else { "false".to_string() })),
-        Value::String(s) => Ok(Some(quote_json_string(&utf16_to_utf8(s)))),
+        Value::String(s) => Ok(Some(quote_json_string_utf16(s))),
         Value::Number(n) => {
             if n.is_finite() {
                 Ok(Some(format_number(*n)))
@@ -632,6 +632,59 @@ fn quote_json_string(s: &str) -> String {
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
+    }
+    out.push('"');
+    out
+}
+
+/// Quote a JSON string from UTF-16 code units — well-formed-json-stringify (§24.5.2.4)
+/// Lone surrogates (U+D800..U+DFFF) are escaped as \uXXXX per spec.
+fn quote_json_string_utf16(s: &[u16]) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut i = 0;
+    while i < s.len() {
+        let cu = s[i];
+        match cu {
+            0x0022 => out.push_str("\\\""), // "
+            0x005C => out.push_str("\\\\"), // \
+            0x0008 => out.push_str("\\b"),
+            0x000C => out.push_str("\\f"),
+            0x000A => out.push_str("\\n"),
+            0x000D => out.push_str("\\r"),
+            0x0009 => out.push_str("\\t"),
+            c if c < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c));
+            }
+            // Lone surrogates → escape as \uXXXX (well-formed-json-stringify)
+            c @ 0xD800..=0xDBFF => {
+                // High surrogate — check if followed by low surrogate
+                if i + 1 < s.len() && (0xDC00..=0xDFFF).contains(&s[i + 1]) {
+                    // Valid surrogate pair, decode and emit as UTF-8
+                    let hi = c as u32;
+                    let lo = s[i + 1] as u32;
+                    let cp = ((hi - 0xD800) << 10) + (lo - 0xDC00) + 0x10000;
+                    if let Some(ch) = char::from_u32(cp) {
+                        out.push(ch);
+                    }
+                    i += 2;
+                    continue;
+                } else {
+                    // Lone high surrogate
+                    out.push_str(&format!("\\ud{:03x}", c & 0xFFF));
+                }
+            }
+            c @ 0xDC00..=0xDFFF => {
+                // Lone low surrogate
+                out.push_str(&format!("\\u{:04x}", c));
+            }
+            c => {
+                if let Some(ch) = char::from_u32(c as u32) {
+                    out.push(ch);
+                }
+            }
+        }
+        i += 1;
     }
     out.push('"');
     out

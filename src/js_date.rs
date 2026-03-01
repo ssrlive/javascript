@@ -448,6 +448,9 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
         ("toLocaleString", 0.0),
         ("toLocaleDateString", 0.0),
         ("toLocaleTimeString", 0.0),
+        // Annex B legacy methods
+        ("getYear", 0.0),
+        ("setYear", 1.0),
     ];
 
     for (method, arity) in methods {
@@ -473,6 +476,12 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
         // Store on prototype: writable, non-enumerable, configurable
         object_set_key_value(mc, &date_proto, method.to_string(), &Value::Object(fn_obj))?;
         date_proto.borrow_mut(mc).set_non_enumerable(*method);
+    }
+
+    // Annex B: Date.prototype.toGMTString === Date.prototype.toUTCString (same object)
+    if let Some(utc_fn) = object_get_key_value(&date_proto, "toUTCString") {
+        object_set_key_value(mc, &date_proto, "toGMTString", &utc_fn.borrow())?;
+        date_proto.borrow_mut(mc).set_non_enumerable("toGMTString");
     }
 
     // Symbol.toPrimitive — Date.prototype[@@toPrimitive](hint)
@@ -1654,6 +1663,54 @@ pub(crate) fn handle_date_method<'gc>(
             let new_t = time_clip(make_date(day, time));
             set_time_stamp_value(mc, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
+        }
+
+        // ===================== Annex B (legacy) =====================
+        "getYear" => {
+            // B.2.4.1: getYear() → getFullYear() - 1900
+            if t.is_nan() {
+                return Ok(Value::Number(f64::NAN));
+            }
+            let c = decompose_local(t).unwrap();
+            Ok(Value::Number(c.year - 1900.0))
+        }
+        "setYear" => {
+            // B.2.4.2: setYear(year)
+            let y = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            if y.is_nan() {
+                let new_t = f64::NAN;
+                set_time_stamp_value(mc, obj_ptr, new_t)?;
+                return Ok(Value::Number(new_t));
+            }
+            let yi = y.trunc();
+            let yr = if (0.0..=99.0).contains(&yi) { yi + 1900.0 } else { yi };
+            // Per spec: if t is NaN, let t be +0𝔽 (so we start from epoch)
+            let c = if t.is_nan() {
+                decompose_utc(0.0).unwrap()
+            } else {
+                decompose_local(t).unwrap()
+            };
+            let new_t = time_clip(local_to_utc(yr, c.month, c.date, c.hour, c.min, c.sec, c.ms));
+            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            Ok(Value::Number(new_t))
+        }
+        "toGMTString" => {
+            // B.2.4.3: toGMTString is the same Function object as toUTCString
+            if t.is_nan() {
+                return Ok(Value::String(utf8_to_utf16("Invalid Date")));
+            }
+            let c = decompose_utc(t).unwrap();
+            let formatted = format!(
+                "{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
+                weekday_name(c.weekday),
+                c.date as u32,
+                month_name(c.month),
+                format_year_display(c.year),
+                c.hour as u32,
+                c.min as u32,
+                c.sec as u32,
+            );
+            Ok(Value::String(utf8_to_utf16(&formatted)))
         }
 
         _ => Err(raise_type_error!(format!("Date.prototype.{method} is not a function")).into()),

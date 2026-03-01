@@ -957,8 +957,26 @@ pub fn handle_reflect_method<'gc>(
                         return Ok(Value::Boolean(crate::js_typedarray::is_valid_integer_index(ta, num_idx)));
                     }
 
-                    let has_prop = object_get_key_value(&obj, &prop_key).is_some();
-                    Ok(Value::Boolean(has_prop))
+                    // OrdinaryHasProperty: check own, then walk prototype chain
+                    let has_own = object_get_key_value(&obj, &prop_key).is_some();
+                    if has_own {
+                        return Ok(Value::Boolean(true));
+                    }
+                    // Walk prototype chain (may hit Proxy traps)
+                    let mut cur_proto = obj.borrow().prototype;
+                    while let Some(proto) = cur_proto {
+                        // Check if proto is a Proxy
+                        if let Some(proxy_cell) = slot_get(&proto, &InternalSlot::Proxy)
+                            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                        {
+                            return Ok(Value::Boolean(crate::js_proxy::proxy_has_property(mc, proxy, prop_key)?));
+                        }
+                        if object_get_key_value(&proto, &prop_key).is_some() {
+                            return Ok(Value::Boolean(true));
+                        }
+                        cur_proto = proto.borrow().prototype;
+                    }
+                    Ok(Value::Boolean(false))
                 }
                 _ => Err(raise_type_error!("Reflect.has target must be an object").into()),
             }

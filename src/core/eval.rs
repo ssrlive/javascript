@@ -12440,6 +12440,13 @@ pub fn evaluate_call_dispatch<'gc>(
             } else if let Some(method) = name.strip_prefix("TypedArray.prototype.") {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 Ok(crate::js_typedarray::handle_typedarray_method(mc, this_v, method, eval_args, env)?)
+            } else if let Some(method) = name.strip_prefix("Uint8Array.prototype.") {
+                let this_v = this_val.unwrap_or(&Value::Undefined);
+                Ok(crate::js_typedarray::handle_uint8array_proto_method(
+                    mc, this_v, method, eval_args, env,
+                )?)
+            } else if let Some(method) = name.strip_prefix("Uint8Array.") {
+                Ok(crate::js_typedarray::handle_uint8array_static_method(mc, method, eval_args, env)?)
             } else if name == "TypedArrayIterator.prototype.next" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 Ok(crate::js_typedarray::handle_typedarray_iterator_next(mc, this_v)?)
@@ -13476,16 +13483,33 @@ pub fn evaluate_call_dispatch<'gc>(
                                 Value::String(crate::unicode::utf8_to_utf16(&value_to_string(&prim)))
                             };
                             // The constructor's "prototype" property points to the error prototype
-                            if let Some(prototype_rc) = object_get_key_value(obj, "prototype")
+                            let err = if let Some(prototype_rc) = object_get_key_value(obj, "prototype")
                                 && let Value::Object(proto_ptr) = &*prototype_rc.borrow()
                             {
-                                let err = crate::core::create_error(mc, Some(*proto_ptr), msg_val)?;
-                                Ok(err)
+                                crate::core::create_error(mc, Some(*proto_ptr), msg_val)?
                             } else {
-                                // Fallback: create error with no prototype
-                                let err = crate::core::create_error(mc, None, msg_val)?;
-                                Ok(err)
+                                crate::core::create_error(mc, None, msg_val)?
+                            };
+                            // error-cause: InstallErrorCause(O, options) per §20.5.8.1
+                            if let Some(options_val) = eval_args.get(1)
+                                && let Value::Object(options_obj) = options_val
+                            {
+                                let has_cause = if let Some(proxy_cell) = crate::core::slot_get(options_obj, &InternalSlot::Proxy)
+                                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                                {
+                                    crate::js_proxy::proxy_has_property(mc, proxy, "cause")?
+                                } else {
+                                    crate::core::has_property_key(options_obj, "cause")
+                                };
+                                if has_cause {
+                                    let cause_val = crate::core::eval::get_property_with_accessors(mc, env, options_obj, "cause")?;
+                                    if let Value::Object(err_obj) = &err {
+                                        object_set_key_value(mc, err_obj, "cause", &cause_val)?;
+                                        err_obj.borrow_mut(mc).set_non_enumerable("cause");
+                                    }
+                                }
                             }
+                            Ok(err)
                         } else if name == crate::unicode::utf8_to_utf16("Promise") {
                             // Promise() called without new must throw TypeError per §27.2.3.1 step 1
                             Err(raise_type_error!("Promise constructor cannot be invoked without 'new'").into())
@@ -16953,6 +16977,7 @@ fn evaluate_expr_property<'gc>(
             | "Math.floor"
             | "Math.fround"
             | "Math.f16round"
+            | "Math.sumPrecise"
             | "Math.log"
             | "Math.log1p"
             | "Math.log2"
@@ -16971,6 +16996,10 @@ fn evaluate_expr_property<'gc>(
             | "Reflect.preventExtensions"
             | "ArrayBuffer.isView"
             | "ArrayBuffer.prototype.resize"
+            | "Uint8Array.fromBase64"
+            | "Uint8Array.fromHex"
+            | "Uint8Array.prototype.setFromBase64"
+            | "Uint8Array.prototype.setFromHex"
             | "RegExp.prototype.exec"
             | "RegExp.prototype.test"
             | "RegExp.prototype.match"
@@ -17055,6 +17084,8 @@ fn evaluate_expr_property<'gc>(
             | "String.prototype.substring"
             | "String.prototype.substr" => 2.0,
             "Function.prototype.[Symbol.hasInstance]" | "SharedArrayBuffer.prototype.grow" => 1.0,
+            "Uint8Array.prototype.toBase64" | "Uint8Array.prototype.toHex" => 0.0,
+            "ArrayBuffer.prototype.transfer" | "ArrayBuffer.prototype.transferToFixedLength" => 0.0,
             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
             _ => {
                 if func_name.starts_with("DataView.prototype.get") {
@@ -17687,6 +17718,26 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                     return Ok(Value::Boolean(deleted));
                 }
 
+                // TypedArray [[Delete]]: numeric indices cannot be deleted
+                if let Some(ta_val) = slot_get(&obj, &InternalSlot::TypedArray)
+                    && let Value::TypedArray(ta) = &*ta_val.borrow()
+                    && let Some(numeric_index) = crate::js_typedarray::canonical_numeric_index_string(key)
+                {
+                    // If detached, return true
+                    if ta.buffer.borrow().detached {
+                        return Ok(Value::Boolean(true));
+                    }
+                    // If not a valid index, return true
+                    if !crate::js_typedarray::is_valid_integer_index(ta, numeric_index) {
+                        return Ok(Value::Boolean(true));
+                    }
+                    // Valid index on non-detached buffer: cannot delete → false
+                    if env_get_strictness(env) {
+                        return Err(crate::raise_type_error!(format!("Cannot delete property '{key}' of a TypedArray")).into());
+                    }
+                    return Ok(Value::Boolean(false));
+                }
+
                 if obj.borrow().non_configurable.contains(&key_val) {
                     if env_get_strictness(env) {
                         Err(crate::raise_type_error!(format!("Cannot delete non-configurable property '{key}'",)).into())
@@ -17765,6 +17816,29 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                         return Ok(Value::Boolean(false));
                     }
                     return Ok(Value::Boolean(true));
+                }
+                // TypedArray [[Delete]]: numeric indices cannot be deleted
+                if let Some(ta_val) = slot_get(&obj, &InternalSlot::TypedArray)
+                    && let Value::TypedArray(ta) = &*ta_val.borrow()
+                {
+                    let key_str = match &key {
+                        PropertyKey::String(s) => Some(s.clone()),
+                        _ => None,
+                    };
+                    if let Some(ref s) = key_str
+                        && let Some(numeric_index) = crate::js_typedarray::canonical_numeric_index_string(s)
+                    {
+                        if ta.buffer.borrow().detached {
+                            return Ok(Value::Boolean(true));
+                        }
+                        if !crate::js_typedarray::is_valid_integer_index(ta, numeric_index) {
+                            return Ok(Value::Boolean(true));
+                        }
+                        if env_get_strictness(env) {
+                            return Err(crate::raise_type_error!(format!("Cannot delete property '{}' of a TypedArray", s)).into());
+                        }
+                        return Ok(Value::Boolean(false));
+                    }
                 }
                 if obj.borrow().non_configurable.contains(&key) {
                     if env_get_strictness(env) {
@@ -18367,6 +18441,10 @@ fn evaluate_expr_index<'gc>(
                     | "Object.prototype.__lookupSetter__"
                     | "ArrayBuffer.isView"
                     | "ArrayBuffer.prototype.resize"
+                    | "Uint8Array.fromBase64"
+                    | "Uint8Array.fromHex"
+                    | "Uint8Array.prototype.setFromBase64"
+                    | "Uint8Array.prototype.setFromHex"
                     | "Array.prototype.sort"
                     | "encodeURI"
                     | "encodeURIComponent"
@@ -18425,6 +18503,7 @@ fn evaluate_expr_index<'gc>(
                     | "Math.floor"
                     | "Math.fround"
                     | "Math.f16round"
+                    | "Math.sumPrecise"
                     | "Math.log"
                     | "Math.log1p"
                     | "Math.log2"
@@ -20506,6 +20585,35 @@ pub fn call_native_function<'gc>(
         }
     }
 
+    // arraybuffer-transfer: transfer, transferToFixedLength, detached
+    if name == "ArrayBuffer.prototype.transfer" || name == "ArrayBuffer.prototype.transferToFixedLength" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        let method_name = if name.ends_with("transferToFixedLength") {
+            "transferToFixedLength"
+        } else {
+            "transfer"
+        };
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_method(
+                mc,
+                env,
+                obj,
+                method_name,
+                args,
+            )?));
+        } else {
+            return Err(raise_type_error!(format!("ArrayBuffer.prototype.{} called on non-object", method_name)).into());
+        }
+    }
+
+    if name == "get detached" || name == "ArrayBuffer.prototype.detached" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_accessor(mc, obj, "detached")?));
+        }
+        return Err(raise_type_error!("Method ArrayBuffer.prototype.detached called on incompatible receiver").into());
+    }
+
     if name == "SharedArrayBuffer.prototype.byteLength" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         if let Value::Object(obj) = this_v {
@@ -20563,6 +20671,18 @@ pub fn call_native_function<'gc>(
             let this_v = this_val.unwrap_or(&Value::Undefined);
             return Ok(Some(crate::js_typedarray::handle_typedarray_method(mc, this_v, method, args, env)?));
         }
+    }
+
+    // Uint8Array prototype methods (toBase64, toHex, setFromBase64, setFromHex)
+    if let Some(method) = name.strip_prefix("Uint8Array.prototype.") {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        return Ok(Some(crate::js_typedarray::handle_uint8array_proto_method(
+            mc, this_v, method, args, env,
+        )?));
+    }
+    // Uint8Array static methods (fromBase64, fromHex)
+    if let Some(method) = name.strip_prefix("Uint8Array.") {
+        return Ok(Some(crate::js_typedarray::handle_uint8array_static_method(mc, method, args, env)?));
     }
 
     // %TypedArray%.species — get [Symbol.species]() { return this; }
@@ -22670,7 +22790,17 @@ fn evaluate_expr_new<'gc>(
                         name_str.as_str(),
                         "Error" | "ReferenceError" | "TypeError" | "RangeError" | "SyntaxError" | "EvalError" | "URIError"
                     ) {
-                        let msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                        let raw_msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                        // ToString(message) per spec §20.5.1.1 step 3
+                        let msg = if matches!(raw_msg, Value::Undefined) {
+                            Value::Undefined
+                        } else {
+                            let prim = crate::core::to_primitive(mc, &raw_msg, "string", env)?;
+                            if matches!(prim, Value::Symbol(_)) {
+                                return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
+                            }
+                            Value::String(crate::unicode::utf8_to_utf16(&value_to_string(&prim)))
+                        };
                         let prototype = if let Some(proto_val) = object_get_key_value(&obj, "prototype") {
                             let prototype_val = match &*proto_val.borrow() {
                                 Value::Property { value: Some(v), .. } => v.borrow().clone(),
@@ -22688,6 +22818,24 @@ fn evaluate_expr_new<'gc>(
                         let err_val = crate::core::js_error::create_error(mc, prototype, msg)?;
                         if let Value::Object(err_obj) = &err_val {
                             object_set_key_value(mc, err_obj, "name", &Value::String(name.clone()))?;
+                            // error-cause: InstallErrorCause(O, options) per §20.5.8.1
+                            if let Some(options_val) = eval_args.get(1)
+                                && let Value::Object(options_obj) = options_val
+                            {
+                                // HasProperty(options, "cause") — must go through Proxy [[HasProperty]]
+                                let has_cause = if let Some(proxy_cell) = crate::core::slot_get(options_obj, &InternalSlot::Proxy)
+                                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                                {
+                                    crate::js_proxy::proxy_has_property(mc, proxy, "cause")?
+                                } else {
+                                    crate::core::has_property_key(options_obj, "cause")
+                                };
+                                if has_cause {
+                                    let cause_val = crate::core::eval::get_property_with_accessors(mc, env, options_obj, "cause")?;
+                                    object_set_key_value(mc, err_obj, "cause", &cause_val)?;
+                                    err_obj.borrow_mut(mc).set_non_enumerable("cause");
+                                }
+                            }
                         }
                         return Ok(err_val);
                     } else if name_str == "AggregateError" {

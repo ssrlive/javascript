@@ -2380,20 +2380,6 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Boolean(true))
         }
         "concat" => {
-            let is_array_or_throw = |obj: &JSObjectDataPtr<'gc>| -> Result<bool, EvalError<'gc>> {
-                if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
-                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
-                {
-                    if proxy.revoked {
-                        return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
-                    }
-                    if let Value::Object(target_obj) = &*proxy.target {
-                        return Ok(is_array(mc, target_obj));
-                    }
-                }
-                Ok(is_array(mc, obj))
-            };
-
             let length_of_array_like = |obj: &JSObjectDataPtr<'gc>| -> Result<usize, EvalError<'gc>> {
                 let len_val = crate::core::get_property_with_accessors(mc, env, obj, "length")?;
                 let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
@@ -2425,8 +2411,27 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     }
                 }
 
-                is_array_or_throw(obj)
+                is_array_spec(mc, obj)
             };
+
+            // HasProperty that goes through Proxy/TypedArray
+            let has_property_compat = |obj: &JSObjectDataPtr<'gc>, key: &str| -> Result<bool, EvalError<'gc>> {
+                if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
+                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                {
+                    return crate::js_proxy::proxy_has_property(mc, proxy, key.to_string());
+                }
+                // TypedArray: check via canonical numeric index
+                if let Some(ta_cell) = crate::core::slot_get(obj, &InternalSlot::TypedArray)
+                    && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                    && let Some(idx) = crate::js_typedarray::canonical_numeric_index_string(key)
+                {
+                    return Ok(crate::js_typedarray::is_valid_integer_index(ta, idx));
+                }
+                Ok(object_get_key_value(obj, key).is_some())
+            };
+
+            const MAX_SAFE_INTEGER: usize = 9007199254740991;
 
             let out = array_species_create_impl(mc, env, object, 0.0)?;
             let mut n = 0usize;
@@ -2440,15 +2445,23 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         continue;
                     };
                     let src_len = length_of_array_like(&src_obj)?;
+                    // §22.1.3.1 step 5.c.iii: If n + len > 2^53 - 1, throw TypeError
+                    if n.checked_add(src_len).is_none_or(|total| total > MAX_SAFE_INTEGER) {
+                        return Err(raise_type_error!("Array.prototype.concat: resulting array length exceeds 2^53 - 1").into());
+                    }
                     for k in 0..src_len {
-                        let has_property = object_get_key_value(&src_obj, k.to_string()).is_some();
-                        if has_property {
-                            let sub = crate::core::get_property_with_accessors(mc, env, &src_obj, k.to_string())?;
+                        let k_str = k.to_string();
+                        if has_property_compat(&src_obj, &k_str)? {
+                            let sub = crate::core::get_property_with_accessors(mc, env, &src_obj, k_str)?;
                             create_data_property_or_throw(mc, &out, n, &sub)?;
                         }
                         n += 1;
                     }
                 } else {
+                    // §22.1.3.1 step 5.d.ii.2: If n >= 2^53 - 1, throw TypeError
+                    if n >= MAX_SAFE_INTEGER {
+                        return Err(raise_type_error!("Array.prototype.concat: resulting array length exceeds 2^53 - 1").into());
+                    }
                     create_data_property_or_throw(mc, &out, n, &item)?;
                     n += 1;
                 }

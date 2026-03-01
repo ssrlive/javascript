@@ -1799,6 +1799,10 @@ pub fn handle_object_method<'gc>(
                             | "Object.prototype.__lookupSetter__"
                             | "ArrayBuffer.isView"
                             | "ArrayBuffer.prototype.resize"
+                            | "Uint8Array.fromBase64"
+                            | "Uint8Array.fromHex"
+                            | "Uint8Array.prototype.setFromBase64"
+                            | "Uint8Array.prototype.setFromHex"
                             | "Array.prototype.sort"
                             | "Function.prototype.call"
                             | "Function.prototype.bind"
@@ -1858,6 +1862,7 @@ pub fn handle_object_method<'gc>(
                             | "Math.floor"
                             | "Math.fround"
                             | "Math.f16round"
+                            | "Math.sumPrecise"
                             | "Math.log"
                             | "Math.log1p"
                             | "Math.log2"
@@ -1948,6 +1953,7 @@ pub fn handle_object_method<'gc>(
                             | "String.prototype.substr" => 2.0,
                             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                             "Symbol.for" | "Symbol.keyFor" | "Symbol.prototype.[Symbol.toPrimitive]" => 1.0,
+                            "Uint8Array.prototype.toBase64" | "Uint8Array.prototype.toHex" => 0.0,
                             _ => 0.0,
                         };
                         crate::core::create_descriptor_object(mc, &Value::Number(len), false, false, true)?

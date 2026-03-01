@@ -92,9 +92,43 @@ pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
 
     // --- Methods (non-enumerable) ---
     let methods = [
-        "floor", "ceil", "round", "abs", "sqrt", "pow", "sin", "cos", "tan", "random", "clz32", "imul", "max", "min", "asin", "acos",
-        "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "exp", "expm1", "log", "log10", "log1p", "log2", "fround",
-        "trunc", "cbrt", "hypot", "sign", "f16round",
+        "floor",
+        "ceil",
+        "round",
+        "abs",
+        "sqrt",
+        "pow",
+        "sin",
+        "cos",
+        "tan",
+        "random",
+        "clz32",
+        "imul",
+        "max",
+        "min",
+        "asin",
+        "acos",
+        "atan",
+        "atan2",
+        "sinh",
+        "cosh",
+        "tanh",
+        "asinh",
+        "acosh",
+        "atanh",
+        "exp",
+        "expm1",
+        "log",
+        "log10",
+        "log1p",
+        "log2",
+        "fround",
+        "trunc",
+        "cbrt",
+        "hypot",
+        "sign",
+        "f16round",
+        "sumPrecise",
     ];
     for name in methods {
         object_set_key_value(mc, &math_obj, name, &Value::Function(format!("Math.{name}")))?;
@@ -354,6 +388,151 @@ pub fn handle_math_call<'gc>(
                 sum_sq += n * n;
             }
             Ok(Value::Number(sum_sq.sqrt()))
+        }
+
+        // --- sumPrecise: Shewchuk exact summation (§21.3.2.34) ---
+        "sumPrecise" => {
+            let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+            let (iter_obj, next_fn) = crate::js_map::get_iterator(mc, env, &iterable)?;
+
+            let mut count = 0usize;
+            let mut has_nan = false;
+            let mut has_pos_inf = false;
+            let mut has_neg_inf = false;
+            let mut all_neg_zero = true;
+            let mut values: Vec<f64> = Vec::new();
+
+            loop {
+                let result = crate::core::evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
+                if crate::js_map::get_iterator_done(mc, env, &result)? {
+                    break;
+                }
+                let item = crate::js_map::get_iterator_value(mc, env, &result)?;
+                count += 1;
+                let n = match &item {
+                    Value::Number(n) => *n,
+                    _ => {
+                        let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                        return Err(raise_type_error!("Math.sumPrecise requires all elements to be Numbers").into());
+                    }
+                };
+                if n.is_nan() {
+                    has_nan = true;
+                    continue;
+                }
+                if n == f64::INFINITY {
+                    has_pos_inf = true;
+                    continue;
+                }
+                if n == f64::NEG_INFINITY {
+                    has_neg_inf = true;
+                    continue;
+                }
+                if n != 0.0 || !n.is_sign_negative() {
+                    all_neg_zero = false;
+                }
+                values.push(n);
+            }
+
+            // Handle special values
+            if has_nan {
+                return Ok(Value::Number(f64::NAN));
+            }
+            if has_pos_inf && has_neg_inf {
+                return Ok(Value::Number(f64::NAN));
+            }
+            if has_pos_inf {
+                return Ok(Value::Number(f64::INFINITY));
+            }
+            if has_neg_inf {
+                return Ok(Value::Number(f64::NEG_INFINITY));
+            }
+            if count == 0 {
+                return Ok(Value::Number(-0.0));
+            }
+
+            // Shewchuk exact summation. Returns None on intermediate overflow.
+            fn fsum_shewchuk(vals: &[f64]) -> Option<f64> {
+                let mut partials: Vec<f64> = Vec::new();
+                for &val in vals {
+                    let mut x = val;
+                    let mut j = 0usize;
+                    let plen = partials.len();
+                    for i in 0..plen {
+                        let mut y = partials[i];
+                        if x.abs() < y.abs() {
+                            std::mem::swap(&mut x, &mut y);
+                        }
+                        let hi = x + y;
+                        let lo = y - (hi - x);
+                        if lo != 0.0 {
+                            partials[j] = lo;
+                            j += 1;
+                        }
+                        x = hi;
+                    }
+                    partials.truncate(j);
+                    if x.is_infinite() {
+                        return None; // intermediate overflow — caller will retry
+                    }
+                    if x != 0.0 || partials.is_empty() {
+                        partials.push(x);
+                    }
+                }
+                if partials.is_empty() {
+                    return Some(0.0);
+                }
+                // Final summation from largest partial down
+                let mut n = partials.len();
+                let mut hi = partials[n - 1];
+                loop {
+                    if n < 2 {
+                        break;
+                    }
+                    n -= 1;
+                    let x = hi;
+                    let y = partials[n - 1];
+                    hi = x + y;
+                    let yr = hi - x;
+                    let lo = y - yr;
+                    if lo != 0.0 {
+                        if n > 1 && ((lo > 0.0 && partials[n - 2] > 0.0) || (lo < 0.0 && partials[n - 2] < 0.0)) {
+                            let adj = lo + lo;
+                            let test = hi + adj;
+                            if test - hi == adj {
+                                hi = test;
+                            }
+                        }
+                        break;
+                    }
+                }
+                Some(hi)
+            }
+
+            // Try direct Shewchuk
+            if let Some(result) = fsum_shewchuk(&values) {
+                if result == 0.0 && all_neg_zero {
+                    return Ok(Value::Number(-0.0));
+                }
+                return Ok(Value::Number(result));
+            }
+
+            // Overflow: retry with power-of-2 scaling (exact, no rounding)
+            let max_abs = values.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+            let nf = values.len() as f64;
+            let log2_bound = nf.log2() + max_abs.log2() - f64::MAX.log2();
+            let k = if log2_bound > 0.0 { (log2_bound.ceil() as i32) + 2 } else { 2 };
+            let scale_down = (0.5f64).powi(k);
+            let scale_up = (2.0f64).powi(k);
+            let scaled: Vec<f64> = values.iter().map(|&v| v * scale_down).collect();
+            if let Some(scaled_result) = fsum_shewchuk(&scaled) {
+                let result = scaled_result * scale_up;
+                if result == 0.0 && all_neg_zero {
+                    return Ok(Value::Number(-0.0));
+                }
+                return Ok(Value::Number(result));
+            }
+            Ok(Value::Number(f64::NAN))
         }
 
         // --- random ---

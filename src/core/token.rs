@@ -2005,9 +2005,8 @@ fn parse_string_literal(
             }
         } else {
             // Check for unescaped line terminators in string literals (but not template literals)
-            if (end_char == '"' || end_char == '\'')
-                && (chars[*start] == '\n' || chars[*start] == '\r' || chars[*start] == '\u{2028}' || chars[*start] == '\u{2029}')
-            {
+            // Per ES2019 (json-superset), U+2028 and U+2029 are allowed inside string literals.
+            if (end_char == '"' || end_char == '\'') && (chars[*start] == '\n' || chars[*start] == '\r') {
                 return Err(raise_tokenize_error!(
                     "Unterminated string literal (newline in string)",
                     current_line,

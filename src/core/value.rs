@@ -1862,6 +1862,12 @@ pub fn get_own_property<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<Property
     obj.borrow().properties.get(&key).cloned()
 }
 
+/// OrdinaryHasProperty: check own properties + prototype chain.
+/// For Proxy objects, callers must check InternalSlot::Proxy and use proxy_has_property instead.
+pub fn has_property_key<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<PropertyKey<'gc>>) -> bool {
+    object_get_key_value(obj, key).is_some()
+}
+
 pub fn object_set_key_value<'gc>(
     mc: &MutationContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,

@@ -261,6 +261,7 @@ pub fn make_atomics_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
         ("wait", "Atomics.wait", 4),
         ("notify", "Atomics.notify", 3),
         ("isLockFree", "Atomics.isLockFree", 1),
+        ("pause", "Atomics.pause", 0),
     ];
 
     for &(method_name, dispatch_name, length) in methods {
@@ -629,6 +630,27 @@ pub fn handle_atomics_method<'gc>(
             _ => false,
         };
         return Ok(Value::Boolean(res));
+    }
+
+    // Atomics.pause() — §25.4.13 — hint to the implementation that the
+    // calling agent is in a spin-wait loop. No observable behaviour.
+    if method == "pause" {
+        // Step 1: If iterationNumber is not undefined, validate it
+        let arg = args.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(arg, Value::Undefined) {
+            match &arg {
+                Value::Number(n) => {
+                    // Must be an integral non-negative number
+                    if n.is_nan() || n.is_infinite() || *n != n.trunc() || *n < 0.0 {
+                        return Err(raise_type_error!("Atomics.pause: iterationNumber must be a non-negative integer").into());
+                    }
+                }
+                _ => {
+                    return Err(raise_type_error!("Atomics.pause: iterationNumber must be a Number").into());
+                }
+            }
+        }
+        return Ok(Value::Undefined);
     }
 
     // All remaining methods: validate typed array type FIRST (before index coercion)
@@ -1036,6 +1058,29 @@ pub fn make_arraybuffer_prototype<'gc>(
     proto.borrow_mut(mc).set_non_enumerable("slice");
     object_set_key_value(mc, &proto, "resize", &Value::Function("ArrayBuffer.prototype.resize".to_string()))?;
     proto.borrow_mut(mc).set_non_enumerable("resize");
+    object_set_key_value(
+        mc,
+        &proto,
+        "transfer",
+        &Value::Function("ArrayBuffer.prototype.transfer".to_string()),
+    )?;
+    proto.borrow_mut(mc).set_non_enumerable("transfer");
+    object_set_key_value(
+        mc,
+        &proto,
+        "transferToFixedLength",
+        &Value::Function("ArrayBuffer.prototype.transferToFixedLength".to_string()),
+    )?;
+    proto.borrow_mut(mc).set_non_enumerable("transferToFixedLength");
+
+    // detached — accessor (getter only)
+    let detached_prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(Value::Function("get detached".to_string()))),
+        setter: None,
+    };
+    object_set_key_value(mc, &proto, "detached", &detached_prop)?;
+    proto.borrow_mut(mc).set_non_enumerable("detached");
 
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_val.borrow()
@@ -3542,6 +3587,26 @@ pub fn handle_arraybuffer_accessor<'gc>(
                 ))
             }
         }
+        "detached" => {
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
+                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    if (**ab).borrow().shared {
+                        return Err(raise_type_error!(
+                            "Method ArrayBuffer.prototype.detached called on incompatible receiver"
+                        ));
+                    }
+                    Ok(Value::Boolean((**ab).borrow().detached))
+                } else {
+                    Err(raise_type_error!(
+                        "Method ArrayBuffer.prototype.detached called on incompatible receiver"
+                    ))
+                }
+            } else {
+                Err(raise_type_error!(
+                    "Method ArrayBuffer.prototype.detached called on incompatible receiver"
+                ))
+            }
+        }
         _ => Ok(Value::Undefined),
     }
 }
@@ -3834,6 +3899,10 @@ pub fn handle_arraybuffer_method<'gc>(
                 if (**ab).borrow().shared {
                     return Err(raise_type_error!("ArrayBuffer.prototype.slice called on a SharedArrayBuffer"));
                 }
+                // Step 4: If IsDetachedBuffer(O) is true, throw a TypeError.
+                if (**ab).borrow().detached {
+                    return Err(raise_type_error!("Cannot slice a detached ArrayBuffer"));
+                }
                 let data = (**ab).borrow().data.lock().unwrap().clone();
                 let len = data.len() as i64;
 
@@ -4014,6 +4083,101 @@ pub fn handle_arraybuffer_method<'gc>(
                 Err(raise_type_error!(
                     "Method ArrayBuffer.prototype.resize called on incompatible receiver"
                 ))
+            }
+        }
+        "transfer" | "transferToFixedLength" => {
+            // §25.1.5.4 ArrayBuffer.prototype.transfer ( [ newLength ] )
+            // §25.1.5.5 ArrayBuffer.prototype.transferToFixedLength ( [ newLength ] )
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
+                let ab = match &*ab_val.borrow() {
+                    Value::ArrayBuffer(ab) => *ab,
+                    _ => {
+                        return Err(raise_type_error!(format!(
+                            "ArrayBuffer.prototype.{} called on incompatible receiver",
+                            method
+                        )));
+                    }
+                };
+                if ab.borrow().shared {
+                    return Err(raise_type_error!(format!(
+                        "ArrayBuffer.prototype.{} called on a SharedArrayBuffer",
+                        method
+                    )));
+                }
+                if ab.borrow().detached {
+                    return Err(raise_type_error!("Cannot transfer a detached ArrayBuffer"));
+                }
+
+                let old_data = ab.borrow().data.lock().unwrap().clone();
+                let old_len = old_data.len();
+
+                // Determine new length
+                let new_len = if let Some(arg) = args.first()
+                    && !matches!(arg, Value::Undefined)
+                {
+                    let prim = if let Value::Object(_) = arg {
+                        crate::core::to_primitive(mc, arg, "number", env).map_err(JSError::from)?
+                    } else {
+                        arg.clone()
+                    };
+                    let n = crate::core::to_number(&prim).map_err(JSError::from)?;
+                    if n.is_nan() || n < 0.0 || !n.is_finite() || n > 9007199254740991.0 || n != n.trunc() {
+                        return Err(raise_range_error!("Invalid array buffer length"));
+                    }
+                    n as usize
+                } else {
+                    old_len
+                };
+
+                // Create the new ArrayBuffer with the requested length
+                let mut new_data = vec![0u8; new_len];
+                let copy_len = old_len.min(new_len);
+                new_data[..copy_len].copy_from_slice(&old_data[..copy_len]);
+
+                // Determine if the new buffer is resizable (transfer preserves, transferToFixedLength does not)
+                let max_byte_length = if method == "transfer" {
+                    let old_max = ab.borrow().max_byte_length;
+                    old_max.map(|max| max.max(new_len))
+                } else {
+                    // transferToFixedLength always creates a fixed-length buffer
+                    None
+                };
+
+                let new_ab = new_gc_cell_ptr(
+                    mc,
+                    JSArrayBuffer {
+                        data: Arc::new(Mutex::new(new_data)),
+                        max_byte_length,
+                        shared: false,
+                        detached: false,
+                    },
+                );
+
+                let new_obj = new_js_object_data(mc);
+                slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+                if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
+                    && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
+                    && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
+                    && let Value::Object(proto) = &*proto_val.borrow()
+                {
+                    new_obj.borrow_mut(mc).prototype = Some(*proto);
+                } else {
+                    new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                }
+
+                // Detach the original buffer
+                {
+                    let mut orig = ab.borrow_mut(mc);
+                    orig.detached = true;
+                    orig.data = Arc::new(Mutex::new(Vec::new()));
+                }
+
+                Ok(Value::Object(new_obj))
+            } else {
+                Err(raise_type_error!(format!(
+                    "ArrayBuffer.prototype.{} called on incompatible receiver",
+                    method
+                )))
             }
         }
         _ => Ok(Value::Undefined),
@@ -4679,6 +4843,678 @@ pub fn handle_typedarray_static_method<'gc>(
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Uint8Array base64/hex methods (uint8array-base64 proposal)
+// ═════════════════════════════════════════════════════════════════════════════
+
+const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64URL_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn base64_decode_char(c: u8, is_base64url: bool) -> Option<u8> {
+    match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' if !is_base64url => Some(62),
+        b'/' if !is_base64url => Some(63),
+        b'-' if is_base64url => Some(62),
+        b'_' if is_base64url => Some(63),
+        _ => None,
+    }
+}
+
+fn is_ascii_whitespace(c: u8) -> bool {
+    matches!(c, 0x09 | 0x0A | 0x0C | 0x0D | 0x20)
+}
+
+fn base64_encode(data: &[u8], alphabet: &[u8], omit_padding: bool) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    let chunks = data.chunks(3);
+    for chunk in chunks {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(alphabet[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(alphabet[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(alphabet[((triple >> 6) & 0x3F) as usize] as char);
+        } else if !omit_padding {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(alphabet[(triple & 0x3F) as usize] as char);
+        } else if !omit_padding {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Result of FromBase64 algorithm — returns decoded bytes, read position,
+/// and an optional error (to support writes-up-to-error semantics).
+struct Base64DecodeResult {
+    bytes: Vec<u8>,
+    read: usize,
+    error: Option<String>,
+}
+
+/// Decode base64 per the spec's FromBase64 algorithm.
+/// If `max_bytes` is Some(n), stops after producing n bytes.
+/// Returns bytes decoded so far even if an error occurred (for writes-up-to-error).
+fn base64_decode(input: &str, is_base64url: bool, last_chunk_handling: &str, max_bytes: Option<usize>) -> Base64DecodeResult {
+    let bytes = input.as_bytes();
+    let max = max_bytes.unwrap_or(usize::MAX);
+    // Per spec: if maxLength = 0, return immediately
+    if max == 0 {
+        return Base64DecodeResult {
+            bytes: Vec::new(),
+            read: 0,
+            error: None,
+        };
+    }
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut chunk: [u8; 4] = [0; 4];
+    let mut chunk_len: usize = 0;
+    let mut i = 0;
+    let mut last_complete_read = 0; // byte position after last complete 4-char chunk
+
+    while i < bytes.len() {
+        let c = bytes[i];
+        if is_ascii_whitespace(c) {
+            i += 1;
+            continue;
+        }
+        if c == b'=' {
+            // Padding: chunk_len must be 2 or 3
+            if chunk_len < 2 {
+                return Base64DecodeResult {
+                    bytes: out,
+                    read: last_complete_read,
+                    error: Some("Invalid padding in base64 string".to_string()),
+                };
+            }
+            i += 1;
+            let expected_pads: usize = if chunk_len == 2 { 2 } else { 1 };
+            let mut pad_count: usize = 1;
+            // Collect remaining required padding chars, allowing whitespace
+            while i < bytes.len() && pad_count < expected_pads {
+                let c2 = bytes[i];
+                if is_ascii_whitespace(c2) {
+                    i += 1;
+                    continue;
+                }
+                if c2 == b'=' {
+                    pad_count += 1;
+                    i += 1;
+                } else {
+                    // Non-whitespace, non-= where = expected
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: last_complete_read,
+                        error: Some("Invalid padding in base64 string".to_string()),
+                    };
+                }
+            }
+            if pad_count < expected_pads {
+                // Incomplete padding (e.g. "AA=" when "AA==" needed)
+                if last_chunk_handling == "stop-before-partial" {
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: last_complete_read,
+                        error: None,
+                    };
+                }
+                return Base64DecodeResult {
+                    bytes: out,
+                    read: last_complete_read,
+                    error: Some("Incomplete padding in base64 string".to_string()),
+                };
+            }
+            // Verify everything after padding is whitespace only
+            while i < bytes.len() {
+                let c2 = bytes[i];
+                if is_ascii_whitespace(c2) {
+                    i += 1;
+                } else {
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: last_complete_read,
+                        error: Some("Unexpected data after base64 padding".to_string()),
+                    };
+                }
+            }
+            // Decode the padded chunk
+            if chunk_len == 2 {
+                let val = (chunk[0] as u32) << 6 | (chunk[1] as u32);
+                if last_chunk_handling == "strict" && (val & 0x0F) != 0 {
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: last_complete_read,
+                        error: Some("Non-zero padding bits in base64 string".to_string()),
+                    };
+                }
+                // 1 byte from padded 2-char chunk
+                if out.len() + 1 > max {
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: last_complete_read,
+                        error: None,
+                    };
+                }
+                out.push((val >> 4) as u8);
+            } else {
+                // chunk_len == 3
+                let val = (chunk[0] as u32) << 12 | (chunk[1] as u32) << 6 | (chunk[2] as u32);
+                if last_chunk_handling == "strict" && (val & 0x03) != 0 {
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: last_complete_read,
+                        error: Some("Non-zero padding bits in base64 string".to_string()),
+                    };
+                }
+                // 2 bytes from padded 3-char chunk
+                if out.len() + 2 > max {
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: last_complete_read,
+                        error: None,
+                    };
+                }
+                out.push((val >> 10) as u8);
+                out.push(((val >> 2) & 0xFF) as u8);
+            }
+            return Base64DecodeResult {
+                bytes: out,
+                read: i,
+                error: None,
+            };
+        }
+
+        if let Some(val) = base64_decode_char(c, is_base64url) {
+            chunk[chunk_len] = val;
+            chunk_len += 1;
+            i += 1;
+            if chunk_len == 4 {
+                let combined = (chunk[0] as u32) << 18 | (chunk[1] as u32) << 12 | (chunk[2] as u32) << 6 | (chunk[3] as u32);
+                let decoded_bytes = [(combined >> 16) as u8, ((combined >> 8) & 0xFF) as u8, (combined & 0xFF) as u8];
+                // Per spec: if adding this chunk would exceed maxLength, return without adding
+                if out.len() + 3 > max {
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: last_complete_read,
+                        error: None,
+                    };
+                }
+                out.extend_from_slice(&decoded_bytes);
+                chunk_len = 0;
+                last_complete_read = i;
+                // If we've exactly hit maxLength, return
+                if out.len() >= max {
+                    return Base64DecodeResult {
+                        bytes: out,
+                        read: i,
+                        error: None,
+                    };
+                }
+            }
+        } else {
+            // Invalid character
+            return Base64DecodeResult {
+                bytes: out,
+                read: last_complete_read,
+                error: Some(format!("Invalid character in base64 string at position {}", i)),
+            };
+        }
+    }
+
+    // End of string, no padding. Handle trailing partial chunk.
+    match chunk_len {
+        0 => Base64DecodeResult {
+            bytes: out,
+            read: i,
+            error: None,
+        },
+        1 => {
+            if last_chunk_handling == "stop-before-partial" {
+                Base64DecodeResult {
+                    bytes: out,
+                    read: last_complete_read,
+                    error: None,
+                }
+            } else {
+                Base64DecodeResult {
+                    bytes: out,
+                    read: last_complete_read,
+                    error: Some("Invalid base64 string (single trailing character)".to_string()),
+                }
+            }
+        }
+        2 => {
+            if last_chunk_handling == "stop-before-partial" {
+                return Base64DecodeResult {
+                    bytes: out,
+                    read: last_complete_read,
+                    error: None,
+                };
+            }
+            if last_chunk_handling == "strict" {
+                return Base64DecodeResult {
+                    bytes: out,
+                    read: last_complete_read,
+                    error: Some("Missing padding in base64 string".to_string()),
+                };
+            }
+            // loose: decode partial
+            let val = (chunk[0] as u32) << 6 | (chunk[1] as u32);
+            out.push((val >> 4) as u8);
+            Base64DecodeResult {
+                bytes: out,
+                read: i,
+                error: None,
+            }
+        }
+        3 => {
+            if last_chunk_handling == "stop-before-partial" {
+                return Base64DecodeResult {
+                    bytes: out,
+                    read: last_complete_read,
+                    error: None,
+                };
+            }
+            if last_chunk_handling == "strict" {
+                return Base64DecodeResult {
+                    bytes: out,
+                    read: last_complete_read,
+                    error: Some("Missing padding in base64 string".to_string()),
+                };
+            }
+            // loose: decode partial
+            let val = (chunk[0] as u32) << 12 | (chunk[1] as u32) << 6 | (chunk[2] as u32);
+            out.push((val >> 10) as u8);
+            out.push(((val >> 2) & 0xFF) as u8);
+            Base64DecodeResult {
+                bytes: out,
+                read: i,
+                error: None,
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Result of FromHex algorithm.
+struct HexDecodeResult {
+    bytes: Vec<u8>,
+    read: usize,
+    error: Option<String>,
+}
+
+/// Decode hex per the spec's FromHex algorithm.
+/// Processes pairs incrementally. If odd length, errors before any decoding.
+fn hex_decode(input: &str, max_bytes: Option<usize>) -> HexDecodeResult {
+    let bytes = input.as_bytes();
+    let max = max_bytes.unwrap_or(usize::MAX);
+    if !bytes.len().is_multiple_of(2) {
+        return HexDecodeResult {
+            bytes: Vec::new(),
+            read: 0,
+            error: Some("Invalid hex string length".to_string()),
+        };
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i + 1 < bytes.len() && out.len() < max {
+        let hi = match hex_val(bytes[i]) {
+            Some(v) => v,
+            None => {
+                return HexDecodeResult {
+                    bytes: out,
+                    read: i,
+                    error: Some(format!("Invalid hex character: {}", bytes[i] as char)),
+                };
+            }
+        };
+        let lo = match hex_val(bytes[i + 1]) {
+            Some(v) => v,
+            None => {
+                return HexDecodeResult {
+                    bytes: out,
+                    read: i,
+                    error: Some(format!("Invalid hex character: {}", bytes[i + 1] as char)),
+                };
+            }
+        };
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    HexDecodeResult {
+        bytes: out,
+        read: i,
+        error: None,
+    }
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn hex_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 2);
+    for &b in data {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+fn get_base64_options<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    options_val: &Value<'gc>,
+) -> Result<(bool, String), EvalError<'gc>> {
+    let mut is_base64url = false;
+    let mut last_chunk_handling = "loose".to_string();
+
+    if let Value::Object(opts) = options_val {
+        // alphabet
+        if let Some(alph_rc) = object_get_key_value(opts, "alphabet") {
+            let alph = get_property_with_accessors(mc, env, opts, "alphabet")?;
+            let _ = alph_rc;
+            match &alph {
+                Value::Undefined => {} // default
+                Value::String(s) => {
+                    let s_utf8 = crate::utf16_to_utf8(s);
+                    match s_utf8.as_str() {
+                        "base64" => {}
+                        "base64url" => is_base64url = true,
+                        _ => return Err(raise_type_error!("Invalid alphabet option").into()),
+                    }
+                }
+                _ => return Err(raise_type_error!("alphabet must be a string").into()),
+            }
+        }
+        // lastChunkHandling
+        if let Some(_lch_rc) = object_get_key_value(opts, "lastChunkHandling") {
+            let lch = get_property_with_accessors(mc, env, opts, "lastChunkHandling")?;
+            match &lch {
+                Value::Undefined => {} // default
+                Value::String(s) => {
+                    let s_utf8 = crate::utf16_to_utf8(s);
+                    match s_utf8.as_str() {
+                        "loose" | "strict" | "stop-before-partial" => last_chunk_handling = s_utf8,
+                        _ => return Err(raise_type_error!("Invalid lastChunkHandling option").into()),
+                    }
+                }
+                _ => return Err(raise_type_error!("lastChunkHandling must be a string").into()),
+            }
+        }
+    }
+
+    Ok((is_base64url, last_chunk_handling))
+}
+
+/// Validate that `this` is a Uint8Array. Returns (obj, ta_len, byte_offset, is_detached).
+fn validate_uint8array_info<'gc>(_mc: &MutationContext<'gc>, this_val: &Value<'gc>) -> Result<(usize, usize, bool), EvalError<'gc>> {
+    if let Value::Object(obj) = this_val {
+        if let Some(ta_val) = slot_get(obj, &InternalSlot::TypedArray)
+            && let Value::TypedArray(ta) = &*ta_val.borrow()
+        {
+            if ta.kind != TypedArrayKind::Uint8 {
+                return Err(raise_type_error!("Method requires a Uint8Array").into());
+            }
+            let detached = ta.buffer.borrow().detached;
+            return Ok((ta.length, ta.byte_offset, detached));
+        }
+        return Err(raise_type_error!("Method requires a Uint8Array").into());
+    }
+    Err(raise_type_error!("Method requires a Uint8Array").into())
+}
+
+/// Read the byte data from a validated Uint8Array.
+fn read_uint8array_data<'gc>(this_val: &Value<'gc>) -> Result<Vec<u8>, EvalError<'gc>> {
+    if let Value::Object(obj) = this_val
+        && let Some(ta_val) = slot_get(obj, &InternalSlot::TypedArray)
+        && let Value::TypedArray(ta) = &*ta_val.borrow()
+    {
+        if ta.buffer.borrow().detached {
+            return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
+        }
+        let len = ta.length;
+        let offset = ta.byte_offset;
+        let buf = ta.buffer.borrow();
+        let data = buf.data.lock().unwrap();
+        let end = offset + len;
+        if end > data.len() {
+            return Err(raise_type_error!("TypedArray buffer out of bounds").into());
+        }
+        return Ok(data[offset..end].to_vec());
+    }
+    Err(raise_type_error!("Method requires a Uint8Array").into())
+}
+
+pub fn handle_uint8array_proto_method<'gc>(
+    mc: &MutationContext<'gc>,
+    this_val: &Value<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    match method {
+        "toBase64" => {
+            // Step 1: Validate this is Uint8Array (but don't read data yet — options may detach)
+            let (_, _, _) = validate_uint8array_info(mc, this_val)?;
+            // Step 2: Process options (getters may have side effects including detaching)
+            let options = args.first().cloned().unwrap_or(Value::Undefined);
+            let (is_base64url, _) = get_base64_options(mc, env, &options)?;
+            let omit_padding = if let Value::Object(opts) = &options {
+                if object_get_key_value(opts, "omitPadding").is_some() {
+                    let v = get_property_with_accessors(mc, env, opts, "omitPadding")?;
+                    // ToBoolean: any truthy value
+                    match &v {
+                        Value::Boolean(b) => *b,
+                        Value::Undefined | Value::Null => false,
+                        Value::Number(n) => *n != 0.0 && !n.is_nan(),
+                        Value::String(s) => !s.is_empty(),
+                        _ => true,
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            // Step 3: Now read the data (after options processing)
+            let data = read_uint8array_data(this_val)?;
+            let alphabet = if is_base64url { BASE64URL_CHARS } else { BASE64_CHARS };
+            let result = base64_encode(&data, alphabet, omit_padding);
+            Ok(Value::String(utf8_to_utf16(&result)))
+        }
+        "toHex" => {
+            let (_, _, detached) = validate_uint8array_info(mc, this_val)?;
+            if detached {
+                return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
+            }
+            let data = read_uint8array_data(this_val)?;
+            let result = hex_encode(&data);
+            Ok(Value::String(utf8_to_utf16(&result)))
+        }
+        "setFromBase64" => {
+            // Validate this is Uint8Array
+            let (ta_len, _, _) = validate_uint8array_info(mc, this_val)?;
+            let string_arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let input = if let Value::String(s) = &string_arg {
+                crate::utf16_to_utf8(s)
+            } else {
+                return Err(raise_type_error!("First argument must be a string").into());
+            };
+            let options = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let (is_base64url, last_chunk_handling) = get_base64_options(mc, env, &options)?;
+
+            // Decode with max_bytes = target array length
+            let result = base64_decode(&input, is_base64url, &last_chunk_handling, Some(ta_len));
+
+            // Write decoded bytes into the Uint8Array (even if there was an error)
+            if let Value::Object(obj) = this_val
+                && let Some(ta_val) = slot_get(obj, &InternalSlot::TypedArray)
+                && let Value::TypedArray(ta) = &*ta_val.borrow()
+            {
+                if ta.buffer.borrow().detached {
+                    return Err(raise_type_error!("Cannot write to a detached ArrayBuffer").into());
+                }
+                let offset = ta.byte_offset;
+                let write_len = result.bytes.len().min(ta.length);
+                {
+                    let buf = ta.buffer.borrow();
+                    let mut data = buf.data.lock().unwrap();
+                    for j in 0..write_len {
+                        data[offset + j] = result.bytes[j];
+                    }
+                }
+                // If there was an error, throw it AFTER writing partial data
+                if let Some(err) = result.error {
+                    return Err(EvalError::from(raise_syntax_error!(err)));
+                }
+                let result_obj = new_js_object_data(mc);
+                let _ = crate::core::set_internal_prototype_from_constructor(mc, &result_obj, env, "Object");
+                object_set_key_value(mc, &result_obj, "read", &Value::Number(result.read as f64))?;
+                object_set_key_value(mc, &result_obj, "written", &Value::Number(write_len as f64))?;
+                Ok(Value::Object(result_obj))
+            } else {
+                Err(raise_type_error!("Method requires a Uint8Array").into())
+            }
+        }
+        "setFromHex" => {
+            // Validate this is Uint8Array
+            let (ta_len, _, _) = validate_uint8array_info(mc, this_val)?;
+            let string_arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let input = if let Value::String(s) = &string_arg {
+                crate::utf16_to_utf8(s)
+            } else {
+                return Err(raise_type_error!("First argument must be a string").into());
+            };
+
+            // Decode with max_bytes = target array length
+            let result = hex_decode(&input, Some(ta_len));
+
+            // Write decoded bytes into the Uint8Array (even if there was an error)
+            if let Value::Object(obj) = this_val
+                && let Some(ta_val) = slot_get(obj, &InternalSlot::TypedArray)
+                && let Value::TypedArray(ta) = &*ta_val.borrow()
+            {
+                if ta.buffer.borrow().detached {
+                    return Err(raise_type_error!("Cannot write to a detached ArrayBuffer").into());
+                }
+                let offset = ta.byte_offset;
+                let write_len = result.bytes.len().min(ta.length);
+                {
+                    let buf = ta.buffer.borrow();
+                    let mut data = buf.data.lock().unwrap();
+                    for j in 0..write_len {
+                        data[offset + j] = result.bytes[j];
+                    }
+                }
+                if let Some(err) = result.error {
+                    return Err(EvalError::from(raise_syntax_error!(err)));
+                }
+                let result_obj = new_js_object_data(mc);
+                let _ = crate::core::set_internal_prototype_from_constructor(mc, &result_obj, env, "Object");
+                object_set_key_value(mc, &result_obj, "read", &Value::Number(result.read as f64))?;
+                object_set_key_value(mc, &result_obj, "written", &Value::Number(write_len as f64))?;
+                Ok(Value::Object(result_obj))
+            } else {
+                Err(raise_type_error!("Method requires a Uint8Array").into())
+            }
+        }
+        _ => Err(raise_type_error!(format!("Uint8Array.prototype.{} is not a function", method)).into()),
+    }
+}
+
+pub fn handle_uint8array_static_method<'gc>(
+    mc: &MutationContext<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    match method {
+        "fromBase64" => {
+            let string_arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let input = if let Value::String(s) = &string_arg {
+                crate::utf16_to_utf8(s)
+            } else {
+                return Err(raise_type_error!("First argument must be a string").into());
+            };
+            let options = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let (is_base64url, last_chunk_handling) = get_base64_options(mc, env, &options)?;
+            let result = base64_decode(&input, is_base64url, &last_chunk_handling, None);
+            if let Some(err) = result.error {
+                return Err(EvalError::from(raise_syntax_error!(err)));
+            }
+            let u8arr = create_uint8array_from_bytes(mc, env, &result.bytes)?;
+            Ok(Value::Object(u8arr))
+        }
+        "fromHex" => {
+            let string_arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let input = if let Value::String(s) = &string_arg {
+                crate::utf16_to_utf8(s)
+            } else {
+                return Err(raise_type_error!("First argument must be a string").into());
+            };
+            let result = hex_decode(&input, None);
+            if let Some(err) = result.error {
+                return Err(EvalError::from(raise_syntax_error!(err)));
+            }
+            let u8arr = create_uint8array_from_bytes(mc, env, &result.bytes)?;
+            Ok(Value::Object(u8arr))
+        }
+        _ => Err(raise_type_error!(format!("Uint8Array.{} is not a function", method)).into()),
+    }
+}
+
+/// Create a Uint8Array from raw bytes
+fn create_uint8array_from_bytes<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    data: &[u8],
+) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+    // Create an ArrayBuffer with the data
+    let ab = JSArrayBuffer {
+        data: Arc::new(Mutex::new(data.to_vec())),
+        max_byte_length: None,
+        shared: false,
+        detached: false,
+    };
+    let ab_obj = new_js_object_data(mc);
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &ab_obj, env, "ArrayBuffer");
+    let ab_cell = new_gc_cell_ptr(mc, ab);
+    slot_set(mc, &ab_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(ab_cell));
+
+    // Create the TypedArray view
+    let ta = JSTypedArray {
+        kind: TypedArrayKind::Uint8,
+        buffer: ab_cell,
+        byte_offset: 0,
+        length: data.len(),
+        length_tracking: false,
+    };
+    let ta_obj = new_js_object_data(mc);
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &ta_obj, env, "Uint8Array");
+    slot_set(mc, &ta_obj, InternalSlot::TypedArray, &Value::TypedArray(Gc::new(mc, ta)));
+    slot_set(mc, &ta_obj, InternalSlot::Kind, &Value::Number(1.0)); // Uint8 = 1
+    // Store the ArrayBuffer JS object so that .buffer accessor works
+    slot_set(mc, &ta_obj, InternalSlot::BufferObject, &Value::Object(ab_obj));
+
+    // Set length as a non-enumerable property for compatibility
+    object_set_key_value(mc, &ta_obj, "length", &Value::Number(data.len() as f64)).map_err(EvalError::from)?;
+    ta_obj.borrow_mut(mc).set_non_enumerable("length");
+
+    Ok(ta_obj)
+}
+
 pub fn handle_typedarray_method<'gc>(
     mc: &MutationContext<'gc>,
     this_val: &Value<'gc>,
@@ -5286,18 +6122,21 @@ pub fn handle_typedarray_method<'gc>(
                     let end = resolve_index(end_rel, len);
                     let count = end.saturating_sub(start);
                     let result_ta = typed_array_species_create(mc, _env, obj, count)?;
-                    // Recheck OOB after coercion + species create (which may resize buffer)
-                    let len = recheck_oob()?;
-                    if let Some(rta_cell) = slot_get_chained(&result_ta, &InternalSlot::TypedArray)
-                        && let Value::TypedArray(rta) = &*rta_cell.borrow()
-                    {
-                        let actual_count = count.min(len.saturating_sub(start));
-                        for i in 0..actual_count {
-                            let v = get_val(start + i)?;
-                            match v {
-                                Value::Number(n) => rta.set(mc, i, n)?,
-                                Value::BigInt(b) => rta.set_bigint(mc, i, bigint_to_i64_modular(&b))?,
-                                _ => rta.set(mc, i, 0.0)?,
+                    // Per spec step 14: only check detached / copy if count > 0
+                    if count > 0 {
+                        // Recheck OOB after coercion + species create (which may resize buffer)
+                        let len = recheck_oob()?;
+                        if let Some(rta_cell) = slot_get_chained(&result_ta, &InternalSlot::TypedArray)
+                            && let Value::TypedArray(rta) = &*rta_cell.borrow()
+                        {
+                            let actual_count = count.min(len.saturating_sub(start));
+                            for i in 0..actual_count {
+                                let v = get_val(start + i)?;
+                                match v {
+                                    Value::Number(n) => rta.set(mc, i, n)?,
+                                    Value::BigInt(b) => rta.set_bigint(mc, i, bigint_to_i64_modular(&b))?,
+                                    _ => rta.set(mc, i, 0.0)?,
+                                }
                             }
                         }
                     }
@@ -5894,6 +6733,59 @@ pub fn initialize_typedarray<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataP
         }
         // Also make name and length on prototype available (not needed per spec, but name helps for .name tests)
         let _ = name; // just to avoid unused warning
+    }
+
+    // ── Uint8Array-specific: toBase64, toHex, fromBase64, fromHex, setFromBase64, setFromHex ──
+    if let Some(u8_ctor_val) = crate::core::env_get(env, "Uint8Array")
+        && let Value::Object(u8_ctor) = &*u8_ctor_val.borrow()
+    {
+        let func_proto_opt: Option<JSObjectDataPtr<'gc>> = if let Some(fp_v) = crate::core::env_get(env, "Function")
+            && let Value::Object(fp_o) = &*fp_v.borrow()
+            && let Some(pp_v) = object_get_key_value(fp_o, "prototype")
+            && let Value::Object(fp) = &*pp_v.borrow()
+        {
+            Some(*fp)
+        } else {
+            None
+        };
+
+        let mk = |mc2: &MutationContext<'gc>, name: &str, dispatch: &str, len: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
+            let fn_obj = new_js_object_data(mc2);
+            fn_obj
+                .borrow_mut(mc2)
+                .set_closure(Some(new_gc_cell_ptr(mc2, Value::Function(dispatch.to_string()))));
+            if let Some(fp) = func_proto_opt {
+                fn_obj.borrow_mut(mc2).prototype = Some(fp);
+            }
+            let nd = crate::core::create_descriptor_object(mc2, &Value::String(utf8_to_utf16(name)), false, false, true)?;
+            crate::js_object::define_property_internal(mc2, &fn_obj, "name", &nd)?;
+            let ld = crate::core::create_descriptor_object(mc2, &Value::Number(len), false, false, true)?;
+            crate::js_object::define_property_internal(mc2, &fn_obj, "length", &ld)?;
+            Ok(fn_obj)
+        };
+
+        // Static methods on Uint8Array
+        for &(name, dispatch_name, length) in &[("fromBase64", "Uint8Array.fromBase64", 1.0), ("fromHex", "Uint8Array.fromHex", 1.0)] {
+            let fn_obj = mk(mc, name, dispatch_name, length)?;
+            let desc = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
+            crate::js_object::define_property_internal(mc, u8_ctor, name, &desc)?;
+        }
+
+        // Prototype methods
+        if let Some(proto_val) = object_get_key_value(u8_ctor, "prototype")
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            for &(name, dispatch_name, length) in &[
+                ("toBase64", "Uint8Array.prototype.toBase64", 0.0),
+                ("toHex", "Uint8Array.prototype.toHex", 0.0),
+                ("setFromBase64", "Uint8Array.prototype.setFromBase64", 1.0),
+                ("setFromHex", "Uint8Array.prototype.setFromHex", 1.0),
+            ] {
+                let fn_obj = mk(mc, name, dispatch_name, length)?;
+                let desc = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
+                crate::js_object::define_property_internal(mc, proto, name, &desc)?;
+            }
+        }
     }
 
     let atomics = make_atomics_object(mc, env)?;

@@ -29,7 +29,7 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         && let Some(proto_val) = object_get_key_value(ctor_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
-        return crate::core::create_error(mc, Some(*proto_obj), msg_val).unwrap_or(Value::String(crate::unicode::utf8_to_utf16(msg)));
+        return crate::core::create_error(mc, Some(*proto_obj), &msg_val).unwrap_or(Value::String(crate::unicode::utf8_to_utf16(msg)));
     }
 
     Value::String(crate::unicode::utf8_to_utf16(msg))
@@ -854,6 +854,72 @@ fn process_one_pending<'gc>(
                         }
                     }
 
+                    // Handle regular For loop with yield in body (NotStarted)
+                    if let StatementKind::For(for_stmt) = &*gen_ptr_mut.body[idx].kind
+                        && inner_idx_opt.is_some()
+                    {
+                        // Execute pre-loop statements
+                        if idx > 0 {
+                            let pre_stmts = gen_ptr_mut.body[0..idx].to_vec();
+                            crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        }
+
+                        // Execute for-loop init
+                        if let Some(init_stmt) = &for_stmt.init {
+                            let init_clone = init_stmt.clone();
+                            crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(&init_clone))?;
+                        }
+
+                        // Check test condition
+                        if let Some(test_expr) = &for_stmt.test {
+                            let test_val = crate::core::evaluate_expr(mc, &func_env, test_expr)?;
+                            if !test_val.to_truthy() {
+                                gen_ptr_mut.state = GeneratorState::Completed;
+                                let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
+                                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                return Ok(());
+                            }
+                        }
+
+                        // Evaluate pre-yield body statements
+                        let body_clone = for_stmt.body.clone();
+                        if let Some(inner_idx) = inner_idx_opt
+                            && inner_idx > 0
+                        {
+                            let pre_stmts = body_clone[0..inner_idx].to_vec();
+                            crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        }
+
+                        // Evaluate yield expression
+                        let yielded = if let Some(ref inner_expr) = yield_inner {
+                            match crate::core::evaluate_expr(mc, &func_env, inner_expr) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    gen_ptr_mut.state = GeneratorState::Completed;
+                                    reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                    return Ok(());
+                                }
+                            }
+                        } else {
+                            Value::Undefined
+                        };
+
+                        // Clear init so it doesn't re-run on resume
+                        if let StatementKind::For(for_stmt_m) = gen_ptr_mut.body[idx].kind.as_mut() {
+                            for_stmt_m.init = None;
+                        }
+
+                        gen_ptr_mut.state = GeneratorState::Suspended {
+                            pc: idx,
+                            stack: vec![],
+                            pre_env: Some(func_env),
+                        };
+                        gen_ptr_mut.cached_initial_yield = Some(yielded.clone());
+                        let res_obj = create_iterator_result_obj(mc, yielded, false)?;
+                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        return Ok(());
+                    }
+
                     if idx > 0 {
                         let pre_stmts = gen_ptr_mut.body[0..idx].to_vec();
                         let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
@@ -1209,6 +1275,105 @@ fn process_one_pending<'gc>(
                             continue;
                         }
                     }
+                }
+
+                // Handle regular For loop with yield in body (Suspended / resume)
+                let pc_val = *pc;
+                if pc_val < gen_ptr_mut.body.len() && matches!(&*gen_ptr_mut.body[pc_val].kind, StatementKind::For(_)) {
+                    let func_env = if let Some(env) = pre_env.as_ref() {
+                        *env
+                    } else {
+                        crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                    };
+
+                    // Execute init if it still exists (first resume after NotStarted may have cleared it)
+                    if let StatementKind::For(for_stmt_m) = gen_ptr_mut.body[pc_val].kind.as_mut()
+                        && let Some(init_stmt) = for_stmt_m.init.take()
+                    {
+                        crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(&init_stmt))?;
+                    }
+
+                    // Re-borrow immutably for test/update/body access
+                    let (test_expr_clone, update_stmt_clone, body_clone) = if let StatementKind::For(fs) = &*gen_ptr_mut.body[pc_val].kind {
+                        (fs.test.clone(), fs.update.clone(), fs.body.clone())
+                    } else {
+                        unreachable!()
+                    };
+
+                    // Execute update
+                    if let Some(update_stmt) = &update_stmt_clone {
+                        crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(update_stmt))?;
+                    }
+
+                    // Check test condition
+                    if let Some(test_expr) = &test_expr_clone {
+                        let test_val = crate::core::evaluate_expr(mc, &func_env, test_expr)?;
+                        if !test_val.to_truthy() {
+                            // Loop is done — run remaining post-loop statements
+                            if pc_val + 1 < gen_ptr_mut.body.len() {
+                                let post_stmts = gen_ptr_mut.body[pc_val + 1..].to_vec();
+                                drop(gen_ptr_mut_guard);
+                                match crate::core::evaluate_statements(mc, &func_env, &post_stmts) {
+                                    Ok(_) => {
+                                        gen_ptr.borrow_mut(mc).state = GeneratorState::Completed;
+                                        let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
+                                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                        return Ok(());
+                                    }
+                                    Err(e) => {
+                                        gen_ptr.borrow_mut(mc).state = GeneratorState::Completed;
+                                        reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            gen_ptr_mut.state = GeneratorState::Completed;
+                            let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
+                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            continue;
+                        }
+                    }
+
+                    // Find yield in for-body and evaluate
+                    if let Some((body_yield_idx, _, _yield_kind, yield_inner_opt)) =
+                        crate::js_generator::find_first_yield_in_statements(&body_clone)
+                    {
+                        // Execute pre-yield body statements
+                        if body_yield_idx > 0 {
+                            let pre_stmts = body_clone[0..body_yield_idx].to_vec();
+                            crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        }
+
+                        // Evaluate yield expression
+                        let yielded = if let Some(inner_expr) = yield_inner_opt {
+                            match crate::core::evaluate_expr(mc, &func_env, &inner_expr) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    gen_ptr_mut.state = GeneratorState::Completed;
+                                    reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                    return Ok(());
+                                }
+                            }
+                        } else {
+                            Value::Undefined
+                        };
+
+                        gen_ptr_mut.state = GeneratorState::Suspended {
+                            pc: pc_val,
+                            stack: vec![],
+                            pre_env: Some(func_env),
+                        };
+                        gen_ptr_mut.cached_initial_yield = Some(yielded.clone());
+                        let res_obj = create_iterator_result_obj(mc, yielded, false)?;
+                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        continue;
+                    }
+
+                    // No more yields in for body — run to completion
+                    gen_ptr_mut.state = GeneratorState::Completed;
+                    let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
+                    resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                    continue;
                 }
 
                 // Resume execution from pc: run remaining tail to completion, but
@@ -1865,7 +2030,7 @@ fn reject_with_type_error<'gc>(
         {
             proto_opt = Some(*proto);
         }
-        crate::core::create_error(mc, proto_opt, msg_val).unwrap_or(Value::String(crate::unicode::utf8_to_utf16(message)))
+        crate::core::create_error(mc, proto_opt, &msg_val).unwrap_or(Value::String(crate::unicode::utf8_to_utf16(message)))
     };
     reject_promise(mc, &promise_cell, err_val, env);
     Ok(Some(promise_obj_val))

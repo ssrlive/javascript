@@ -1,5 +1,6 @@
 use crate::core::EvalError;
 use crate::core::JSWeakSet;
+use crate::core::WeakKey;
 use crate::core::{Gc, GcCell, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
@@ -166,46 +167,23 @@ pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     Ok(())
 }
 
-/// Check if WeakSet has a value and clean up dead entries
-fn weakset_has_value<'gc>(
-    mc: &MutationContext<'gc>,
-    weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
-    value_obj_rc: &JSObjectDataPtr<'gc>,
-) -> bool {
-    let mut found = false;
-    weakset.borrow_mut(mc).values.retain(|v| {
-        if let Some(strong_v) = v.upgrade(mc) {
-            if Gc::ptr_eq(*value_obj_rc, strong_v) {
-                found = true;
-            }
-            true // Keep alive entries
-        } else {
-            false // Remove dead entries
+/// Check if WeakSet has a value
+fn weakset_has_value<'gc>(mc: &MutationContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
+    let weakset_ref = weakset.borrow();
+    for v in &weakset_ref.values {
+        if v.matches(mc, key) {
+            return true;
         }
-    });
-    found
+    }
+    false
 }
 
-/// Delete a value from WeakSet and clean up dead entries
-fn weakset_delete_value<'gc>(
-    mc: &MutationContext<'gc>,
-    weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
-    value_obj_rc: &JSObjectDataPtr<'gc>,
-) -> bool {
-    let mut deleted = false;
-    weakset.borrow_mut(mc).values.retain(|v| {
-        if let Some(strong_v) = v.upgrade(mc) {
-            if Gc::ptr_eq(*value_obj_rc, strong_v) {
-                deleted = true;
-                false // Remove this entry
-            } else {
-                true // Keep other alive entries
-            }
-        } else {
-            false // Remove dead entries
-        }
-    });
-    deleted
+/// Delete a value from WeakSet
+fn weakset_delete_value<'gc>(mc: &MutationContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
+    let mut weakset_mut = weakset.borrow_mut(mc);
+    let len_before = weakset_mut.values.len();
+    weakset_mut.values.retain(|v| !v.matches(mc, key));
+    weakset_mut.values.len() < len_before
 }
 
 /// Handle WeakSet instance method calls
@@ -220,25 +198,17 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
         "add" => {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
 
-            // Check if value can be held weakly (must be an object)
-            let value_obj_rc = match &value {
-                Value::Object(obj) => *obj,
-                _ => return Err(raise_type_error!("Invalid value used in weak set").into()),
+            // Check if value can be held weakly (must be an object or non-registered symbol)
+            let weak_key = match WeakKey::from_value(&value) {
+                Ok(wk) => wk,
+                Err(()) => return Err(raise_type_error!("Invalid value used in weak set").into()),
             };
 
-            let weak_value = Gc::downgrade(value_obj_rc);
-
-            // Remove existing entry with same value (if still alive)
-            weakset.borrow_mut(mc).values.retain(|v| {
-                if let Some(strong_v) = v.upgrade(mc) {
-                    !Gc::ptr_eq(value_obj_rc, strong_v)
-                } else {
-                    false // Remove dead entries
-                }
-            });
+            // Remove existing entry with same value
+            weakset.borrow_mut(mc).values.retain(|v| !v.matches(mc, &value));
 
             // Add new entry
-            weakset.borrow_mut(mc).values.push(weak_value);
+            weakset.borrow_mut(mc).values.push(weak_key);
 
             // Return this (the wrapper object)
             Ok(this_obj.clone())
@@ -246,22 +216,20 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
         "has" => {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let value_obj_rc = match &value {
-                Value::Object(obj) => obj,
-                _ => return Ok(Value::Boolean(false)),
-            };
+            if WeakKey::from_value(&value).is_err() {
+                return Ok(Value::Boolean(false));
+            }
 
-            Ok(Value::Boolean(weakset_has_value(mc, weakset, value_obj_rc)))
+            Ok(Value::Boolean(weakset_has_value(mc, weakset, &value)))
         }
         "delete" => {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let value_obj_rc = match &value {
-                Value::Object(obj) => obj,
-                _ => return Ok(Value::Boolean(false)),
-            };
+            if WeakKey::from_value(&value).is_err() {
+                return Ok(Value::Boolean(false));
+            }
 
-            Ok(Value::Boolean(weakset_delete_value(mc, weakset, value_obj_rc)))
+            Ok(Value::Boolean(weakset_delete_value(mc, weakset, &value)))
         }
         "toString" => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
         _ => Err(raise_type_error!(format!("WeakSet.prototype.{} is not a function", method)).into()),

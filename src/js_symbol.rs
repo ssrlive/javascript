@@ -393,7 +393,7 @@ pub(crate) fn handle_symbol_for<'gc>(
     }
 
     // Otherwise create and store a new symbol associated with the key
-    let sym = Gc::new(mc, SymbolData::new(Some(&key)));
+    let sym = Gc::new(mc, SymbolData::new_registered(Some(&key)));
     object_set_key_value(mc, &registry_obj, &key, &Value::Symbol(sym))?;
     Ok(Value::Symbol(sym))
 }

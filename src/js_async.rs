@@ -40,7 +40,7 @@ pub fn handle_async_closure_call<'gc>(
                 EvalError::Throw(v, _, _) => v,
                 EvalError::Js(je) => {
                     let msg = je.message();
-                    let err_val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
+                    let err_val = crate::core::create_error(mc, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = &err_val {
                         if let Some(line) = je.js_line() {
                             slot_set(mc, obj, InternalSlot::Line, &Value::Number(line as f64));
@@ -148,7 +148,7 @@ fn step<'gc>(
                 EvalError::Throw(v, _, _) => v,
                 EvalError::Js(j) => {
                     let msg = j.message();
-                    let val = crate::core::create_error(mc, None, Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
+                    let val = crate::core::create_error(mc, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = &val {
                         if let Some(line) = j.js_line() {
                             slot_set(mc, obj, InternalSlot::Line, &Value::Number(line as f64));

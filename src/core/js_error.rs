@@ -262,15 +262,15 @@ pub fn create_suppressed_error<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     prototype: Option<JSObjectDataPtr<'gc>>,
-    error: Value<'gc>,
-    suppressed: Value<'gc>,
-    message: Option<Value<'gc>>,
+    error: &Value<'gc>,
+    suppressed: &Value<'gc>,
+    message: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let message_value = if let Some(msg_val) = message {
         if matches!(msg_val, Value::Undefined) {
             Value::Undefined
         } else {
-            let prim = to_primitive(mc, &msg_val, "string", env)?;
+            let prim = to_primitive(mc, msg_val, "string", env)?;
             if matches!(prim, Value::Symbol(_)) {
                 return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
             }
@@ -314,11 +314,11 @@ pub fn create_suppressed_error<'gc>(
     };
 
     // 2. error
-    object_set_key_value(mc, &err_obj, "error", &error).map_err(EvalError::from)?;
+    object_set_key_value(mc, &err_obj, "error", error).map_err(EvalError::from)?;
     err_obj.borrow_mut(mc).set_non_enumerable("error");
 
     // 3. suppressed
-    object_set_key_value(mc, &err_obj, "suppressed", &suppressed).map_err(EvalError::from)?;
+    object_set_key_value(mc, &err_obj, "suppressed", suppressed).map_err(EvalError::from)?;
     err_obj.borrow_mut(mc).set_non_enumerable("suppressed");
 
     // 4. stack (implementation-defined, after the spec-required properties)
@@ -336,15 +336,15 @@ pub fn create_aggregate_error<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     prototype: Option<JSObjectDataPtr<'gc>>,
-    errors: Value<'gc>,
-    message: Option<Value<'gc>>,
-    options: Option<Value<'gc>>,
+    errors: &Value<'gc>,
+    message: Option<&Value<'gc>>,
+    options: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let message_value = if let Some(msg_val) = message {
         if matches!(msg_val, Value::Undefined) {
             Value::Undefined
         } else {
-            let prim = to_primitive(mc, &msg_val, "string", env)?;
+            let prim = to_primitive(mc, msg_val, "string", env)?;
             if matches!(prim, Value::Symbol(_)) {
                 return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
             }
@@ -354,7 +354,7 @@ pub fn create_aggregate_error<'gc>(
         Value::Undefined
     };
 
-    let err_obj_val = create_error(mc, prototype, message_value).map_err(EvalError::from)?;
+    let err_obj_val = create_error(mc, prototype, &message_value)?;
     let err_obj = match &err_obj_val {
         Value::Object(o) => *o,
         _ => return Ok(err_obj_val),
@@ -372,7 +372,7 @@ pub fn create_aggregate_error<'gc>(
                 if matches!(method, Value::Undefined | Value::Null) {
                     return Err(raise_type_error!("Object is not iterable").into());
                 }
-                let iter = crate::core::eval::evaluate_call_dispatch(mc, env, &method, Some(&errors), &[])?;
+                let iter = crate::core::eval::evaluate_call_dispatch(mc, env, &method, Some(errors), &[])?;
                 match iter {
                     Value::Object(iter_obj) => iter_obj,
                     _ => return Err(raise_type_error!("Iterator is not an object").into()),
@@ -415,9 +415,9 @@ pub fn create_aggregate_error<'gc>(
 
     if let Some(options_val) = options
         && let Value::Object(options_obj) = options_val
-        && object_get_key_value(&options_obj, "cause").is_some()
+        && object_get_key_value(options_obj, "cause").is_some()
     {
-        let cause_val = crate::core::eval::get_property_with_accessors(mc, env, &options_obj, "cause")?;
+        let cause_val = crate::core::eval::get_property_with_accessors(mc, env, options_obj, "cause")?;
         object_set_key_value(mc, &err_obj, "cause", &cause_val).map_err(EvalError::from)?;
         err_obj.borrow_mut(mc).set_non_enumerable("cause");
     }
@@ -429,7 +429,7 @@ pub fn create_aggregate_error<'gc>(
 pub fn create_error<'gc>(
     mc: &MutationContext<'gc>,
     prototype: Option<JSObjectDataPtr<'gc>>,
-    message: Value<'gc>,
+    message: &Value<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     let error_obj = new_js_object_data(mc);
     error_obj.borrow_mut(mc).prototype = prototype;
@@ -439,10 +439,10 @@ pub fn create_error<'gc>(
         Value::String(s) => {
             object_set_key_value(mc, &error_obj, "message", &Value::String(s.clone()))?;
             error_obj.borrow_mut(mc).set_non_enumerable("message");
-            utf16_to_utf8(&s)
+            utf16_to_utf8(s)
         }
         other => {
-            let s = utf8_to_utf16(&value_to_string(&other));
+            let s = utf8_to_utf16(&value_to_string(other));
             object_set_key_value(mc, &error_obj, "message", &Value::String(s.clone()))?;
             error_obj.borrow_mut(mc).set_non_enumerable("message");
             utf16_to_utf8(&s)

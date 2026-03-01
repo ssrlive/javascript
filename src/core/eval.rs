@@ -2830,7 +2830,7 @@ pub fn evaluate_statements_with_labels<'gc>(
                     && let Value::Object(proto_ptr) = &*proto_val_rc.borrow()
                 {
                     let msg = Value::String(utf8_to_utf16(msg_str));
-                    let err_obj = crate::core::create_error(mc, Some(*proto_ptr), msg)?;
+                    let err_obj = crate::core::create_error(mc, Some(*proto_ptr), &msg)?;
 
                     // DEBUG: Check constructor name
                     // In real code we wouldn't do this, but for debugging why assert.throws fails:
@@ -3118,7 +3118,7 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
                     && let Value::Object(proto_ptr) = &*proto_val_rc.borrow()
                 {
                     let msg = Value::String(utf8_to_utf16(msg_str));
-                    let err_obj = crate::core::create_error(mc, Some(*proto_ptr), msg)?;
+                    let err_obj = crate::core::create_error(mc, Some(*proto_ptr), &msg)?;
                     return Err(EvalError::Throw(err_obj, Some(stmt.line), Some(stmt.column)));
                 }
                 return Err(raise_syntax_error!(msg_str).into());
@@ -13410,56 +13410,44 @@ pub fn evaluate_call_dispatch<'gc>(
                             let errors_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
                             let message_val = eval_args.get(1).cloned();
                             let options_val = eval_args.get(2).cloned();
+                            use crate::core::js_error::create_aggregate_error;
                             if let Some(prototype_rc) = object_get_key_value(obj, "prototype") {
                                 let prototype_val = match &*prototype_rc.borrow() {
                                     Value::Property { value: Some(v), .. } => v.borrow().clone(),
                                     other => other.clone(),
                                 };
                                 if let Value::Object(proto_ptr) = prototype_val {
-                                    crate::core::js_error::create_aggregate_error(
+                                    create_aggregate_error(
                                         mc,
                                         env,
                                         Some(proto_ptr),
-                                        errors_val,
-                                        message_val,
-                                        options_val,
+                                        &errors_val,
+                                        message_val.as_ref(),
+                                        options_val.as_ref(),
                                     )
                                 } else {
-                                    crate::core::js_error::create_aggregate_error(mc, env, None, errors_val, message_val, options_val)
+                                    create_aggregate_error(mc, env, None, &errors_val, message_val.as_ref(), options_val.as_ref())
                                 }
                             } else {
-                                crate::core::js_error::create_aggregate_error(mc, env, None, errors_val, message_val, options_val)
+                                create_aggregate_error(mc, env, None, &errors_val, message_val.as_ref(), options_val.as_ref())
                             }
                         } else if name == crate::unicode::utf8_to_utf16("SuppressedError") {
                             let error_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
                             let suppressed_val = eval_args.get(1).cloned().unwrap_or(Value::Undefined);
                             let message_val = eval_args.get(2).cloned().unwrap_or(Value::Undefined);
+                            use crate::core::js_error::create_suppressed_error;
                             if let Some(prototype_rc) = object_get_key_value(obj, "prototype") {
                                 let prototype_val = match &*prototype_rc.borrow() {
                                     Value::Property { value: Some(v), .. } => v.borrow().clone(),
                                     other => other.clone(),
                                 };
                                 if let Value::Object(proto_ptr) = prototype_val {
-                                    crate::core::js_error::create_suppressed_error(
-                                        mc,
-                                        env,
-                                        Some(proto_ptr),
-                                        error_val,
-                                        suppressed_val,
-                                        Some(message_val),
-                                    )
+                                    create_suppressed_error(mc, env, Some(proto_ptr), &error_val, &suppressed_val, Some(&message_val))
                                 } else {
-                                    crate::core::js_error::create_suppressed_error(
-                                        mc,
-                                        env,
-                                        None,
-                                        error_val,
-                                        suppressed_val,
-                                        Some(message_val),
-                                    )
+                                    create_suppressed_error(mc, env, None, &error_val, &suppressed_val, Some(&message_val))
                                 }
                             } else {
-                                crate::core::js_error::create_suppressed_error(mc, env, None, error_val, suppressed_val, Some(message_val))
+                                create_suppressed_error(mc, env, None, &error_val, &suppressed_val, Some(&message_val))
                             }
                         } else if name == crate::unicode::utf8_to_utf16("Error")
                             || name == crate::unicode::utf8_to_utf16("TypeError")
@@ -13486,9 +13474,9 @@ pub fn evaluate_call_dispatch<'gc>(
                             let err = if let Some(prototype_rc) = object_get_key_value(obj, "prototype")
                                 && let Value::Object(proto_ptr) = &*prototype_rc.borrow()
                             {
-                                crate::core::create_error(mc, Some(*proto_ptr), msg_val)?
+                                crate::core::create_error(mc, Some(*proto_ptr), &msg_val)?
                             } else {
-                                crate::core::create_error(mc, None, msg_val)?
+                                crate::core::create_error(mc, None, &msg_val)?
                             };
                             // error-cause: InstallErrorCause(O, options) per §20.5.8.1
                             if let Some(options_val) = eval_args.get(1)
@@ -15079,7 +15067,7 @@ fn evaluate_optional_chain_base<'gc>(
     }
 }
 
-fn await_promise_value<'gc>(
+pub(crate) fn await_promise_value<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
@@ -17083,9 +17071,12 @@ fn evaluate_expr_property<'gc>(
             | "String.prototype.split"
             | "String.prototype.substring"
             | "String.prototype.substr" => 2.0,
-            "Function.prototype.[Symbol.hasInstance]" | "SharedArrayBuffer.prototype.grow" => 1.0,
+            "Function.prototype.[Symbol.hasInstance]" | "SharedArrayBuffer.prototype.grow" | "JSON.rawJSON" | "JSON.isRawJSON" => 1.0,
             "Uint8Array.prototype.toBase64" | "Uint8Array.prototype.toHex" => 0.0,
-            "ArrayBuffer.prototype.transfer" | "ArrayBuffer.prototype.transferToFixedLength" => 0.0,
+            "ArrayBuffer.prototype.transfer"
+            | "ArrayBuffer.prototype.transferToFixedLength"
+            | "ArrayBuffer.prototype.transferToImmutable" => 0.0,
+            "ArrayBuffer.prototype.sliceToImmutable" => 2.0,
             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
             _ => {
                 if func_name.starts_with("DataView.prototype.get") {
@@ -18607,8 +18598,11 @@ fn evaluate_expr_index<'gc>(
                     "Function.prototype.[Symbol.hasInstance]"
                     | "Symbol.for"
                     | "Symbol.keyFor"
-                    | "Symbol.prototype.[Symbol.toPrimitive]" => 1.0,
+                    | "Symbol.prototype.[Symbol.toPrimitive]"
+                    | "JSON.rawJSON"
+                    | "JSON.isRawJSON" => 1.0,
                     "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
+                    "ArrayBuffer.prototype.sliceToImmutable" => 2.0,
                     _ => {
                         if func_name.starts_with("DataView.prototype.get") {
                             1.0
@@ -19776,7 +19770,7 @@ pub fn call_native_function<'gc>(
         return Err(raise_type_error!("detachArrayBuffer requires an ArrayBuffer object").into());
     }
 
-    if name == "Array.isArray" || name == "Array.from" || name == "Array.of" {
+    if name == "Array.isArray" || name == "Array.from" || name == "Array.of" || name == "Array.fromAsync" {
         let method = name.trim_start_matches("Array.");
         let v = crate::js_array::handle_array_static_method(mc, method, this_val, args, env)?;
         return Ok(Some(v));
@@ -20614,6 +20608,44 @@ pub fn call_native_function<'gc>(
         return Err(raise_type_error!("Method ArrayBuffer.prototype.detached called on incompatible receiver").into());
     }
 
+    if name == "get immutable" || name == "ArrayBuffer.prototype.immutable" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_accessor(mc, obj, "immutable")?));
+        }
+        return Err(raise_type_error!("Method ArrayBuffer.prototype.immutable called on incompatible receiver").into());
+    }
+
+    if name == "ArrayBuffer.prototype.transferToImmutable" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_method(
+                mc,
+                env,
+                obj,
+                "transferToImmutable",
+                args,
+            )?));
+        } else {
+            return Err(raise_type_error!("ArrayBuffer.prototype.transferToImmutable called on non-object").into());
+        }
+    }
+
+    if name == "ArrayBuffer.prototype.sliceToImmutable" {
+        let this_v = this_val.unwrap_or(&Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_typedarray::handle_arraybuffer_method(
+                mc,
+                env,
+                obj,
+                "sliceToImmutable",
+                args,
+            )?));
+        } else {
+            return Err(raise_type_error!("ArrayBuffer.prototype.sliceToImmutable called on non-object").into());
+        }
+    }
+
     if name == "SharedArrayBuffer.prototype.byteLength" {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         if let Value::Object(obj) = this_v {
@@ -21120,7 +21152,7 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 
     let error_proto = found_proto;
 
-    let err_val = create_error(mc, error_proto, (&raw_msg).into()).unwrap_or(Value::Undefined);
+    let err_val = create_error(mc, error_proto, &(&raw_msg).into()).unwrap_or(Value::Undefined);
 
     if let Value::Object(obj) = &err_val {
         obj.borrow_mut(mc).set_property(mc, "name", name.into());
@@ -22693,6 +22725,7 @@ fn evaluate_expr_new<'gc>(
                             && (native_name == "Array.isArray"
                                 || native_name == "Array.from"
                                 || native_name == "Array.of"
+                                || native_name == "Array.fromAsync"
                                 || native_name == "ArrayBuffer.isView")
                         {
                             return Err(raise_type_error!("Not a constructor").into());
@@ -22815,7 +22848,7 @@ fn evaluate_expr_new<'gc>(
                             None
                         };
 
-                        let err_val = crate::core::js_error::create_error(mc, prototype, msg)?;
+                        let err_val = crate::core::js_error::create_error(mc, prototype, &msg)?;
                         if let Value::Object(err_obj) = &err_val {
                             object_set_key_value(mc, err_obj, "name", &Value::String(name.clone()))?;
                             // error-cause: InstallErrorCause(O, options) per §20.5.8.1
@@ -22856,8 +22889,8 @@ fn evaluate_expr_new<'gc>(
                             None
                         };
 
-                        let err_val =
-                            crate::core::js_error::create_aggregate_error(mc, env, prototype, errors_val, message_val, options_val)?;
+                        use crate::core::js_error::create_aggregate_error;
+                        let err_val = create_aggregate_error(mc, env, prototype, &errors_val, message_val.as_ref(), options_val.as_ref())?;
                         return Ok(err_val);
                     } else if name_str == "SuppressedError" {
                         let error_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
@@ -22876,14 +22909,8 @@ fn evaluate_expr_new<'gc>(
                         } else {
                             None
                         };
-                        let err_val = crate::core::js_error::create_suppressed_error(
-                            mc,
-                            env,
-                            prototype,
-                            error_val,
-                            suppressed_val,
-                            Some(message_val),
-                        )?;
+                        use crate::core::js_error::create_suppressed_error;
+                        let err_val = create_suppressed_error(mc, env, prototype, &error_val, &suppressed_val, Some(&message_val))?;
                         return Ok(err_val);
                     } else if name_str == "Object" {
                         let ctor_realm = crate::js_class::get_function_realm(&obj).ok().flatten().unwrap_or(*env);
@@ -24381,15 +24408,8 @@ pub fn create_suppressed_error_value<'gc>(
     error: &Value<'gc>,
     suppressed: &Value<'gc>,
 ) -> Value<'gc> {
-    // Use create_suppressed_error directly to ensure correct property ordering
-    match crate::core::js_error::create_suppressed_error(
-        mc,
-        env,
-        None,
-        error.clone(),
-        suppressed.clone(),
-        None, // no message
-    ) {
+    // Use create_suppressed_error with no message directly to ensure correct property ordering
+    match crate::core::js_error::create_suppressed_error(mc, env, None, error, suppressed, None) {
         Ok(val) => val,
         Err(_) => {
             // Fallback: create a simple error object

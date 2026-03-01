@@ -24,16 +24,58 @@ pub struct JSSet<'gc> {
     pub values: Vec<Option<Value<'gc>>>,
 }
 
+/// A key that can be held weakly: either a GC'd object or a non-registered symbol.
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub enum WeakKey<'gc> {
+    Object(GcWeak<'gc, GcCell<JSObjectData<'gc>>>),
+    Symbol(GcWeak<'gc, SymbolData>),
+}
+
+impl<'gc> WeakKey<'gc> {
+    /// Check if this weak key is still alive and matches the given value.
+    pub fn matches(&self, mc: &crate::core::MutationContext<'gc>, val: &Value<'gc>) -> bool {
+        match (self, val) {
+            (WeakKey::Object(weak), Value::Object(obj)) => weak.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *obj)),
+            (WeakKey::Symbol(weak), Value::Symbol(sym)) => weak.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *sym)),
+            _ => false,
+        }
+    }
+
+    /// Check if this weak key is still alive.
+    pub fn is_alive(&self, mc: &crate::core::MutationContext<'gc>) -> bool {
+        match self {
+            WeakKey::Object(weak) => weak.upgrade(mc).is_some(),
+            WeakKey::Symbol(weak) => weak.upgrade(mc).is_some(),
+        }
+    }
+
+    /// Create a WeakKey from a Value, returning Err if the value cannot be held weakly.
+    pub fn from_value(val: &Value<'gc>) -> Result<WeakKey<'gc>, ()> {
+        match val {
+            Value::Object(obj) => Ok(WeakKey::Object(Gc::downgrade(*obj))),
+            Value::Symbol(sym) => {
+                if sym.registered {
+                    Err(()) // registered symbols cannot be held weakly
+                } else {
+                    Ok(WeakKey::Symbol(Gc::downgrade(*sym)))
+                }
+            }
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSWeakMap<'gc> {
-    pub entries: Vec<(GcWeak<'gc, GcCell<JSObjectData<'gc>>>, Value<'gc>)>,
+    pub entries: Vec<(WeakKey<'gc>, Value<'gc>)>,
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSWeakSet<'gc> {
-    pub values: Vec<GcWeak<'gc, GcCell<JSObjectData<'gc>>>>,
+    pub values: Vec<WeakKey<'gc>>,
 }
 
 #[derive(Clone, Collect)]
@@ -138,6 +180,8 @@ pub struct JSArrayBuffer {
     pub shared: bool,
     // Optional maximum byte length for resizable ArrayBuffers
     pub max_byte_length: Option<usize>,
+    /// Whether this ArrayBuffer is immutable (frozen data, cannot be written to or transferred)
+    pub immutable: bool,
 }
 
 #[derive(Clone, Collect)]
@@ -517,6 +561,9 @@ pub enum InternalSlot {
     // --- Explicit Resource Management ---
     DisposableResources, // __disposable_resources (Vec of (value, is_async) pairs)
     DisposableType,      // "sync" or "async" — distinguishes DisposableStack from AsyncDisposableStack
+
+    // --- JSON ---
+    IsRawJSON, // marker: object created by JSON.rawJSON()
 
     // --- ShadowRealm ---
     ShadowRealm,        // __shadow_realm  (isolated global env for a ShadowRealm instance)
@@ -984,12 +1031,23 @@ impl<'gc> ClosureData<'gc> {
 #[collect(require_static)]
 pub struct SymbolData {
     description: Option<String>,
+    /// True for symbols created via `Symbol.for()` (global symbol registry).
+    /// Registered symbols cannot be used as WeakMap/WeakSet/WeakRef keys.
+    pub registered: bool,
 }
 
 impl SymbolData {
     pub fn new(description: Option<&str>) -> Self {
         SymbolData {
             description: description.map(|s| s.to_string()),
+            registered: false,
+        }
+    }
+
+    pub fn new_registered(description: Option<&str>) -> Self {
+        SymbolData {
+            description: description.map(|s| s.to_string()),
+            registered: true,
         }
     }
 

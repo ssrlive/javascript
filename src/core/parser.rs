@@ -11,7 +11,7 @@ static TEMPLATE_SITE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn next_template_site_id() -> u64 {
     TEMPLATE_SITE_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
-use crate::{raise_parse_error, raise_parse_error_at, raise_parse_error_with_token, unicode::utf16_to_utf8};
+use crate::{raise_parse_error, raise_parse_error_at, raise_parse_error_with_token, raise_syntax_error, unicode::utf16_to_utf8};
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
@@ -1838,6 +1838,30 @@ fn parse_const_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     })
 }
 
+/// Check that a StringLiteral used as a ModuleExportName is well-formed Unicode
+/// (no unpaired surrogates). Spec: "It is a Syntax Error if IsStringWellFormedUnicode
+/// of the StringValue of StringLiteral is false."
+fn check_module_export_name_well_formed(s: &[u16]) -> Result<(), JSError> {
+    let len = s.len();
+    let mut i = 0;
+    while i < len {
+        let c = s[i];
+        if (0xD800..=0xDBFF).contains(&c) {
+            // High surrogate — must be followed by a low surrogate
+            if i + 1 >= len || !(0xDC00..=0xDFFF).contains(&s[i + 1]) {
+                return Err(raise_syntax_error!("Module export name must not contain an unpaired surrogate"));
+            }
+            i += 2;
+        } else if (0xDC00..=0xDFFF).contains(&c) {
+            // Low surrogate without preceding high surrogate
+            return Err(raise_syntax_error!("Module export name must not contain an unpaired surrogate"));
+        } else {
+            i += 1;
+        }
+    }
+    Ok(())
+}
+
 fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1; // consume import
@@ -1896,10 +1920,13 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                     break;
                 }
 
-                let imported_name = if let Some(id_name) = t[*index].token.as_identifier_string() {
-                    id_name
+                let (imported_name, imported_is_string) = if let Some(id_name) = t[*index].token.as_identifier_string() {
+                    (id_name, false)
+                } else if let Token::StringLit(s) = &t[*index].token {
+                    check_module_export_name_well_formed(s)?;
+                    (utf16_to_utf8(s), true)
                 } else {
-                    return Err(raise_parse_error!("Expected identifier in named import"));
+                    return Err(raise_parse_error!("Expected identifier or string literal in named import"));
                 };
                 *index += 1;
 
@@ -1919,6 +1946,11 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                         } else {
                             return Err(raise_parse_error!("Expected identifier after 'as'"));
                         }
+                    } else if imported_is_string {
+                        // String literal import names require `as <binding>`
+                        return Err(raise_syntax_error!(
+                            "A string literal import name requires 'as' followed by an identifier"
+                        ));
                     }
                 }
 
@@ -2057,11 +2089,20 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 if let Some(id_name) = t[*index].token.as_identifier_string() {
                     *index += 1;
                     id_name
+                } else if let Token::StringLit(s) = &t[*index].token {
+                    check_module_export_name_well_formed(s)?;
+                    let name = utf16_to_utf8(s);
+                    *index += 1;
+                    name
                 } else {
-                    return Err(raise_parse_error!("Expected identifier after 'as' in export statement"));
+                    return Err(raise_parse_error!(
+                        "Expected identifier or string literal after 'as' in export statement"
+                    ));
                 }
             } else {
-                return Err(raise_parse_error!("Expected identifier after 'as' in export statement"));
+                return Err(raise_parse_error!(
+                    "Expected identifier or string literal after 'as' in export statement"
+                ));
             };
             specifiers.push(ExportSpecifier::Namespace(name));
         } else {
@@ -2094,6 +2135,7 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         }
     } else if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
         *index += 1; // consume {
+        let mut has_string_source_name = false;
         loop {
             while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                 *index += 1;
@@ -2104,14 +2146,18 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 break;
             }
 
-            let name = if let Some(id_name) = t[*index].token.as_identifier_string() {
-                id_name
+            let (name, name_is_string) = if let Some(id_name) = t[*index].token.as_identifier_string() {
+                (id_name, false)
+            } else if let Token::StringLit(s) = &t[*index].token {
+                check_module_export_name_well_formed(s)?;
+                (utf16_to_utf8(s), true)
             } else {
-                return Err(raise_parse_error!("Expected identifier in export specifier"));
+                return Err(raise_parse_error!("Expected identifier or string literal in export specifier"));
             };
             *index += 1;
 
             let mut alias = None;
+            let mut alias_is_string = false;
             if *index < t.len() {
                 let is_as = match &t[*index].token {
                     Token::Identifier(s) if s == "as" => true,
@@ -2124,14 +2170,37 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                         if let Some(id_name) = t[*index].token.as_identifier_string() {
                             alias = Some(id_name);
                             *index += 1;
+                        } else if let Token::StringLit(s) = &t[*index].token {
+                            check_module_export_name_well_formed(s)?;
+                            alias = Some(utf16_to_utf8(s));
+                            alias_is_string = true;
+                            *index += 1;
                         } else {
-                            return Err(raise_parse_error!("Expected identifier after as"));
+                            return Err(raise_parse_error!("Expected identifier or string literal after as"));
                         }
                     } else {
-                        return Err(raise_parse_error!("Expected identifier after as"));
+                        return Err(raise_parse_error!("Expected identifier or string literal after as"));
                     }
                 }
             }
+
+            // Track if the source (referenced binding) side is a string literal.
+            // If there's no alias, the name IS the referenced binding;
+            // if there IS an alias, the name (left of 'as') is the referenced binding.
+            if name_is_string {
+                has_string_source_name = true;
+            }
+            // Also, `export { "foo" as "bar" }` without `from` is invalid because
+            // the alias side being a string literal implies ReferencedBindings contains a
+            // StringLiteral. Actually per spec the check is: if the *source* (left side
+            // of `as`) is a string literal, it's in ReferencedBindings and that's an error.
+            // But also `export { x as "string" }` without from is fine — "string" is the
+            // export name (right side), x is the binding (left side).
+            // Edge case: `export { "foo" as "bar" }` — "foo" is the source/binding which
+            // is a string → error.
+            // Edge case: `export { "foo" as bar }` — "foo" is the binding → error.
+            // Edge case: `export { "foo" }` — "foo" is both binding and export name → error.
+            let _ = alias_is_string; // used only to avoid warning; the real check is name_is_string
 
             specifiers.push(ExportSpecifier::Named(name, alias));
 
@@ -2156,6 +2225,14 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                     }
                 }
             }
+        }
+
+        // Spec: ExportDeclaration : `export` NamedExports `;`
+        // It is a Syntax Error if ReferencedBindings of NamedExports contains any StringLiteral.
+        if source.is_none() && has_string_source_name {
+            return Err(raise_syntax_error!(
+                "A string literal cannot be used as an exported binding without `from`"
+            ));
         }
 
         consume_import_attributes_clause(t, index)?;

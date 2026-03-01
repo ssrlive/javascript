@@ -1,7 +1,7 @@
 use crate::core::MutationContext;
 use crate::core::{
     EvalError, InternalSlot, JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value,
-    slot_get,
+    slot_get, slot_set,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, is_array, set_array_length};
@@ -22,6 +22,14 @@ pub fn initialize_json<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
     // JSON.stringify — function with length = 3
     object_set_key_value(mc, &json_obj, "stringify", &Value::Function("JSON.stringify".to_string()))?;
     json_obj.borrow_mut(mc).set_non_enumerable("stringify");
+
+    // JSON.rawJSON — function with length = 1
+    object_set_key_value(mc, &json_obj, "rawJSON", &Value::Function("JSON.rawJSON".to_string()))?;
+    json_obj.borrow_mut(mc).set_non_enumerable("rawJSON");
+
+    // JSON.isRawJSON — function with length = 1
+    object_set_key_value(mc, &json_obj, "isRawJSON", &Value::Function("JSON.isRawJSON".to_string()))?;
+    json_obj.borrow_mut(mc).set_non_enumerable("isRawJSON");
 
     // Symbol.toStringTag = "JSON" { writable: false, enumerable: false, configurable: true }
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
@@ -56,6 +64,8 @@ pub fn handle_json_method<'gc>(
     match method {
         "parse" => json_parse(mc, args, env),
         "stringify" => json_stringify(mc, args, env),
+        "rawJSON" => json_raw_json(mc, args, env),
+        "isRawJSON" => json_is_raw_json(mc, args),
         _ => Err(raise_eval_error!(format!("JSON.{method} is not implemented")).into()),
     }
 }
@@ -81,11 +91,14 @@ fn json_parse<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjec
     // Step 4: If reviver is a callable function, run InternalizeJSONProperty.
     let reviver = args.get(1).cloned().unwrap_or(Value::Undefined);
     if is_callable(&reviver) {
+        // Extract source tree for json-parse-with-source (reviver context.source)
+        let source_tree = extract_json_sources(&json_str);
+
         // Wrap root in {"": unfiltered}
         let root = new_js_object_data(mc);
         let _ = crate::core::set_internal_prototype_from_constructor(mc, &root, env, "Object");
         object_set_key_value(mc, &root, "", &unfiltered)?;
-        internalize_json_property(mc, env, &root, "", &reviver)
+        internalize_json_property(mc, env, &root, "", &reviver, source_tree.as_ref())
     } else {
         Ok(unfiltered)
     }
@@ -111,12 +124,14 @@ fn to_string_for_json<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JS
 }
 
 /// InternalizeJSONProperty (holder, name, reviver) — §24.5.1.1
+/// With json-parse-with-source: passes a context object {source} to reviver.
 fn internalize_json_property<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     holder: &JSObjectDataPtr<'gc>,
     name: &str,
     reviver: &Value<'gc>,
+    source_node: Option<&JsonSourceNode>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 1: Let val be ? Get(holder, name).
     let val = get_prop(mc, env, holder, name)?;
@@ -125,27 +140,47 @@ fn internalize_json_property<'gc>(
     if let Value::Object(obj) = &val {
         if is_array_for_json_checked(mc, obj)? {
             // Step 2.b: isArray is true
-            // ii. Let len be ? LengthOfArrayLike(val).
             let len = to_length_of_array_like(mc, env, obj)?;
             for i in 0..len {
                 let i_str = i.to_string();
-                let new_element = internalize_json_property(mc, env, obj, &i_str, reviver)?;
+                // Look up child source node
+                let child_source = source_node.and_then(|sn| match sn {
+                    JsonSourceNode::Array(children) => children.get(i),
+                    _ => None,
+                });
+                // Compare current value with original to decide if source is valid
+                let child_val = get_prop(mc, env, obj, &i_str)?;
+                let child_source = child_source.and_then(|cs| {
+                    if source_node_matches_value(cs, &child_val) {
+                        Some(cs)
+                    } else {
+                        None
+                    }
+                });
+                let new_element = internalize_json_property(mc, env, obj, &i_str, reviver, child_source)?;
                 if matches!(new_element, Value::Undefined) {
-                    // 3.a: Perform ? val.[[Delete]](prop).
-                    // Note: OrdinaryDelete returns false for non-configurable — no throw.
                     let _ = json_delete_property(mc, obj, &i_str)?;
                 } else {
-                    // 4.a: Perform ? CreateDataProperty(val, prop, newElement).
-                    // Note: CreateDataProperty — returns false for non-configurable, no throw.
                     let _ = json_create_data_property(mc, obj, &i_str, &new_element)?;
                 }
             }
         } else {
             // Step 2.c: Else (object)
-            // i. Let keys be ? EnumerableOwnProperties(val, key).
             let keys = enumerable_own_property_names(mc, obj)?;
             for key in keys {
-                let new_element = internalize_json_property(mc, env, obj, &key, reviver)?;
+                let child_source = source_node.and_then(|sn| match sn {
+                    JsonSourceNode::Object(entries) => entries.iter().find(|(k, _)| k == &key).map(|(_, v)| v),
+                    _ => None,
+                });
+                let child_val = get_prop(mc, env, obj, &key)?;
+                let child_source = child_source.and_then(|cs| {
+                    if source_node_matches_value(cs, &child_val) {
+                        Some(cs)
+                    } else {
+                        None
+                    }
+                });
+                let new_element = internalize_json_property(mc, env, obj, &key, reviver, child_source)?;
                 if matches!(new_element, Value::Undefined) {
                     let _ = json_delete_property(mc, obj, &key)?;
                 } else {
@@ -155,9 +190,25 @@ fn internalize_json_property<'gc>(
         }
     }
 
-    // Step 3: Return ? Call(reviver, holder, « name, val »).
+    // Build context object for reviver (json-parse-with-source)
+    let context = new_js_object_data(mc);
+    let _ = crate::core::set_internal_prototype_from_constructor(mc, &context, env, "Object");
+    if let Some(JsonSourceNode::Primitive(source_text)) = source_node {
+        // Only add source if the source node is a primitive and matches the current value
+        if primitive_source_matches_value(source_text, &val) {
+            object_set_key_value(mc, &context, "source", &Value::String(utf8_to_utf16(source_text)))?;
+        }
+    }
+
+    // Step 3: Return ? Call(reviver, holder, « name, val, context »).
     let name_val = Value::String(utf8_to_utf16(name));
-    crate::core::evaluate_call_dispatch(mc, env, reviver, Some(&Value::Object(*holder)), &[name_val, val])
+    crate::core::evaluate_call_dispatch(
+        mc,
+        env,
+        reviver,
+        Some(&Value::Object(*holder)),
+        &[name_val, val, Value::Object(context)],
+    )
 }
 
 /// LengthOfArrayLike(obj) — §7.3.2: Get(obj, "length") then ToLength.
@@ -287,6 +338,310 @@ fn get_prop<'gc>(
     key: &str,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     crate::core::get_property_with_accessors(mc, env, obj, key)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// json-parse-with-source — source extraction & value matching
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Source tree extracted from JSON text. Preserves the original structure
+/// and raw source text for each primitive value.
+enum JsonSourceNode {
+    Primitive(String),
+    Array(Vec<JsonSourceNode>),
+    Object(Vec<(String, JsonSourceNode)>),
+}
+
+/// Parse the JSON text to build a parallel source tree.
+/// The JSON must already be validated by serde_json.
+fn extract_json_sources(input: &str) -> Option<JsonSourceNode> {
+    let bytes = input.as_bytes();
+    let mut pos = 0;
+    src_skip_ws(bytes, &mut pos);
+    src_parse_value(input, bytes, &mut pos)
+}
+
+fn src_skip_ws(bytes: &[u8], pos: &mut usize) {
+    while *pos < bytes.len() && matches!(bytes[*pos], b' ' | b'\t' | b'\n' | b'\r') {
+        *pos += 1;
+    }
+}
+
+fn src_parse_value(input: &str, bytes: &[u8], pos: &mut usize) -> Option<JsonSourceNode> {
+    src_skip_ws(bytes, pos);
+    if *pos >= bytes.len() {
+        return None;
+    }
+    match bytes[*pos] {
+        b'{' => src_parse_object(input, bytes, pos),
+        b'[' => src_parse_array(input, bytes, pos),
+        b'"' => {
+            let start = *pos;
+            src_skip_string(bytes, pos);
+            Some(JsonSourceNode::Primitive(input[start..*pos].to_string()))
+        }
+        b't' | b'f' | b'n' => {
+            let start = *pos;
+            while *pos < bytes.len() && bytes[*pos].is_ascii_alphabetic() {
+                *pos += 1;
+            }
+            Some(JsonSourceNode::Primitive(input[start..*pos].to_string()))
+        }
+        _ => {
+            // Number: -? digit+ (.digit+)? ([eE][+-]?digit+)?
+            let start = *pos;
+            if *pos < bytes.len() && bytes[*pos] == b'-' {
+                *pos += 1;
+            }
+            while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+                *pos += 1;
+            }
+            if *pos < bytes.len() && bytes[*pos] == b'.' {
+                *pos += 1;
+                while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+                    *pos += 1;
+                }
+            }
+            if *pos < bytes.len() && matches!(bytes[*pos], b'e' | b'E') {
+                *pos += 1;
+                if *pos < bytes.len() && matches!(bytes[*pos], b'+' | b'-') {
+                    *pos += 1;
+                }
+                while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+                    *pos += 1;
+                }
+            }
+            Some(JsonSourceNode::Primitive(input[start..*pos].to_string()))
+        }
+    }
+}
+
+fn src_skip_string(bytes: &[u8], pos: &mut usize) {
+    *pos += 1; // skip opening "
+    while *pos < bytes.len() {
+        if bytes[*pos] == b'\\' {
+            *pos += 2; // skip escape sequence
+        } else if bytes[*pos] == b'"' {
+            *pos += 1; // skip closing "
+            return;
+        } else {
+            *pos += 1;
+        }
+    }
+}
+
+fn src_parse_array(input: &str, bytes: &[u8], pos: &mut usize) -> Option<JsonSourceNode> {
+    *pos += 1; // skip [
+    src_skip_ws(bytes, pos);
+    let mut items = Vec::new();
+    if *pos < bytes.len() && bytes[*pos] != b']' {
+        items.push(src_parse_value(input, bytes, pos)?);
+        src_skip_ws(bytes, pos);
+        while *pos < bytes.len() && bytes[*pos] == b',' {
+            *pos += 1;
+            items.push(src_parse_value(input, bytes, pos)?);
+            src_skip_ws(bytes, pos);
+        }
+    }
+    if *pos < bytes.len() {
+        *pos += 1;
+    } // skip ]
+    Some(JsonSourceNode::Array(items))
+}
+
+fn src_parse_object(input: &str, bytes: &[u8], pos: &mut usize) -> Option<JsonSourceNode> {
+    *pos += 1; // skip {
+    src_skip_ws(bytes, pos);
+    let mut entries = Vec::new();
+    if *pos < bytes.len() && bytes[*pos] != b'}' {
+        let key = src_parse_string_key(input, bytes, pos)?;
+        src_skip_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b':' {
+            *pos += 1;
+        }
+        let value = src_parse_value(input, bytes, pos)?;
+        entries.push((key, value));
+        src_skip_ws(bytes, pos);
+        while *pos < bytes.len() && bytes[*pos] == b',' {
+            *pos += 1;
+            src_skip_ws(bytes, pos);
+            let key = src_parse_string_key(input, bytes, pos)?;
+            src_skip_ws(bytes, pos);
+            if *pos < bytes.len() && bytes[*pos] == b':' {
+                *pos += 1;
+            }
+            let value = src_parse_value(input, bytes, pos)?;
+            entries.push((key, value));
+            src_skip_ws(bytes, pos);
+        }
+    }
+    if *pos < bytes.len() {
+        *pos += 1;
+    } // skip }
+    Some(JsonSourceNode::Object(entries))
+}
+
+fn src_parse_string_key(input: &str, bytes: &[u8], pos: &mut usize) -> Option<String> {
+    src_skip_ws(bytes, pos);
+    let start = *pos;
+    src_skip_string(bytes, pos);
+    decode_json_string(&input[start..*pos])
+}
+
+/// Decode a JSON string literal (with surrounding quotes) to its content.
+fn decode_json_string(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return None;
+    }
+    let inner = &source[1..source.len() - 1];
+    let mut result = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next()? {
+                '"' => result.push('"'),
+                '\\' => result.push('\\'),
+                '/' => result.push('/'),
+                'b' => result.push('\x08'),
+                'f' => result.push('\x0C'),
+                'n' => result.push('\n'),
+                'r' => result.push('\r'),
+                't' => result.push('\t'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if hex.len() != 4 {
+                        return None;
+                    }
+                    let cp = u16::from_str_radix(&hex, 16).ok()?;
+                    if (0xD800..=0xDBFF).contains(&cp) {
+                        // High surrogate — expect \uXXXX low surrogate
+                        if chars.next() != Some('\\') || chars.next() != Some('u') {
+                            return None;
+                        }
+                        let hex2: String = chars.by_ref().take(4).collect();
+                        if hex2.len() != 4 {
+                            return None;
+                        }
+                        let cp2 = u16::from_str_radix(&hex2, 16).ok()?;
+                        let full_cp = ((cp as u32 - 0xD800) << 10) + (cp2 as u32 - 0xDC00) + 0x10000;
+                        result.push(char::from_u32(full_cp)?);
+                    } else {
+                        result.push(char::from_u32(cp as u32)?);
+                    }
+                }
+                _ => return None,
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    Some(result)
+}
+
+/// Check whether a source node structurally matches a JS value.
+/// Used to detect forward modifications by the reviver.
+fn source_node_matches_value<'gc>(node: &JsonSourceNode, val: &Value<'gc>) -> bool {
+    match node {
+        JsonSourceNode::Primitive(src) => primitive_source_matches_value(src, val),
+        JsonSourceNode::Array(_) => matches!(val, Value::Object(_)),
+        JsonSourceNode::Object(_) => matches!(val, Value::Object(_)),
+    }
+}
+
+/// Check whether a primitive JSON source text matches a JS value.
+fn primitive_source_matches_value<'gc>(source: &str, val: &Value<'gc>) -> bool {
+    let bytes = source.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    match bytes[0] {
+        b'"' => {
+            if let Value::String(s) = val
+                && let Some(decoded) = decode_json_string(source)
+            {
+                return utf16_to_utf8(s) == decoded;
+            }
+            false
+        }
+        b't' => matches!(val, Value::Boolean(true)),
+        b'f' => matches!(val, Value::Boolean(false)),
+        b'n' => matches!(val, Value::Null),
+        _ => {
+            // Number
+            if let Value::Number(n) = val
+                && let Ok(source_num) = source.parse::<f64>()
+            {
+                return n.to_bits() == source_num.to_bits();
+            }
+            false
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JSON.rawJSON & JSON.isRawJSON (json-parse-with-source)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// JSON.rawJSON(text) — §25.5.2.1
+fn json_raw_json<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let text = args.first().cloned().unwrap_or(Value::Undefined);
+
+    // Step 1: Let jsonString be ? ToString(text).
+    let json_string = match &text {
+        Value::Symbol(_) => return Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
+        Value::BigInt(n) => n.to_string(),
+        _ => to_string_for_json(mc, &text, env)?,
+    };
+
+    // Step 2: Throw SyntaxError if jsonString is empty, or if first/last code unit is whitespace.
+    if json_string.is_empty() {
+        return Err(raise_syntax_error!("JSON.rawJSON: text must not be empty").into());
+    }
+    let first = json_string.as_bytes()[0];
+    let last = json_string.as_bytes()[json_string.len() - 1];
+    if matches!(first, b'\t' | b'\n' | b'\r' | b' ') || matches!(last, b'\t' | b'\n' | b'\r' | b' ') {
+        return Err(raise_syntax_error!("JSON.rawJSON: text must not start or end with whitespace").into());
+    }
+
+    // Step 3: Parse as JSON — must be valid and not an object or array.
+    if json_string.starts_with('{') || json_string.starts_with('[') {
+        return Err(raise_syntax_error!("JSON.rawJSON: text must be a JSON primitive value").into());
+    }
+    let _: serde_json::Value = match serde_json::from_str(&json_string) {
+        Ok(v) => v,
+        Err(_) => return Err(raise_syntax_error!("JSON.rawJSON: invalid JSON text").into()),
+    };
+
+    // Step 5: Let obj be OrdinaryObjectCreate(null).
+    let obj = new_js_object_data(mc);
+    // Set prototype to null
+    obj.borrow_mut(mc).prototype = None;
+
+    // Step 6: CreateDataPropertyOrThrow(obj, "rawJSON", jsonString)
+    object_set_key_value(mc, &obj, "rawJSON", &Value::String(utf8_to_utf16(&json_string)))?;
+
+    // Mark as raw JSON
+    slot_set(mc, &obj, InternalSlot::IsRawJSON, &Value::Boolean(true));
+
+    // Step 7: SetIntegrityLevel(obj, "frozen")
+    obj.borrow_mut(mc).set_non_writable("rawJSON");
+    obj.borrow_mut(mc).set_non_configurable(PropertyKey::String("rawJSON".to_string()));
+    // Prevent extensions
+    slot_set(mc, &obj, InternalSlot::Kind, &Value::String(utf8_to_utf16("frozen")));
+
+    Ok(Value::Object(obj))
+}
+
+/// JSON.isRawJSON(O) — §25.5.2.2
+fn json_is_raw_json<'gc>(_mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = args.first().cloned().unwrap_or(Value::Undefined);
+    if let Value::Object(obj) = &val
+        && slot_get(obj, &InternalSlot::IsRawJSON).is_some()
+    {
+        return Ok(Value::Boolean(true));
+    }
+    Ok(Value::Boolean(false))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -445,6 +800,15 @@ fn serialize_json_property<'gc>(
 
     // Step 4: If value is an Object, unwrap boxed primitives.
     if let Value::Object(obj) = &value {
+        // Check for rawJSON (json-parse-with-source) — output rawJSON text directly
+        if slot_get(obj, &InternalSlot::IsRawJSON).is_some()
+            && let Some(raw_val) = object_get_key_value(obj, "rawJSON")
+        {
+            let raw = raw_val.borrow().clone();
+            if let Value::String(s) = &raw {
+                return Ok(Some(utf16_to_utf8(s)));
+            }
+        }
         let unwrapped = unwrap_boxed(mc, obj, env)?;
         if !matches!(unwrapped, Value::Object(_)) {
             value = unwrapped;

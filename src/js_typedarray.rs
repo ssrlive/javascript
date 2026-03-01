@@ -1082,6 +1082,33 @@ pub fn make_arraybuffer_prototype<'gc>(
     object_set_key_value(mc, &proto, "detached", &detached_prop)?;
     proto.borrow_mut(mc).set_non_enumerable("detached");
 
+    // immutable — accessor (getter only)
+    let immutable_prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(Value::Function("get immutable".to_string()))),
+        setter: None,
+    };
+    object_set_key_value(mc, &proto, "immutable", &immutable_prop)?;
+    proto.borrow_mut(mc).set_non_enumerable("immutable");
+
+    // transferToImmutable
+    object_set_key_value(
+        mc,
+        &proto,
+        "transferToImmutable",
+        &Value::Function("ArrayBuffer.prototype.transferToImmutable".to_string()),
+    )?;
+    proto.borrow_mut(mc).set_non_enumerable("transferToImmutable");
+
+    // sliceToImmutable
+    object_set_key_value(
+        mc,
+        &proto,
+        "sliceToImmutable",
+        &Value::Function("ArrayBuffer.prototype.sliceToImmutable".to_string()),
+    )?;
+    proto.borrow_mut(mc).set_non_enumerable("sliceToImmutable");
+
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_val.borrow()
         && let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
@@ -2873,6 +2900,9 @@ pub fn handle_dataview_method<'gc>(
         }
         // ---- Set methods ----
         "setInt8" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             check_detached()?;
@@ -2880,6 +2910,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setUint8" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             check_detached()?;
@@ -2887,6 +2920,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setInt16" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -2895,6 +2931,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setUint16" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -2903,6 +2942,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setInt32" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -2911,6 +2953,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setUint32" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -2919,6 +2964,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setFloat32" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -2927,6 +2975,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setFloat64" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -2935,6 +2986,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setFloat16" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -2943,6 +2997,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setBigInt64" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let i = to_bigint_i64(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -2951,6 +3008,9 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         "setBigUint64" => {
+            if data_view_rc.buffer.borrow().immutable {
+                return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
+            }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
             let i = to_bigint_i64(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
@@ -3607,6 +3667,26 @@ pub fn handle_arraybuffer_accessor<'gc>(
                 ))
             }
         }
+        "immutable" => {
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
+                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    if (**ab).borrow().shared {
+                        return Err(raise_type_error!(
+                            "Method ArrayBuffer.prototype.immutable called on incompatible receiver"
+                        ));
+                    }
+                    Ok(Value::Boolean((**ab).borrow().immutable))
+                } else {
+                    Err(raise_type_error!(
+                        "Method ArrayBuffer.prototype.immutable called on incompatible receiver"
+                    ))
+                }
+            } else {
+                Err(raise_type_error!(
+                    "Method ArrayBuffer.prototype.immutable called on incompatible receiver"
+                ))
+            }
+        }
         _ => Ok(Value::Undefined),
     }
 }
@@ -3962,6 +4042,14 @@ pub fn handle_arraybuffer_method<'gc>(
                         return Err(raise_type_error!("ArrayBuffer species constructor returned the same buffer"));
                     }
 
+                    // Step 23: If IsImmutableBuffer(new) is true, throw TypeError.
+                    if let Some(new_ab_val) = slot_get_chained(&new_obj, &InternalSlot::ArrayBuffer)
+                        && let Value::ArrayBuffer(new_ab) = &*new_ab_val.borrow()
+                        && new_ab.borrow().immutable
+                    {
+                        return Err(raise_type_error!("ArrayBuffer species constructor returned an immutable buffer"));
+                    }
+
                     // Step 20: If new.[[ArrayBufferByteLength]] < newLen, throw TypeError.
                     if let Some(new_ab_val) = slot_get_chained(&new_obj, &InternalSlot::ArrayBuffer)
                         && let Value::ArrayBuffer(new_ab) = &*new_ab_val.borrow()
@@ -4104,14 +4192,11 @@ pub fn handle_arraybuffer_method<'gc>(
                         method
                     )));
                 }
-                if ab.borrow().detached {
-                    return Err(raise_type_error!("Cannot transfer a detached ArrayBuffer"));
-                }
 
+                // Determine new length (coerce BEFORE detached/immutable checks per spec)
                 let old_data = ab.borrow().data.lock().unwrap().clone();
                 let old_len = old_data.len();
 
-                // Determine new length
                 let new_len = if let Some(arg) = args.first()
                     && !matches!(arg, Value::Undefined)
                 {
@@ -4128,6 +4213,13 @@ pub fn handle_arraybuffer_method<'gc>(
                 } else {
                     old_len
                 };
+
+                if ab.borrow().detached {
+                    return Err(raise_type_error!("Cannot transfer a detached ArrayBuffer"));
+                }
+                if ab.borrow().immutable {
+                    return Err(raise_type_error!("Cannot transfer an immutable ArrayBuffer"));
+                }
 
                 // Create the new ArrayBuffer with the requested length
                 let mut new_data = vec![0u8; new_len];
@@ -4150,6 +4242,7 @@ pub fn handle_arraybuffer_method<'gc>(
                         max_byte_length,
                         shared: false,
                         detached: false,
+                        immutable: false,
                     },
                 );
 
@@ -4178,6 +4271,154 @@ pub fn handle_arraybuffer_method<'gc>(
                     "ArrayBuffer.prototype.{} called on incompatible receiver",
                     method
                 )))
+            }
+        }
+        "transferToImmutable" => {
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer) {
+                let ab = match &*ab_val.borrow() {
+                    Value::ArrayBuffer(ab) => *ab,
+                    _ => {
+                        return Err(raise_type_error!(
+                            "ArrayBuffer.prototype.transferToImmutable called on incompatible receiver"
+                        ));
+                    }
+                };
+                if ab.borrow().shared {
+                    return Err(raise_type_error!(
+                        "ArrayBuffer.prototype.transferToImmutable called on a SharedArrayBuffer"
+                    ));
+                }
+                if ab.borrow().detached {
+                    return Err(raise_type_error!("Cannot transfer a detached ArrayBuffer"));
+                }
+                if ab.borrow().immutable {
+                    return Err(raise_type_error!("Cannot transfer an immutable ArrayBuffer"));
+                }
+
+                let old_data = ab.borrow().data.lock().unwrap().clone();
+
+                // Create an immutable ArrayBuffer with the same data
+                let new_ab = new_gc_cell_ptr(
+                    mc,
+                    JSArrayBuffer {
+                        data: Arc::new(Mutex::new(old_data)),
+                        max_byte_length: None,
+                        shared: false,
+                        detached: false,
+                        immutable: true,
+                    },
+                );
+
+                let new_obj = new_js_object_data(mc);
+                slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+                if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
+                    && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
+                    && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
+                    && let Value::Object(proto) = &*proto_val.borrow()
+                {
+                    new_obj.borrow_mut(mc).prototype = Some(*proto);
+                } else {
+                    new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                }
+
+                // Detach the original buffer
+                {
+                    let mut orig = ab.borrow_mut(mc);
+                    orig.detached = true;
+                    orig.data = Arc::new(Mutex::new(Vec::new()));
+                }
+
+                Ok(Value::Object(new_obj))
+            } else {
+                Err(raise_type_error!(
+                    "ArrayBuffer.prototype.transferToImmutable called on incompatible receiver"
+                ))
+            }
+        }
+        "sliceToImmutable" => {
+            if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
+                && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
+            {
+                if (**ab).borrow().shared {
+                    return Err(raise_type_error!(
+                        "ArrayBuffer.prototype.sliceToImmutable called on a SharedArrayBuffer"
+                    ));
+                }
+                if (**ab).borrow().detached {
+                    return Err(raise_type_error!("Cannot slice a detached ArrayBuffer"));
+                }
+
+                let data = (**ab).borrow().data.lock().unwrap().clone();
+                let len = data.len() as i64;
+
+                let to_integer_or_infinity = |v: Option<&Value<'gc>>, default: i64| -> Result<i64, JSError> {
+                    let raw = match v {
+                        None | Some(Value::Undefined) => default as f64,
+                        Some(Value::Object(_)) => {
+                            let prim = crate::core::to_primitive(mc, v.unwrap(), "number", env).map_err(JSError::from)?;
+                            crate::core::to_number(&prim).map_err(JSError::from)?
+                        }
+                        Some(other) => crate::core::to_number(other).map_err(JSError::from)?,
+                    };
+                    let int = if raw.is_nan() || raw == 0.0 {
+                        0
+                    } else if !raw.is_finite() {
+                        if raw.is_sign_negative() { i64::MIN } else { i64::MAX }
+                    } else {
+                        raw.trunc() as i64
+                    };
+                    Ok(int)
+                };
+
+                let start_raw = to_integer_or_infinity(args.first(), 0)?;
+                let end_raw = to_integer_or_infinity(args.get(1), len)?;
+
+                // Re-check detached after argument coercion (valueOf may detach)
+                if (**ab).borrow().detached {
+                    return Err(raise_type_error!("Cannot slice a detached ArrayBuffer"));
+                }
+
+                let start = if start_raw < 0 {
+                    (len + start_raw).max(0)
+                } else {
+                    start_raw.min(len)
+                };
+                let end = if end_raw < 0 { (len + end_raw).max(0) } else { end_raw.min(len) };
+                let final_end = end.max(start);
+                let new_len = (final_end - start) as usize;
+
+                let slice_bytes = &data[start as usize..final_end as usize];
+                let mut new_data = vec![0u8; new_len];
+                new_data[..slice_bytes.len()].copy_from_slice(slice_bytes);
+
+                let new_ab = new_gc_cell_ptr(
+                    mc,
+                    JSArrayBuffer {
+                        data: Arc::new(Mutex::new(new_data)),
+                        max_byte_length: None,
+                        shared: false,
+                        detached: false,
+                        immutable: true,
+                    },
+                );
+
+                let new_obj = new_js_object_data(mc);
+                slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+                if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
+                    && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
+                    && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
+                    && let Value::Object(proto) = &*proto_val.borrow()
+                {
+                    new_obj.borrow_mut(mc).prototype = Some(*proto);
+                } else {
+                    new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                }
+
+                Ok(Value::Object(new_obj))
+            } else {
+                Err(raise_type_error!(
+                    "ArrayBuffer.prototype.sliceToImmutable called on incompatible receiver"
+                ))
             }
         }
         _ => Ok(Value::Undefined),
@@ -5487,6 +5728,7 @@ fn create_uint8array_from_bytes<'gc>(
         max_byte_length: None,
         shared: false,
         detached: false,
+        immutable: false,
     };
     let ab_obj = new_js_object_data(mc);
     let _ = crate::core::set_internal_prototype_from_constructor(mc, &ab_obj, env, "ArrayBuffer");

@@ -1,5 +1,6 @@
 use crate::core::EvalError;
 use crate::core::JSWeakMap;
+use crate::core::WeakKey;
 use crate::core::{Gc, GcCell, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
@@ -193,10 +194,10 @@ pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 }
 
 /// Check if WeakMap has a key
-fn weakmap_has_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key_obj_rc: &JSObjectDataPtr<'gc>) -> bool {
+fn weakmap_has_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
     let weakmap = weakmap.borrow();
     for (k, _) in &weakmap.entries {
-        if k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *key_obj_rc)) {
+        if k.matches(mc, key) {
             return true;
         }
     }
@@ -204,16 +205,10 @@ fn weakmap_has_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWe
 }
 
 /// Delete a key from WeakMap
-fn weakmap_delete_key<'gc>(
-    mc: &MutationContext<'gc>,
-    weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>,
-    key_obj_rc: &JSObjectDataPtr<'gc>,
-) -> bool {
+fn weakmap_delete_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
     let mut weakmap_mut = weakmap.borrow_mut(mc);
     let len_before = weakmap_mut.entries.len();
-    weakmap_mut
-        .entries
-        .retain(|(k, _)| !k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *key_obj_rc)));
+    weakmap_mut.entries.retain(|(k, _)| !k.matches(mc, key));
     weakmap_mut.entries.len() < len_before
 }
 
@@ -232,19 +227,16 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             let value = args.get(1).cloned().unwrap_or(Value::Undefined);
 
             // Check if key can be held weakly (must be an object or non-registered symbol)
-            let key_obj_rc = match &key {
-                Value::Object(obj) => *obj,
-                _ => return Err(raise_type_error!("Invalid value used as weak map key").into()),
+            let weak_key = match WeakKey::from_value(&key) {
+                Ok(wk) => wk,
+                Err(()) => return Err(raise_type_error!("Invalid value used as weak map key").into()),
             };
 
             // Remove existing entry with same key
-            weakmap
-                .borrow_mut(mc)
-                .entries
-                .retain(|(k, _)| !k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, key_obj_rc)));
+            weakmap.borrow_mut(mc).entries.retain(|(k, _)| !k.matches(mc, &key));
 
             // Add new entry
-            weakmap.borrow_mut(mc).entries.push((Gc::downgrade(key_obj_rc), value));
+            weakmap.borrow_mut(mc).entries.push((weak_key, value));
 
             // Return this (the wrapper object)
             Ok(this_obj.clone())
@@ -252,14 +244,14 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
         "get" => {
             let key = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let key_obj_rc = match &key {
-                Value::Object(obj) => obj,
-                _ => return Ok(Value::Undefined),
-            };
+            // Non-weakly-holdable keys just return undefined
+            if WeakKey::from_value(&key).is_err() {
+                return Ok(Value::Undefined);
+            }
 
             let weakmap_ref = weakmap.borrow();
             for (k, v) in &weakmap_ref.entries {
-                if k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *key_obj_rc)) {
+                if k.matches(mc, &key) {
                     return Ok(v.clone());
                 }
             }
@@ -269,22 +261,20 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
         "has" => {
             let key = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let key_obj_rc = match &key {
-                Value::Object(obj) => obj,
-                _ => return Ok(Value::Boolean(false)),
-            };
+            if WeakKey::from_value(&key).is_err() {
+                return Ok(Value::Boolean(false));
+            }
 
-            Ok(Value::Boolean(weakmap_has_key(mc, weakmap, key_obj_rc)))
+            Ok(Value::Boolean(weakmap_has_key(mc, weakmap, &key)))
         }
         "delete" => {
             let key = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let key_obj_rc = match &key {
-                Value::Object(obj) => obj,
-                _ => return Ok(Value::Boolean(false)),
-            };
+            if WeakKey::from_value(&key).is_err() {
+                return Ok(Value::Boolean(false));
+            }
 
-            Ok(Value::Boolean(weakmap_delete_key(mc, weakmap, key_obj_rc)))
+            Ok(Value::Boolean(weakmap_delete_key(mc, weakmap, &key)))
         }
         "toString" => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
         "getOrInsert" => {
@@ -292,22 +282,19 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             let key = args.first().cloned().unwrap_or(Value::Undefined);
             let default_value = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let key_obj_rc = match &key {
-                Value::Object(obj) => *obj,
-                _ => return Err(raise_type_error!("Invalid value used as weak map key").into()),
+            let weak_key = match WeakKey::from_value(&key) {
+                Ok(wk) => wk,
+                Err(()) => return Err(raise_type_error!("Invalid value used as weak map key").into()),
             };
 
             // If key already exists, return existing value
             for (k, v) in &weakmap.borrow().entries {
-                if k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, key_obj_rc)) {
+                if k.matches(mc, &key) {
                     return Ok(v.clone());
                 }
             }
             // Insert and return the default
-            weakmap
-                .borrow_mut(mc)
-                .entries
-                .push((Gc::downgrade(key_obj_rc), default_value.clone()));
+            weakmap.borrow_mut(mc).entries.push((weak_key, default_value.clone()));
             Ok(default_value)
         }
         "getOrInsertComputed" => {
@@ -315,9 +302,9 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             let key = args.first().cloned().unwrap_or(Value::Undefined);
             let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let key_obj_rc = match &key {
-                Value::Object(obj) => *obj,
-                _ => return Err(raise_type_error!("Invalid value used as weak map key").into()),
+            let weak_key = match WeakKey::from_value(&key) {
+                Ok(wk) => wk,
+                Err(()) => return Err(raise_type_error!("Invalid value used as weak map key").into()),
             };
 
             // Validate callback is callable
@@ -337,7 +324,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 
             // If key already exists, return existing value
             for (k, v) in &weakmap.borrow().entries {
-                if k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, key_obj_rc)) {
+                if k.matches(mc, &key) {
                     return Ok(v.clone());
                 }
             }
@@ -345,12 +332,12 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             let computed = crate::core::evaluate_call_dispatch(mc, _env, &callback, None, std::slice::from_ref(&key))?;
             // Re-check: if callback caused insertion of same key, OVERWRITE with computed value
             for (k, v) in &mut weakmap.borrow_mut(mc).entries {
-                if k.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, key_obj_rc)) {
+                if k.matches(mc, &key) {
                     *v = computed.clone();
                     return Ok(computed);
                 }
             }
-            weakmap.borrow_mut(mc).entries.push((Gc::downgrade(key_obj_rc), computed.clone()));
+            weakmap.borrow_mut(mc).entries.push((weak_key, computed.clone()));
             Ok(computed)
         }
         _ => Err(raise_type_error!(format!("WeakMap.prototype.{} is not a function", method)).into()),

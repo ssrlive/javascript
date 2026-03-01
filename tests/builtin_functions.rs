@@ -237,8 +237,8 @@ mod builtin_functions_tests {
         let script = r#"let obj = JSON.parse('{"name":"John","age":30,"city":"New York"}'); JSON.stringify(obj)"#;
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         let inner: String = serde_json::from_str(&result).unwrap();
-        // Should be the same as input (order may differ, but for this simple case it should match)
-        assert_eq!(inner, r#"{"age":30,"city":"New York","name":"John"}"#);
+        // With preserve_order, insertion order is maintained (correct JS behavior)
+        assert_eq!(inner, r#"{"name":"John","age":30,"city":"New York"}"#);
     }
 
     #[test]

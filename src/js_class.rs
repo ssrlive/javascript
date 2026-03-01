@@ -823,6 +823,12 @@ fn initialize_instance_elements<'gc>(
             };
 
             if let Some(name) = private_name {
+                // nonextensible-applies-to-private: PrivateFieldAdd step 1
+                // If O.[[Extensible]] is false, throw a TypeError.
+                if !instance.borrow().is_extensible() {
+                    return Err(raise_type_error!("Cannot add private field to a non-extensible object").into());
+                }
+
                 let key = {
                     let v = crate::core::env_get(&definition_env, &format!("#{name}")).unwrap();
                     if let Value::PrivateName(n, id) = &*v.borrow() {
@@ -1072,6 +1078,11 @@ fn initialize_instance_elements<'gc>(
                             panic!("Missing private name")
                         }
                     };
+                    // nonextensible-applies-to-private: PrivateFieldAdd step 1
+                    // Check after evaluating initializer (which may call Object.preventExtensions)
+                    if !instance.borrow().is_extensible() {
+                        return Err(raise_type_error!("Cannot add private field to a non-extensible object").into());
+                    }
                     set_name_if_anonymous(mc, &val, init_expr, &pk)?;
                     object_set_key_value(mc, instance, pk, &val)?;
                 }
@@ -1639,9 +1650,9 @@ pub(crate) fn evaluate_new<'gc>(
                                 mc,
                                 &ctor_realm_env,
                                 prototype,
-                                errors_val,
-                                message_val,
-                                options_val,
+                                &errors_val,
+                                message_val.as_ref(),
+                                options_val.as_ref(),
                             );
                         }
 
@@ -1653,9 +1664,9 @@ pub(crate) fn evaluate_new<'gc>(
                                 mc,
                                 &ctor_realm_env,
                                 prototype,
-                                error_val,
-                                suppressed_val,
-                                Some(message_val),
+                                &error_val,
+                                &suppressed_val,
+                                Some(&message_val),
                             );
                         }
 
@@ -1669,7 +1680,7 @@ pub(crate) fn evaluate_new<'gc>(
                             }
                             Value::String(crate::unicode::utf8_to_utf16(&crate::core::value_to_string(&prim)))
                         };
-                        return Ok(crate::core::create_error(mc, prototype, msg_val)?);
+                        return Ok(crate::core::create_error(mc, prototype, &msg_val)?);
                     }
                     "BigInt" | "Symbol" => {
                         return Err(raise_type_error!(format!("{} is not a constructor", name_desc)).into());
@@ -3316,6 +3327,11 @@ pub(crate) fn create_class_object<'gc>(
                 );
                 static_env.borrow_mut(mc).set_home_object(Some(class_obj.into()));
                 let value = evaluate_expr(mc, &static_env, &value_expr)?;
+                // nonextensible-applies-to-private: PrivateFieldAdd step 1
+                // Check after evaluating initializer (which may call Object.preventExtensions)
+                if matches!(key, PropertyKey::Private(..)) && !class_obj.borrow().is_extensible() {
+                    return Err(raise_type_error!("Cannot add private field to a non-extensible object").into());
+                }
                 set_name_if_anonymous(mc, &value, &value_expr, &key)?;
                 object_set_key_value(mc, &class_obj, key, &value)?;
             }

@@ -119,16 +119,31 @@ pub fn initialize_global_constructors_with_parent<'gc>(
     crate::js_string::initialize_string_iterator_prototype(mc, env)?;
     crate::js_function::initialize_function(mc, env)?;
 
-    // Fix up Symbol's [[Prototype]] to be Function.prototype now that Function is initialized.
-    // (Symbol is initialized before Function because other builtins need well-known symbols.)
-    if let Some(sym_val) = env_get(env, "Symbol")
-        && let Value::Object(sym_ctor) = &*sym_val.borrow()
-        && let Some(func_val) = env_get(env, "Function")
+    // Fix up [[Prototype]] of builtins created before Function was initialized.
+    if let Some(func_val) = env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_val.borrow()
         && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_val.borrow()
     {
-        sym_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        // Symbol constructor
+        if let Some(sym_val) = env_get(env, "Symbol")
+            && let Value::Object(sym_ctor) = &*sym_val.borrow()
+        {
+            sym_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        }
+        // Array static methods (isArray, from, of, fromAsync)
+        if let Some(arr_val) = env_get(env, "Array")
+            && let Value::Object(arr_ctor) = &*arr_val.borrow()
+        {
+            for method_name in ["isArray", "from", "of", "fromAsync"] {
+                if let Some(method_val) = object_get_key_value(arr_ctor, method_name)
+                    && let Value::Object(method_obj) = &*method_val.borrow()
+                    && method_obj.borrow().prototype.is_none()
+                {
+                    method_obj.borrow_mut(mc).prototype = Some(*func_proto);
+                }
+            }
+        }
     }
 
     initialize_regexp(mc, env)?;

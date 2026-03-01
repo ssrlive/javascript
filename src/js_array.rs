@@ -194,7 +194,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     object_set_key_value(mc, &array_proto, "constructor", &Value::Object(array_ctor))?;
     array_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
-    for (method, method_length) in [("isArray", 1.0_f64), ("from", 1.0_f64), ("of", 0.0_f64)] {
+    for (method, method_length) in [("isArray", 1.0_f64), ("from", 1.0_f64), ("of", 0.0_f64), ("fromAsync", 1.0_f64)] {
         let func_obj = new_js_object_data(mc);
 
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
@@ -489,7 +489,7 @@ pub(crate) fn handle_array_static_method<'gc>(
         crate::core::env_get(env, "this").map(|tv_rc| tv_rc.borrow().clone())
     };
 
-    if matches!(method, "from" | "of")
+    if matches!(method, "from" | "of" | "fromAsync")
         && let Some(Value::Object(this_obj)) = effective_this.as_ref()
         && let Some(cl_ptr) = this_obj.borrow().get_closure()
     {
@@ -498,8 +498,10 @@ pub(crate) fn handle_array_static_method<'gc>(
             _ => None,
         };
 
-        if matches!(native_name.as_deref(), Some("Array.from") | Some("Array.of"))
-            && let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
+        if matches!(
+            native_name.as_deref(),
+            Some("Array.from") | Some("Array.of") | Some("Array.fromAsync")
+        ) && let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
         {
             effective_this = Some(array_ctor_rc.borrow().clone());
         }
@@ -614,10 +616,12 @@ pub(crate) fn handle_array_static_method<'gc>(
         let fallback_len = len_arg.unwrap_or(0) as f64;
         if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
             && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
-            && let Ok(Value::Object(out_obj)) =
-                crate::js_class::evaluate_new(mc, env, &Value::Object(*array_ctor_obj), &[Value::Number(fallback_len)], None)
         {
-            return Ok(out_obj);
+            match crate::js_class::evaluate_new(mc, env, &Value::Object(*array_ctor_obj), &[Value::Number(fallback_len)], None) {
+                Ok(Value::Object(out_obj)) => return Ok(out_obj),
+                Ok(_) => {}              // fall through
+                Err(e) => return Err(e), // propagate RangeError etc.
+            }
         }
 
         let out = create_array(mc, env).map_err(EvalError::from)?;
@@ -1027,6 +1031,284 @@ pub(crate) fn handle_array_static_method<'gc>(
             }
             set_length_with_set_semantics(&out, result.len())?;
             Ok(Value::Object(out))
+        }
+        "fromAsync" => {
+            let async_items = args.first().cloned().unwrap_or(Value::Undefined);
+            let map_fn_arg = args.get(1).cloned();
+            let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+
+            // Create promise capability — always uses intrinsic %Promise%
+            let (promise, resolve, reject) = crate::js_promise::create_promise_capability(mc, env)?;
+
+            // Execute the body; errors turn into rejections
+            let body_result: Result<Value<'gc>, EvalError<'gc>> = (|| {
+                // Validate mapfn
+                let mapper: Option<Value<'gc>> = if let Some(fn_val) = map_fn_arg {
+                    if matches!(fn_val, Value::Undefined) {
+                        None
+                    } else {
+                        let callable = match &fn_val {
+                            Value::Closure(_)
+                            | Value::AsyncClosure(_)
+                            | Value::Function(_)
+                            | Value::GeneratorFunction(_, _)
+                            | Value::AsyncGeneratorFunction(_, _) => true,
+                            Value::Object(obj) => {
+                                obj.borrow().get_closure().is_some()
+                                    || slot_get_chained(obj, &InternalSlot::NativeCtor).is_some()
+                                    || slot_get_chained(obj, &InternalSlot::BoundTarget).is_some()
+                            }
+                            _ => false,
+                        };
+                        if !callable {
+                            return Err(raise_type_error!("Array.fromAsync map function must be callable").into());
+                        }
+                        Some(fn_val)
+                    }
+                } else {
+                    None
+                };
+
+                let do_map = |val: Value<'gc>, idx: usize| -> Result<Value<'gc>, EvalError<'gc>> {
+                    if let Some(fn_val) = &mapper {
+                        let mut actual_fn = fn_val.clone();
+                        if let Value::Object(obj) = fn_val {
+                            if let Some(prop) = obj.borrow().get_closure() {
+                                actual_fn = prop.borrow().clone();
+                            } else if let Some(nc) = slot_get_chained(obj, &InternalSlot::NativeCtor)
+                                && let Value::String(name_vec) = &*nc.borrow()
+                            {
+                                actual_fn = Value::Function(utf16_to_utf8(name_vec));
+                            }
+                        }
+                        let call_args = vec![val, Value::Number(idx as f64)];
+                        let mapped = evaluate_call_dispatch(mc, env, &actual_fn, Some(&this_arg), &call_args)?;
+                        // Await the mapped value
+                        crate::core::await_promise_value(mc, env, &mapped)
+                    } else {
+                        Ok(val)
+                    }
+                };
+
+                // Try Symbol.asyncIterator
+                let mut using_async_iter: Option<Value<'gc>> = None;
+                let mut using_sync_iter: Option<Value<'gc>> = None;
+
+                if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                {
+                    // Check @@asyncIterator
+                    if let Some(async_iter_sym) = object_get_key_value(sym_obj, "asyncIterator")
+                        && let Value::Symbol(async_sym_data) = &*async_iter_sym.borrow()
+                    {
+                        let method = match &async_items {
+                            Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, async_sym_data)?,
+                            _ => Value::Undefined,
+                        };
+                        if !matches!(method, Value::Undefined | Value::Null) {
+                            using_async_iter = Some(method);
+                        }
+                    }
+
+                    // Fallback: check @@iterator
+                    if using_async_iter.is_none()
+                        && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+                        && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+                    {
+                        let method = match &async_items {
+                            Value::String(_) => {
+                                // Strings are iterable
+                                crate::core::get_primitive_prototype_property(mc, env, &async_items, iter_sym_data)?
+                            }
+                            Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, iter_sym_data)?,
+                            _ => Value::Undefined,
+                        };
+                        if !matches!(method, Value::Undefined | Value::Null) {
+                            using_sync_iter = Some(method);
+                        }
+                    }
+                }
+
+                if using_async_iter.is_some() || using_sync_iter.is_some() {
+                    // Iterator path
+                    let is_async = using_async_iter.is_some();
+                    let iter_fn = if is_async {
+                        using_async_iter.unwrap()
+                    } else {
+                        using_sync_iter.unwrap()
+                    };
+
+                    // If IsConstructor(C), let A = Construct(C); else A = ArrayCreate(0)
+                    let out = create_with_ctor_or_array(None)?;
+
+                    let iter_result = evaluate_call_dispatch(mc, env, &iter_fn, Some(&async_items), &[])?;
+                    let iter_obj = match iter_result {
+                        Value::Object(o) => o,
+                        _ => return Err(raise_type_error!("Iterator result must be an object").into()),
+                    };
+
+                    let close_iterator = |iter_obj: &crate::core::JSObjectDataPtr<'gc>| {
+                        if let Ok(return_fn) = crate::core::get_property_with_accessors(mc, env, iter_obj, "return")
+                            && !matches!(return_fn, Value::Undefined | Value::Null)
+                        {
+                            let _ = evaluate_call_dispatch(mc, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
+                        }
+                    };
+
+                    let mut k = 0usize;
+                    loop {
+                        let next_fn = match crate::core::get_property_with_accessors(mc, env, &iter_obj, "next") {
+                            Ok(v) => v,
+                            Err(e) => {
+                                close_iterator(&iter_obj);
+                                return Err(e);
+                            }
+                        };
+                        let mut next_result = match evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                close_iterator(&iter_obj);
+                                return Err(e);
+                            }
+                        };
+
+                        // For async iterators, await the next result
+                        if is_async {
+                            next_result = match crate::core::await_promise_value(mc, env, &next_result) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    close_iterator(&iter_obj);
+                                    return Err(e);
+                                }
+                            };
+                        }
+
+                        let next_obj = match next_result {
+                            Value::Object(o) => o,
+                            _ => {
+                                close_iterator(&iter_obj);
+                                return Err(raise_type_error!("Iterator.next must return an object").into());
+                            }
+                        };
+
+                        let done_val = match crate::core::get_property_with_accessors(mc, env, &next_obj, "done") {
+                            Ok(v) => v,
+                            Err(e) => {
+                                close_iterator(&iter_obj);
+                                return Err(e);
+                            }
+                        };
+                        if done_val.to_truthy() {
+                            break;
+                        }
+
+                        let value = match crate::core::get_property_with_accessors(mc, env, &next_obj, "value") {
+                            Ok(v) => v,
+                            Err(e) => {
+                                close_iterator(&iter_obj);
+                                return Err(e);
+                            }
+                        };
+
+                        // Await the value
+                        let awaited = match crate::core::await_promise_value(mc, env, &value) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                close_iterator(&iter_obj);
+                                return Err(e);
+                            }
+                        };
+
+                        // Apply mapping
+                        let mapped = match do_map(awaited, k) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                close_iterator(&iter_obj);
+                                return Err(e);
+                            }
+                        };
+
+                        if let Err(e) = create_data_property_or_throw(&out, k, &mapped) {
+                            close_iterator(&iter_obj);
+                            return Err(e);
+                        }
+                        k += 1;
+                    }
+
+                    set_length_with_set_semantics(&out, k)?;
+                    Ok(Value::Object(out))
+                } else {
+                    // Array-like path
+                    if matches!(async_items, Value::Undefined | Value::Null) {
+                        return Err(raise_type_error!("Array.fromAsync requires an array-like or iterable object").into());
+                    }
+
+                    let array_like = match &async_items {
+                        Value::Object(obj) => *obj,
+                        _ => {
+                            // ToObject
+                            match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&async_items), env)? {
+                                Value::Object(obj) => obj,
+                                _ => return Err(raise_type_error!("Cannot convert to object").into()),
+                            }
+                        }
+                    };
+
+                    let len_val = crate::core::get_property_with_accessors(mc, env, &array_like, "length")?;
+                    let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                    let len_num = crate::core::to_number(&len_prim)?;
+                    let max_len = 9007199254740991.0_f64;
+                    let len = if len_num.is_nan() || len_num <= 0.0 {
+                        0usize
+                    } else if !len_num.is_finite() {
+                        return Err(raise_type_error!("Array-like length too large").into());
+                    } else {
+                        len_num.floor().min(max_len) as usize
+                    };
+
+                    // If IsConstructor(C), let A = Construct(C, «len»); else A = ArrayCreate(len)
+                    let out = create_with_ctor_or_array(Some(len))?;
+
+                    for k in 0..len {
+                        let element = crate::core::get_property_with_accessors(mc, env, &array_like, k.to_string())?;
+
+                        // Await the element value
+                        let awaited = crate::core::await_promise_value(mc, env, &element)?;
+
+                        // Apply mapping
+                        let mapped = do_map(awaited, k)?;
+
+                        create_data_property_or_throw(&out, k, &mapped)?;
+                    }
+
+                    set_length_with_set_semantics(&out, len)?;
+                    Ok(Value::Object(out))
+                }
+            })();
+
+            // Resolve or reject the promise
+            match body_result {
+                Ok(result_val) => {
+                    if let Err(e) = crate::js_promise::call_function(mc, &resolve, &[result_val], env) {
+                        log::debug!("Error resolving Array.fromAsync promise: {:?}", e);
+                    }
+                }
+                Err(e) => {
+                    let rej_val = match e {
+                        EvalError::Throw(v, _, _) => v,
+                        EvalError::Js(je) => {
+                            let msg = je.message();
+                            crate::core::create_error(mc, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined)
+                        }
+                    };
+                    if let Err(e) = crate::js_promise::call_function(mc, &reject, &[rej_val], env) {
+                        log::debug!("Error rejecting Array.fromAsync promise: {:?}", e);
+                    }
+                }
+            }
+
+            let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+            Ok(Value::Object(promise_obj))
         }
         "of" => {
             let out = create_with_ctor_or_array(Some(args.len()))?;

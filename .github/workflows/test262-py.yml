@@ -1,0 +1,259 @@
+name: test262-py
+
+on:
+  push:
+  pull_request:
+
+  # 允許手動觸發，可以選擇跑哪些測試
+  workflow_dispatch:
+    inputs:
+      test_pattern:
+        description: 'Glob pattern for tests to run'
+        required: false
+        default: 'test/built-ins/**/*.js test/language/**/*.js'
+      skip_features:
+        description: 'Comma-separated features to skip'
+        required: false
+        default: ''
+
+# 同一 PR 只保留最新一次 CI
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # ↓↓↓ 修改這裡：你的引擎 cargo package 名稱 ↓↓↓
+  ENGINE_BIN_NAME: js
+
+jobs:
+  build-engine:
+    name: Build Engine
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout engine
+        uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build engine (release)
+        run: cargo build --release -p ${{ env.ENGINE_BIN_NAME }}
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p staging
+          cp target/release/${{ env.ENGINE_BIN_NAME }} staging/
+          cp run.py staging/
+
+      - name: Upload engine binary + runner
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-binary
+          path: staging/
+          retention-days: 1
+
+  test262:
+    name: test262
+    needs: build-engine
+    runs-on: ubuntu-latest
+    # 不讓測試失敗阻擋整個 workflow，這樣能看到完整報告
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # ── 按模組拆分並行跑，加速 CI ──
+        suite:
+          # language 拆成 4 個任務：2 個慢的 dstr 單獨跑，其餘分兩組
+          - name: lang-expr-dstr
+            pattern: "test/language/expressions/class/dstr/**/*.js"
+            exclude: ""
+          - name: lang-stmt-dstr
+            pattern: "test/language/statements/class/dstr/**/*.js"
+            exclude: ""
+          - name: lang-expressions
+            pattern: "test/language/expressions/**/*.js"
+            exclude: "test/language/expressions/class/dstr/**/*.js"
+          - name: lang-other
+            pattern: "test/language/**/*.js"
+            exclude: "test/language/expressions/**/*.js,test/language/statements/class/dstr/**/*.js"
+          - name: built-ins-A-E
+            pattern: "test/built-ins/[A-E]*/**/*.js"
+            exclude: ""
+          - name: built-ins-F-O
+            pattern: "test/built-ins/[F-O]*/**/*.js"
+            exclude: ""
+          - name: built-ins-P-Z
+            pattern: "test/built-ins/[P-Z]*/**/*.js"
+            exclude: "test/built-ins/RegExp/property-escapes/generated/**/*.js"
+          - name: annexB
+            pattern: "test/annexB/**/*.js"
+            exclude: ""
+
+    steps:
+      - name: Download engine binary
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-binary
+          path: ./engine
+
+      - name: Make engine executable
+        run: chmod +x ./engine/${{ env.ENGINE_BIN_NAME }}
+
+      - name: Checkout test262
+        uses: actions/checkout@v6
+        with:
+          repository: tc39/test262
+          path: test262
+          fetch-depth: 1
+
+      - name: Copy runner script
+        run: cp ./engine/run.py test262/run.py
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Run test262 — ${{ matrix.suite.name }}
+        id: run-tests
+        working-directory: test262
+        env:
+          # 你的引擎不支持的特性，在這裡跳過
+          SKIP_FEATURES: >-
+            Atomics,SharedArrayBuffer,
+            IsHTMLDDA,
+            resizable-arraybuffer,
+            Temporal,
+            import-defer,
+            source-phase-imports,
+            source-phase-imports-module-source,
+            tail-call-optimization
+          TEST_PATTERN: ${{ github.event.inputs.test_pattern || matrix.suite.pattern }}
+          EXCLUDE_PATTERN: ${{ matrix.suite.exclude }}
+          SKIP_OVERRIDE: ${{ github.event.inputs.skip_features }}
+        run: |
+          SKIP="${SKIP_OVERRIDE:-$SKIP_FEATURES}"
+          EXCLUDE_ARGS=()
+          if [ -n "$EXCLUDE_PATTERN" ]; then
+            EXCLUDE_ARGS=(--exclude "$EXCLUDE_PATTERN")
+          fi
+          python3 run.py \
+            --engine "${{ github.workspace }}/engine/${{ env.ENGINE_BIN_NAME }}" \
+            --jobs 4 \
+            --timeout 30 \
+            --failures-only \
+            --gh-annotations \
+            --json results-${{ matrix.suite.name }}.json \
+            --summary summary-${{ matrix.suite.name }}.md \
+            --skip-features "$SKIP" \
+            "${EXCLUDE_ARGS[@]}" \
+            "$TEST_PATTERN"
+        # 即使測試失敗也繼續，這樣能上傳報告
+        continue-on-error: true
+
+      - name: Write job summary
+        if: always()
+        working-directory: test262
+        run: |
+          if [ -f summary-${{ matrix.suite.name }}.md ]; then
+            cat summary-${{ matrix.suite.name }}.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-results-${{ matrix.suite.name }}
+          path: |
+            test262/results-*.json
+            test262/summary-*.md
+          retention-days: 30
+
+  # ── 匯總所有分片結果 ──
+  report:
+    name: Aggregate Results
+    needs: test262
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test262-results-*
+          merge-multiple: true
+
+      - name: Aggregate and report
+        run: |
+          echo "## test262 Overall Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          TOTAL_PASS=0
+          TOTAL_FAIL=0
+          TOTAL_SKIP=0
+          TOTAL_TIMEOUT=0
+
+          for f in results-*.json; do
+            if [ -f "$f" ]; then
+              SUITE=$(basename "$f" .json | sed 's/results-//')
+              PASS=$(python3 -c "import json; d=json.load(open('$f')); print(d['summary']['pass'])")
+              FAIL=$(python3 -c "import json; d=json.load(open('$f')); print(d['summary']['fail'])")
+              SKIP=$(python3 -c "import json; d=json.load(open('$f')); print(d['summary']['skip'])")
+              TMO=$(python3 -c "import json; d=json.load(open('$f')); print(d['summary']['timeout'])")
+              TOTAL_PASS=$((TOTAL_PASS + PASS))
+              TOTAL_FAIL=$((TOTAL_FAIL + FAIL))
+              TOTAL_SKIP=$((TOTAL_SKIP + SKIP))
+              TOTAL_TIMEOUT=$((TOTAL_TIMEOUT + TMO))
+              echo "  $SUITE: $PASS pass, $FAIL fail, $SKIP skip, $TMO timeout"
+            fi
+          done
+
+          TOTAL=$((TOTAL_PASS + TOTAL_FAIL + TOTAL_SKIP + TOTAL_TIMEOUT))
+          TESTED=$((TOTAL - TOTAL_SKIP))
+          if [ "$TESTED" -gt 0 ]; then
+            RATE=$(python3 -c "print(f'{$TOTAL_PASS/$TESTED*100:.1f}')")
+          else
+            RATE="N/A"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :white_check_mark: Pass | $TOTAL_PASS |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :x: Fail | $TOTAL_FAIL |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :fast_forward: Skip | $TOTAL_SKIP |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :hourglass: Timeout | $TOTAL_TIMEOUT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Total** | **$TOTAL** |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Overall pass rate: ${RATE}%**" >> "$GITHUB_STEP_SUMMARY"
+
+          echo ""
+          echo "============================="
+          echo " PASS: $TOTAL_PASS"
+          echo " FAIL: $TOTAL_FAIL"
+          echo " SKIP: $TOTAL_SKIP"
+          echo " TIMEOUT: $TOTAL_TIMEOUT"
+          echo " Pass rate: ${RATE}%"
+          echo "============================="
+
+          # 如果有失敗，設定 exit code
+          if [ "$TOTAL_FAIL" -gt 0 ]; then
+            echo "::warning::$TOTAL_FAIL test(s) failed"
+          fi

@@ -322,6 +322,18 @@ pub fn initialize_global_constructors_with_parent<'gc>(
     // through str_to_internal_slot, hiding it from property access.
     object_set_key_value(mc, env, "__detachArrayBuffer__", &val)?;
 
+    // AnnexB: Create [[IsHTMLDDA]] object for $262.IsHTMLDDA test262 harness.
+    // This is a callable object that returns null when called.
+    {
+        let htmldda = new_js_object_data(mc);
+        // Mark with [[IsHTMLDDA]] internal slot
+        slot_set(mc, &htmldda, InternalSlot::IsHTMLDDA, &Value::Boolean(true));
+        // Make it callable: attach a closure that returns null
+        let closure_fn = Value::Function("__isHTMLDDA__".to_string());
+        htmldda.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_fn)));
+        object_set_key_value(mc, env, "__isHTMLDDA__", &Value::Object(htmldda))?;
+    }
+
     // Expose common global functions as callables
     env_set(mc, env, "parseInt", &Value::Function("parseInt".to_string()))?;
     env_set(mc, env, "parseFloat", &Value::Function("parseFloat".to_string()))?;

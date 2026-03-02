@@ -184,6 +184,11 @@ pub fn handle_global_function<'gc>(
             return Ok(Value::Object(result));
         }
 
+        // AnnexB: [[IsHTMLDDA]] callable — always returns null
+        "__isHTMLDDA__" => {
+            return Ok(Value::Null);
+        }
+
         "Object.prototype.valueOf" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -244,6 +249,17 @@ pub fn handle_global_function<'gc>(
             }
             return Err(raise_eval_error!("RegExp.prototype.toString called without this").into());
         }
+        "RegExp.prototype.compile" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_regexp::handle_regexp_method(mc, &obj, "compile", args, env);
+                } else {
+                    return Err(raise_type_error!("RegExp.prototype.compile called on non-object receiver").into());
+                }
+            }
+            return Err(raise_eval_error!("RegExp.prototype.compile called without this").into());
+        }
         // RegExp.prototype accessor getters (source, global, ignoreCase, etc.)
         _ if func_name.starts_with("RegExp.prototype.get ") => {
             let prop = &func_name["RegExp.prototype.get ".len()..];
@@ -252,6 +268,73 @@ pub fn handle_global_function<'gc>(
                 if let Some(val) = crate::js_regexp::handle_regexp_getter_with_this(mc, env, &this_v, prop)? {
                     return Ok(val);
                 }
+            }
+            return Ok(Value::Undefined);
+        }
+        // AnnexB: Legacy RegExp static property getters (RegExp.$1, input, lastMatch, etc.)
+        _ if func_name.starts_with("RegExp.legacy.get ") => {
+            let prop = &func_name["RegExp.legacy.get ".len()..];
+            // GetLegacyRegExpStaticProperty: SameValue(C, thisValue) check
+            // "this" must be the exact %RegExp% constructor (not a subclass, not cross-realm)
+            let this_val = crate::core::env_get(env, "this")
+                .map(|rc| rc.borrow().clone())
+                .unwrap_or(Value::Undefined);
+            // Get the %RegExp% of the realm where this getter was defined
+            let origin_env = if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let _ = this_rc;
+                // The OriginGlobal slot on the getter function object points to the defining realm
+                *env
+            } else {
+                *env
+            };
+            let regexp_ctor_val = crate::core::object_get_key_value(&origin_env, "RegExp");
+            let is_same = if let Some(rc) = &regexp_ctor_val
+                && let Value::Object(regexp_ctor) = &*rc.borrow()
+            {
+                if let Value::Object(this_obj) = &this_val {
+                    std::ptr::eq(&**this_obj as *const _, &**regexp_ctor as *const _)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !is_same {
+                return Err(raise_type_error!(format!("get RegExp.{prop} requires that 'this' be the RegExp constructor")).into());
+            }
+            let result = crate::js_regexp::get_legacy_regexp_property(prop);
+            return Ok(Value::String(result));
+        }
+        // AnnexB: Legacy RegExp static property setters (RegExp.input, RegExp.$_)
+        _ if func_name.starts_with("RegExp.legacy.set ") => {
+            let prop = &func_name["RegExp.legacy.set ".len()..];
+            // SetLegacyRegExpStaticProperty: SameValue(C, thisValue) check
+            let this_val = crate::core::env_get(env, "this")
+                .map(|rc| rc.borrow().clone())
+                .unwrap_or(Value::Undefined);
+            let regexp_ctor_val = crate::core::object_get_key_value(env, "RegExp");
+            let is_same = if let Some(rc) = &regexp_ctor_val
+                && let Value::Object(regexp_ctor) = &*rc.borrow()
+            {
+                if let Value::Object(this_obj) = &this_val {
+                    std::ptr::eq(&**this_obj as *const _, &**regexp_ctor as *const _)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !is_same {
+                return Err(raise_type_error!(format!("set RegExp.{prop} requires that 'this' be the RegExp constructor")).into());
+            }
+            let val_arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let val_str = match val_arg {
+                Value::String(s) => s,
+                other => crate::unicode::utf8_to_utf16(&crate::core::value_to_string(&other)),
+            };
+            match prop {
+                "input" | "$_" => crate::js_regexp::set_legacy_regexp_input(val_str),
+                _ => {} // Other legacy props are read-only
             }
             return Ok(Value::Undefined);
         }

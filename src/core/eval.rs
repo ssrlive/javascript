@@ -186,6 +186,19 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
 }
 
 fn loose_equal<'gc>(mc: &MutationContext<'gc>, l: &Value<'gc>, r: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
+    // AnnexB: [[IsHTMLDDA]] objects compare equal to null and undefined
+    if let Value::Object(obj) = l
+        && slot_get(obj, &InternalSlot::IsHTMLDDA).is_some()
+        && matches!(r, Value::Null | Value::Undefined)
+    {
+        return Ok(true);
+    }
+    if let Value::Object(obj) = r
+        && slot_get(obj, &InternalSlot::IsHTMLDDA).is_some()
+        && matches!(l, Value::Null | Value::Undefined)
+    {
+        return Ok(true);
+    }
     match (l, r) {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => Ok(true),
         (Value::Undefined, Value::Null) | (Value::Null, Value::Undefined) => Ok(true),
@@ -17276,7 +17289,12 @@ fn evaluate_expr_typeof<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         | Value::Getter(..)
         | Value::Setter(..) => "function",
         Value::Object(_) | Value::Proxy(_) => {
-            if is_callable_for_typeof(&val) {
+            // AnnexB: [[IsHTMLDDA]] objects → typeof returns "undefined"
+            if let Value::Object(obj) = &val
+                && slot_get(obj, &InternalSlot::IsHTMLDDA).is_some()
+            {
+                "undefined"
+            } else if is_callable_for_typeof(&val) {
                 "function"
             } else {
                 "object"
@@ -19762,6 +19780,58 @@ pub fn call_native_function<'gc>(
     if let Some(prop) = name.strip_prefix("RegExp.prototype.get ") {
         let this_v = this_val.unwrap_or(&Value::Undefined);
         return crate::js_regexp::handle_regexp_getter_with_this(mc, env, this_v, prop);
+    }
+
+    // AnnexB: Legacy RegExp static property getters
+    if let Some(prop) = name.strip_prefix("RegExp.legacy.get ") {
+        let this_v = this_val.cloned().unwrap_or(Value::Undefined);
+        // SameValue(C, thisValue): "this" must be the exact %RegExp% constructor
+        let regexp_ctor_val = crate::core::object_get_key_value(env, "RegExp");
+        let is_same = if let Some(rc) = &regexp_ctor_val
+            && let Value::Object(regexp_ctor) = &*rc.borrow()
+        {
+            if let Value::Object(this_obj) = &this_v {
+                std::ptr::eq(&**this_obj as *const _, &**regexp_ctor as *const _)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !is_same {
+            return Err(raise_type_error!(format!("get RegExp.{prop} requires that 'this' be the RegExp constructor")).into());
+        }
+        return Ok(Some(Value::String(crate::js_regexp::get_legacy_regexp_property(prop))));
+    }
+
+    // AnnexB: Legacy RegExp static property setters
+    if let Some(prop) = name.strip_prefix("RegExp.legacy.set ") {
+        let this_v = this_val.cloned().unwrap_or(Value::Undefined);
+        let regexp_ctor_val = crate::core::object_get_key_value(env, "RegExp");
+        let is_same = if let Some(rc) = &regexp_ctor_val
+            && let Value::Object(regexp_ctor) = &*rc.borrow()
+        {
+            if let Value::Object(this_obj) = &this_v {
+                std::ptr::eq(&**this_obj as *const _, &**regexp_ctor as *const _)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !is_same {
+            return Err(raise_type_error!(format!("set RegExp.{prop} requires that 'this' be the RegExp constructor")).into());
+        }
+        let val_arg = args.first().cloned().unwrap_or(Value::Undefined);
+        let val_str = match val_arg {
+            Value::String(s) => s,
+            other => crate::unicode::utf8_to_utf16(&crate::core::value_to_string(&other)),
+        };
+        match prop {
+            "input" | "$_" => crate::js_regexp::set_legacy_regexp_input(val_str),
+            _ => {}
+        }
+        return Ok(Some(Value::Undefined));
     }
 
     // Date.prototype.* instance methods
@@ -23015,7 +23085,8 @@ fn evaluate_expr_new<'gc>(
                     } else if name_str == "Array" {
                         return crate::js_array::handle_array_constructor(mc, &eval_args, env, None);
                     } else if name_str == "RegExp" {
-                        return crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(env), &eval_args);
+                        let ctor_realm = crate::js_class::get_function_realm(&obj).ok().flatten().unwrap_or(*env);
+                        return crate::js_regexp::handle_regexp_constructor_with_env(mc, Some(&ctor_realm), &eval_args);
                     } else if name_str == "Map" {
                         return crate::js_map::handle_map_constructor(mc, &eval_args, env, None);
                     } else if name_str == "Proxy" {

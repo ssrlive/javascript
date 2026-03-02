@@ -4907,6 +4907,10 @@ pub fn handle_typedarray_static_method<'gc>(
                             used_iterator = true;
                             // ES2024 §23.2.2.1 step 5a: IteratorToList — collect ALL values first
                             let iterator = crate::core::evaluate_call_dispatch(mc, env, &iter_fn, Some(&Value::Object(*src_obj)), &[])?;
+                            // GetIterator step 5: If Type(iterator) is not Object, throw a TypeError.
+                            if !matches!(iterator, Value::Object(_)) {
+                                return Err(raise_type_error!("Result of the Symbol.iterator method is not an object").into());
+                            }
                             if let Value::Object(iter_obj) = iterator {
                                 loop {
                                     let next_fn = get_property_with_accessors(mc, env, &iter_obj, "next")?;

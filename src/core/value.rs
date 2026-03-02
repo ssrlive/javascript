@@ -565,6 +565,9 @@ pub enum InternalSlot {
     // --- JSON ---
     IsRawJSON, // marker: object created by JSON.rawJSON()
 
+    // --- AnnexB ---
+    IsHTMLDDA, // [[IsHTMLDDA]] internal slot (document.all emulation)
+
     // --- ShadowRealm ---
     ShadowRealm,        // __shadow_realm  (isolated global env for a ShadowRealm instance)
     WrappedTarget,      // __wrapped_target (target function of a WrappedFunction)
@@ -1187,6 +1190,8 @@ impl<'gc> Value<'gc> {
             Value::String(s) => !s.is_empty(),
             Value::Null | Value::Undefined | Value::Uninitialized => false,
             Value::BigInt(b) => !num_traits::Zero::is_zero(&**b),
+            // AnnexB: [[IsHTMLDDA]] objects are falsy
+            Value::Object(obj) if slot_get(obj, &InternalSlot::IsHTMLDDA).is_some() => false,
             _ => true,
         }
     }

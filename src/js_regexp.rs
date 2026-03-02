@@ -37,6 +37,91 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+// ---------------------------------------------------------------------------
+// AnnexB B.2.4: Legacy RegExp static properties (RegExp.$1-$9, etc.)
+// Thread-local state updated after each successful RegExp built-in exec.
+// ---------------------------------------------------------------------------
+#[derive(Clone, Default)]
+struct LegacyRegExpState {
+    input: Vec<u16>,         // [[RegExpInput]]
+    last_match: Vec<u16>,    // [[RegExpLastMatch]]
+    left_context: Vec<u16>,  // [[RegExpLeftContext]]
+    right_context: Vec<u16>, // [[RegExpRightContext]]
+    last_paren: Vec<u16>,    // [[RegExpLastParen]]
+    parens: [Vec<u16>; 9],   // [[RegExpParen1]]-[[RegExpParen9]]
+}
+
+thread_local! {
+    static LEGACY_REGEXP_STATE: RefCell<LegacyRegExpState> =
+        RefCell::new(LegacyRegExpState::default());
+    /// Manually set input via `RegExp.input = val` (the [[RegExpInput]] slot
+    /// that can be written by user code).
+    static LEGACY_REGEXP_INPUT_OVERRIDE: RefCell<Option<Vec<u16>>> =
+        const { RefCell::new(None) };
+}
+
+/// Update legacy regexp state after a successful match.
+fn update_legacy_regexp_state(input: &[u16], match_start: usize, match_end: usize, captures: &[Option<std::ops::Range<usize>>]) {
+    LEGACY_REGEXP_STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        s.input = input.to_vec();
+        s.last_match = input[match_start..match_end].to_vec();
+        s.left_context = input[..match_start].to_vec();
+        s.right_context = input[match_end..].to_vec();
+        // Parens: captures[0] is group 1, captures[1] is group 2, etc.
+        for i in 0..9 {
+            if i < captures.len() {
+                if let Some(ref range) = captures[i] {
+                    s.parens[i] = input[range.start..range.end].to_vec();
+                } else {
+                    s.parens[i] = Vec::new();
+                }
+            } else {
+                s.parens[i] = Vec::new();
+            }
+        }
+        // lastParen = last actually-matched capturing group
+        s.last_paren = Vec::new();
+        for i in (0..captures.len().min(9)).rev() {
+            if captures[i].is_some() {
+                s.last_paren = s.parens[i].clone();
+                break;
+            }
+        }
+    });
+    // Clear input override on successful match
+    LEGACY_REGEXP_INPUT_OVERRIDE.with(|o| *o.borrow_mut() = None);
+}
+
+/// Read legacy state for getter dispatch.
+pub(crate) fn get_legacy_regexp_property(property: &str) -> Vec<u16> {
+    LEGACY_REGEXP_STATE.with(|state| {
+        let s = state.borrow();
+        match property {
+            "input" | "$_" => LEGACY_REGEXP_INPUT_OVERRIDE.with(|o| o.borrow().clone().unwrap_or_else(|| s.input.clone())),
+            "lastMatch" | "$&" => s.last_match.clone(),
+            "leftContext" | "$`" => s.left_context.clone(),
+            "rightContext" | "$'" => s.right_context.clone(),
+            "lastParen" | "$+" => s.last_paren.clone(),
+            "$1" => s.parens[0].clone(),
+            "$2" => s.parens[1].clone(),
+            "$3" => s.parens[2].clone(),
+            "$4" => s.parens[3].clone(),
+            "$5" => s.parens[4].clone(),
+            "$6" => s.parens[5].clone(),
+            "$7" => s.parens[6].clone(),
+            "$8" => s.parens[7].clone(),
+            "$9" => s.parens[8].clone(),
+            _ => Vec::new(),
+        }
+    })
+}
+
+/// Set input override (for `RegExp.input = val`).
+pub(crate) fn set_legacy_regexp_input(val: Vec<u16>) {
+    LEGACY_REGEXP_INPUT_OVERRIDE.with(|o| *o.borrow_mut() = Some(val));
+}
+
 /// Compile a regex, returning a cached copy when the same pattern+flags
 /// have been compiled before.
 pub(crate) fn get_or_compile_regex(pattern: &[u16], flags: &str) -> Result<Regex, String> {
@@ -61,6 +146,9 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     object_set_key_value(mc, &regexp_ctor, "length", &Value::Number(2.0))?;
     regexp_ctor.borrow_mut(mc).set_non_enumerable("length");
     regexp_ctor.borrow_mut(mc).set_non_writable("length");
+
+    // Stamp with OriginGlobal so cross-realm new Ctor() picks up the correct realm
+    slot_set(mc, &regexp_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -94,12 +182,31 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     // (handled by native function dispatch)
 
     // Register instance methods
-    let methods = vec!["exec", "test", "toString", "compile"];
+    let methods = vec!["exec", "test", "toString"];
 
     for method in methods {
         let val = Value::Function(format!("RegExp.prototype.{method}"));
         object_set_key_value(mc, &regexp_proto, method, &val)?;
         regexp_proto.borrow_mut(mc).set_non_enumerable(method);
+    }
+
+    // `compile` needs to track its realm's RegExp constructor for cross-realm
+    // checks, so wrap it in an Object with OriginGlobal pointing to the realm.
+    {
+        let compile_fn_obj = new_js_object_data(mc);
+        let compile_fn_val = Value::Function("RegExp.prototype.compile".to_string());
+        compile_fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, compile_fn_val)));
+        slot_set(mc, &compile_fn_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        // Set length = 2 and name = "compile" so property descriptor tests pass
+        // Per spec: { writable: false, enumerable: false, configurable: true }
+        object_set_key_value(mc, &compile_fn_obj, "length", &Value::Number(2.0))?;
+        compile_fn_obj.borrow_mut(mc).set_non_enumerable("length");
+        compile_fn_obj.borrow_mut(mc).set_non_writable("length");
+        object_set_key_value(mc, &compile_fn_obj, "name", &Value::String(utf8_to_utf16("compile")))?;
+        compile_fn_obj.borrow_mut(mc).set_non_enumerable("name");
+        compile_fn_obj.borrow_mut(mc).set_non_writable("name");
+        object_set_key_value(mc, &regexp_proto, "compile", &Value::Object(compile_fn_obj))?;
+        regexp_proto.borrow_mut(mc).set_non_enumerable("compile");
     }
 
     if let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
@@ -191,6 +298,105 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     // Ensure RegExp constructor [[Prototype]] = Function.prototype
     if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &regexp_ctor, env, "Function") {
         log::warn!("Failed to set RegExp constructor's internal prototype from Function: {e:?}");
+    }
+
+    // AnnexB B.2.4: Legacy RegExp static accessor properties on the constructor
+    // Properties with both getter and setter: input/$_
+    // Properties with getter only (setter = undefined): $1-$9, lastMatch/$&,
+    //   lastParen/$+, leftContext/$`, rightContext/$'
+    {
+        let getter_only_props = [
+            "$1",
+            "$2",
+            "$3",
+            "$4",
+            "$5",
+            "$6",
+            "$7",
+            "$8",
+            "$9",
+            "lastMatch",
+            "$&",
+            "lastParen",
+            "$+",
+            "leftContext",
+            "$`",
+            "rightContext",
+            "$'",
+        ];
+        let getter_setter_props = ["input", "$_"];
+
+        // Get Function.prototype for getter function objects
+        let func_proto = if let Some(func_ctor_val) = object_get_key_value(env, "Function")
+            && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+            && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
+            && let Value::Object(func_proto) = &*func_proto_val.borrow()
+        {
+            Some(*func_proto)
+        } else {
+            None
+        };
+
+        for prop in getter_only_props {
+            let getter_fn = Value::Function(format!("RegExp.legacy.get {prop}"));
+            let getter_obj = new_js_object_data(mc);
+            getter_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, getter_fn)));
+            slot_set(mc, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+            object_set_key_value(mc, &getter_obj, "length", &Value::Number(0.0))?;
+            getter_obj.borrow_mut(mc).set_non_enumerable("length");
+            getter_obj.borrow_mut(mc).set_non_writable("length");
+            object_set_key_value(mc, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop}"))))?;
+            getter_obj.borrow_mut(mc).set_non_enumerable("name");
+            getter_obj.borrow_mut(mc).set_non_writable("name");
+            if let Some(fp) = func_proto {
+                getter_obj.borrow_mut(mc).prototype = Some(fp);
+            }
+            let accessor = Value::Property {
+                value: None,
+                getter: Some(Box::new(Value::Object(getter_obj))),
+                setter: None, // spec says [[Set]]: undefined for read-only legacy props
+            };
+            object_set_key_value(mc, &regexp_ctor, prop, &accessor)?;
+            regexp_ctor.borrow_mut(mc).set_non_enumerable(prop);
+        }
+
+        for prop in getter_setter_props {
+            let getter_fn = Value::Function(format!("RegExp.legacy.get {prop}"));
+            let getter_obj = new_js_object_data(mc);
+            getter_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, getter_fn)));
+            slot_set(mc, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+            object_set_key_value(mc, &getter_obj, "length", &Value::Number(0.0))?;
+            getter_obj.borrow_mut(mc).set_non_enumerable("length");
+            getter_obj.borrow_mut(mc).set_non_writable("length");
+            object_set_key_value(mc, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop}"))))?;
+            getter_obj.borrow_mut(mc).set_non_enumerable("name");
+            getter_obj.borrow_mut(mc).set_non_writable("name");
+            if let Some(fp) = func_proto {
+                getter_obj.borrow_mut(mc).prototype = Some(fp);
+            }
+
+            let setter_fn = Value::Function(format!("RegExp.legacy.set {prop}"));
+            let setter_obj = new_js_object_data(mc);
+            setter_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, setter_fn)));
+            slot_set(mc, &setter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+            object_set_key_value(mc, &setter_obj, "length", &Value::Number(1.0))?;
+            setter_obj.borrow_mut(mc).set_non_enumerable("length");
+            setter_obj.borrow_mut(mc).set_non_writable("length");
+            object_set_key_value(mc, &setter_obj, "name", &Value::String(utf8_to_utf16(&format!("set {prop}"))))?;
+            setter_obj.borrow_mut(mc).set_non_enumerable("name");
+            setter_obj.borrow_mut(mc).set_non_writable("name");
+            if let Some(fp) = func_proto {
+                setter_obj.borrow_mut(mc).prototype = Some(fp);
+            }
+
+            let accessor = Value::Property {
+                value: None,
+                getter: Some(Box::new(Value::Object(getter_obj))),
+                setter: Some(Box::new(Value::Object(setter_obj))),
+            };
+            object_set_key_value(mc, &regexp_ctor, prop, &accessor)?;
+            regexp_ctor.borrow_mut(mc).set_non_enumerable(prop);
+        }
     }
 
     Ok(())
@@ -1198,6 +1404,24 @@ pub(crate) fn handle_regexp_method<'gc>(
                         (start, end)
                     };
 
+                    // AnnexB: Update legacy regexp static properties
+                    {
+                        let caps: Vec<Option<std::ops::Range<usize>>> = m
+                            .captures
+                            .iter()
+                            .map(|c| {
+                                c.as_ref().map(|r| {
+                                    if mapping {
+                                        map_index_back(&input_u16, r.start)..map_index_back(&input_u16, r.end)
+                                    } else {
+                                        r.clone()
+                                    }
+                                })
+                            })
+                            .collect();
+                        update_legacy_regexp_state(&input_u16, orig_start, orig_end, &caps);
+                    }
+
                     // Construct result array
                     let result_array = create_array(mc, env)?;
 
@@ -1402,6 +1626,30 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             match match_result {
                 Some(m) => {
+                    // AnnexB: Update legacy regexp static properties
+                    {
+                        let start = m.range.start;
+                        let end = m.range.end;
+                        let (orig_start, orig_end) = if mapping {
+                            (map_index_back(&input_u16, start), map_index_back(&input_u16, end))
+                        } else {
+                            (start, end)
+                        };
+                        let caps: Vec<Option<std::ops::Range<usize>>> = m
+                            .captures
+                            .iter()
+                            .map(|c| {
+                                c.as_ref().map(|r| {
+                                    if mapping {
+                                        map_index_back(&input_u16, r.start)..map_index_back(&input_u16, r.end)
+                                    } else {
+                                        r.clone()
+                                    }
+                                })
+                            })
+                            .collect();
+                        update_legacy_regexp_state(&input_u16, orig_start, orig_end, &caps);
+                    }
                     if use_last {
                         let end = m.range.end;
                         let orig_end = if mapping { map_index_back(&input_u16, end) } else { end };
@@ -1419,10 +1667,66 @@ pub(crate) fn handle_regexp_method<'gc>(
         }
         "compile" => {
             // AnnexB B.2.5.1 RegExp.prototype.compile(pattern, flags)
+            // Helper: create a TypeError from the current realm's TypeError constructor
+            // so that cross-realm instanceof checks work correctly.
+            let realm_type_error = |mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str| -> EvalError<'gc> {
+                if let Some(tc_val) = crate::core::env_get(env, "TypeError")
+                    && let Some(tc_obj) = match &*tc_val.borrow() {
+                        Value::Object(tc) => Some(*tc),
+                        Value::Property { value: Some(v), .. } => match &*v.borrow() {
+                            Value::Object(tc) => Some(*tc),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                {
+                    let msg_val = Value::String(utf8_to_utf16(message));
+                    if let Ok(err_val) = crate::js_class::evaluate_new(mc, env, &Value::Object(tc_obj), &[msg_val], None)
+                        && let Value::Object(err_obj) = err_val
+                    {
+                        return EvalError::Throw(Value::Object(err_obj), None, None);
+                    }
+                }
+                raise_type_error!(message).into()
+            };
+
             // Step 1: Validate `this` is a RegExp object
             if slot_get(object, &InternalSlot::Regex).is_none() && slot_get(object, &InternalSlot::IsRegExpPrototype).is_none() {
-                return Err(raise_type_error!("RegExp.prototype.compile called on incompatible receiver").into());
+                return Err(realm_type_error(
+                    mc,
+                    env,
+                    "RegExp.prototype.compile called on incompatible receiver",
+                ));
             }
+
+            // legacy-regexp spec: The receiver's [[Prototype]] chain must lead to
+            // exactly the current realm's %RegExp.prototype% directly (i.e. not a
+            // subclass and not a cross-realm RegExp).
+            // Check: Object.getPrototypeOf(this) === %RegExp.prototype%
+            {
+                let this_proto = object.borrow().prototype;
+                let regexp_proto_match = if let Some(regexp_ctor_val) = object_get_key_value(env, "RegExp")
+                    && let Value::Object(regexp_ctor) = &*regexp_ctor_val.borrow()
+                    && let Some(proto_val) = object_get_key_value(regexp_ctor, "prototype")
+                    && let Value::Object(proto_obj) = &*proto_val.borrow()
+                {
+                    if let Some(tp) = this_proto {
+                        std::ptr::eq(&*tp as *const _, &**proto_obj as *const _)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !regexp_proto_match {
+                    return Err(realm_type_error(
+                        mc,
+                        env,
+                        "RegExp.prototype.compile called on incompatible receiver",
+                    ));
+                }
+            }
+
             let pattern_arg = args.first().cloned().unwrap_or(Value::Undefined);
             let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 

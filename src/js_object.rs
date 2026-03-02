@@ -1812,6 +1812,8 @@ pub fn handle_object_method<'gc>(
                             | "encodeURIComponent"
                             | "decodeURI"
                             | "decodeURIComponent"
+                            | "escape"
+                            | "unescape"
                             | "isNaN"
                             | "isFinite"
                             | "parseFloat"
@@ -1955,6 +1957,11 @@ pub fn handle_object_method<'gc>(
                             | "String.prototype.substr" => 2.0,
                             "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                             "Symbol.for" | "Symbol.keyFor" | "Symbol.prototype.[Symbol.toPrimitive]" => 1.0,
+                            "String.prototype.anchor"
+                            | "String.prototype.fontcolor"
+                            | "String.prototype.fontsize"
+                            | "String.prototype.link" => 1.0,
+                            "RegExp.prototype.compile" => 2.0,
                             "Uint8Array.prototype.toBase64" | "Uint8Array.prototype.toHex" => 0.0,
                             "ArrayBuffer.prototype.sliceToImmutable" => 2.0,
                             _ => 0.0,

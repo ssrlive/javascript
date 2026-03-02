@@ -410,7 +410,7 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
     outLines.push('');
   }
 
-  if (testPath.includes('/language/global-code/')) {
+  if (testPath.includes('/language/global-code/') || /\$262\.evalScript\b/.test(_test_src)) {
     outLines.push('// Inject: enable focused global-code semantics mode');
     outLines.push('// __test262_global_code_mode');
     outLines.push('');

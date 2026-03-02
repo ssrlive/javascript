@@ -331,6 +331,9 @@ pub fn initialize_global_constructors_with_parent<'gc>(
     env_set(mc, env, "decodeURI", &Value::Function("decodeURI".to_string()))?;
     env_set(mc, env, "encodeURIComponent", &Value::Function("encodeURIComponent".to_string()))?;
     env_set(mc, env, "decodeURIComponent", &Value::Function("decodeURIComponent".to_string()))?;
+    // AnnexB global functions
+    env_set(mc, env, "escape", &Value::Function("escape".to_string()))?;
+    env_set(mc, env, "unescape", &Value::Function("unescape".to_string()))?;
 
     // Timer functions
     env_set(mc, env, "setTimeout", &Value::Function("setTimeout".to_string()))?;

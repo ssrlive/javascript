@@ -94,7 +94,7 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     // (handled by native function dispatch)
 
     // Register instance methods
-    let methods = vec!["exec", "test", "toString"];
+    let methods = vec!["exec", "test", "toString", "compile"];
 
     for method in methods {
         let val = Value::Function(format!("RegExp.prototype.{method}"));
@@ -735,6 +735,11 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
     let arg0 = args.first().cloned().unwrap_or(Value::Undefined);
     let arg1 = args.get(1).cloned();
 
+    // Per spec 22.2.3.1 step 2: always call IsRegExp first so side effects
+    // on Symbol.match (e.g. recompiling via .compile()) are observable
+    // before we read internal slots in steps 4-5.
+    let pattern_is_regexp = is_regexp_with_env(mc, &arg0, env)?;
+
     // Step 4: If pattern has [[RegExpMatcher]] internal slot, use internal source/flags
     if let Some((re_pattern, re_flags)) = extract_regexp_parts(&arg0) {
         let flags = if let Some(f) = &arg1 {
@@ -758,7 +763,6 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
     }
 
     // Step 5: Else if patternIsRegExp, read source/flags from regexp-like object
-    let pattern_is_regexp = is_regexp_with_env(mc, &arg0, env)?;
     if pattern_is_regexp && let Value::Object(obj) = &arg0 {
         // Step 5a: P = ? Get(pattern, "source")
         let source_val = if let Some(env) = env {
@@ -1412,6 +1416,86 @@ pub(crate) fn handle_regexp_method<'gc>(
                     Ok(Value::Boolean(false))
                 }
             }
+        }
+        "compile" => {
+            // AnnexB B.2.5.1 RegExp.prototype.compile(pattern, flags)
+            // Step 1: Validate `this` is a RegExp object
+            if slot_get(object, &InternalSlot::Regex).is_none() && slot_get(object, &InternalSlot::IsRegExpPrototype).is_none() {
+                return Err(raise_type_error!("RegExp.prototype.compile called on incompatible receiver").into());
+            }
+            let pattern_arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            let (new_pattern, new_flags) = if let Value::Object(p_obj) = &pattern_arg
+                && slot_get(p_obj, &InternalSlot::Regex).is_some()
+            {
+                // If pattern is a RegExp and flags is not undefined, throw TypeError
+                if !matches!(flags_arg, Value::Undefined) {
+                    return Err(raise_type_error!("Cannot supply flags when constructing one RegExp from another").into());
+                }
+                // Read directly from [[OriginalSource]] and [[OriginalFlags]] internal slots
+                let src = match slot_get(p_obj, &InternalSlot::Regex) {
+                    Some(v) => match &*v.borrow() {
+                        Value::String(s) => utf16_to_utf8(s),
+                        _ => String::new(),
+                    },
+                    None => String::new(),
+                };
+                let flg = internal_get_flags_string(p_obj);
+                (src, flg)
+            } else {
+                let p = if matches!(pattern_arg, Value::Undefined) {
+                    String::new()
+                } else {
+                    let p_s = crate::js_string::spec_to_string(mc, &pattern_arg, env)?;
+                    utf16_to_utf8(&p_s)
+                };
+                let f = if matches!(flags_arg, Value::Undefined) {
+                    String::new()
+                } else {
+                    let f_s = crate::js_string::spec_to_string(mc, &flags_arg, env)?;
+                    utf16_to_utf8(&f_s)
+                };
+                (p, f)
+            };
+
+            // Validate flags
+            let mut seen = std::collections::HashSet::new();
+            for c in new_flags.chars() {
+                if !"dgimsuy".contains(c) {
+                    return Err(raise_syntax_error!(format!("invalid flags: {}", new_flags)).into());
+                }
+                if !seen.insert(c) {
+                    return Err(raise_syntax_error!(format!("invalid flags: {}", new_flags)).into());
+                }
+            }
+
+            // Try to compile the new pattern
+            let mut r_flags = String::new();
+            for c in new_flags.chars() {
+                if "gimsuvy".contains(c) {
+                    r_flags.push(c);
+                }
+            }
+            let pattern_u16 = utf8_to_utf16(&new_pattern);
+            let _ = get_or_compile_regex(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
+
+            // Update the RegExp internal slots
+            slot_set(mc, object, InternalSlot::Regex, &Value::String(pattern_u16));
+            slot_set(mc, object, InternalSlot::Flags, &Value::String(utf8_to_utf16(&new_flags)));
+            // Update individual flag boolean slots
+            slot_set(mc, object, InternalSlot::RegexGlobal, &Value::Boolean(new_flags.contains('g')));
+            slot_set(mc, object, InternalSlot::RegexIgnoreCase, &Value::Boolean(new_flags.contains('i')));
+            slot_set(mc, object, InternalSlot::RegexMultiline, &Value::Boolean(new_flags.contains('m')));
+            slot_set(mc, object, InternalSlot::RegexDotAll, &Value::Boolean(new_flags.contains('s')));
+            slot_set(mc, object, InternalSlot::RegexUnicode, &Value::Boolean(new_flags.contains('u')));
+            slot_set(mc, object, InternalSlot::RegexSticky, &Value::Boolean(new_flags.contains('y')));
+            slot_set(mc, object, InternalSlot::RegexHasIndices, &Value::Boolean(new_flags.contains('d')));
+            slot_set(mc, object, InternalSlot::RegexUnicodeSets, &Value::Boolean(new_flags.contains('v')));
+            // Reset lastIndex to 0 (throws TypeError if non-writable per spec §21.2.3.2.2 step 12)
+            set_last_index_checked(mc, object, 0.0)?;
+
+            Ok(Value::Object(*object))
         }
         "toString" => {
             // §22.2.5.14 RegExp.prototype.toString()

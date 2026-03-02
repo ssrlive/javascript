@@ -2667,8 +2667,19 @@ pub fn evaluate_statements_with_labels<'gc>(
                 &global_env,
                 global_env.borrow().is_extensible()
             );
-            let lex_env = crate::core::new_js_object_data(mc);
-            lex_env.borrow_mut(mc).prototype = Some(global_env);
+            // Reuse the shared global lexical environment if one exists so
+            // that `let`/`const` bindings from indirect eval are visible to
+            // subsequent script code (GlobalDeclarationInstantiation 14.1.14).
+            let lex_env = if let Some(v) = slot_get_chained(&global_env, &InternalSlot::GlobalLexEnv)
+                && let Value::Object(obj) = &*v.borrow()
+            {
+                *obj
+            } else {
+                let le = crate::core::new_js_object_data(mc);
+                le.borrow_mut(mc).prototype = Some(global_env);
+                slot_set(mc, &global_env, InternalSlot::GlobalLexEnv, &Value::Object(le));
+                le
+            };
 
             // Hoist functions and var declarations into the global env,
             // but skip lexical hoisting there.
@@ -3630,15 +3641,10 @@ fn eval_res<'gc>(
                         v
                     };
 
-                    let mut target_env = *env;
-                    while !target_env.borrow().is_function_scope {
-                        if let Some(proto) = target_env.borrow().prototype {
-                            target_env = proto;
-                        } else {
-                            break;
-                        }
-                    }
-                    env_set(mc, &target_env, name, &val)?;
+                    // Resolve through the scope chain so that catch-parameter
+                    // bindings (which are lexical and shadow hoisted vars) are
+                    // found first — see AnnexB §B.3.4 / §B.3.5.
+                    env_set(mc, env, name, &val)?;
                 }
             }
             Ok(None)
@@ -16912,6 +16918,8 @@ fn evaluate_expr_property<'gc>(
             | "encodeURIComponent"
             | "decodeURI"
             | "decodeURIComponent"
+            | "escape"
+            | "unescape"
             | "Function.prototype.call"
             | "Function.prototype.bind"
             | "Error.isError"
@@ -17071,7 +17079,15 @@ fn evaluate_expr_property<'gc>(
             | "String.prototype.split"
             | "String.prototype.substring"
             | "String.prototype.substr" => 2.0,
-            "Function.prototype.[Symbol.hasInstance]" | "SharedArrayBuffer.prototype.grow" | "JSON.rawJSON" | "JSON.isRawJSON" => 1.0,
+            "Function.prototype.[Symbol.hasInstance]"
+            | "SharedArrayBuffer.prototype.grow"
+            | "JSON.rawJSON"
+            | "JSON.isRawJSON"
+            | "String.prototype.anchor"
+            | "String.prototype.fontcolor"
+            | "String.prototype.fontsize"
+            | "String.prototype.link" => 1.0,
+            "RegExp.prototype.compile" => 2.0,
             "Uint8Array.prototype.toBase64" | "Uint8Array.prototype.toHex" => 0.0,
             "ArrayBuffer.prototype.transfer"
             | "ArrayBuffer.prototype.transferToFixedLength"
@@ -18441,6 +18457,8 @@ fn evaluate_expr_index<'gc>(
                     | "encodeURIComponent"
                     | "decodeURI"
                     | "decodeURIComponent"
+                    | "escape"
+                    | "unescape"
                     | "Function.prototype.call"
                     | "Function.prototype.bind"
                     | "Error.isError"
@@ -18600,7 +18618,12 @@ fn evaluate_expr_index<'gc>(
                     | "Symbol.keyFor"
                     | "Symbol.prototype.[Symbol.toPrimitive]"
                     | "JSON.rawJSON"
-                    | "JSON.isRawJSON" => 1.0,
+                    | "JSON.isRawJSON"
+                    | "String.prototype.anchor"
+                    | "String.prototype.fontcolor"
+                    | "String.prototype.fontsize"
+                    | "String.prototype.link" => 1.0,
+                    "RegExp.prototype.compile" => 2.0,
                     "Object.defineProperty" | "JSON.stringify" | "Reflect.apply" | "Reflect.defineProperty" | "Reflect.set" => 3.0,
                     "ArrayBuffer.prototype.sliceToImmutable" => 2.0,
                     _ => {

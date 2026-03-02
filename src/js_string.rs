@@ -276,6 +276,30 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         string_proto.borrow_mut(mc).set_non_enumerable(*method);
     }
 
+    // AnnexB: trimLeft === trimStart, trimRight === trimEnd (reference identity)
+    if let Some(trim_start_val) = object_get_key_value(&string_proto, "trimStart") {
+        let v = trim_start_val.borrow().clone();
+        object_set_key_value(mc, &string_proto, "trimLeft", &v)?;
+        string_proto.borrow_mut(mc).set_non_enumerable("trimLeft");
+    }
+    if let Some(trim_end_val) = object_get_key_value(&string_proto, "trimEnd") {
+        let v = trim_end_val.borrow().clone();
+        object_set_key_value(mc, &string_proto, "trimRight", &v)?;
+        string_proto.borrow_mut(mc).set_non_enumerable("trimRight");
+    }
+
+    // AnnexB HTML string wrapper methods (B.2.3.2 – B.2.3.14)
+    // Simple wrappers (length 0)
+    for method in ["big", "blink", "bold", "fixed", "italics", "small", "strike", "sub", "sup"] {
+        object_set_key_value(mc, &string_proto, method, &Value::Function(format!("String.prototype.{method}")))?;
+        string_proto.borrow_mut(mc).set_non_enumerable(method);
+    }
+    // Attribute wrappers (length 1)
+    for method in ["anchor", "fontcolor", "fontsize", "link"] {
+        object_set_key_value(mc, &string_proto, method, &Value::Function(format!("String.prototype.{method}")))?;
+        string_proto.borrow_mut(mc).set_non_enumerable(method);
+    }
+
     // Make constructor non-enumerable on the prototype
     string_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
@@ -417,6 +441,23 @@ pub fn handle_string_method<'gc>(
         "isWellFormed" => string_is_well_formed_method(mc, s, args, env),
         "replaceAll" => string_replace_all_method(mc, s, args, env),
         "localeCompare" => string_locale_compare_method(mc, s, args, env),
+        // AnnexB aliases
+        "trimLeft" => Ok(Value::String(es_trim_start(s))),
+        "trimRight" => Ok(Value::String(es_trim_end(s))),
+        // AnnexB HTML wrapper methods
+        "anchor" => string_html_wrapper(mc, s, "a", Some(("name", args)), env),
+        "big" => string_html_wrapper(mc, s, "big", None, env),
+        "blink" => string_html_wrapper(mc, s, "blink", None, env),
+        "bold" => string_html_wrapper(mc, s, "b", None, env),
+        "fixed" => string_html_wrapper(mc, s, "tt", None, env),
+        "fontcolor" => string_html_wrapper(mc, s, "font", Some(("color", args)), env),
+        "fontsize" => string_html_wrapper(mc, s, "font", Some(("size", args)), env),
+        "italics" => string_html_wrapper(mc, s, "i", None, env),
+        "link" => string_html_wrapper(mc, s, "a", Some(("href", args)), env),
+        "small" => string_html_wrapper(mc, s, "small", None, env),
+        "strike" => string_html_wrapper(mc, s, "strike", None, env),
+        "sub" => string_html_wrapper(mc, s, "sub", None, env),
+        "sup" => string_html_wrapper(mc, s, "sup", None, env),
         _ => Err(raise_eval_error!(format!("Unknown string method: {method}")).into()),
     }
 }
@@ -454,25 +495,29 @@ fn string_substr_method<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let len = utf16_len(s) as isize;
+    let size = utf16_len(s) as f64;
     let int_start = if args.is_empty() {
         0.0
     } else {
         spec_to_integer_or_zero(mc, &args[0], env)?
     };
-    let mut start_idx = int_start as isize;
-    if start_idx < 0 {
-        start_idx = (len + start_idx).max(0);
-    }
+    // Step 5: If intStart is -∞ or +∞, clamp accordingly
+    let int_start = if int_start < 0.0 {
+        (size + int_start).max(0.0)
+    } else {
+        int_start.min(size)
+    };
     let length = if args.len() < 2 || matches!(args[1], Value::Undefined) {
-        (len - start_idx) as usize
+        size - int_start
     } else {
         let n = spec_to_integer_or_zero(mc, &args[1], env)?;
-        if n < 0.0 { 0 } else { n as usize }
+        n.max(0.0).min(size - int_start)
     };
-    let end_idx = (start_idx + length as isize).min(len);
-    let start_idx = start_idx.max(0) as usize;
-    let end_idx = end_idx.max(0) as usize;
+    if length <= 0.0 {
+        return Ok(Value::String(Vec::new()));
+    }
+    let start_idx = int_start as usize;
+    let end_idx = (int_start + length) as usize;
     Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
 }
 
@@ -2289,4 +2334,29 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     object_set_key_value(mc, &result_obj, "value", &Value::String(ch_vec))?;
     object_set_key_value(mc, &result_obj, "done", &Value::Boolean(false))?;
     Ok(Value::Object(result_obj))
+}
+
+/// AnnexB CreateHTML(string, tag, attribute, value) — B.2.3.2–B.2.3.14
+fn string_html_wrapper<'gc>(
+    mc: &MutationContext<'gc>,
+    s: &[u16],
+    tag: &str,
+    attr: Option<(&str, &[Value<'gc>])>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let s_str = utf16_to_utf8(s);
+    let result = if let Some((attr_name, args)) = attr {
+        let attr_val = if args.is_empty() {
+            "undefined".to_string()
+        } else {
+            let v = spec_to_string(mc, &args[0], env)?;
+            utf16_to_utf8(&v)
+        };
+        // Escape '"' as '&quot;' in attribute value
+        let escaped = attr_val.replace('"', "&quot;");
+        format!("<{tag} {attr_name}=\"{escaped}\">{s_str}</{tag}>")
+    } else {
+        format!("<{tag}>{s_str}</{tag}>")
+    };
+    Ok(Value::String(utf8_to_utf16(&result)))
 }

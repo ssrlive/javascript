@@ -51,6 +51,7 @@ jobs:
           - id: 38
           - id: 39
           - id: 40
+          - id: 41
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -243,6 +244,10 @@ jobs:
             40)
               TITLE='"built-ins/Temporal"'
               FOCUS='built-ins/Temporal'
+              ;;
+            41)
+              TITLE='"annexB"'
+              FOCUS='annexB'
               ;;
             *)
               echo "Unknown subset id: ${{ matrix.id }}" >&2

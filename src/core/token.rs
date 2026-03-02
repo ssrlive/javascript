@@ -510,6 +510,20 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 }
             }
             '-' => {
+                // AnnexB B.1.1: HTMLCloseComment  -->  acts as a single-line
+                // comment when preceded by a LineTerminator (or at start of input).
+                if i + 2 < chars.len() && chars[i + 1] == '-' && chars[i + 2] == '>' {
+                    let after_lt = tokens.is_empty() || matches!(tokens.last().map(|t| &t.token), Some(Token::LineTerminator));
+                    if after_lt {
+                        i += 3;
+                        column += 3;
+                        while i < chars.len() && !matches!(chars[i], '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                            i += 1;
+                            column += 1;
+                        }
+                        continue;
+                    }
+                }
                 if i + 1 < chars.len() && chars[i + 1] == '-' {
                     tokens.push(TokenData {
                         token: Token::Decrement,
@@ -980,7 +994,15 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 }
             }
             '<' => {
-                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                // AnnexB B.1.1: HTMLOpenComment  <!--  acts as a single-line comment
+                if i + 3 < chars.len() && chars[i + 1] == '!' && chars[i + 2] == '-' && chars[i + 3] == '-' {
+                    i += 4;
+                    column += 4;
+                    while i < chars.len() && !matches!(chars[i], '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                        i += 1;
+                        column += 1;
+                    }
+                } else if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(TokenData {
                         token: Token::LessEqual,
                         line,

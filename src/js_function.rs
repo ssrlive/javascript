@@ -305,6 +305,8 @@ pub fn handle_global_function<'gc>(
         "Symbol_toString" => return symbol_prototype_to_string(mc, args, env),
         "encodeURI" => return encode_uri(mc, args, env),
         "decodeURI" => return decode_uri(mc, args, env),
+        "escape" => return annexb_escape(mc, args, env),
+        "unescape" => return annexb_unescape(mc, args, env),
         "IteratorSelf" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -4153,4 +4155,66 @@ pub fn handle_function_prototype_method<'gc>(
         }
         _ => Err(crate::raise_type_error!(format!("Unknown Function.prototype method: {method}")).into()),
     }
+}
+
+/// AnnexB B.2.1.1 — escape(string)
+fn annexb_escape<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let s_val = if args.is_empty() {
+        crate::js_string::spec_to_string(mc, &Value::Undefined, env)?
+    } else {
+        crate::js_string::spec_to_string(mc, &args[0], env)?
+    };
+    let s_str = crate::unicode::utf16_to_utf8(&s_val);
+    let mut result = String::new();
+    for ch in s_str.encode_utf16() {
+        if (ch < 128) && (ch as u8).is_ascii_alphanumeric() || b"@*_+-./".contains(&(ch as u8)) {
+            result.push(ch as u8 as char);
+        } else if ch < 256 {
+            result.push_str(&format!("%{:02X}", ch));
+        } else {
+            result.push_str(&format!("%u{:04X}", ch));
+        }
+    }
+    Ok(Value::String(crate::unicode::utf8_to_utf16(&result)))
+}
+
+/// AnnexB B.2.1.2 — unescape(string)
+fn annexb_unescape<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let s_val = if args.is_empty() {
+        crate::js_string::spec_to_string(mc, &Value::Undefined, env)?
+    } else {
+        crate::js_string::spec_to_string(mc, &args[0], env)?
+    };
+    let s_str = crate::unicode::utf16_to_utf8(&s_val);
+    let bytes = s_str.as_bytes();
+    let len = bytes.len();
+    let mut result: Vec<u16> = Vec::new();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'%' {
+            if i + 5 < len && bytes[i + 1] == b'u' {
+                // Try %uXXXX
+                if let Ok(hex) = u16::from_str_radix(std::str::from_utf8(&bytes[i + 2..i + 6]).unwrap_or(""), 16) {
+                    result.push(hex);
+                    i += 6;
+                    continue;
+                }
+            }
+            if i + 2 < len {
+                // Try %XX
+                if let Ok(hex) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+                    result.push(hex as u16);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        // Normal character — encode as UTF-16
+        let ch = bytes[i] as char;
+        let mut buf = [0u16; 2];
+        let encoded = ch.encode_utf16(&mut buf);
+        result.extend_from_slice(encoded);
+        i += 1;
+    }
+    Ok(Value::String(result))
 }

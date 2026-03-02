@@ -2269,6 +2269,8 @@ pub(crate) fn create_class_object<'gc>(
     // Create class environment for private names
     let class_env = new_js_object_data(mc);
     class_env.borrow_mut(mc).prototype = Some(*env);
+    // Class bodies are always strict (§14.6 — A ClassBody is always strict code)
+    crate::core::env_set_strictness(mc, &class_env, true)?;
 
     if !name.is_empty() {
         object_set_key_value(mc, &class_env, name, &Value::Uninitialized)?;

@@ -2839,8 +2839,10 @@ pub fn evaluate_statements_with_labels<'gc>(
                     env_set_strictness(mc, &eval_lex_env, true)?;
                 }
 
-                // Hoist var/function declarations to caller's env (skip lexicals)
-                hoist_declarations(mc, env, statements, true, false)?;
+                // Hoist var/function declarations to caller's env (skip lexicals).
+                // Pass is_eval=true so global var bindings are created as
+                // configurable per EvalDeclarationInstantiation §19.2.1.3.
+                hoist_declarations(mc, env, statements, true, true)?;
 
                 // Hoist let/const/class into the fresh eval lex env
                 for stmt in statements {
@@ -13150,63 +13152,79 @@ pub fn evaluate_call_dispatch<'gc>(
                         },
                     };
 
-                    for src_expr in eval_args.iter().skip(1) {
-                        if matches!(src_expr, Value::Undefined | Value::Null) {
-                            continue;
-                        }
-
-                        let source_obj = match src_expr {
-                            Value::Object(o) => *o,
-                            other => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(other), env)? {
-                                Value::Object(o) => o,
-                                _ => return Err(raise_type_error!("Cannot convert value to object").into()),
-                            },
-                        };
-
-                        let ordered = if let Some(proxy_cell) = crate::core::slot_get(&source_obj, &InternalSlot::Proxy)
-                            && let Value::Proxy(proxy) = &*proxy_cell.borrow()
-                        {
-                            crate::js_proxy::proxy_own_keys(mc, proxy)?
-                        } else {
-                            crate::core::ordinary_own_property_keys_mc(mc, &source_obj)?
-                        };
-
-                        for key in ordered {
-                            if key == "__proto__".into() {
-                                continue;
-                            }
-
-                            let is_enumerable = if let Some(proxy_cell) = crate::core::slot_get(&source_obj, &InternalSlot::Proxy)
-                                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
-                            {
-                                match crate::js_proxy::proxy_get_own_property_is_enumerable(mc, proxy, &key)? {
-                                    Some(en) => en,
-                                    None => continue,
-                                }
-                            } else {
-                                if crate::core::get_own_property(&source_obj, &key).is_none() {
-                                    continue;
-                                }
-                                source_obj.borrow().is_enumerable(&key)
-                            };
-
-                            if !is_enumerable {
-                                continue;
-                            }
-
-                            let prop_value = crate::core::get_property_with_accessors(mc, env, &source_obj, &key)?;
-                            crate::core::set_property_with_accessors(
-                                mc,
-                                env,
-                                &target_obj,
-                                key,
-                                &prop_value,
-                                Some(&Value::Object(target_obj)),
-                            )?;
-                        }
+                    // Object.assign uses [[Set]] with Throw=true (§22.1.2.1 step 5.e.iv.2),
+                    // so property-set failures must always throw TypeError.
+                    let was_strict = crate::core::env_get_strictness(env);
+                    if !was_strict {
+                        crate::core::env_set_strictness(mc, env, true)?;
                     }
 
-                    Ok(Value::Object(target_obj))
+                    let assign_result: Result<Value<'gc>, EvalError<'gc>> = (|| {
+                        for src_expr in eval_args.iter().skip(1) {
+                            if matches!(src_expr, Value::Undefined | Value::Null) {
+                                continue;
+                            }
+
+                            let source_obj = match src_expr {
+                                Value::Object(o) => *o,
+                                other => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(other), env)? {
+                                    Value::Object(o) => o,
+                                    _ => return Err(raise_type_error!("Cannot convert value to object").into()),
+                                },
+                            };
+
+                            let ordered = if let Some(proxy_cell) = crate::core::slot_get(&source_obj, &InternalSlot::Proxy)
+                                && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                            {
+                                crate::js_proxy::proxy_own_keys(mc, proxy)?
+                            } else {
+                                crate::core::ordinary_own_property_keys_mc(mc, &source_obj)?
+                            };
+
+                            for key in ordered {
+                                if key == "__proto__".into() {
+                                    continue;
+                                }
+
+                                let is_enumerable = if let Some(proxy_cell) = crate::core::slot_get(&source_obj, &InternalSlot::Proxy)
+                                    && let Value::Proxy(proxy) = &*proxy_cell.borrow()
+                                {
+                                    match crate::js_proxy::proxy_get_own_property_is_enumerable(mc, proxy, &key)? {
+                                        Some(en) => en,
+                                        None => continue,
+                                    }
+                                } else {
+                                    if crate::core::get_own_property(&source_obj, &key).is_none() {
+                                        continue;
+                                    }
+                                    source_obj.borrow().is_enumerable(&key)
+                                };
+
+                                if !is_enumerable {
+                                    continue;
+                                }
+
+                                let prop_value = crate::core::get_property_with_accessors(mc, env, &source_obj, &key)?;
+                                crate::core::set_property_with_accessors(
+                                    mc,
+                                    env,
+                                    &target_obj,
+                                    key,
+                                    &prop_value,
+                                    Some(&Value::Object(target_obj)),
+                                )?;
+                            }
+                        }
+
+                        Ok(Value::Object(target_obj))
+                    })();
+
+                    // Restore env strictness
+                    if !was_strict {
+                        crate::core::env_set_strictness(mc, env, was_strict)?;
+                    }
+
+                    assign_result
                 } else {
                     Ok(crate::js_object::handle_object_method(mc, suffix, eval_args, env)?)
                 }
@@ -21122,6 +21140,13 @@ pub(crate) fn call_accessor<'gc>(
             call_env.borrow_mut(mc).prototype = Some(*captured_env);
             call_env.borrow_mut(mc).is_function_scope = true;
             object_set_key_value(mc, &call_env, "this", &Value::Object(*receiver))?;
+            // Getters are ordinary functions — provide an `arguments` object
+            // (empty, since getters receive no arguments) for sloppy-mode code.
+            {
+                let args_obj = crate::core::new_js_object_data(mc);
+                object_set_key_value(mc, &args_obj, "length", &Value::Number(0.0))?;
+                object_set_key_value(mc, &call_env, "arguments", &Value::Object(args_obj))?;
+            }
             // If the getter carried a home object, propagate it into call env so `super` resolves
             call_env.borrow_mut(mc).set_home_object(home_opt.clone());
             let body_clone = body.clone();

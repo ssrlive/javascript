@@ -4221,19 +4221,31 @@ pub fn handle_function_prototype_method<'gc>(
                 chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
             };
 
-            let property_name = if name.is_empty() {
-                None
-            } else if is_identifier_name(&name) || name.starts_with('[') {
-                Some(name)
+            // NativeFunction grammar:
+            //   function NativeFunctionAccessor_opt IdentifierName_opt ( ) { [native code] }
+            // Split on `get `/`set ` prefix so each part satisfies the grammar.
+            let (accessor_prefix, prop_part) = if let Some(rest) = name.strip_prefix("get ") {
+                ("get ", rest)
+            } else if let Some(rest) = name.strip_prefix("set ") {
+                ("set ", rest)
             } else {
-                Some(format!("[{name}]"))
+                ("", name.as_str())
             };
 
-            let repr = if let Some(prop) = property_name {
-                format!("function {prop}() {{ [native code] }}")
+            #[allow(clippy::if_same_then_else)]
+            let property_name = if prop_part.is_empty() {
+                String::new()
+            } else if is_identifier_name(prop_part) {
+                prop_part.to_string()
+            } else if prop_part.starts_with('[') {
+                prop_part.to_string()
             } else {
-                "function () { [native code] }".to_string()
+                // Non-identifier property name (e.g. $', $&) — omit to
+                // satisfy the NativeFunction grammar requirement.
+                String::new()
             };
+
+            let repr = format!("function {accessor_prefix}{property_name}() {{ [native code] }}");
             Ok(Value::String(crate::unicode::utf8_to_utf16(&repr)))
         }
         _ => Err(crate::raise_type_error!(format!("Unknown Function.prototype method: {method}")).into()),

@@ -403,8 +403,22 @@ pub(crate) fn define_property_internal<'gc>(
         Some(new_gc_cell_ptr(mc, v))
     } else if let Some(existing) = &existing_own_value {
         match existing {
-            Value::Property { value, .. } => *value,
-            Value::Getter(..) | Value::Setter(..) => None,
+            Value::Property { value, .. } => {
+                // When converting from accessor to data (is_data_descriptor && value is None),
+                // default value to undefined per ES spec 10.1.6.3 step 5.
+                if is_data_descriptor && value.is_none() {
+                    Some(new_gc_cell_ptr(mc, Value::Undefined))
+                } else {
+                    *value
+                }
+            }
+            Value::Getter(..) | Value::Setter(..) => {
+                if is_data_descriptor {
+                    Some(new_gc_cell_ptr(mc, Value::Undefined))
+                } else {
+                    None
+                }
+            }
             other => Some(new_gc_cell_ptr(mc, other.clone())),
         }
     } else {

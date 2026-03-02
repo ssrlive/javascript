@@ -2267,6 +2267,14 @@ pub fn handle_object_method<'gc>(
             }
             let target_obj = to_object_for_object_static(mc, env, args.first().unwrap())?;
 
+            // Object.assign uses [[Set]] with Throw=true (§22.1.2.1 step 5.e.iv.2),
+            // so property-set failures must always throw TypeError regardless of
+            // the caller's strict-mode context.
+            let was_strict = crate::core::env_get_strictness(env);
+            if !was_strict {
+                crate::core::env_set_strictness(mc, env, true)?;
+            }
+
             // Iterate sources
             for src_expr in args.iter().skip(1) {
                 let src_val = src_expr.clone();
@@ -2309,6 +2317,11 @@ pub fn handle_object_method<'gc>(
                     let prop_value = crate::core::get_property_with_accessors(mc, env, &source_obj, &key)?;
                     crate::core::set_property_with_accessors(mc, env, &target_obj, key, &prop_value, Some(&Value::Object(target_obj)))?;
                 }
+            }
+
+            // Restore env strictness
+            if !was_strict {
+                crate::core::env_set_strictness(mc, env, was_strict)?;
             }
 
             Ok(Value::Object(target_obj))

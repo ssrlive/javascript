@@ -1101,6 +1101,9 @@ fn execute_module<'gc>(
     let env = new_js_object_data(mc);
     env.borrow_mut(mc).is_function_scope = true;
 
+    // Module code is always strict per ECMAScript spec §16.2.1.11
+    crate::core::env_set_strictness(mc, &env, true)?;
+
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__filepath` similarly to `evaluate_script`.
     let val = Value::String(crate::unicode::utf8_to_utf16(module_path));

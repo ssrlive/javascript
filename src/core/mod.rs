@@ -290,12 +290,12 @@ pub fn initialize_global_constructors_with_parent<'gc>(
         env_set(mc, env, "eval", &Value::Object(eval_obj))?;
     }
 
-    // This engine operates in strict mode only; mark the global environment accordingly so
-    // eval() and nested function parsing can enforce strict-mode rules unconditionally.
-    env_set_strictness(mc, env, true)?;
-
-    // Define 'arguments' for global scope with poison pill for strict compliance
-    crate::js_class::create_arguments_object(mc, env, &[], Some(&Value::Undefined))?;
+    // The global environment runs in sloppy (non-strict) mode by default.
+    // Individual functions/scripts opt in via "use strict" directives or via
+    // ES module semantics.  Keeping the global sloppy ensures correct
+    // ECMAScript behaviours: this-boxing of primitives in sloppy calls,
+    // silent delete of non-configurable properties, arguments.callee access, etc.
+    env_set_strictness(mc, env, false)?;
 
     let val = Value::Function("__internal_async_step_resolve".to_string());
     env_set(mc, env, "__internal_async_step_resolve", &val)?;
@@ -567,6 +567,8 @@ where
             let module_env = new_js_object_data(mc);
             module_env.borrow_mut(mc).is_function_scope = true;
             module_env.borrow_mut(mc).prototype = Some(root.global_env);
+            // ES modules are always strict (§10.2.1)
+            env_set_strictness(mc, &module_env, true)?;
             object_set_key_value(mc, &module_env, "this", &Value::Undefined)?;
             object_set_key_value(mc, &module_env, "globalThis", &Value::Object(root.global_env))?;
 

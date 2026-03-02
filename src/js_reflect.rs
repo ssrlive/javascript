@@ -795,6 +795,15 @@ pub fn handle_reflect_method<'gc>(
                     if let PropertyKey::String(s) = &prop_key {
                         crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
                     }
+                    // Module namespace exotic [[Delete]] (§28.3.4):
+                    // If P is an element of [[Exports]], return false.
+                    {
+                        let b = obj.borrow();
+                        let is_ns = b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible());
+                        if is_ns && b.properties.contains_key(&prop_key) {
+                            return Ok(Value::Boolean(false));
+                        }
+                    }
                     if obj.borrow().non_configurable.contains(&prop_key) {
                         return Ok(Value::Boolean(false));
                     }
@@ -1108,6 +1117,14 @@ pub fn handle_reflect_method<'gc>(
                                 return Ok(Value::Boolean(true));
                             }
                             // Valid index, receiver !== target: fall through to OrdinarySet
+                        }
+                    }
+
+                    // Module namespace exotic [[Set]] (§28.3.2): always returns false
+                    {
+                        let b = obj.borrow();
+                        if b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible()) {
+                            return Ok(Value::Boolean(false));
                         }
                     }
 

@@ -231,6 +231,13 @@ fn test_typedarray_destructuring_resizable_buffer_regression() {
     let _wrapped = format!("{}\nJSON.stringify(({}));", script, "(function(){return (function(){})();})()");
 
     // Evaluate and assert
-    let result = evaluate_script(&script, Some(path)).expect("evaluate_script failed");
-    assert_eq!(result, "\"OK\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(&script, Some(path)).expect("evaluate_script failed");
+            assert_eq!(result, "\"OK\"");
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("test thread panicked");
 }

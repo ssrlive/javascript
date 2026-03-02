@@ -2823,12 +2823,57 @@ pub fn evaluate_statements_with_labels<'gc>(
 
             exec_env = lex_env;
         } else {
-            if starts_with_use_strict {
-                log::trace!("evaluate_statements: detected 'use strict' directive; marking env as strict");
-                env_set_strictness(mc, &exec_env, true)?;
-            }
+            // Check for direct eval marker: per spec §19.2.1.3 step 9, direct
+            // eval creates a new declarative environment for lexically-scoped
+            // declarations.  Var/function declarations still go to the caller's
+            // variable environment (the parent env).
+            let is_direct_eval = slot_get(env, &InternalSlot::IsDirectEval)
+                .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
+                .unwrap_or(false);
+            if is_direct_eval {
+                let _ = slot_remove(mc, env, &InternalSlot::IsDirectEval);
+                let eval_lex_env = crate::core::new_js_object_data(mc);
+                eval_lex_env.borrow_mut(mc).prototype = Some(*env);
 
-            hoist_declarations(mc, &exec_env, statements, false, false)?;
+                if starts_with_use_strict {
+                    env_set_strictness(mc, &eval_lex_env, true)?;
+                }
+
+                // Hoist var/function declarations to caller's env (skip lexicals)
+                hoist_declarations(mc, env, statements, true, false)?;
+
+                // Hoist let/const/class into the fresh eval lex env
+                for stmt in statements {
+                    match &*stmt.kind {
+                        StatementKind::Let(decls) => {
+                            for (name, _) in decls {
+                                object_set_key_value(mc, &eval_lex_env, name, &Value::Uninitialized)?;
+                                eval_lex_env.borrow_mut(mc).set_lexical(name.clone());
+                            }
+                        }
+                        StatementKind::Const(decls) => {
+                            for (name, _) in decls {
+                                object_set_key_value(mc, &eval_lex_env, name, &Value::Uninitialized)?;
+                                eval_lex_env.borrow_mut(mc).set_lexical(name.clone());
+                            }
+                        }
+                        StatementKind::Class(class_def) => {
+                            object_set_key_value(mc, &eval_lex_env, &class_def.name, &Value::Uninitialized)?;
+                            eval_lex_env.borrow_mut(mc).set_lexical(class_def.name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+
+                exec_env = eval_lex_env;
+            } else {
+                if starts_with_use_strict {
+                    log::trace!("evaluate_statements: detected 'use strict' directive; marking env as strict");
+                    env_set_strictness(mc, &exec_env, true)?;
+                }
+
+                hoist_declarations(mc, &exec_env, statements, false, false)?;
+            }
         }
     }
 
@@ -6981,9 +7026,113 @@ fn eval_res<'gc>(
                 head_env = Some(he);
             }
             let iter_eval_env = head_env.as_ref().unwrap_or(env);
-
-            // Simplified: assume array for now
             let iter_val = evaluate_expr(mc, iter_eval_env, iterable)?;
+
+            // ── iterator protocol (Map, Set, generators, etc.) ──
+            let mut iterator: Option<JSObjectDataPtr<'gc>> = None;
+            if let Some(sym_ctor) = env_get(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+                && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+            {
+                let method = if let Value::Object(obj) = &iter_val {
+                    get_property_with_accessors(mc, env, obj, iter_sym_data)?
+                } else {
+                    get_primitive_prototype_property(mc, env, &iter_val, iter_sym_data)?
+                };
+                if !matches!(method, Value::Undefined | Value::Null) {
+                    let res = evaluate_call_dispatch(mc, env, &method, Some(&iter_val), &[])?;
+                    if let Value::Object(iter_obj) = res {
+                        iterator = Some(iter_obj);
+                    }
+                }
+            }
+
+            if let Some(iter_obj) = iterator {
+                loop {
+                    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                    if matches!(next_method, Value::Undefined | Value::Null) {
+                        return Err(EvalError::Js(raise_type_error!("Iterator has no next method")));
+                    }
+                    let next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+                    if let Value::Object(next_res) = next_res_val {
+                        let done = match get_property_with_accessors(mc, env, &next_res, "done")? {
+                            Value::Boolean(b) => b,
+                            _ => false,
+                        };
+                        if done {
+                            break;
+                        }
+                        let value = get_property_with_accessors(mc, env, &next_res, "value")?;
+                        let pattern_expr = Expr::Object(convert_object_binding_pattern_from_object_elements(pattern));
+                        let body_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                            let e = new_js_object_data(mc);
+                            e.borrow_mut(mc).prototype = Some(*env);
+                            for name in names.iter() {
+                                object_set_key_value(mc, &e, name, &Value::Uninitialized)?;
+                            }
+                            if let Err(e_err) = evaluate_binding_target_with_value(mc, &e, &pattern_expr, &value) {
+                                return Err(iterator_close_on_error(mc, env, &iter_obj, e_err));
+                            }
+                            if matches!(decl_kind_opt, Some(crate::core::VarDeclKind::Const)) {
+                                for name in names.iter() {
+                                    e.borrow_mut(mc).set_const(name.clone());
+                                }
+                            }
+                            e
+                        } else {
+                            if let Err(e_err) = evaluate_binding_target_with_value(mc, env, &pattern_expr, &value) {
+                                return Err(iterator_close_on_error(mc, env, &iter_obj, e_err));
+                            }
+                            *env
+                        };
+                        let (res, vbody) =
+                            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                                evaluate_statements_with_context_and_last_value(mc, &body_env, body, labels)?
+                            } else {
+                                evaluate_statements_with_context_and_last_value(mc, env, body, labels)?
+                            };
+                        match res {
+                            ControlFlow::Normal(_) => *last_value = vbody,
+                            ControlFlow::Break(label) => {
+                                if !matches!(&vbody, Value::Undefined) {
+                                    *last_value = vbody;
+                                }
+                                if label.is_none() {
+                                    iterator_close(mc, env, &iter_obj)?;
+                                    break;
+                                }
+                                iterator_close(mc, env, &iter_obj)?;
+                                return Ok(Some(ControlFlow::Break(label)));
+                            }
+                            ControlFlow::Continue(label) => {
+                                if !matches!(&vbody, Value::Undefined) {
+                                    *last_value = vbody;
+                                }
+                                if let Some(ref l) = label
+                                    && !own_labels.contains(l)
+                                {
+                                    iterator_close(mc, env, &iter_obj)?;
+                                    return Ok(Some(ControlFlow::Continue(label)));
+                                }
+                            }
+                            ControlFlow::Return(v) => {
+                                iterator_close(mc, env, &iter_obj)?;
+                                return Ok(Some(ControlFlow::Return(v)));
+                            }
+                            ControlFlow::Throw(v, l, c) => {
+                                let _ = iterator_close(mc, env, &iter_obj);
+                                return Ok(Some(ControlFlow::Throw(v, l, c)));
+                            }
+                        }
+                    } else {
+                        return Err(raise_type_error!("Iterator result is not an object").into());
+                    }
+                }
+                return Ok(None);
+            }
+
+            // Fallback: plain array
             if let Value::Object(obj) = iter_val
                 && is_array(mc, &obj)
             {
@@ -7044,7 +7193,7 @@ fn eval_res<'gc>(
                 }
                 return Ok(None);
             }
-            Err(raise_type_error!("ForOfDestructuringObject only supports Arrays currently").into())
+            Err(raise_type_error!("Value is not iterable").into())
         }
         StatementKind::ForOfDestructuringArray(decl_kind_opt, pattern, iterable, body) => {
             // Hoist var declarations from destructuring pattern (var case)
@@ -12274,6 +12423,12 @@ fn handle_eval_function<'gc>(
             env_set_strictness(mc, &new_env, true)?;
             new_env
         } else {
+            // Non-strict direct eval: mark the caller's env so that
+            // evaluate_statements_with_labels creates a new lexical env
+            // for let/const/class declarations (spec §19.2.1.3 step 9).
+            if !is_indirect_eval {
+                slot_set(mc, env, InternalSlot::IsDirectEval, &Value::Boolean(true));
+            }
             *env
         };
 
@@ -17763,6 +17918,19 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                     return Ok(Value::Boolean(false));
                 }
 
+                // Module namespace exotic [[Delete]] (§28.3.4):
+                // If P is an element of [[Exports]], return false.
+                {
+                    let b = obj.borrow();
+                    let is_ns = b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible());
+                    if is_ns && b.properties.contains_key(&key_val) {
+                        if env_get_strictness(env) {
+                            return Err(crate::raise_type_error!(format!("Cannot delete property '{key}' of a module namespace")).into());
+                        }
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+
                 if obj.borrow().non_configurable.contains(&key_val) {
                     if env_get_strictness(env) {
                         Err(crate::raise_type_error!(format!("Cannot delete non-configurable property '{key}'",)).into())
@@ -17861,6 +18029,22 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
                         }
                         if env_get_strictness(env) {
                             return Err(crate::raise_type_error!(format!("Cannot delete property '{}' of a TypedArray", s)).into());
+                        }
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+                // Module namespace exotic [[Delete]] (§28.3.4):
+                // If P is an element of [[Exports]], return false.
+                {
+                    let b = obj.borrow();
+                    let is_ns = b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible());
+                    if is_ns && b.properties.contains_key(&key) {
+                        if env_get_strictness(env) {
+                            return Err(crate::raise_type_error!(format!(
+                                "Cannot delete property '{}' of a module namespace",
+                                value_to_string(&key_val_res)
+                            ))
+                            .into());
                         }
                         return Ok(Value::Boolean(false));
                     }
@@ -19141,8 +19325,12 @@ pub(crate) fn set_property_with_accessors<'gc>(
 ) -> Result<(), EvalError<'gc>> {
     let key = &key.into();
 
-    if obj.borrow().deferred_module_path.is_some() {
-        return Err(raise_type_error!("Cannot assign to module namespace object").into());
+    // Module namespace exotic [[Set]] (§28.3.2): always returns false → TypeError
+    {
+        let b = obj.borrow();
+        if b.deferred_module_path.is_some() || (b.prototype.is_none() && !b.is_extensible()) {
+            return Err(raise_type_error!("Cannot assign to module namespace object").into());
+        }
     }
 
     if receiver_opt.is_some()
@@ -21681,11 +21869,44 @@ pub fn call_closure<'gc>(
         // }
 
         let callee_val = fn_obj.map(Value::Object);
+
+        // Per §10.4.4.6, an unmapped arguments object (used when the parameter
+        // list is non-simple OR the function is strict) must have a ThrowTypeError
+        // callee accessor.  Mark the env temporarily so create_arguments_object
+        // applies the restriction.
+        let has_non_simple_params = cl.params.iter().any(|p| {
+            matches!(
+                p,
+                DestructuringElement::Variable(_, Some(_))
+                    | DestructuringElement::Rest(_)
+                    | DestructuringElement::RestPattern(_)
+                    | DestructuringElement::NestedArray(..)
+                    | DestructuringElement::NestedObject(..)
+                    | DestructuringElement::Property(..)
+                    | DestructuringElement::ComputedProperty(..)
+            )
+        });
+        let force_unmapped = has_non_simple_params && !fn_is_strict;
+        if force_unmapped {
+            env_set_strictness(mc, &var_env, true)?;
+        }
+
         // Place the arguments object into the var_env (function body env)
         crate::js_class::create_arguments_object(mc, &var_env, args, callee_val.as_ref())?;
         // Ensure parameter defaults can access `arguments` via the parameter env chain.
         if crate::core::get_own_property(&param_env, "arguments").is_none() {
+            if force_unmapped {
+                env_set_strictness(mc, &param_env, true)?;
+            }
             crate::js_class::create_arguments_object(mc, &param_env, args, callee_val.as_ref())?;
+            if force_unmapped {
+                env_set_strictness(mc, &param_env, fn_is_strict)?;
+            }
+        }
+
+        // Restore actual strictness after arguments object creation
+        if force_unmapped {
+            env_set_strictness(mc, &var_env, fn_is_strict)?;
         }
 
         // env_set(mc, &call_env, "arguments", &Value::Object(args_obj))?;

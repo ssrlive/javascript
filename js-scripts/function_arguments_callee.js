@@ -62,14 +62,28 @@ try {
 }
 
 {
-    console.log("=== Testing that accessing arguments.callee throws TypeError in strict mode ===");
+    console.log("=== Testing that accessing arguments.callee throws TypeError in strict mode (inside function) ===");
+    (function() {
+        "use strict";
+        try {
+            arguments.callee;
+            throw new Error("Accessing arguments.callee did not throw");
+        } catch (e) {
+            console.log(e);
+            if (!(e instanceof TypeError)) {
+                throw new Error('Expected a TypeError, but got: ' + e);
+            }
+        }
+    })();
+
+    console.log("=== Testing that arguments is not defined at global scope ===");
     try {
-        arguments.callee;
-        throw new Error("Accessing arguments.callee did not throw");
+        arguments;
+        throw new Error("arguments should not be defined at global scope");
     } catch (e) {
         console.log(e);
-        if (!(e instanceof TypeError)) {
-            throw new Error('Expected a TypeError, but got: ' + e);
+        if (!(e instanceof ReferenceError)) {
+            throw new Error('Expected a ReferenceError, but got: ' + e);
         }
     }
 }

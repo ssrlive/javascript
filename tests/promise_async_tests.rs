@@ -24,8 +24,15 @@ fn test_await_async_function() {
         }
         getResult()
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "42");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "42");
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 #[test]

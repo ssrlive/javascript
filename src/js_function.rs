@@ -3014,6 +3014,9 @@ fn evalute_eval_function<'gc>(
         let new_env = new_js_object_data(mc);
         new_env.borrow_mut(mc).prototype = Some(*env);
         exec_env = new_env;
+    } else if !is_indirect_eval {
+        // Direct eval is handled via handle_eval_function in eval.rs,
+        // not through this native_eval path.  No action needed here.
     }
 
     match crate::core::evaluate_statements(mc, &exec_env, &stmts) {

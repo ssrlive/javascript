@@ -367,6 +367,7 @@ pub enum InternalSlot {
     IsArrowFunction,       // __is_arrow_function
     IsStrict,              // __is_strict
     IsIndirectEval,        // __is_indirect_eval
+    IsDirectEval,          // __is_direct_eval
     FnNamePrefix,          // __fn_name_prefix
     Filepath,              // __filepath
     FileId,                // __file_id
@@ -620,6 +621,7 @@ pub fn str_to_internal_slot(s: &str) -> Option<InternalSlot> {
         "__is_arrow_function" => return Some(InternalSlot::IsArrowFunction),
         "__is_strict" => return Some(InternalSlot::IsStrict),
         "__is_indirect_eval" => return Some(InternalSlot::IsIndirectEval),
+        "__is_direct_eval" => return Some(InternalSlot::IsDirectEval),
         "__fn_name_prefix" => return Some(InternalSlot::FnNamePrefix),
         "__filepath" => return Some(InternalSlot::Filepath),
         "__file_id" => return Some(InternalSlot::FileId),
@@ -2486,8 +2488,11 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
                 borrowed.properties.contains_key(&PropertyKey::String("globalThis".to_string()))
             };
             if is_global {
-                // Sloppy mode: create global binding on the global object itself.
-                if env_get_strictness(&current) {
+                // Per ECMAScript PutValue, the strict flag comes from the
+                // Reference (i.e. the code context that performed the
+                // assignment), not the global environment itself.  Use the
+                // *caller's* env to decide whether this is a strict-mode error.
+                if env_get_strictness(env) {
                     return Err(crate::raise_reference_error!(format!("{key} is not defined")));
                 } else {
                     return env_set(mc, &current, key, val);
@@ -2496,10 +2501,9 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             current = parent_rc;
         } else {
             // Reached global scope (or end of chain) and variable not found.
-            // If the global environment is operating in strict mode, this is a ReferenceError.
-            // If the global environment is non-strict, create a new global binding instead (as per
-            // ECMAScript non-strict assignment semantics for unresolvable references).
-            if env_get_strictness(&current) {
+            // Per PutValue, the strict flag comes from the calling code
+            // context (the Reference), not the end of the scope chain.
+            if env_get_strictness(env) {
                 return Err(crate::raise_reference_error!(format!("{key} is not defined")));
             } else {
                 // No explicit strictness marker: be permissive and create the global binding

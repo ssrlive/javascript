@@ -364,6 +364,17 @@ async function runAll(){
       for (const inc of includes){
         const incBasename = inc;
         let incPath = HARNESS_INDEX[incBasename] || '';
+        // If the include has a path prefix (e.g. "sm/non262-Reflect-shell.js"),
+        // try resolving it relative to the harness directory first, then fall
+        // back to matching by the trailing basename component.
+        if (!incPath && inc.includes('/')) {
+          const rel = path.join(REPO_DIR, 'harness', inc);
+          if (fs.existsSync(rel)) { incPath = rel; }
+          if (!incPath) {
+            const bn = path.basename(inc);
+            incPath = HARNESS_INDEX[bn] || '';
+          }
+        }
         if (!incPath){
           // search repo
           const found = ordered.find(p => path.basename(p) === incBasename) || null;

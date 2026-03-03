@@ -350,11 +350,9 @@ async function runAll(){
     if (/features:/.test(meta) && /Intl/.test(meta)) { skip++; log(`SKIP (feature: Intl) ${f}`); continue; }
     if (/\bIntl\b/.test(fs.readFileSync(f,'utf8'))) { skip++; log(`SKIP (contains Intl) ${f}`); continue; }
 
-    // Skip tests that require $262.agent (multi-threaded worker support)
-    {
-      const src = fs.readFileSync(f, 'utf8');
-      if (/\$262\.agent\b/.test(src)) { skip++; log(`SKIP ($262.agent) ${f}`); continue; }
-    }
+    // Detect tests that require $262.agent (multi-threaded worker support)
+    const _agentSrc = fs.readFileSync(f, 'utf8');
+    const needsAgent = /\$262\.agent\b/.test(_agentSrc);
 
     // handle includes
     const includes = parseIncludes(meta);
@@ -434,7 +432,7 @@ async function runAll(){
     // not inject a global "use strict" which can change eval semantics.
     const isModule = hasFlag(meta, 'module');
     const needStrict = !isModule && hasFlag(meta, 'onlyStrict');
-    const {testToRun, tmpPath, cleanupTmp} = composeTest({testPath: f, repoDir: REPO_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict});
+    const {testToRun, tmpPath, cleanupTmp} = composeTest({testPath: f, repoDir: REPO_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict, needsAgent});
 
     let currentSucceeds = false;
     // Run test

@@ -4077,6 +4077,18 @@ fn eval_res<'gc>(
                         {
                             create_class_object(mc, "default", &class_def.extends, &class_def.members, env, false)
                                 .map_err(|e| refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e))?
+                        } else if let Expr::Function(Some(fn_name), params, body) = expr {
+                            // `export default function fn() { ... }` is a hoistable declaration.
+                            // The name `fn` is bound in the module scope, NOT in an NFE
+                            // intermediate scope.  Evaluate without the name to avoid NFE
+                            // scope creation, then set the .name property manually.
+                            let mut body_clone = body.clone();
+                            let func_val = evaluate_function_expression(mc, env, None, params, &mut body_clone)?;
+                            if let Value::Object(ref func_obj) = func_val {
+                                let desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(fn_name)), false, false, true)?;
+                                crate::js_object::define_property_internal(mc, func_obj, "name", &desc)?;
+                            }
+                            func_val
                         } else {
                             evaluate_expr(mc, env, expr)?
                         };
@@ -19020,10 +19032,29 @@ fn evaluate_function_expression<'gc>(
 
     let is_strict = has_body_use_strict || env_strict_ancestor;
 
+    // For Named Function Expressions (NFE), create an intermediate scope that
+    // contains the self-binding so the function can reference itself by name
+    // even when invoked indirectly (e.g., via setTimeout). Per the ES spec,
+    // the NFE name is bound in a scope between the outer env and the closure's
+    // own parameter scope.
+    let closure_env = if let Some(ref n) = name {
+        if !n.is_empty() {
+            let nfe_env = crate::core::new_js_object_data(mc);
+            nfe_env.borrow_mut(mc).prototype = Some(*env);
+            nfe_env.borrow_mut(mc).is_function_scope = false;
+            // The binding will be set to the function object after it's created (below).
+            nfe_env
+        } else {
+            *env
+        }
+    } else {
+        *env
+    };
+
     let closure_data = ClosureData {
         params: params.to_vec(),
         body: body.to_vec(),
-        env: Some(*env),
+        env: Some(closure_env),
         is_strict,
         enforce_strictness_inheritance: true,
         ..ClosureData::default()
@@ -19032,6 +19063,17 @@ fn evaluate_function_expression<'gc>(
     func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
     match name {
         Some(n) if !n.is_empty() => {
+            // Set the NFE self-binding in the intermediate scope so the function
+            // can reference itself by name from any invocation path.
+            object_set_key_value(mc, &closure_env, &n, &Value::Object(func_obj))?;
+            // Per spec (14.1.20 step 4), the NFE name binding is an immutable
+            // binding created with CreateImmutableBinding(name, false).  In
+            // strict mode, assignment to it throws a TypeError; in sloppy mode
+            // it silently fails.  Marking it non-writable achieves this because
+            // env_set already throws for non-writable keys in strict contexts.
+            if is_strict {
+                closure_env.borrow_mut(mc).set_non_writable(&n);
+            }
             let desc = create_descriptor_object(mc, &Value::String(utf8_to_utf16(&n)), false, false, true)?;
             crate::js_object::define_property_internal(mc, &func_obj, "name", &desc)?;
         }
@@ -20111,6 +20153,92 @@ pub fn call_native_function<'gc>(
             return Ok(Some(Value::Undefined));
         }
         return Err(raise_type_error!("detachArrayBuffer requires an ArrayBuffer object").into());
+    }
+
+    // ─── $262.agent native hooks ───────────────────────────────────────────
+    if name == "__agent_start" {
+        let script = match args.first() {
+            Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+            Some(v) => crate::core::value_to_string(v),
+            None => String::new(),
+        };
+        crate::js_agent::agent_start(script);
+        return Ok(Some(Value::Undefined));
+    }
+    if name == "__agent_broadcast" {
+        // Accepts a SharedArrayBuffer object; extract its Arc data
+        if let Some(Value::Object(obj)) = args.first()
+            && let Some(ab_val) = slot_get_chained(obj, &InternalSlot::ArrayBuffer)
+            && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
+        {
+            let ab_ref = ab.borrow();
+            if !ab_ref.shared {
+                return Err(raise_type_error!("agent.broadcast requires a SharedArrayBuffer").into());
+            }
+            let data_arc = ab_ref.data.clone();
+            let byte_length = ab_ref.data.lock().unwrap().len();
+            crate::js_agent::agent_broadcast(data_arc, byte_length);
+            return Ok(Some(Value::Undefined));
+        }
+        return Err(raise_type_error!("agent.broadcast requires a SharedArrayBuffer").into());
+    }
+    if name == "__agent_getReport" {
+        return Ok(Some(match crate::js_agent::agent_get_report() {
+            Some(s) => Value::String(crate::unicode::utf8_to_utf16(&s)),
+            None => Value::Null,
+        }));
+    }
+    if name == "__agent_sleep" {
+        let ms = match args.first() {
+            Some(v) => crate::core::to_number_with_env(mc, env, v)?,
+            None => 0.0,
+        };
+        crate::js_agent::agent_sleep(ms);
+        return Ok(Some(Value::Undefined));
+    }
+    if name == "__agent_monotonicNow" {
+        return Ok(Some(Value::Number(crate::js_agent::agent_monotonic_now())));
+    }
+    if name == "__agent_receiveBroadcast" {
+        // Called from within an agent thread. Blocks until broadcast is available.
+        // Returns a SharedArrayBuffer object wrapping the same Arc data.
+        let (data_arc, byte_length) = crate::js_agent::agent_receive_broadcast();
+        let obj = crate::core::new_js_object_data(mc);
+        // Set up SharedArrayBuffer prototype
+        if let Some(ctor_val) = crate::core::env_get(env, "SharedArrayBuffer")
+            && let Value::Object(ctor_obj) = &*ctor_val.borrow()
+            && let Some(p_val) = object_get_key_value(ctor_obj, "prototype")
+            && let Value::Object(p_obj) = &*p_val.borrow()
+        {
+            obj.borrow_mut(mc).prototype = Some(*p_obj);
+        }
+        let buffer = new_gc_cell_ptr(
+            mc,
+            crate::core::value::JSArrayBuffer {
+                data: data_arc,
+                shared: true,
+                detached: false,
+                max_byte_length: None,
+                immutable: false,
+            },
+        );
+        slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
+        // Store byte_length for byteLength getter
+        let _ = byte_length; // byte_length is already encoded in the Arc Vec
+        return Ok(Some(Value::Object(obj)));
+    }
+    if name == "__agent_report" {
+        let val = match args.first() {
+            Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+            Some(v) => crate::core::value_to_string(v),
+            None => String::new(),
+        };
+        crate::js_agent::agent_report(val);
+        return Ok(Some(Value::Undefined));
+    }
+    if name == "__agent_leaving" {
+        crate::js_agent::agent_leaving();
+        return Ok(Some(Value::Undefined));
     }
 
     if name == "Array.isArray" || name == "Array.from" || name == "Array.of" || name == "Array.fromAsync" {

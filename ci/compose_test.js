@@ -280,7 +280,7 @@ function verifyComposeStubMarkerCount(testPath, harnessIndex = {}, prependFiles 
   return count === expected;
 }
 
-function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needStrict = true}) {
+function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needStrict = true, needsAgent = false}) {
   // Returns { testToRun, tmpPath, cleanupTmp }
 
   // prepends are file paths
@@ -367,6 +367,25 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
 
   // Write unique prepends
   PREPEND_FILES = ensureArrayDistinct(PREPEND_FILES);
+
+  // Inject $262.agent shim BEFORE harness files (atomicsHelper.js extends $262.agent)
+  if (needsAgent) {
+    outLines.push('// Inject: $262.agent shim for multi-agent tests');
+    outLines.push('if (typeof $262 === "undefined") { var $262 = {}; }');
+    outLines.push('if (!$262.agent) { $262.agent = {}; }');
+    outLines.push('$262.agent.start = function(script) { __agent_start(script); };');
+    outLines.push('$262.agent.broadcast = function(sab) {');
+    outLines.push('  if (sab && sab.buffer) { __agent_broadcast(sab.buffer); }');
+    outLines.push('  else { __agent_broadcast(sab); }');
+    outLines.push('};');
+    outLines.push('$262.agent.getReport = function() { return __agent_getReport(); };');
+    outLines.push('$262.agent.sleep = function(ms) { __agent_sleep(ms); };');
+    outLines.push('$262.agent.monotonicNow = function() { return __agent_monotonicNow(); };');
+    outLines.push('$262.agent.leaving = function() { __agent_leaving(); };');
+    outLines.push('$262.agent.report = function(val) { __agent_report(String(val)); };');
+    outLines.push('');
+  }
+
   for (const p of PREPEND_FILES) {
     if (!p) continue;
     if (fs.existsSync(p)) {
@@ -466,7 +485,7 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
 
     // Inject unified $262 shim into the rebuilt file when required by test/meta
     const metaFixed = extractMeta(testPath);
-    inject262Shim(lines2, testPath, metaFixed);
+    inject262Shim(lines2, testPath, metaFixed, [], needsAgent);
 
     const absTest = path.resolve(testPath);
     lines2.push(`// Inject: ${absTest}`);

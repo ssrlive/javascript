@@ -360,6 +360,26 @@ pub fn initialize_global_constructors_with_parent<'gc>(
     // Expose __createRealm__ as a native callable for cross-realm tests.
     env_set(mc, env, "__createRealm__", &Value::Function("__createRealm__".to_string()))?;
 
+    // $262.agent native hooks for test262 multi-agent tests
+    object_set_key_value(mc, env, "__agent_start", &Value::Function("__agent_start".to_string()))?;
+    object_set_key_value(mc, env, "__agent_broadcast", &Value::Function("__agent_broadcast".to_string()))?;
+    object_set_key_value(mc, env, "__agent_getReport", &Value::Function("__agent_getReport".to_string()))?;
+    object_set_key_value(mc, env, "__agent_sleep", &Value::Function("__agent_sleep".to_string()))?;
+    object_set_key_value(
+        mc,
+        env,
+        "__agent_monotonicNow",
+        &Value::Function("__agent_monotonicNow".to_string()),
+    )?;
+    object_set_key_value(
+        mc,
+        env,
+        "__agent_receiveBroadcast",
+        &Value::Function("__agent_receiveBroadcast".to_string()),
+    )?;
+    object_set_key_value(mc, env, "__agent_report", &Value::Function("__agent_report".to_string()))?;
+    object_set_key_value(mc, env, "__agent_leaving", &Value::Function("__agent_leaving".to_string()))?;
+
     #[cfg(feature = "os")]
     crate::js_os::initialize_os_module(mc, env)?;
 
@@ -494,6 +514,11 @@ where
 
     arena.mutate(|mc, root| {
         initialize_global_constructors(mc, &root.global_env)?;
+
+        // Reset agent state for test isolation (only on main thread, not agent threads)
+        if !crate::js_agent::is_agent_thread() {
+            crate::js_agent::reset_agent_state();
+        }
 
         env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
         root.global_env.borrow_mut(mc).set_non_enumerable("globalThis");
@@ -669,6 +694,17 @@ where
                             // Before exiting, attempt to process any runtime-pending unhandled checks
                             // (they may have matured and should be re-queued as UnhandledCheck tasks).
                             if crate::js_promise::process_runtime_pending_unhandled(mc, &root.global_env, false)? {
+                                count += 1;
+                                continue;
+                            }
+
+                            // Keep event loop alive while Atomics.waitAsync promises are pending.
+                            // Background notification threads will wake us via EVENT_LOOP_WAKE.
+                            if crate::js_typedarray::has_pending_async_waiters() {
+                                let (lock, cv) = crate::js_promise::get_event_loop_wake();
+                                let mut guard = lock.lock().unwrap();
+                                *guard = false;
+                                let (_g, _res) = cv.wait_timeout(guard, std::time::Duration::from_millis(100)).unwrap();
                                 count += 1;
                                 continue;
                             }

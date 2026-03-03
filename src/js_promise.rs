@@ -1653,6 +1653,12 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
 /// If no tasks are ready but timers are pending, it returns `PollResult::Wait`.
 /// If the queue is empty, it returns `PollResult::Empty`.
 pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSError> {
+    // Check for resolved Atomics.waitAsync waiters first.
+    // If any resolved, call their promise resolve functions and report Executed.
+    if crate::js_typedarray::check_resolved_async_waiters(mc)? {
+        return Ok(PollResult::Executed);
+    }
+
     // Debug: print top 5 repeated tasks every 100 tasks
     let current_task_count = TASK_COUNTER.load(Ordering::SeqCst);
     if current_task_count % 100 < 20 {

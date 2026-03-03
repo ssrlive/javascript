@@ -36,6 +36,7 @@ pub(crate) mod js_string;
 pub(crate) mod js_symbol;
 pub(crate) mod timer_thread;
 // pub(crate) mod js_testintl;
+pub(crate) mod js_agent;
 pub(crate) mod js_finalization_registry;
 pub(crate) mod js_typedarray;
 pub(crate) mod js_weakmap;

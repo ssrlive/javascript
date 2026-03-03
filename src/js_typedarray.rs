@@ -7,6 +7,7 @@ use crate::js_array::is_array;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
 use crate::{JSError, core::EvalError};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Condvar;
 use std::sync::LazyLock;
@@ -17,19 +18,57 @@ use std::sync::{Arc, Mutex};
 #[allow(clippy::type_complexity)]
 static WAITERS: LazyLock<Mutex<HashMap<(usize, usize), Vec<Arc<(Mutex<bool>, Condvar)>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Async waiter record for Atomics.waitAsync.
-/// Tracks the waiter handle and whether the wait has been resolved.
-#[allow(dead_code)]
-struct AsyncWaiter {
-    waiter: Arc<(Mutex<bool>, Condvar)>,
-    arc_ptr: usize,
-    byte_index: usize,
-    timeout: Option<std::time::Duration>,
-    resolved: Arc<Mutex<Option<bool>>>, // None=pending, Some(true)="ok", Some(false)="timed-out"
+/// Thread-local pending async waiter record for event loop polling.
+/// Stores the resolved flag and the promise resolve function (transmuted to 'static).
+struct PendingAsyncWaiterLocal {
+    resolved: Arc<Mutex<Option<bool>>>,
+    resolve_fn: Value<'static>,
+    env: JSObjectDataPtr<'static>,
 }
 
-/// Global list of pending Atomics.waitAsync waiters.
-static ASYNC_WAITERS: LazyLock<Mutex<Vec<AsyncWaiter>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+thread_local! {
+    /// Thread-local list of pending Atomics.waitAsync waiters awaiting event loop resolution.
+    static PENDING_ASYNC_WAITERS: RefCell<Vec<PendingAsyncWaiterLocal>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Check all thread-local pending async waiters. If any have been resolved by
+/// their background notification thread, call the corresponding promise resolve
+/// function and remove them. Returns true if at least one was resolved.
+pub fn check_resolved_async_waiters<'gc>(mc: &MutationContext<'gc>) -> Result<bool, EvalError<'gc>> {
+    let resolved_items: Vec<(Value<'gc>, JSObjectDataPtr<'gc>, bool)> = PENDING_ASYNC_WAITERS.with(|paw| {
+        let mut list = paw.borrow_mut();
+        let mut to_resolve = Vec::new();
+        list.retain(|waiter| {
+            let flag = waiter.resolved.lock().unwrap();
+            if let Some(was_ok) = *flag {
+                let resolve_fn: Value<'gc> = unsafe { std::mem::transmute(waiter.resolve_fn.clone()) };
+                let env: JSObjectDataPtr<'gc> = unsafe { std::mem::transmute(waiter.env) };
+                to_resolve.push((resolve_fn, env, was_ok));
+                false // remove from list
+            } else {
+                true // keep
+            }
+        });
+        to_resolve
+    });
+
+    if resolved_items.is_empty() {
+        return Ok(false);
+    }
+
+    for (resolve_fn, env, was_ok) in resolved_items {
+        let result_str = if was_ok { "ok" } else { "timed-out" };
+        let result_val = Value::String(utf8_to_utf16(result_str));
+        let _ = crate::js_promise::call_function(mc, &resolve_fn, &[result_val], &env);
+    }
+
+    Ok(true)
+}
+
+/// Returns true if there are pending (unresolved) async waiters on this thread.
+pub fn has_pending_async_waiters() -> bool {
+    PENDING_ASYNC_WAITERS.with(|paw| !paw.borrow().is_empty())
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // IEEE 754 binary16 (half-precision float) conversion helpers
@@ -1028,19 +1067,20 @@ pub fn handle_atomics_method<'gc>(
                 let (m, cv) = crate::js_promise::get_event_loop_wake();
                 let mut g = m.lock().unwrap();
                 *g = true;
-                cv.notify_one();
+                cv.notify_all();
             });
 
-            // Store the async waiter info in ASYNC_WAITERS so the event loop can
-            // resolve the promise when the background thread finishes.
+            // Store in thread-local for event loop polling.
+            // The event loop will periodically check resolved flags and call resolve_fn.
             {
-                let mut async_waiters = ASYNC_WAITERS.lock().unwrap();
-                async_waiters.push(AsyncWaiter {
-                    waiter: waiter.clone(),
-                    arc_ptr: arc_ptr_copy,
-                    byte_index: byte_index_copy,
-                    timeout: timeout_dur,
-                    resolved: resolved_flag,
+                let resolve_static: Value<'static> = unsafe { std::mem::transmute(resolve_fn.clone()) };
+                let env_static: JSObjectDataPtr<'static> = unsafe { std::mem::transmute(*env) };
+                PENDING_ASYNC_WAITERS.with(|paw| {
+                    paw.borrow_mut().push(PendingAsyncWaiterLocal {
+                        resolved: resolved_flag.clone(),
+                        resolve_fn: resolve_static,
+                        env: env_static,
+                    });
                 });
             }
 
@@ -1051,20 +1091,20 @@ pub fn handle_atomics_method<'gc>(
 
             // Check if the waiter already resolved (common in synchronous test patterns)
             {
-                let async_waiters = ASYNC_WAITERS.lock().unwrap();
-                if let Some(aw) = async_waiters.last() {
-                    let flag = aw.resolved.lock().unwrap();
-                    if let Some(was_ok) = *flag {
-                        drop(flag);
-                        drop(async_waiters);
-                        // Resolve the promise synchronously
-                        let result_str = if was_ok { "ok" } else { "timed-out" };
-                        let result_val = Value::String(utf8_to_utf16(result_str));
-                        let _ = crate::js_promise::call_function(mc, &resolve_fn, &[result_val], env);
-                        // Remove from ASYNC_WAITERS
-                        let mut aw_list = ASYNC_WAITERS.lock().unwrap();
-                        aw_list.pop();
-                    }
+                let flag = resolved_flag.lock().unwrap();
+                if let Some(was_ok) = *flag {
+                    drop(flag);
+                    // Resolve the promise synchronously
+                    let result_str = if was_ok { "ok" } else { "timed-out" };
+                    let result_val = Value::String(utf8_to_utf16(result_str));
+                    let _ = crate::js_promise::call_function(mc, &resolve_fn, &[result_val], env);
+                    // Remove from thread-local since we resolved it here
+                    PENDING_ASYNC_WAITERS.with(|paw| {
+                        let mut list = paw.borrow_mut();
+                        if let Some(pos) = list.iter().position(|p| Arc::ptr_eq(&p.resolved, &resolved_flag)) {
+                            list.remove(pos);
+                        }
+                    });
                 }
             }
 

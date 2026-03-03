@@ -569,6 +569,15 @@ pub enum InternalSlot {
     // --- AnnexB ---
     IsHTMLDDA, // [[IsHTMLDDA]] internal slot (document.all emulation)
 
+    // --- WeakRef ---
+    WeakRefTarget, // __weakref_target (the weak target value)
+    WeakRefMarker, // __weakref_marker (boolean marker for WeakRef instances)
+
+    // --- FinalizationRegistry ---
+    FRCleanup, // __fr_cleanup (cleanup callback)
+    FRMarker,  // __fr_marker  (boolean marker for FR instances)
+    FRCells,   // __fr_cells   (registered cells array)
+
     // --- ShadowRealm ---
     ShadowRealm,        // __shadow_realm  (isolated global env for a ShadowRealm instance)
     WrappedTarget,      // __wrapped_target (target function of a WrappedFunction)
@@ -746,6 +755,13 @@ pub fn str_to_internal_slot(s: &str) -> Option<InternalSlot> {
         "__eof" => return Some(InternalSlot::Eof),
         "__lookupGetter__" => return Some(InternalSlot::LookupGetter),
         "__lookupSetter__" => return Some(InternalSlot::LookupSetter),
+        // WeakRef
+        "__weakref_target" => return Some(InternalSlot::WeakRefTarget),
+        "__weakref_marker" => return Some(InternalSlot::WeakRefMarker),
+        // FinalizationRegistry
+        "__fr_cleanup" => return Some(InternalSlot::FRCleanup),
+        "__fr_marker" => return Some(InternalSlot::FRMarker),
+        "__fr_cells" => return Some(InternalSlot::FRCells),
         // ShadowRealm
         "__shadow_realm" => return Some(InternalSlot::ShadowRealm),
         "__wrapped_target" => return Some(InternalSlot::WrappedTarget),

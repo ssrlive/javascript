@@ -1609,7 +1609,11 @@ pub(crate) fn evaluate_new<'gc>(
                         return crate::js_set::handle_set_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }
                     "WeakMap" => return crate::js_weakmap::handle_weakmap_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
+                    "WeakRef" => return crate::js_weakref::handle_weakref_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
                     "WeakSet" => return crate::js_weakset::handle_weakset_constructor(mc, evaluated_args, &ctor_realm_env, new_target),
+                    "FinalizationRegistry" => {
+                        return crate::js_finalization_registry::handle_fr_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
+                    }
                     "DisposableStack" => {
                         return crate::js_disposable::handle_disposable_stack_constructor(mc, evaluated_args, &ctor_realm_env, new_target);
                     }

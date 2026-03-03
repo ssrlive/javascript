@@ -13384,6 +13384,46 @@ pub fn evaluate_call_dispatch<'gc>(
                 } else {
                     Err(raise_type_error!(format!("Unknown WeakSet function: {}", name)).into())
                 }
+            } else if name.starts_with("WeakRef.") {
+                if let Some(method) = name.strip_prefix("WeakRef.prototype.") {
+                    let this_v = this_val.unwrap_or(&Value::Undefined);
+                    if let Value::Object(obj) = this_v {
+                        if slot_get_chained(obj, &InternalSlot::WeakRefMarker).is_some() {
+                            Ok(crate::js_weakref::handle_weakref_instance_method(mc, obj, method, eval_args, env)?)
+                        } else {
+                            Err(raise_type_error!(format!("Method WeakRef.prototype.{} called on incompatible receiver", method)).into())
+                        }
+                    } else {
+                        Err(raise_type_error!(format!("Method WeakRef.prototype.{} called on incompatible receiver", method)).into())
+                    }
+                } else {
+                    Err(raise_type_error!(format!("Unknown WeakRef function: {}", name)).into())
+                }
+            } else if name.starts_with("FinalizationRegistry.") {
+                if let Some(method) = name.strip_prefix("FinalizationRegistry.prototype.") {
+                    let this_v = this_val.unwrap_or(&Value::Undefined);
+                    if let Value::Object(obj) = this_v {
+                        if slot_get_chained(obj, &InternalSlot::FRMarker).is_some() {
+                            Ok(crate::js_finalization_registry::handle_fr_instance_method(
+                                mc, obj, method, eval_args, env,
+                            )?)
+                        } else {
+                            Err(raise_type_error!(format!(
+                                "Method FinalizationRegistry.prototype.{} called on incompatible receiver",
+                                method
+                            ))
+                            .into())
+                        }
+                    } else {
+                        Err(raise_type_error!(format!(
+                            "Method FinalizationRegistry.prototype.{} called on incompatible receiver",
+                            method
+                        ))
+                        .into())
+                    }
+                } else {
+                    Err(raise_type_error!(format!("Unknown FinalizationRegistry function: {}", name)).into())
+                }
             } else if name == "Set[Symbol.species]" {
                 let this_v = this_val.unwrap_or(&Value::Undefined);
                 Ok(this_v.clone())
@@ -17134,6 +17174,7 @@ fn evaluate_expr_property<'gc>(
             | "WeakSet.prototype.add"
             | "WeakSet.prototype.has"
             | "WeakSet.prototype.delete"
+            | "FinalizationRegistry.prototype.unregister"
             | "Number.isNaN"
             | "Number.isFinite"
             | "Number.isInteger"
@@ -17237,6 +17278,7 @@ fn evaluate_expr_property<'gc>(
             | "Map.prototype.getOrInsert"
             | "Map.prototype.getOrInsertComputed"
             | "WeakMap.prototype.set"
+            | "FinalizationRegistry.prototype.register"
             | "WeakMap.prototype.getOrInsert"
             | "WeakMap.prototype.getOrInsertComputed"
             | "Array.prototype.toSpliced"
@@ -18707,6 +18749,7 @@ fn evaluate_expr_index<'gc>(
                     | "WeakSet.prototype.add"
                     | "WeakSet.prototype.has"
                     | "WeakSet.prototype.delete"
+                    | "FinalizationRegistry.prototype.unregister"
                     | "Number.isNaN"
                     | "Number.isFinite"
                     | "Number.isInteger"
@@ -18810,6 +18853,7 @@ fn evaluate_expr_index<'gc>(
                     | "WeakMap.prototype.set"
                     | "WeakMap.prototype.getOrInsert"
                     | "WeakMap.prototype.getOrInsertComputed"
+                    | "FinalizationRegistry.prototype.register"
                     | "Array.prototype.toSpliced"
                     | "Array.prototype.with"
                     | "Math.atan2"
@@ -23339,8 +23383,12 @@ fn evaluate_expr_new<'gc>(
                         return crate::js_proxy::handle_proxy_constructor(mc, &eval_args, env);
                     } else if name_str == "WeakMap" {
                         return crate::js_weakmap::handle_weakmap_constructor(mc, &eval_args, env, None);
+                    } else if name_str == "WeakRef" {
+                        return crate::js_weakref::handle_weakref_constructor(mc, &eval_args, env, None);
                     } else if name_str == "WeakSet" {
                         return crate::js_weakset::handle_weakset_constructor(mc, &eval_args, env, None);
+                    } else if name_str == "FinalizationRegistry" {
+                        return crate::js_finalization_registry::handle_fr_constructor(mc, &eval_args, env, None);
                     } else if name_str == "Set" {
                         return crate::js_set::handle_set_constructor(mc, &eval_args, env, None);
                     } else if name_str == "ArrayBuffer" {

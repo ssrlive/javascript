@@ -4700,11 +4700,26 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         let mut is_shorthand_candidate = false;
                         // Track whether the property name was a computed name (e.g. `[expr]`)
                         let mut key_is_computed = false;
-                        // Optional 'async' keyword indicates async concise method
+                        // Optional 'async' keyword indicates async concise method.
+                        // Only treat `async` as the modifier when the *next* meaningful
+                        // token starts a method name (identifier, `[`, `*`, or another
+                        // keyword-as-name).  If it is followed by `:`, `,`, `}`, `=`,
+                        // or `(`, then `async` itself is the property name (e.g.
+                        // `{ async: true }`, `{ async, ... }`, `{ async() {} }`).
                         let mut is_async_member = false;
                         if *index < tokens.len() && matches!(tokens[*index].token, Token::Async) {
-                            is_async_member = true;
-                            *index += 1; // consume 'async'
+                            let mut peek = *index + 1;
+                            while peek < tokens.len() && matches!(tokens[peek].token, Token::LineTerminator) {
+                                peek += 1;
+                            }
+                            let next_starts_method_name = peek < tokens.len()
+                                && (matches!(tokens[peek].token, Token::Identifier(_) | Token::LBracket | Token::Multiply)
+                                    || (tokens[peek].token.as_identifier_string().is_some()
+                                        && !matches!(tokens[peek].token, Token::Async)));
+                            if next_starts_method_name {
+                                is_async_member = true;
+                                *index += 1; // consume 'async'
+                            }
                         }
                         // Optional '*' indicates generator concise method
                         let mut is_generator = false;
@@ -6327,6 +6342,11 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
             } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
                 *index += 1;
                 key_name = Some(utf16_to_utf8(&s));
+            } else if let Some(name) = tokens.get(*index).and_then(|t| t.token.as_identifier_string()) {
+                // Allow keyword tokens (async, yield, get, set, etc.) as property keys in destructuring
+                *index += 1;
+                key_name = Some(name);
+                is_identifier_key = true;
             } else {
                 log::trace!("expected property key but got {:?}", tokens.get(*index));
                 return Err(raise_parse_error_at!(tokens.get(*index)));

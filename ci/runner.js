@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const {spawnSync, spawn} = require('child_process');
-const {composeTest, extractMeta, parseList, hasFlag} = require('./compose_test');
+const {composeTest, extractMeta, parseList, hasFlag, referencesAssert} = require('./compose_test');
 
 const REPO_DIR = path.resolve(__dirname, '..', '..', 'test262');
 const RESULTS_FILE = 'test262-results.log';
@@ -346,16 +346,18 @@ async function runAll(){
       if (unsupported) continue;
     }
 
+    // Read test source once and reuse for all checks below
+    const testSrc = fs.readFileSync(f, 'utf8');
+
     // fast skip for Intl
     if (/features:/.test(meta) && /Intl/.test(meta)) { skip++; log(`SKIP (feature: Intl) ${f}`); continue; }
-    if (/\bIntl\b/.test(fs.readFileSync(f,'utf8'))) { skip++; log(`SKIP (contains Intl) ${f}`); continue; }
+    if (/\bIntl\b/.test(testSrc)) { skip++; log(`SKIP (contains Intl) ${f}`); continue; }
 
     // Detect tests that require $262.agent (multi-threaded worker support)
-    const _agentSrc = fs.readFileSync(f, 'utf8');
-    const needsAgent = /\$262\.agent\b/.test(_agentSrc);
+    const needsAgent = /\$262\.agent\b/.test(testSrc);
 
     // handle includes
-    const includes = parseIncludes(meta);
+    const includes = parseList(meta, 'includes');
     let resolved_includes = [];
     let missing=false;
     if (includes.length>0){
@@ -390,32 +392,7 @@ async function runAll(){
         resolved_includes.push(incPath);
       }
 
-      // if test references assert but none of the includes supply it, add assert
-      if (/\bassert\b/.test(fs.readFileSync(f,'utf8'))){
-        let have_assert=false;
-        for (const p of resolved_includes){ if (p && (/function\s+assert|var\s+assert/.test(fs.readFileSync(p,'utf8')) || /defines:\s*\[[^\]]*\bassert\b/.test(extractMeta(p)) )) { have_assert=true; break; } }
-        if (!have_assert && HARNESS_INDEX['assert.js']){
-          const sta = HARNESS_INDEX['sta.js'];
-          if (sta) resolved_includes.unshift(sta);
-          resolved_includes.unshift(HARNESS_INDEX['assert.js']);
-        }
-      }
-
       if (missing){ skip++; log(`SKIP (missing-include) ${f}`); continue; }
-    }
-
-    // For ALL tests (including those without explicit includes), ensure assert.js/sta.js
-    // are prepended if the test source references `assert` or `Test262Error`.
-    {
-      const src = fs.readFileSync(f, 'utf8');
-      if (/\bassert\b/.test(src) || /\bTest262Error\b/.test(src)) {
-        let have_assert = resolved_includes.some(p => p && path.basename(p) === 'assert.js');
-        if (!have_assert && HARNESS_INDEX['assert.js']) {
-          const sta = HARNESS_INDEX['sta.js'];
-          if (sta && !resolved_includes.some(p => p && path.basename(p) === 'sta.js')) resolved_includes.unshift(sta);
-          resolved_includes.unshift(HARNESS_INDEX['assert.js']);
-        }
-      }
     }
 
     // async flag handling
@@ -564,13 +541,6 @@ async function runAll(){
     process.exit(1);
   }
   process.exit(0);
-}
-
-function parseIncludes(meta){
-  const re = /includes:\s*\[(.*?)\]/s;
-  const m = meta.match(re);
-  if (!m) return [];
-  return m[1].split(',').map(s=>s.trim().replace(/^['\"]|['\"]$/g,'')).filter(Boolean);
 }
 
 runAll();

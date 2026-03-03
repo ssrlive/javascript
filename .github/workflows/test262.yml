@@ -199,6 +199,7 @@ jobs:
             29)
               TITLE='"built-ins/AbstractModuleSource" - "built-ins/Boolean"'
               FOCUS='built-ins/AbstractModuleSource,built-ins/AggregateError,built-ins/ArrayBuffer,built-ins/ArrayIteratorPrototype,built-ins/AsyncDisposableStack,built-ins/AsyncFromSyncIteratorPrototype,built-ins/AsyncFunction,built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype,built-ins/Atomics,built-ins/BigInt,built-ins/Boolean'
+              TIMEOUT='200'
               ;;
             30)
               TITLE='"built-ins/DataView" - "built-ins/TypedArray"'

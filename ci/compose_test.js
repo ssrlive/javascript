@@ -41,13 +41,6 @@ function references262(filePath) {
   return /\$262\b/.test(src);
 }
 
-function definesAssertInFile(filePath) {
-  if (!fs.existsSync(filePath)) return false;
-  const src = fs.readFileSync(filePath, 'utf8');
-  const defines = parseList(extractMeta(filePath), 'defines');
-  return /function\s+assert\b|var\s+assert\b|assert\._isSameValue/.test(src) || defines.includes('assert');
-}
-
 function ensureArrayDistinct(arr) {
   const seen = new Set();
   const out = [];
@@ -87,7 +80,7 @@ function mirrorSiblingModuleFiles(testPath, targetDir) {
   }
 }
 
-const realmFeatureName = ['cross', 'realm'].join('-');
+const realmFeatureName = 'cross-realm';
 const realmMarker = '// Inject: unified $262 shim - idempotent';
 function get262StubLines() {
   // Minimal, idempotent $262 shim with createRealm support
@@ -254,8 +247,8 @@ function get262StubLines() {
   ];
 }
 
-function inject262Shim(outLines, testPath, meta, prependFiles = []) {
-  let need262Shim = references262(testPath) || hasFeature(meta, realmFeatureName);
+function inject262Shim(outLines, testPath, meta, prependFiles = [], needsAgent = false) {
+  let need262Shim = references262(testPath) || hasFeature(meta, realmFeatureName) || needsAgent;
   if (!need262Shim) {
     for (const p of prependFiles) {
       if (p && fs.existsSync(p) && references262(p)) {
@@ -368,10 +361,12 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   // Write unique prepends
   PREPEND_FILES = ensureArrayDistinct(PREPEND_FILES);
 
+  const meta = extractMeta(testPath);
+  inject262Shim(outLines, testPath, meta, PREPEND_FILES, needsAgent);
+
   // Inject $262.agent shim BEFORE harness files (atomicsHelper.js extends $262.agent)
   if (needsAgent) {
     outLines.push('// Inject: $262.agent shim for multi-agent tests');
-    outLines.push('if (typeof $262 === "undefined") { var $262 = {}; }');
     outLines.push('if (!$262.agent) { $262.agent = {}; }');
     outLines.push('$262.agent.start = function(script) { __agent_start(script); };');
     outLines.push('$262.agent.broadcast = function(sab) {');
@@ -417,9 +412,6 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push('}');
   outLines.push('');
 
-  const meta = extractMeta(testPath);
-  inject262Shim(outLines, testPath, meta, PREPEND_FILES);
-
   // Ensure dynamic import resolves relative to the original test file path,
   // not the composed file path. Only inject when the test actually
   // contains an import (either a static `import` declaration or dynamic
@@ -445,55 +437,6 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
 
   fs.writeFileSync(tmpName, outLines.join('\n'));
   mirrorSiblingModuleFiles(testPath, composed.tmpDir);
-
-  // verify assert was injected if test references assert
-  if (referencesAssert(testPath) && !definesAssertInFile(tmpName)) {
-    // rebuild ensuring sta/assert at top while preserving other PREPEND_FILES
-    const fixedComposed = createComposedTarget(testPath);
-    const fixedTmp = fixedComposed.tmpPath;
-    const lines2 = [];
-    if (needStrict) {
-      lines2.push('"use strict";');
-      lines2.push('');
-    }
-    const assertPath = harnessIndex['assert.js'];
-    const staPath = harnessIndex['sta.js'];
-    const fixedPrepend = [];
-    if (staPath) fixedPrepend.push(staPath);
-    if (assertPath) fixedPrepend.push(assertPath);
-    for (const p of PREPEND_FILES) {
-      if (!p) continue;
-      const b = path.basename(p);
-      if (!fixedPrepend.some(q => path.basename(q) === b)) fixedPrepend.push(p);
-    }
-    const fixedUnique = ensureArrayDistinct(fixedPrepend);
-    for (const p of fixedUnique) {
-      if (!p) continue;
-      const absP = path.resolve(p);
-      lines2.push(`// Inject: ${absP}`);
-      lines2.push(fs.readFileSync(p, 'utf8'));
-      lines2.push('');
-    }
-
-    lines2.push('// Inject: expose common harness helpers on globalThis for imported modules');
-    lines2.push('if (typeof globalThis !== "undefined") {');
-    lines2.push('  if (typeof assert !== "undefined" && typeof globalThis.assert === "undefined") globalThis.assert = assert;');
-    lines2.push('  if (typeof Test262Error !== "undefined" && typeof globalThis.Test262Error === "undefined") globalThis.Test262Error = Test262Error;');
-    lines2.push('  if (typeof $DONE !== "undefined" && typeof globalThis.$DONE === "undefined") globalThis.$DONE = $DONE;');
-    lines2.push('}');
-    lines2.push('');
-
-    // Inject unified $262 shim into the rebuilt file when required by test/meta
-    const metaFixed = extractMeta(testPath);
-    inject262Shim(lines2, testPath, metaFixed, [], needsAgent);
-
-    const absTest = path.resolve(testPath);
-    lines2.push(`// Inject: ${absTest}`);
-    lines2.push(fs.readFileSync(testPath, 'utf8'));
-    fs.writeFileSync(fixedTmp, lines2.join('\n'));
-    mirrorSiblingModuleFiles(testPath, fixedComposed.tmpDir);
-    return {testToRun: fixedTmp, tmpPath: fixedTmp, cleanupTmp: true};
-  }
 
   return {testToRun: tmpName, tmpPath: tmpName, cleanupTmp: true};
 }

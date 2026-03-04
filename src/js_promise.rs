@@ -3966,16 +3966,14 @@ pub fn handle_promise_static_method_val<'gc>(
                 && get_promise_from_js_object(obj).is_some()
             {
                 // Check if val.constructor === C
-                if let Some(ctor_rc) = object_get_key_value(obj, "constructor") {
-                    let ctor_val = ctor_rc.borrow().normalize_slot();
-                    // Use referential equality for objects
-                    let same = match (&ctor_val, c) {
-                        (Value::Object(a), Value::Object(b)) => std::ptr::eq(&*a.borrow() as *const _, &*b.borrow() as *const _),
-                        _ => false,
-                    };
-                    if same {
-                        return Ok(val.clone());
-                    }
+                let ctor_val = crate::core::get_property_with_accessors(mc, env, obj, "constructor")?;
+                // Use referential equality for objects
+                let same = match (&ctor_val, c) {
+                    (Value::Object(a), Value::Object(b)) => std::ptr::eq(&*a.borrow() as *const _, &*b.borrow() as *const _),
+                    _ => false,
+                };
+                if same {
+                    return Ok(val.clone());
                 }
             }
 

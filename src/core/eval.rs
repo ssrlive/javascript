@@ -20361,6 +20361,14 @@ pub fn call_native_function<'gc>(
         return Ok(Some(crate::js_async_generator::__internal_async_gen_yield_reject(mc, args, env)?));
     }
 
+    if name == "__internal_async_gen_return_resolve" {
+        return Ok(Some(crate::js_async_generator::__internal_async_gen_return_resolve(mc, args, env)?));
+    }
+
+    if name == "__internal_async_gen_return_reject" {
+        return Ok(Some(crate::js_async_generator::__internal_async_gen_return_reject(mc, args, env)?));
+    }
+
     if name == "__internal_async_gen_await_resolve" {
         return Ok(Some(crate::js_async_generator::__internal_async_gen_await_resolve(mc, args, env)?));
     }

@@ -449,6 +449,25 @@ impl<'gc> VM<'gc> {
                 Some(Value::Number(n)) => Value::Boolean(n.is_finite() && *n == n.trunc() && n.abs() <= 9007199254740991.0),
                 _ => Value::Boolean(false),
             },
+            // Error constructors called as functions (without `new`) — still create error objects
+            BUILTIN_CTOR_ERROR
+            | BUILTIN_CTOR_TYPEERROR
+            | BUILTIN_CTOR_SYNTAXERROR
+            | BUILTIN_CTOR_RANGEERROR
+            | BUILTIN_CTOR_REFERENCEERROR => {
+                let type_name = match id {
+                    BUILTIN_CTOR_TYPEERROR => "TypeError",
+                    BUILTIN_CTOR_SYNTAXERROR => "SyntaxError",
+                    BUILTIN_CTOR_RANGEERROR => "RangeError",
+                    BUILTIN_CTOR_REFERENCEERROR => "ReferenceError",
+                    _ => "Error",
+                };
+                let msg = args.first().map(|v| self.vm_to_string(v)).unwrap_or_default();
+                let mut map = IndexMap::new();
+                map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(type_name)));
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
             _ => {
                 log::warn!("Unknown builtin ID: {}", id);
                 Value::Undefined
@@ -1736,6 +1755,10 @@ impl<'gc> VM<'gc> {
                             // Object without __type__: instanceof Object = true
                             ctor_str == "Object"
                         }
+                    } else if ctor_str == "Function" {
+                        // VmNativeFunction / VmFunction are instances of Function
+                        matches!(&lhs, Value::VmNativeFunction(_) | Value::VmFunction(..))
+                            || matches!(&lhs, Value::VmObject(m) if m.borrow().contains_key("__native_id__"))
                     } else {
                         false
                     };

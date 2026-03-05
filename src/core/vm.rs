@@ -253,11 +253,28 @@ impl<'gc> VM<'gc> {
         self.globals.insert("undefined".to_string(), Value::Undefined);
     }
 
+    /// Convert a value to string, calling toString() on VmObjects if available
+    fn vm_to_string(&mut self, val: &Value<'gc>) -> String {
+        if let Value::VmObject(map) = val {
+            let ts = map.borrow().get("toString").cloned();
+            if let Some(Value::VmFunction(ip, _arity)) = ts {
+                let result = self.call_vm_function(ip, &[]);
+                return value_to_string(&result);
+            }
+            // Check __value__ for wrapper objects (e.g. new String("abc"))
+            let inner = map.borrow().get("__value__").cloned();
+            if let Some(v) = inner {
+                return value_to_string(&v);
+            }
+        }
+        value_to_string(val)
+    }
+
     /// Execute a native/built-in function
     fn call_builtin(&mut self, id: u8, args: Vec<Value<'gc>>) -> Value<'gc> {
         match id {
             BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
-                let parts: Vec<String> = args.iter().map(|v| value_to_string(v)).collect();
+                let parts: Vec<String> = args.iter().map(|v| self.vm_to_string(v)).collect();
                 let msg = parts.join(" ");
                 self.output.push(msg.clone());
                 // Match existing console behavior: print to stdout
@@ -406,7 +423,10 @@ impl<'gc> VM<'gc> {
             }
             // String() as function: convert argument to string
             BUILTIN_CTOR_STRING => {
-                let s = args.first().map(value_to_string).unwrap_or_default();
+                let s = match args.first() {
+                    Some(v) => self.vm_to_string(v),
+                    None => String::new(),
+                };
                 Value::String(crate::unicode::utf8_to_utf16(&s))
             }
             // Number.isNaN: strict check (no coercion)
@@ -1079,6 +1099,8 @@ impl<'gc> VM<'gc> {
                 Opcode::Add => {
                     let b = self.stack.pop().expect("VM Stack underflow on Add (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Add (a)");
+                    let is_a_str = matches!(&a, Value::String(_));
+                    let is_b_str = matches!(&b, Value::String(_));
                     match (&a, &b) {
                         (Value::Number(a_num), Value::Number(b_num)) => {
                             self.stack.push(Value::Number(a_num + b_num));
@@ -1089,17 +1111,11 @@ impl<'gc> VM<'gc> {
                             result.extend_from_slice(b_str);
                             self.stack.push(Value::String(result));
                         }
-                        // Mixed: coerce to string
-                        (Value::String(a_str), _) => {
-                            let b_s = crate::unicode::utf8_to_utf16(&value_to_string(&b));
-                            let mut result = a_str.clone();
-                            result.extend_from_slice(&b_s);
-                            self.stack.push(Value::String(result));
-                        }
-                        (_, Value::String(b_str)) => {
-                            let a_s = crate::unicode::utf8_to_utf16(&value_to_string(&a));
-                            let mut result = a_s;
-                            result.extend_from_slice(b_str);
+                        _ if is_a_str || is_b_str => {
+                            let a_s = self.vm_to_string(&a);
+                            let b_s = self.vm_to_string(&b);
+                            let mut result = crate::unicode::utf8_to_utf16(&a_s);
+                            result.extend_from_slice(&crate::unicode::utf8_to_utf16(&b_s));
                             self.stack.push(Value::String(result));
                         }
                         _ => {

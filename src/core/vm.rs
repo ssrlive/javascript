@@ -150,11 +150,30 @@ impl<'gc> VM<'gc> {
                 Opcode::Add => {
                     let b = self.stack.pop().expect("VM Stack underflow on Add (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Add (a)");
-                    match (a, b) {
+                    match (&a, &b) {
                         (Value::Number(a_num), Value::Number(b_num)) => {
                             self.stack.push(Value::Number(a_num + b_num));
                         }
-                        _ => return Err("Only numbers supported in VM Add".to_string()),
+                        // String concatenation
+                        (Value::String(a_str), Value::String(b_str)) => {
+                            let mut result = a_str.clone();
+                            result.extend_from_slice(b_str);
+                            self.stack.push(Value::String(result));
+                        }
+                        // Mixed: coerce to string
+                        (Value::String(a_str), _) => {
+                            let b_s = crate::unicode::utf8_to_utf16(&value_to_string(&b));
+                            let mut result = a_str.clone();
+                            result.extend_from_slice(&b_s);
+                            self.stack.push(Value::String(result));
+                        }
+                        (_, Value::String(b_str)) => {
+                            let a_s = crate::unicode::utf8_to_utf16(&value_to_string(&a));
+                            let mut result = a_s;
+                            result.extend_from_slice(b_str);
+                            self.stack.push(Value::String(result));
+                        }
+                        _ => return Err("Unsupported types in VM Add".to_string()),
                     }
                 }
                 Opcode::Sub => {
@@ -217,7 +236,111 @@ impl<'gc> VM<'gc> {
                         (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
                             self.stack.push(Value::Boolean(a_bool == b_bool));
                         }
-                        _ => self.stack.push(Value::Boolean(false)), // Strict equal for diff types in this demo
+                        (Value::String(ref a_s), Value::String(ref b_s)) => {
+                            self.stack.push(Value::Boolean(a_s == b_s));
+                        }
+                        (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined)
+                        | (Value::Null, Value::Undefined) | (Value::Undefined, Value::Null) => {
+                            self.stack.push(Value::Boolean(true));
+                        }
+                        _ => self.stack.push(Value::Boolean(false)),
+                    }
+                }
+                Opcode::NotEqual => {
+                    let b = self.stack.pop().expect("VM Stack underflow");
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Boolean(a_num != b_num));
+                        }
+                        (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
+                            self.stack.push(Value::Boolean(a_bool != b_bool));
+                        }
+                        (Value::String(ref a_s), Value::String(ref b_s)) => {
+                            self.stack.push(Value::Boolean(a_s != b_s));
+                        }
+                        (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined)
+                        | (Value::Null, Value::Undefined) | (Value::Undefined, Value::Null) => {
+                            self.stack.push(Value::Boolean(false));
+                        }
+                        _ => self.stack.push(Value::Boolean(true)),
+                    }
+                }
+                Opcode::StrictNotEqual => {
+                    let b = self.stack.pop().expect("VM Stack underflow");
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Boolean(a_num != b_num));
+                        }
+                        (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
+                            self.stack.push(Value::Boolean(a_bool != b_bool));
+                        }
+                        (Value::String(ref a_s), Value::String(ref b_s)) => {
+                            self.stack.push(Value::Boolean(a_s != b_s));
+                        }
+                        _ => self.stack.push(Value::Boolean(true)),
+                    }
+                }
+                Opcode::LessEqual => {
+                    let b = self.stack.pop().expect("VM Stack underflow");
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Boolean(a_num <= b_num));
+                        }
+                        _ => self.stack.push(Value::Boolean(false)),
+                    }
+                }
+                Opcode::GreaterEqual => {
+                    let b = self.stack.pop().expect("VM Stack underflow");
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Boolean(a_num >= b_num));
+                        }
+                        _ => self.stack.push(Value::Boolean(false)),
+                    }
+                }
+                Opcode::Mod => {
+                    let b = self.stack.pop().expect("VM Stack underflow");
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Number(a_num % b_num));
+                        }
+                        _ => return Err("Only numbers supported in VM Mod".to_string()),
+                    }
+                }
+                Opcode::Negate => {
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match a {
+                        Value::Number(n) => self.stack.push(Value::Number(-n)),
+                        _ => self.stack.push(Value::Number(f64::NAN)),
+                    }
+                }
+                Opcode::Not => {
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    self.stack.push(Value::Boolean(!a.to_truthy()));
+                }
+                Opcode::TypeOf => {
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    let type_str = match &a {
+                        Value::Number(_) => "number",
+                        Value::String(_) => "string",
+                        Value::Boolean(_) => "boolean",
+                        Value::Undefined => "undefined",
+                        Value::Null => "object",
+                        Value::VmFunction(..) | Value::Closure(..) | Value::Function(..) => "function",
+                        _ => "object",
+                    };
+                    self.stack.push(Value::String(crate::unicode::utf8_to_utf16(type_str)));
+                }
+                Opcode::JumpIfTrue => {
+                    let offset = self.read_u16();
+                    let val = self.stack.pop().unwrap_or(Value::Undefined);
+                    if val.to_truthy() {
+                        self.ip = offset as usize;
                     }
                 }
             }

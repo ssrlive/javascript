@@ -5,6 +5,7 @@ use crate::Value;
 pub struct Compiler<'gc> {
     chunk: Chunk<'gc>,
     locals: Vec<String>,
+    scope_depth: i32, // 0 = top-level (global), > 0 = inside function
 }
 
 impl<'gc> Compiler<'gc> {
@@ -12,6 +13,7 @@ impl<'gc> Compiler<'gc> {
         Self {
             chunk: Chunk::new(),
             locals: Vec::new(),
+            scope_depth: 0,
         }
     }
 
@@ -65,20 +67,23 @@ impl<'gc> Compiler<'gc> {
                     if let Some(init) = init_opt {
                         self.compile_expr(init)?;
                     } else {
-                        // Normally Push Undefined, but for now we push constant Undefined 
-                        // Wait, creating a Constant pool entry for Undefined is fine.
                         let idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_byte(idx);
                     }
-                    
-                    let name_u16 = crate::unicode::utf8_to_utf16(name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::DefineGlobal);
-                    self.chunk.write_byte(name_idx);
+
+                    if self.scope_depth > 0 {
+                        // Inside a function: value stays on stack as a local slot
+                        self.locals.push(name.clone());
+                    } else {
+                        // Top-level: define as global
+                        let name_u16 = crate::unicode::utf8_to_utf16(name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_byte(name_idx);
+                    }
                 }
                 if is_last {
-                    // Statements don't return values usually, but REPL likes Undefined
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_byte(idx);
@@ -159,8 +164,10 @@ impl<'gc> Compiler<'gc> {
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
 
-                // Save and reset locals for function scope
+                // Save and reset locals/scope for function scope
                 let old_locals = std::mem::take(&mut self.locals);
+                let old_depth = self.scope_depth;
+                self.scope_depth = 1;
                 for param in params {
                     if let crate::core::statement::DestructuringElement::Variable(param_name, _) = param {
                         self.locals.push(param_name.clone());
@@ -179,6 +186,7 @@ impl<'gc> Compiler<'gc> {
 
                 self.patch_jump(jump_over);
                 self.locals = old_locals;
+                self.scope_depth = old_depth;
 
                 // Push the VmFunction value and define it as a global
                 let func_val = Value::VmFunction(func_ip, params.len() as u8);
@@ -202,6 +210,26 @@ impl<'gc> Compiler<'gc> {
                 let constant_index = self.chunk.add_constant(Value::Number(*n));
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_byte(constant_index);
+            }
+            Expr::StringLit(s) => {
+                let idx = self.chunk.add_constant(Value::String(s.clone()));
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_byte(idx);
+            }
+            Expr::Boolean(b) => {
+                let idx = self.chunk.add_constant(Value::Boolean(*b));
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_byte(idx);
+            }
+            Expr::Null => {
+                let idx = self.chunk.add_constant(Value::Null);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_byte(idx);
+            }
+            Expr::Undefined => {
+                let idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_byte(idx);
             }
             Expr::Var(name, ..) => {
                 if let Some(pos) = self.locals.iter().position(|l| l == name) {
@@ -240,11 +268,17 @@ impl<'gc> Compiler<'gc> {
                     BinaryOp::Add => self.chunk.write_opcode(Opcode::Add),
                     BinaryOp::Sub => self.chunk.write_opcode(Opcode::Sub),
                     BinaryOp::Mul => self.chunk.write_opcode(Opcode::Mul),
-                    BinaryOp::Div => self.chunk.write_opcode(Opcode::Div),                    BinaryOp::LessThan => self.chunk.write_opcode(Opcode::LessThan),
+                    BinaryOp::Div => self.chunk.write_opcode(Opcode::Div),
+                    BinaryOp::Mod => self.chunk.write_opcode(Opcode::Mod),
+                    BinaryOp::LessThan => self.chunk.write_opcode(Opcode::LessThan),
                     BinaryOp::GreaterThan => self.chunk.write_opcode(Opcode::GreaterThan),
+                    BinaryOp::LessEqual => self.chunk.write_opcode(Opcode::LessEqual),
+                    BinaryOp::GreaterEqual => self.chunk.write_opcode(Opcode::GreaterEqual),
                     BinaryOp::Equal => self.chunk.write_opcode(Opcode::Equal),
-                    BinaryOp::StrictEqual => self.chunk.write_opcode(Opcode::Equal), // rough approximation for demo                    // We can add other opcodes easily later
-                    _ => return Err(format!("UnimplementedbinaryoperatorforVM")),
+                    BinaryOp::StrictEqual => self.chunk.write_opcode(Opcode::Equal),
+                    BinaryOp::NotEqual => self.chunk.write_opcode(Opcode::NotEqual),
+                    BinaryOp::StrictNotEqual => self.chunk.write_opcode(Opcode::StrictNotEqual),
+                    _ => return Err(format!("Unimplemented binary operator for VM: {:?}", op)),
                 }
             }
             Expr::Call(callee, args) => {
@@ -254,6 +288,52 @@ impl<'gc> Compiler<'gc> {
                 }
                 self.chunk.write_opcode(Opcode::Call);
                 self.chunk.write_byte(args.len() as u8);
+            }
+            // Unary operators
+            Expr::UnaryNeg(inner) => {
+                self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::Negate);
+            }
+            Expr::LogicalNot(inner) => {
+                self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::Not);
+            }
+            Expr::UnaryPlus(inner) => {
+                // +x is just coerce to number, for now just compile inner
+                self.compile_expr(inner)?;
+            }
+            Expr::TypeOf(inner) => {
+                self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::TypeOf);
+            }
+            // Logical operators (short-circuit)
+            Expr::LogicalAnd(left, right) => {
+                // Evaluate left; if falsy, short-circuit (keep left value)
+                self.compile_expr(left)?;
+                let end_jump = self.emit_jump(Opcode::JumpIfFalse);
+                // Left was truthy, discard it and evaluate right
+                self.compile_expr(right)?;
+                let skip = self.emit_jump(Opcode::Jump);
+                self.patch_jump(end_jump);
+                // Left was falsy, push false
+                let idx = self.chunk.add_constant(Value::Boolean(false));
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_byte(idx);
+                self.patch_jump(skip);
+            }
+            Expr::LogicalOr(left, right) => {
+                // Evaluate left; if truthy, short-circuit (keep left value)
+                self.compile_expr(left)?;
+                let end_jump = self.emit_jump(Opcode::JumpIfTrue);
+                // Left was falsy, discard it and evaluate right
+                self.compile_expr(right)?;
+                let skip = self.emit_jump(Opcode::Jump);
+                self.patch_jump(end_jump);
+                // Left was truthy, push true
+                let idx = self.chunk.add_constant(Value::Boolean(true));
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_byte(idx);
+                self.patch_jump(skip);
             }
             _ => return Err(format!("Unimplemented expression type for VM: {:?}", expr)),
         }

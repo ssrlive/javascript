@@ -42,6 +42,8 @@ pub enum Opcode {
     SetupTry = 36,
     TeardownTry = 37,
     GetThis = 38,
+    GetKeys = 39,   // pop object, push array of its string keys
+    GetMethod = 40, // peek object (keep on stack), push method value on top
 }
 
 impl From<u8> for Opcode {
@@ -86,6 +88,8 @@ impl From<u8> for Opcode {
             36 => Opcode::SetupTry,
             37 => Opcode::TeardownTry,
             38 => Opcode::GetThis,
+            39 => Opcode::GetKeys,
+            40 => Opcode::GetMethod,
             _ => panic!("Unknown opcode: {}", byte),
         }
     }

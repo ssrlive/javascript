@@ -8,10 +8,10 @@ use crate::{
     },
     raise_range_error, raise_type_error,
 };
+use indexmap::IndexMap;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -1161,7 +1161,7 @@ pub enum Value<'gc> {
     Function(String),
     VmFunction(usize, u8), // (ip, arg_count)
     VmArray(Rc<RefCell<Vec<Value<'gc>>>>),
-    VmObject(Rc<RefCell<HashMap<String, Value<'gc>>>>),
+    VmObject(Rc<RefCell<IndexMap<String, Value<'gc>>>>),
     VmNativeFunction(u8), // builtin ID
 
     Closure(Gc<'gc, ClosureData<'gc>>),

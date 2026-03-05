@@ -195,4 +195,210 @@ function buildAndSum(n) {
 // sum of squares 0..9 = 0+1+4+9+16+25+36+49+64+81 = 285
 assert(buildAndSum(10) === 285, "sum of squares 0..9 = 285");
 
-console.log("=== All VM smoke tests passed! ===");
+// ============================================================
+// TIER 4: const, break/continue, do-while, for-in,
+//         arrow functions, string/array methods, JSON
+// ============================================================
+
+// === 21. const ===
+const PI = 3.14;
+assert(PI === 3.14, "const PI");
+const GREETING = "hello";
+assert(GREETING === "hello", "const string");
+
+// === 22. break ===
+var breakSum = 0;
+for (var i = 0; i < 100; i++) {
+  if (i >= 5) break;
+  breakSum = breakSum + i;
+}
+assert(breakSum === 10, "break exits loop at i=5");
+
+// === 23. continue ===
+var contSum = 0;
+for (var i = 0; i < 10; i++) {
+  if (i % 2 === 0) continue;
+  contSum = contSum + i;
+}
+assert(contSum === 25, "continue skips even, sum odd 1..9=25");
+
+// === 24. do-while ===
+var dw = 0;
+var dwCount = 0;
+do {
+  dw = dw + dwCount;
+  dwCount = dwCount + 1;
+} while (dwCount < 5);
+assert(dw === 10, "do-while sum 0..4=10");
+
+// body executes at least once even when condition is false
+var dwOnce = 0;
+do {
+  dwOnce = 42;
+} while (false);
+assert(dwOnce === 42, "do-while runs at least once");
+
+// === 25. for-in ===
+var obj = { a: 1, b: 2, c: 3 };
+var keys = "";
+for (var k in obj) {
+  keys = keys + k;
+}
+// key order is insertion order for string keys
+assert(keys === "abc", "for-in iterates object keys");
+
+var forInSum = 0;
+for (var k in obj) {
+  forInSum = forInSum + obj[k];
+}
+assert(forInSum === 6, "for-in access values");
+
+// === 26. arrow functions ===
+var double = (x) => x * 2;
+assert(double(5) === 10, "arrow fn expression body");
+
+var add = (a, b) => { return a + b; };
+assert(add(3, 4) === 7, "arrow fn block body");
+
+var zero = () => 0;
+assert(zero() === 0, "arrow fn no args");
+
+// === 27. Array.push / Array.pop ===
+var arr2 = [10, 20];
+arr2.push(30);
+assert(arr2.length === 3, "push increases length");
+assert(arr2[2] === 30, "push adds element");
+
+var popped = arr2.pop();
+assert(popped === 30, "pop returns last");
+assert(arr2.length === 2, "pop decreases length");
+
+// === 28. Array.join ===
+var joined = [1, 2, 3].join("-");
+assert(joined === "1-2-3", "array join with separator");
+
+var joined2 = ["a", "b", "c"].join("");
+assert(joined2 === "abc", "array join empty sep");
+
+// === 29. Array.indexOf ===
+var idx = [10, 20, 30, 40].indexOf(30);
+assert(idx === 2, "array indexOf found");
+
+var idx2 = [10, 20, 30].indexOf(99);
+assert(idx2 === -1, "array indexOf not found");
+
+// === 30. Array.slice ===
+var sl = [1, 2, 3, 4, 5].slice(1, 3);
+assert(sl.length === 2, "slice length");
+assert(sl[0] === 2, "slice[0]");
+assert(sl[1] === 3, "slice[1]");
+
+// === 31. Array.concat ===
+var c = [1, 2].concat([3, 4]);
+assert(c.length === 4, "concat length");
+assert(c[2] === 3, "concat[2]");
+assert(c[3] === 4, "concat[3]");
+
+// === 32. Array.map ===
+var mapped = [1, 2, 3].map((x) => x * 10);
+assert(mapped.length === 3, "map length");
+assert(mapped[0] === 10, "map[0]");
+assert(mapped[1] === 20, "map[1]");
+assert(mapped[2] === 30, "map[2]");
+
+// === 33. Array.filter ===
+var filtered = [1, 2, 3, 4, 5, 6].filter((x) => x % 2 === 0);
+assert(filtered.length === 3, "filter length");
+assert(filtered[0] === 2, "filter[0]");
+assert(filtered[1] === 4, "filter[1]");
+
+// === 34. Array.forEach ===
+var feSum = 0;
+[10, 20, 30].forEach((x) => { feSum = feSum + x; });
+assert(feSum === 60, "forEach sum");
+
+// === 35. Array.reduce ===
+var reduced = [1, 2, 3, 4].reduce((acc, x) => acc + x, 0);
+assert(reduced === 10, "reduce sum");
+
+// === 36. String.toUpperCase / toLowerCase ===
+assert("hello".toUpperCase() === "HELLO", "toUpperCase");
+assert("WORLD".toLowerCase() === "world", "toLowerCase");
+
+// === 37. String.trim ===
+assert("  hi  ".trim() === "hi", "trim");
+
+// === 38. String.includes ===
+assert("hello world".includes("world") === true, "includes found");
+assert("hello world".includes("xyz") === false, "includes not found");
+
+// === 39. String.indexOf ===
+assert("abcdef".indexOf("cd") === 2, "string indexOf found");
+assert("abcdef".indexOf("zz") === -1, "string indexOf not found");
+
+// === 40. String.startsWith / endsWith ===
+assert("hello".startsWith("hel") === true, "startsWith true");
+assert("hello".startsWith("xyz") === false, "startsWith false");
+assert("hello".endsWith("llo") === true, "endsWith true");
+assert("hello".endsWith("xyz") === false, "endsWith false");
+
+// === 41. String.slice ===
+assert("abcdef".slice(1, 4) === "bcd", "string slice");
+
+// === 42. String.split ===
+var parts = "a,b,c".split(",");
+assert(parts.length === 3, "split length");
+assert(parts[0] === "a", "split[0]");
+assert(parts[1] === "b", "split[1]");
+assert(parts[2] === "c", "split[2]");
+
+// === 43. String.charAt ===
+assert("hello".charAt(1) === "e", "charAt");
+
+// === 44. String.replace ===
+assert("hello world".replace("world", "JS") === "hello JS", "replace");
+
+// === 45. String.substring ===
+assert("abcdef".substring(2, 5) === "cde", "substring");
+
+// === 46. JSON.stringify ===
+assert(JSON.stringify(42) === "42", "JSON.stringify number");
+assert(JSON.stringify("hi") === "\"hi\"", "JSON.stringify string");
+assert(JSON.stringify(true) === "true", "JSON.stringify bool");
+assert(JSON.stringify(null) === "null", "JSON.stringify null");
+
+// === 47. JSON.parse ===
+assert(JSON.parse("42") === 42, "JSON.parse number");
+assert(JSON.parse("true") === true, "JSON.parse bool");
+assert(JSON.parse("null") === null, "JSON.parse null");
+assert(JSON.parse("\"hi\"") === "hi", "JSON.parse string");
+
+// === 48. Array.isArray ===
+assert(Array.isArray([1, 2]) === true, "isArray true");
+assert(Array.isArray(42) === false, "isArray false");
+
+// === 49. Nested method calls ===
+var nested = [1, 2, 3].map((x) => x + 1).filter((x) => x > 2);
+assert(nested.length === 2, "chained map+filter length");
+assert(nested[0] === 3, "chained[0]");
+assert(nested[1] === 4, "chained[1]");
+
+// === 50. break in while ===
+var wBreak = 0;
+while (true) {
+  wBreak = wBreak + 1;
+  if (wBreak === 10) break;
+}
+assert(wBreak === 10, "break in while");
+
+// === 51. continue in while ===
+var wCont = 0;
+var wContI = 0;
+while (wContI < 10) {
+  wContI = wContI + 1;
+  if (wContI % 3 === 0) continue;
+  wCont = wCont + 1;
+}
+assert(wCont === 7, "continue in while skips multiples of 3");
+
+console.log("=== All VM smoke tests (Tier 1-4) passed! ===");

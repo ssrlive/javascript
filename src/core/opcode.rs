@@ -1,4 +1,4 @@
-use crate::Value;
+use crate::core::{JSError, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -44,11 +44,14 @@ pub enum Opcode {
     GetThis = 38,
     GetKeys = 39,   // pop object, push array of its string keys
     GetMethod = 40, // peek object (keep on stack), push method value on top
+    NewError = 41,  // pop message string, push VmObject { message }
 }
 
-impl From<u8> for Opcode {
-    fn from(byte: u8) -> Self {
-        match byte {
+impl TryFrom<u8> for Opcode {
+    type Error = JSError;
+
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
+        let v = match byte {
             0 => Opcode::Return,
             1 => Opcode::Constant,
             2 => Opcode::Add,
@@ -90,8 +93,10 @@ impl From<u8> for Opcode {
             38 => Opcode::GetThis,
             39 => Opcode::GetKeys,
             40 => Opcode::GetMethod,
-            _ => panic!("Unknown opcode: {}", byte),
-        }
+            41 => Opcode::NewError,
+            _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
+        };
+        Ok(v)
     }
 }
 

@@ -66,6 +66,9 @@ pub use opcode::*;
 pub mod vm;
 pub use vm::*;
 
+pub mod compiler;
+pub use compiler::*;
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct JsRoot<'gc> {
@@ -1155,17 +1158,10 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(script:
     // We can't really do string output exactly easily without gc for strings,
     // but we can compile and run to get a primitive value string.
     let compiler = Compiler::new();
-    let chunk = match compiler.compile(&statements) {
-        Ok(c) => c,
-        Err(e) => return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError { message: e })),
-    };
+    let chunk = compiler.compile(&statements)?;
 
     let mut vm = VM::new(chunk);
-    match vm.run() {
-        Ok(v) => Ok(value_to_string(&v)),
-        Err(e) => Err(crate::make_js_error!(crate::JSErrorKind::Throw(e))),
-    }
-}
+    let v = vm.run()?;
 
-pub mod compiler;
-pub use compiler::*;
+    Ok(value_to_string(&v))
+}

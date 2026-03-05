@@ -13,6 +13,35 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+/// Array storage with optional named properties (e.g. `arr.foo = "bar"`).
+#[derive(Clone)]
+pub struct VmArrayData<'gc> {
+    pub elements: Vec<Value<'gc>>,
+    pub props: IndexMap<String, Value<'gc>>,
+}
+
+impl<'gc> VmArrayData<'gc> {
+    pub fn new(elements: Vec<Value<'gc>>) -> Self {
+        Self {
+            elements,
+            props: IndexMap::new(),
+        }
+    }
+}
+
+impl<'gc> std::ops::Deref for VmArrayData<'gc> {
+    type Target = Vec<Value<'gc>>;
+    fn deref(&self) -> &Vec<Value<'gc>> {
+        &self.elements
+    }
+}
+
+impl<'gc> std::ops::DerefMut for VmArrayData<'gc> {
+    fn deref_mut(&mut self) -> &mut Vec<Value<'gc>> {
+        &mut self.elements
+    }
+}
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Collect)]
@@ -1160,7 +1189,7 @@ pub enum Value<'gc> {
     Object(JSObjectDataPtr<'gc>),
     Function(String),
     VmFunction(usize, u8), // (ip, arg_count)
-    VmArray(Rc<RefCell<Vec<Value<'gc>>>>),
+    VmArray(Rc<RefCell<VmArrayData<'gc>>>),
     VmObject(Rc<RefCell<IndexMap<String, Value<'gc>>>>),
     VmNativeFunction(u8), // builtin ID
 

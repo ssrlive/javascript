@@ -1,6 +1,6 @@
-use crate::Value;
 use crate::core::opcode::{Chunk, Opcode};
-use crate::core::value::value_to_string;
+use crate::core::value::{VmArrayData, value_to_string};
+use crate::core::{JSError, Value};
 use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -322,7 +322,7 @@ impl<'gc> VM<'gc> {
                         _ => len as usize,
                     };
                     let sliced: Vec<Value<'gc>> = if start < end { a[start..end].to_vec() } else { Vec::new() };
-                    return Value::VmArray(Rc::new(RefCell::new(sliced)));
+                    return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(sliced))));
                 }
                 BUILTIN_ARRAY_CONCAT => {
                     let mut result = arr.borrow().clone();
@@ -337,19 +337,19 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_MAP => {
                     if let Some(Value::VmFunction(ip, _arity)) = args.first() {
-                        let elements: Vec<Value<'gc>> = arr.borrow().clone();
+                        let elements = arr.borrow().elements.clone();
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
                             let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
                             result.push(r);
                         }
-                        return Value::VmArray(Rc::new(RefCell::new(result)));
+                        return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
                     }
-                    return Value::VmArray(Rc::new(RefCell::new(Vec::new())));
+                    return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(Vec::new()))));
                 }
                 BUILTIN_ARRAY_FILTER => {
                     if let Some(Value::VmFunction(ip, _arity)) = args.first() {
-                        let elements: Vec<Value<'gc>> = arr.borrow().clone();
+                        let elements = arr.borrow().elements.clone();
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
                             let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
@@ -357,13 +357,13 @@ impl<'gc> VM<'gc> {
                                 result.push(elem.clone());
                             }
                         }
-                        return Value::VmArray(Rc::new(RefCell::new(result)));
+                        return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
                     }
-                    return Value::VmArray(Rc::new(RefCell::new(Vec::new())));
+                    return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(Vec::new()))));
                 }
                 BUILTIN_ARRAY_FOREACH => {
                     if let Some(Value::VmFunction(ip, _arity)) = args.first() {
-                        let elements: Vec<Value<'gc>> = arr.borrow().clone();
+                        let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
                             self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
                         }
@@ -372,7 +372,7 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_REDUCE => {
                     if let Some(Value::VmFunction(ip, _arity)) = args.first() {
-                        let elements: Vec<Value<'gc>> = arr.borrow().clone();
+                        let elements = arr.borrow().elements.clone();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
                         } else if !elements.is_empty() {
@@ -409,7 +409,7 @@ impl<'gc> VM<'gc> {
                             .map(|p| Value::String(crate::unicode::utf8_to_utf16(p)))
                             .collect()
                     };
-                    return Value::VmArray(Rc::new(RefCell::new(parts)));
+                    return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(parts))));
                 }
                 BUILTIN_STRING_INDEXOF => {
                     let needle = args.first().map(value_to_string).unwrap_or_default();
@@ -583,7 +583,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Handle a thrown value: unwind to nearest try/catch or return error
-    fn handle_throw(&mut self, thrown: Value<'gc>) -> Result<(), String> {
+    fn handle_throw(&mut self, thrown: Value<'gc>) -> Result<(), JSError> {
         if let Some(try_frame) = self.try_stack.pop() {
             // Unwind stack and call frames
             self.stack.truncate(try_frame.stack_depth);
@@ -595,7 +595,7 @@ impl<'gc> VM<'gc> {
             }
             Ok(())
         } else {
-            Err(format!("Uncaught: {}", value_to_string(&thrown)))
+            Err(crate::raise_syntax_error!(format!("Uncaught: {}", value_to_string(&thrown))))
         }
     }
 
@@ -614,16 +614,16 @@ impl<'gc> VM<'gc> {
     }
 
     /// Core execution loop of the VM (Fetch-Decode-Execute)
-    pub fn run(&mut self) -> Result<Value<'gc>, String> {
+    pub fn run(&mut self) -> Result<Value<'gc>, JSError> {
         self.run_inner(0)
     }
 
     /// Execute VM until frames drop below `min_depth` or top-level returns
-    fn run_inner(&mut self, min_depth: usize) -> Result<Value<'gc>, String> {
+    fn run_inner(&mut self, min_depth: usize) -> Result<Value<'gc>, JSError> {
         loop {
             // Fetch instruction
             let instruction_byte = self.read_byte();
-            let instruction = Opcode::from(instruction_byte);
+            let instruction = Opcode::try_from(instruction_byte)?;
 
             // Execute action based on instruction
             match instruction {
@@ -782,7 +782,7 @@ impl<'gc> VM<'gc> {
                             result.extend_from_slice(b_str);
                             self.stack.push(Value::String(result));
                         }
-                        _ => return Err("Unsupported types in VM Add".to_string()),
+                        _ => return Err(crate::raise_syntax_error!("Unsupported types in VM Add")),
                     }
                 }
                 Opcode::Sub => {
@@ -792,7 +792,7 @@ impl<'gc> VM<'gc> {
                         (Value::Number(a_num), Value::Number(b_num)) => {
                             self.stack.push(Value::Number(a_num - b_num));
                         }
-                        _ => return Err("Only numbers supported in VM Sub".to_string()),
+                        _ => return Err(crate::raise_syntax_error!("Only numbers supported in VM Sub")),
                     }
                 }
                 Opcode::Mul => {
@@ -802,7 +802,7 @@ impl<'gc> VM<'gc> {
                         (Value::Number(a_num), Value::Number(b_num)) => {
                             self.stack.push(Value::Number(a_num * b_num));
                         }
-                        _ => return Err("Only numbers supported in VM Mul".to_string()),
+                        _ => return Err(crate::raise_syntax_error!("Only numbers supported in VM Mul")),
                     }
                 }
                 Opcode::Div => {
@@ -812,7 +812,7 @@ impl<'gc> VM<'gc> {
                         (Value::Number(a_num), Value::Number(b_num)) => {
                             self.stack.push(Value::Number(a_num / b_num));
                         }
-                        _ => return Err("Only numbers supported in VM Div".to_string()),
+                        _ => return Err(crate::raise_syntax_error!("Only numbers supported in VM Div")),
                     }
                 }
                 Opcode::LessThan => {
@@ -922,7 +922,7 @@ impl<'gc> VM<'gc> {
                         (Value::Number(a_num), Value::Number(b_num)) => {
                             self.stack.push(Value::Number(a_num % b_num));
                         }
-                        _ => return Err("Only numbers supported in VM Mod".to_string()),
+                        _ => return Err(crate::raise_syntax_error!("Only numbers supported in VM Mod")),
                     }
                 }
                 Opcode::Negate => {
@@ -960,7 +960,7 @@ impl<'gc> VM<'gc> {
                     let count = self.read_byte() as usize;
                     let start = self.stack.len() - count;
                     let elems: Vec<Value<'gc>> = self.stack.drain(start..).collect();
-                    self.stack.push(Value::VmArray(Rc::new(RefCell::new(elems))));
+                    self.stack.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(elems)))));
                 }
                 Opcode::NewObject => {
                     let count = self.read_byte() as usize;
@@ -989,8 +989,8 @@ impl<'gc> VM<'gc> {
                             let val = map.borrow().get(&key).cloned().unwrap_or(Value::Undefined);
                             self.stack.push(val);
                         }
-                        Value::VmArray(_arr) => match key.as_str() {
-                            "length" => self.stack.push(Value::Number(_arr.borrow().len() as f64)),
+                        Value::VmArray(arr) => match key.as_str() {
+                            "length" => self.stack.push(Value::Number(arr.borrow().len() as f64)),
                             "push" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_PUSH)),
                             "pop" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_POP)),
                             "join" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_JOIN)),
@@ -1001,7 +1001,11 @@ impl<'gc> VM<'gc> {
                             "filter" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_FILTER)),
                             "forEach" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_FOREACH)),
                             "reduce" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_REDUCE)),
-                            _ => self.stack.push(Value::Undefined),
+                            _ => {
+                                // Check custom named properties
+                                let val = arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined);
+                                self.stack.push(val);
+                            }
                         },
                         Value::String(_) => match key.as_str() {
                             "length" => {
@@ -1041,6 +1045,8 @@ impl<'gc> VM<'gc> {
                     let obj = self.stack.pop().expect("VM Stack underflow on SetProperty (obj)");
                     if let Value::VmObject(map) = &obj {
                         map.borrow_mut().insert(key, val.clone());
+                    } else if let Value::VmArray(arr) = &obj {
+                        arr.borrow_mut().props.insert(key, val.clone());
                     } else {
                         log::warn!("SetProperty on non-object: {}", value_to_string(&obj));
                     }
@@ -1150,9 +1156,19 @@ impl<'gc> VM<'gc> {
                             .keys()
                             .map(|k| Value::String(crate::unicode::utf8_to_utf16(k)))
                             .collect(),
+                        Value::VmArray(arr) => {
+                            let a = arr.borrow();
+                            let mut k: Vec<Value<'gc>> = (0..a.elements.len())
+                                .map(|i| Value::String(crate::unicode::utf8_to_utf16(&i.to_string())))
+                                .collect();
+                            for prop_key in a.props.keys() {
+                                k.push(Value::String(crate::unicode::utf8_to_utf16(prop_key)));
+                            }
+                            k
+                        }
                         _ => Vec::new(),
                     };
-                    self.stack.push(Value::VmArray(Rc::new(RefCell::new(keys))));
+                    self.stack.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(keys)))));
                 }
                 Opcode::GetMethod => {
                     // Stack: [..., obj] -> [..., obj, method]
@@ -1198,6 +1214,13 @@ impl<'gc> VM<'gc> {
                         _ => Value::Undefined,
                     };
                     self.stack.push(method);
+                }
+                Opcode::NewError => {
+                    // Pop message from stack, create VmObject { message: msg }
+                    let msg = self.stack.pop().unwrap_or(Value::Undefined);
+                    let mut map = IndexMap::new();
+                    map.insert("message".to_string(), msg);
+                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
                 }
             }
         }

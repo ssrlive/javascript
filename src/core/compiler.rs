@@ -1,5 +1,5 @@
 use crate::core::opcode::{Chunk, Opcode};
-use crate::core::statement::{BinaryOp, Expr, Statement, StatementKind};
+use crate::core::statement::{BinaryOp, Expr, Statement, StatementKind, CatchParamPattern};
 use crate::Value;
 
 pub struct Compiler<'gc> {
@@ -191,6 +191,65 @@ impl<'gc> Compiler<'gc> {
                 }
                 self.chunk.write_opcode(Opcode::Return);
             }
+            StatementKind::Throw(expr) => {
+                self.compile_expr(expr)?;
+                self.chunk.write_opcode(Opcode::Throw);
+            }
+            StatementKind::TryCatch(tc) => {
+                // Determine catch binding name constant index (or 0xff for none)
+                let binding_idx = if let Some(_catch_body) = &tc.catch_body {
+                    if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
+                        let name_u16 = crate::unicode::utf8_to_utf16(name);
+                        self.chunk.add_constant(Value::String(name_u16))
+                    } else {
+                        0xff
+                    }
+                } else {
+                    0xff
+                };
+
+                // SetupTry <catch_ip:u16> <binding_idx:u8>
+                self.chunk.write_opcode(Opcode::SetupTry);
+                let catch_placeholder = self.chunk.code.len();
+                self.chunk.write_u16(0xffff); // placeholder for catch ip
+                self.chunk.write_byte(binding_idx);
+
+                // Try body
+                for s in &tc.try_body {
+                    self.compile_statement(s, false)?;
+                }
+                self.chunk.write_opcode(Opcode::TeardownTry);
+
+                // Jump over catch block
+                let jump_over_catch = self.emit_jump(Opcode::Jump);
+
+                // Patch catch address to here
+                let catch_start = self.chunk.code.len();
+                self.chunk.code[catch_placeholder] = (catch_start & 0xff) as u8;
+                self.chunk.code[catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
+
+                // Catch body
+                if let Some(ref catch_body) = tc.catch_body {
+                    for s in catch_body {
+                        self.compile_statement(s, false)?;
+                    }
+                }
+
+                self.patch_jump(jump_over_catch);
+
+                // Finally body
+                if let Some(ref finally_body) = tc.finally_body {
+                    for s in finally_body {
+                        self.compile_statement(s, false)?;
+                    }
+                }
+
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_byte(idx);
+                }
+            }
             StatementKind::FunctionDeclaration(name, params, body, _is_gen, _is_async) => {
                 // Jump over the function body in the main bytecode stream
                 let jump_over = self.emit_jump(Opcode::Jump);
@@ -298,12 +357,18 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             Expr::Call(callee, args) => {
+                // Method call pattern: obj.method(args)
+                // We emit: compile obj -> GetProperty "method" -> push args -> Call
+                // This naturally works because GetProperty leaves the function on TOS
                 self.compile_expr(callee)?;
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
                 self.chunk.write_opcode(Opcode::Call);
                 self.chunk.write_byte(args.len() as u8);
+            }
+            Expr::This => {
+                self.chunk.write_opcode(Opcode::GetThis);
             }
             // Unary operators
             Expr::UnaryNeg(inner) => {

@@ -2848,6 +2848,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::VmFunction(..) => "Function",
                 Value::VmArray(..) => "Array",
                 Value::VmObject(..) => "Object",
+                Value::VmNativeFunction(..) => "Function",
             },
             args.len()
         ))
@@ -3004,6 +3005,7 @@ pub(crate) fn handle_to_string_method<'gc>(
             Ok(Value::String(utf8_to_utf16(&elems.join(","))))
         }
         Value::VmObject(_) => Ok(Value::String(utf8_to_utf16("[object Object]"))),
+        Value::VmNativeFunction(id) => Ok(Value::String(utf8_to_utf16(&format!("function native#{}() {{ [native code] }}", id)))),
     }
 }
 
@@ -3105,6 +3107,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                 Value::VmFunction(..) => "Function",
                 Value::VmArray(..) => "Array",
                 Value::VmObject(..) => "Object",
+                Value::VmNativeFunction(..) => "Function",
             },
             args.len()
         ))
@@ -3285,6 +3288,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::VmFunction(ip, arity) => Ok(Value::VmFunction(*ip, *arity)),
         Value::VmArray(arr) => Ok(Value::VmArray(arr.clone())),
         Value::VmObject(obj) => Ok(Value::VmObject(obj.clone())),
+        Value::VmNativeFunction(id) => Ok(Value::VmNativeFunction(*id)),
     }
 }
 

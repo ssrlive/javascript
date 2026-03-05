@@ -5,6 +5,21 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+// Builtin function IDs
+const BUILTIN_CONSOLE_LOG: u8 = 0;
+const BUILTIN_CONSOLE_WARN: u8 = 1;
+const BUILTIN_CONSOLE_ERROR: u8 = 2;
+const BUILTIN_MATH_FLOOR: u8 = 3;
+const BUILTIN_MATH_CEIL: u8 = 4;
+const BUILTIN_MATH_ROUND: u8 = 5;
+const BUILTIN_MATH_ABS: u8 = 6;
+const BUILTIN_MATH_SQRT: u8 = 7;
+const BUILTIN_MATH_MAX: u8 = 8;
+const BUILTIN_MATH_MIN: u8 = 9;
+const BUILTIN_ISNAN: u8 = 10;
+const BUILTIN_PARSEINT: u8 = 11;
+const BUILTIN_PARSEFLOAT: u8 = 12;
+const BUILTIN_ARRAY_PUSH: u8 = 13;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame {
@@ -12,23 +27,172 @@ pub struct CallFrame {
     pub bp: usize, // Base pointer
 }
 
+#[derive(Debug, Clone)]
+pub struct TryFrame {
+    pub catch_ip: usize,          // where to jump on throw
+    pub stack_depth: usize,       // stack depth at try entry
+    pub frame_depth: usize,       // call frame depth at try entry
+    pub catch_binding: Option<String>, // variable name for caught value
+}
+
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
     chunk: Chunk<'gc>,
-    ip: usize,                // Instruction Pointer: points to the currently executing byte
-    stack: Vec<Value<'gc>>,   // Operand Stack
-    globals: HashMap<String, Value<'gc>>, // Variables environment
+    ip: usize,
+    stack: Vec<Value<'gc>>,
+    globals: HashMap<String, Value<'gc>>,
     frames: Vec<CallFrame>,
+    try_stack: Vec<TryFrame>,
+    this_stack: Vec<Value<'gc>>,  // this binding stack
+    output: Vec<String>,          // captured output for console.log etc.
 }
 
 impl<'gc> VM<'gc> {
     pub fn new(chunk: Chunk<'gc>) -> Self {
-        Self {
+        let mut vm = Self {
             chunk,
             ip: 0,
-            stack: Vec::with_capacity(256), // Reserve stack size
+            stack: Vec::with_capacity(256),
             globals: HashMap::new(),
             frames: Vec::new(),
+            try_stack: Vec::new(),
+            this_stack: vec![Value::Undefined], // global this = undefined
+            output: Vec::new(),
+        };
+        vm.register_builtins();
+        vm
+    }
+
+    /// Get captured console output
+    pub fn take_output(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.output)
+    }
+
+    /// Register built-in global objects (console, Math, isNaN, parseInt, etc.)
+    fn register_builtins(&mut self) {
+        // console object
+        let mut console_map = HashMap::new();
+        console_map.insert("log".to_string(), Value::VmNativeFunction(BUILTIN_CONSOLE_LOG));
+        console_map.insert("warn".to_string(), Value::VmNativeFunction(BUILTIN_CONSOLE_WARN));
+        console_map.insert("error".to_string(), Value::VmNativeFunction(BUILTIN_CONSOLE_ERROR));
+        self.globals.insert("console".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(console_map))));
+
+        // Math object
+        let mut math_map = HashMap::new();
+        math_map.insert("floor".to_string(), Value::VmNativeFunction(BUILTIN_MATH_FLOOR));
+        math_map.insert("ceil".to_string(), Value::VmNativeFunction(BUILTIN_MATH_CEIL));
+        math_map.insert("round".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ROUND));
+        math_map.insert("abs".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ABS));
+        math_map.insert("sqrt".to_string(), Value::VmNativeFunction(BUILTIN_MATH_SQRT));
+        math_map.insert("max".to_string(), Value::VmNativeFunction(BUILTIN_MATH_MAX));
+        math_map.insert("min".to_string(), Value::VmNativeFunction(BUILTIN_MATH_MIN));
+        math_map.insert("PI".to_string(), Value::Number(std::f64::consts::PI));
+        math_map.insert("E".to_string(), Value::Number(std::f64::consts::E));
+        self.globals.insert("Math".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(math_map))));
+
+        // Global functions
+        self.globals.insert("isNaN".to_string(), Value::VmNativeFunction(BUILTIN_ISNAN));
+        self.globals.insert("parseInt".to_string(), Value::VmNativeFunction(BUILTIN_PARSEINT));
+        self.globals.insert("parseFloat".to_string(), Value::VmNativeFunction(BUILTIN_PARSEFLOAT));
+    }
+
+    /// Execute a native/built-in function
+    fn call_builtin(&mut self, id: u8, args: Vec<Value<'gc>>) -> Value<'gc> {
+        match id {
+            BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
+                let parts: Vec<String> = args.iter().map(|v| value_to_string(v)).collect();
+                let msg = parts.join(" ");
+                self.output.push(msg.clone());
+                // Match existing console behavior: print to stdout
+                println!("{}", msg);
+                Value::Undefined
+            }
+            BUILTIN_MATH_FLOOR => {
+                if let Some(Value::Number(n)) = args.first() { Value::Number(n.floor()) }
+                else { Value::Number(f64::NAN) }
+            }
+            BUILTIN_MATH_CEIL => {
+                if let Some(Value::Number(n)) = args.first() { Value::Number(n.ceil()) }
+                else { Value::Number(f64::NAN) }
+            }
+            BUILTIN_MATH_ROUND => {
+                if let Some(Value::Number(n)) = args.first() { Value::Number(n.round()) }
+                else { Value::Number(f64::NAN) }
+            }
+            BUILTIN_MATH_ABS => {
+                if let Some(Value::Number(n)) = args.first() { Value::Number(n.abs()) }
+                else { Value::Number(f64::NAN) }
+            }
+            BUILTIN_MATH_SQRT => {
+                if let Some(Value::Number(n)) = args.first() { Value::Number(n.sqrt()) }
+                else { Value::Number(f64::NAN) }
+            }
+            BUILTIN_MATH_MAX => {
+                let mut result = f64::NEG_INFINITY;
+                for a in &args {
+                    if let Value::Number(n) = a { if *n > result { result = *n; } }
+                    else { return Value::Number(f64::NAN); }
+                }
+                Value::Number(result)
+            }
+            BUILTIN_MATH_MIN => {
+                let mut result = f64::INFINITY;
+                for a in &args {
+                    if let Value::Number(n) = a { if *n < result { result = *n; } }
+                    else { return Value::Number(f64::NAN); }
+                }
+                Value::Number(result)
+            }
+            BUILTIN_ISNAN => {
+                match args.first() {
+                    Some(Value::Number(n)) => Value::Boolean(n.is_nan()),
+                    Some(Value::Undefined) => Value::Boolean(true),
+                    _ => Value::Boolean(false),
+                }
+            }
+            BUILTIN_PARSEINT => {
+                let s = args.first().map(value_to_string).unwrap_or_default();
+                let trimmed = s.trim();
+                match trimmed.parse::<f64>() {
+                    Ok(n) => Value::Number(n.trunc()),
+                    Err(_) => Value::Number(f64::NAN),
+                }
+            }
+            BUILTIN_PARSEFLOAT => {
+                let s = args.first().map(value_to_string).unwrap_or_default();
+                match s.trim().parse::<f64>() {
+                    Ok(n) => Value::Number(n),
+                    Err(_) => Value::Number(f64::NAN),
+                }
+            }
+            BUILTIN_ARRAY_PUSH => {
+                // arg0 = array, rest = elements to push
+                // handled directly in Call for method calls
+                Value::Undefined
+            }
+            _ => {
+                log::warn!("Unknown builtin ID: {}", id);
+                Value::Undefined
+            }
+        }
+    }
+
+    /// Handle a thrown value: unwind to nearest try/catch or return error
+    fn handle_throw(&mut self, thrown: Value<'gc>) -> Result<(), String> {
+        if let Some(try_frame) = self.try_stack.pop() {
+            // Unwind stack and call frames
+            self.stack.truncate(try_frame.stack_depth);
+            self.frames.truncate(try_frame.frame_depth);
+            self.ip = try_frame.catch_ip;
+            // If catch has a binding, store thrown value as global
+            if let Some(name) = try_frame.catch_binding {
+                self.globals.insert(name, thrown);
+            }
+            Ok(())
+        } else {
+            Err(format!("Uncaught: {}", value_to_string(&thrown)))
         }
     }
 
@@ -84,20 +248,29 @@ impl<'gc> VM<'gc> {
                     // Stack: [..., callee, arg0, arg1, ...]
                     let callee_idx = self.stack.len() - arg_count - 1;
                     let callee = self.stack[callee_idx].clone();
-                    if let Value::VmFunction(target_ip, arity) = callee {
-                        if arg_count as u8 != arity {
-                            log::warn!("Arity mismatch: expected {}, got {}", arity, arg_count);
+                    match callee {
+                        Value::VmFunction(target_ip, arity) => {
+                            if arg_count as u8 != arity {
+                                log::warn!("Arity mismatch: expected {}, got {}", arity, arg_count);
+                            }
+                            let frame = CallFrame {
+                                return_ip: self.ip,
+                                bp: callee_idx + 1,
+                            };
+                            self.frames.push(frame);
+                            self.ip = target_ip;
                         }
-                        let frame = CallFrame {
-                            return_ip: self.ip,
-                            bp: callee_idx + 1, // First argument sits right after the callee
-                        };
-                        self.frames.push(frame);
-                        self.ip = target_ip;
-                    } else {
-                        log::warn!("Attempted to call non-function: {}", value_to_string(&callee));
-                        self.stack.truncate(callee_idx);
-                        self.stack.push(Value::Undefined);
+                        Value::VmNativeFunction(id) => {
+                            let args: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
+                            let result = self.call_builtin(id, args);
+                            self.stack.pop(); // pop the callee
+                            self.stack.push(result);
+                        }
+                        _ => {
+                            log::warn!("Attempted to call non-function: {}", value_to_string(&callee));
+                            self.stack.truncate(callee_idx);
+                            self.stack.push(Value::Undefined);
+                        }
                     }
                 }
                 Opcode::Constant => {
@@ -472,6 +645,37 @@ impl<'gc> VM<'gc> {
                         Value::Number(n) => self.stack.push(Value::Number(n - 1.0)),
                         _ => self.stack.push(Value::Number(f64::NAN)),
                     }
+                }
+                Opcode::Throw => {
+                    let thrown = self.stack.pop().unwrap_or(Value::Undefined);
+                    self.handle_throw(thrown)?;
+                }
+                Opcode::SetupTry => {
+                    let catch_ip = self.read_u16() as usize;
+                    let binding_idx = self.read_byte();
+                    let catch_binding = if binding_idx == 0xff {
+                        None
+                    } else {
+                        let name_val = &self.chunk.constants[binding_idx as usize];
+                        if let Value::String(s) = name_val {
+                            Some(crate::unicode::utf16_to_utf8(s))
+                        } else {
+                            None
+                        }
+                    };
+                    self.try_stack.push(TryFrame {
+                        catch_ip,
+                        stack_depth: self.stack.len(),
+                        frame_depth: self.frames.len(),
+                        catch_binding,
+                    });
+                }
+                Opcode::TeardownTry => {
+                    self.try_stack.pop();
+                }
+                Opcode::GetThis => {
+                    let this_val = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
+                    self.stack.push(this_val);
                 }
             }
         }

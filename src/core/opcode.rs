@@ -38,6 +38,10 @@ pub enum Opcode {
     SetIndex = 32,
     Increment = 33,
     Decrement = 34,
+    Throw = 35,
+    SetupTry = 36,
+    TeardownTry = 37,
+    GetThis = 38,
 }
 
 impl From<u8> for Opcode {
@@ -78,6 +82,10 @@ impl From<u8> for Opcode {
             32 => Opcode::SetIndex,
             33 => Opcode::Increment,
             34 => Opcode::Decrement,
+            35 => Opcode::Throw,
+            36 => Opcode::SetupTry,
+            37 => Opcode::TeardownTry,
+            38 => Opcode::GetThis,
             _ => panic!("Unknown opcode: {}", byte),
         }
     }

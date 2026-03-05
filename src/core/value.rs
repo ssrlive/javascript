@@ -1162,6 +1162,7 @@ pub enum Value<'gc> {
     VmFunction(usize, u8), // (ip, arg_count)
     VmArray(Rc<RefCell<Vec<Value<'gc>>>>),
     VmObject(Rc<RefCell<HashMap<String, Value<'gc>>>>),
+    VmNativeFunction(u8), // builtin ID
 
     Closure(Gc<'gc, ClosureData<'gc>>),
     AsyncClosure(Gc<'gc, ClosureData<'gc>>),
@@ -1680,6 +1681,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
             elems.join(",")
         }
         Value::VmObject(_) => "[object Object]".to_string(),
+        Value::VmNativeFunction(id) => format!("[NativeFunction#{}]", id),
     }
 }
 

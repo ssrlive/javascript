@@ -9,6 +9,10 @@ pub enum Opcode {
     Sub = 3,
     Mul = 4,
     Div = 5,
+    Pop = 6,
+    DefineGlobal = 7,
+    GetGlobal = 8,
+    SetGlobal = 9,
 }
 
 impl From<u8> for Opcode {
@@ -20,6 +24,10 @@ impl From<u8> for Opcode {
             3 => Opcode::Sub,
             4 => Opcode::Mul,
             5 => Opcode::Div,
+            6 => Opcode::Pop,
+            7 => Opcode::DefineGlobal,
+            8 => Opcode::GetGlobal,
+            9 => Opcode::SetGlobal,
             _ => panic!("Unknown opcode: {}", byte),
         }
     }

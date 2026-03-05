@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 
 pub(crate) mod core;
-pub use crate::core::vm::run_vm_demo;
 
 #[macro_use]
 pub(crate) mod error;

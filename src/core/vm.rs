@@ -1,11 +1,13 @@
 use crate::Value;
 use crate::core::opcode::{Chunk, Opcode};
+use std::collections::HashMap;
 
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
     chunk: Chunk<'gc>,
     ip: usize,                // Instruction Pointer: points to the currently executing byte
     stack: Vec<Value<'gc>>,   // Operand Stack
+    globals: HashMap<String, Value<'gc>>, // Variables environment
 }
 
 impl<'gc> VM<'gc> {
@@ -14,6 +16,7 @@ impl<'gc> VM<'gc> {
             chunk,
             ip: 0,
             stack: Vec::with_capacity(256), // Reserve stack size
+            globals: HashMap::new(),
         }
     }
 
@@ -42,6 +45,38 @@ impl<'gc> VM<'gc> {
                     let constant_index = self.read_byte() as usize;
                     let constant = self.chunk.constants[constant_index].clone();
                     self.stack.push(constant);
+                }
+                Opcode::Pop => {
+                    self.stack.pop();
+                }
+                Opcode::DefineGlobal => {
+                    let name_idx = self.read_byte() as usize;
+                    let name_val = &self.chunk.constants[name_idx];
+                    if let Value::String(s) = name_val {
+                        let name_str = crate::unicode::utf16_to_utf8(s);
+                        let val = self.stack.pop().unwrap_or(Value::Undefined);
+                        self.globals.insert(name_str, val);
+                    }
+                }
+                Opcode::GetGlobal => {
+                    let name_idx = self.read_byte() as usize;
+                    let name_val = &self.chunk.constants[name_idx];
+                    if let Value::String(s) = name_val {
+                        let name_str = crate::unicode::utf16_to_utf8(s);
+                        let val = self.globals.get(&name_str).cloned().unwrap_or(Value::Undefined);
+                        self.stack.push(val);
+                    }
+                }
+                Opcode::SetGlobal => {
+                    let name_idx = self.read_byte() as usize;
+                    let name_val = &self.chunk.constants[name_idx];
+                    if let Value::String(s) = name_val {
+                        let name_str = crate::unicode::utf16_to_utf8(s);
+                        // Assignment leaves the value on the stack, so just peek
+                        let val = self.stack.last().cloned().unwrap_or(Value::Undefined);
+                        // In strict JS, assigning to undefined global throws. Here we just set or define.
+                        self.globals.insert(name_str, val);
+                    }
                 }
                 Opcode::Add => {
                     let b = self.stack.pop().expect("VM Stack underflow on Add (b)");
@@ -86,45 +121,4 @@ impl<'gc> VM<'gc> {
             }
         }
     }
-}
-
-/// Simple 1 + 2 test entry
-pub fn run_vm_demo<'gc>() {
-    let mut chunk = Chunk::new();
-
-    log::warn!("[VM Demo] Assembling Bytecode for: 1 + 2");
-
-    // Add constant 1.0 to constant pool and get index
-    let constant_1_index = chunk.add_constant(Value::Number(1.0));
-    // Add constant 2.0 to constant pool and get index
-    let constant_2_index = chunk.add_constant(Value::Number(2.0));
-
-    // Emit instruction: Load Constant 1
-    chunk.write_opcode(Opcode::Constant);
-    chunk.write_byte(constant_1_index);
-
-    // Emit instruction: Load Constant 2
-    chunk.write_opcode(Opcode::Constant);
-    chunk.write_byte(constant_2_index);
-
-    // Emit instruction: Add
-    chunk.write_opcode(Opcode::Add);
-
-    // Emit instruction: Return
-    chunk.write_opcode(Opcode::Return);
-
-    // Start the virtual machine!
-    let mut vm = VM::new(chunk);
-    
-    log::warn!("========================================");
-    log::warn!("[VM] Starting execution...");
-    match vm.run() {
-        Ok(result) => {
-            if let Value::Number(n) = result {
-                log::warn!("[VM] Execution Finished! Result: {}", n);
-            }
-        },
-        Err(e) => log::warn!("[VM] Error: {}", e),
-    }
-    log::warn!("========================================");
 }

@@ -2849,6 +2849,8 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::VmArray(..) => "Array",
                 Value::VmObject(..) => "Object",
                 Value::VmNativeFunction(..) => "Function",
+                Value::VmMap(..) => "Map",
+                Value::VmSet(..) => "Set",
             },
             args.len()
         ))
@@ -3009,6 +3011,8 @@ pub(crate) fn handle_to_string_method<'gc>(
             "function native#{}() {{ [native code] }}",
             id
         )))),
+        Value::VmMap(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
+        Value::VmSet(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
     }
 }
 
@@ -3111,6 +3115,8 @@ pub(crate) fn handle_value_of_method<'gc>(
                 Value::VmArray(..) => "Array",
                 Value::VmObject(..) => "Object",
                 Value::VmNativeFunction(..) => "Function",
+                Value::VmMap(..) => "Map",
+                Value::VmSet(..) => "Set",
             },
             args.len()
         ))
@@ -3292,6 +3298,8 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::VmArray(arr) => Ok(Value::VmArray(arr.clone())),
         Value::VmObject(obj) => Ok(Value::VmObject(obj.clone())),
         Value::VmNativeFunction(id) => Ok(Value::VmNativeFunction(*id)),
+        Value::VmMap(m) => Ok(Value::VmMap(m.clone())),
+        Value::VmSet(s) => Ok(Value::VmSet(s.clone())),
     }
 }
 

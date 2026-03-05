@@ -1,5 +1,5 @@
 use crate::core::opcode::{Chunk, Opcode};
-use crate::core::value::{VmArrayData, value_to_string};
+use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{JSError, Value};
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -70,6 +70,30 @@ const BUILTIN_NUM_TOEXPONENTIAL: u8 = 78;
 const BUILTIN_NUM_TOPRECISION: u8 = 79;
 const BUILTIN_NUM_TOSTRING: u8 = 80;
 const BUILTIN_NUM_VALUEOF: u8 = 81;
+// Map methods
+const BUILTIN_MAP_SET: u8 = 82;
+const BUILTIN_MAP_GET: u8 = 83;
+const BUILTIN_MAP_HAS: u8 = 84;
+const BUILTIN_MAP_DELETE: u8 = 85;
+const BUILTIN_MAP_KEYS: u8 = 86;
+const BUILTIN_MAP_VALUES: u8 = 87;
+const BUILTIN_MAP_ENTRIES: u8 = 88;
+const BUILTIN_MAP_FOREACH: u8 = 89;
+const BUILTIN_MAP_CLEAR: u8 = 90;
+// Set methods
+const BUILTIN_SET_ADD: u8 = 91;
+const BUILTIN_SET_HAS: u8 = 92;
+const BUILTIN_SET_DELETE: u8 = 93;
+#[allow(dead_code)]
+const BUILTIN_SET_KEYS: u8 = 94;
+const BUILTIN_SET_VALUES: u8 = 95;
+const BUILTIN_SET_ENTRIES: u8 = 96;
+const BUILTIN_SET_FOREACH: u8 = 97;
+const BUILTIN_SET_CLEAR: u8 = 98;
+// Constructor sentinels
+const BUILTIN_CTOR_MAP: u8 = 99;
+const BUILTIN_CTOR_SET: u8 = 100;
+const BUILTIN_ITERATOR_NEXT: u8 = 101;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame {
@@ -251,6 +275,10 @@ impl<'gc> VM<'gc> {
         self.globals.insert("Infinity".to_string(), Value::Number(f64::INFINITY));
         self.globals.insert("NaN".to_string(), Value::Number(f64::NAN));
         self.globals.insert("undefined".to_string(), Value::Undefined);
+
+        // Map / Set constructors
+        self.globals.insert("Map".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_MAP));
+        self.globals.insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
     }
 
     /// Convert a value to string, calling toString() on VmObjects if available
@@ -521,7 +549,14 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_JOIN => {
                     let sep = args.first().map(value_to_string).unwrap_or_else(|| ",".to_string());
-                    let parts: Vec<String> = arr.borrow().iter().map(|v| value_to_string(v)).collect();
+                    let parts: Vec<String> = arr
+                        .borrow()
+                        .iter()
+                        .map(|v| match v {
+                            Value::Undefined | Value::Null => String::new(),
+                            other => value_to_string(other),
+                        })
+                        .collect();
                     return Value::String(crate::unicode::utf8_to_utf16(&parts.join(&sep)));
                 }
                 BUILTIN_ARRAY_INDEXOF => {
@@ -785,8 +820,171 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        // Map methods
+        if let Value::VmMap(ref m) = receiver {
+            match id {
+                BUILTIN_MAP_SET => {
+                    let key = args.first().cloned().unwrap_or(Value::Undefined);
+                    let val = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let mut borrow = m.borrow_mut();
+                    // Update existing key or insert new
+                    if let Some(entry) = borrow.entries.iter_mut().find(|(k, _)| self.values_equal(k, &key)) {
+                        entry.1 = val;
+                    } else {
+                        borrow.entries.push((key, val));
+                    }
+                    drop(borrow);
+                    return receiver; // Map.set returns the Map itself
+                }
+                BUILTIN_MAP_GET => {
+                    let key = args.first().cloned().unwrap_or(Value::Undefined);
+                    let borrow = m.borrow();
+                    let val = borrow
+                        .entries
+                        .iter()
+                        .find(|(k, _)| self.values_equal(k, &key))
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Value::Undefined);
+                    return val;
+                }
+                BUILTIN_MAP_HAS => {
+                    let key = args.first().cloned().unwrap_or(Value::Undefined);
+                    let borrow = m.borrow();
+                    return Value::Boolean(borrow.entries.iter().any(|(k, _)| self.values_equal(k, &key)));
+                }
+                BUILTIN_MAP_DELETE => {
+                    let key = args.first().cloned().unwrap_or(Value::Undefined);
+                    let mut borrow = m.borrow_mut();
+                    let len_before = borrow.entries.len();
+                    borrow.entries.retain(|(k, _)| !self.values_equal(k, &key));
+                    return Value::Boolean(borrow.entries.len() < len_before);
+                }
+                BUILTIN_MAP_CLEAR => {
+                    m.borrow_mut().entries.clear();
+                    return Value::Undefined;
+                }
+                BUILTIN_MAP_KEYS => {
+                    let items: Vec<Value<'gc>> = m.borrow().entries.iter().map(|(k, _)| k.clone()).collect();
+                    return self.make_iterator(items);
+                }
+                BUILTIN_MAP_VALUES => {
+                    let items: Vec<Value<'gc>> = m.borrow().entries.iter().map(|(_, v)| v.clone()).collect();
+                    return self.make_iterator(items);
+                }
+                BUILTIN_MAP_ENTRIES => {
+                    let items: Vec<Value<'gc>> = m
+                        .borrow()
+                        .entries
+                        .iter()
+                        .map(|(k, v)| Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![k.clone(), v.clone()])))))
+                        .collect();
+                    return self.make_iterator(items);
+                }
+                BUILTIN_MAP_FOREACH => {
+                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                        let entries: Vec<(Value<'gc>, Value<'gc>)> = m.borrow().entries.clone();
+                        for (k, v) in &entries {
+                            self.call_vm_function(*ip, &[v.clone(), k.clone()]);
+                        }
+                    }
+                    return Value::Undefined;
+                }
+                _ => {}
+            }
+        }
+
+        // Set methods
+        if let Value::VmSet(ref s) = receiver {
+            match id {
+                BUILTIN_SET_ADD => {
+                    let val = args.first().cloned().unwrap_or(Value::Undefined);
+                    let mut borrow = s.borrow_mut();
+                    if !borrow.values.iter().any(|v| self.values_equal(v, &val)) {
+                        borrow.values.push(val);
+                    }
+                    drop(borrow);
+                    return receiver; // Set.add returns the Set itself
+                }
+                BUILTIN_SET_HAS => {
+                    let val = args.first().cloned().unwrap_or(Value::Undefined);
+                    let borrow = s.borrow();
+                    return Value::Boolean(borrow.values.iter().any(|v| self.values_equal(v, &val)));
+                }
+                BUILTIN_SET_DELETE => {
+                    let val = args.first().cloned().unwrap_or(Value::Undefined);
+                    let mut borrow = s.borrow_mut();
+                    let len_before = borrow.values.len();
+                    borrow.values.retain(|v| !self.values_equal(v, &val));
+                    return Value::Boolean(borrow.values.len() < len_before);
+                }
+                BUILTIN_SET_CLEAR => {
+                    s.borrow_mut().values.clear();
+                    return Value::Undefined;
+                }
+                BUILTIN_SET_VALUES => {
+                    let items: Vec<Value<'gc>> = s.borrow().values.clone();
+                    return self.make_iterator(items);
+                }
+                BUILTIN_SET_ENTRIES => {
+                    let items: Vec<Value<'gc>> = s
+                        .borrow()
+                        .values
+                        .iter()
+                        .map(|v| Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![v.clone(), v.clone()])))))
+                        .collect();
+                    return self.make_iterator(items);
+                }
+                BUILTIN_SET_FOREACH => {
+                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                        let vals: Vec<Value<'gc>> = s.borrow().values.clone();
+                        for v in &vals {
+                            self.call_vm_function(*ip, &[v.clone(), v.clone()]);
+                        }
+                    }
+                    return Value::Undefined;
+                }
+                _ => {}
+            }
+        }
+
+        // Iterator next() on VmObject with __items__ / __index__
+        if let Value::VmObject(ref obj) = receiver
+            && id == BUILTIN_ITERATOR_NEXT
+        {
+            let mut borrow = obj.borrow_mut();
+            let idx = match borrow.get("__index__") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            };
+            let items = borrow.get("__items__").cloned();
+            if let Some(Value::VmArray(arr)) = items {
+                let a = arr.borrow();
+                if idx < a.len() {
+                    borrow.insert("__index__".to_string(), Value::Number((idx + 1) as f64));
+                    let mut result = IndexMap::new();
+                    result.insert("value".to_string(), a[idx].clone());
+                    result.insert("done".to_string(), Value::Boolean(false));
+                    return Value::VmObject(Rc::new(RefCell::new(result)));
+                }
+            }
+            let mut result = IndexMap::new();
+            result.insert("value".to_string(), Value::Undefined);
+            result.insert("done".to_string(), Value::Boolean(true));
+            return Value::VmObject(Rc::new(RefCell::new(result)));
+        }
+
         log::warn!("Unknown method builtin ID {} on {}", id, value_to_string(&receiver));
         Value::Undefined
+    }
+
+    /// Create an iterator object from a Vec of values
+    fn make_iterator(&self, items: Vec<Value<'gc>>) -> Value<'gc> {
+        let arr = Rc::new(RefCell::new(VmArrayData::new(items)));
+        let mut obj = IndexMap::new();
+        obj.insert("__items__".to_string(), Value::VmArray(arr));
+        obj.insert("__index__".to_string(), Value::Number(0.0));
+        obj.insert("next".to_string(), Value::VmNativeFunction(BUILTIN_ITERATOR_NEXT));
+        Value::VmObject(Rc::new(RefCell::new(obj)))
     }
 
     /// Compare two values for equality (used by indexOf etc.)
@@ -796,6 +994,32 @@ impl<'gc> VM<'gc> {
             (Value::String(x), Value::String(y)) => x == y,
             (Value::Boolean(x), Value::Boolean(y)) => x == y,
             (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined) => true,
+            _ => false,
+        }
+    }
+
+    /// JS loose equality (==) with type coercion
+    fn loose_equal(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => x == y,
+            (Value::String(x), Value::String(y)) => x == y,
+            (Value::Boolean(x), Value::Boolean(y)) => x == y,
+            (Value::Null, Value::Null)
+            | (Value::Undefined, Value::Undefined)
+            | (Value::Null, Value::Undefined)
+            | (Value::Undefined, Value::Null) => true,
+            // Number vs String: coerce string to number
+            (Value::Number(n), Value::String(_)) => *n == to_number(b),
+            (Value::String(_), Value::Number(n)) => to_number(a) == *n,
+            // Boolean vs any: coerce boolean to number, recurse
+            (Value::Boolean(bv), _) => {
+                let num = Value::Number(if *bv { 1.0 } else { 0.0 });
+                self.loose_equal(&num, b)
+            }
+            (_, Value::Boolean(bv)) => {
+                let num = Value::Number(if *bv { 1.0 } else { 0.0 });
+                self.loose_equal(a, &num)
+            }
             _ => false,
         }
     }
@@ -1130,7 +1354,11 @@ impl<'gc> VM<'gc> {
                             result.extend_from_slice(b_str);
                             self.stack.push(Value::String(result));
                         }
-                        _ if is_a_str || is_b_str => {
+                        _ if is_a_str
+                            || is_b_str
+                            || matches!(&a, Value::VmArray(_) | Value::VmObject(_))
+                            || matches!(&b, Value::VmArray(_) | Value::VmObject(_)) =>
+                        {
                             let a_s = self.vm_to_string(&a);
                             let b_s = self.vm_to_string(&b);
                             let mut result = crate::unicode::utf8_to_utf16(&a_s);
@@ -1185,46 +1413,12 @@ impl<'gc> VM<'gc> {
                 Opcode::Equal => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Boolean(a_num == b_num));
-                        }
-                        (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
-                            self.stack.push(Value::Boolean(a_bool == b_bool));
-                        }
-                        (Value::String(ref a_s), Value::String(ref b_s)) => {
-                            self.stack.push(Value::Boolean(a_s == b_s));
-                        }
-                        (Value::Null, Value::Null)
-                        | (Value::Undefined, Value::Undefined)
-                        | (Value::Null, Value::Undefined)
-                        | (Value::Undefined, Value::Null) => {
-                            self.stack.push(Value::Boolean(true));
-                        }
-                        _ => self.stack.push(Value::Boolean(false)),
-                    }
+                    self.stack.push(Value::Boolean(self.loose_equal(&a, &b)));
                 }
                 Opcode::NotEqual => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Boolean(a_num != b_num));
-                        }
-                        (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
-                            self.stack.push(Value::Boolean(a_bool != b_bool));
-                        }
-                        (Value::String(ref a_s), Value::String(ref b_s)) => {
-                            self.stack.push(Value::Boolean(a_s != b_s));
-                        }
-                        (Value::Null, Value::Null)
-                        | (Value::Undefined, Value::Undefined)
-                        | (Value::Null, Value::Undefined)
-                        | (Value::Undefined, Value::Null) => {
-                            self.stack.push(Value::Boolean(false));
-                        }
-                        _ => self.stack.push(Value::Boolean(true)),
-                    }
+                    self.stack.push(Value::Boolean(!self.loose_equal(&a, &b)));
                 }
                 Opcode::StrictNotEqual => {
                     let b = self.stack.pop().expect("VM Stack underflow");
@@ -1403,6 +1597,30 @@ impl<'gc> VM<'gc> {
                             "toPrecision" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
                             "toString" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
                             "valueOf" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                            _ => self.stack.push(Value::Undefined),
+                        },
+                        Value::VmMap(m) => match key.as_str() {
+                            "size" => self.stack.push(Value::Number(m.borrow().entries.len() as f64)),
+                            "set" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_SET)),
+                            "get" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_GET)),
+                            "has" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_HAS)),
+                            "delete" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_DELETE)),
+                            "keys" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_KEYS)),
+                            "values" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_VALUES)),
+                            "entries" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_ENTRIES)),
+                            "forEach" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_FOREACH)),
+                            "clear" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_CLEAR)),
+                            _ => self.stack.push(Value::Undefined),
+                        },
+                        Value::VmSet(s) => match key.as_str() {
+                            "size" => self.stack.push(Value::Number(s.borrow().values.len() as f64)),
+                            "add" => self.stack.push(Value::VmNativeFunction(BUILTIN_SET_ADD)),
+                            "has" => self.stack.push(Value::VmNativeFunction(BUILTIN_SET_HAS)),
+                            "delete" => self.stack.push(Value::VmNativeFunction(BUILTIN_SET_DELETE)),
+                            "keys" | "values" => self.stack.push(Value::VmNativeFunction(BUILTIN_SET_VALUES)),
+                            "entries" => self.stack.push(Value::VmNativeFunction(BUILTIN_SET_ENTRIES)),
+                            "forEach" => self.stack.push(Value::VmNativeFunction(BUILTIN_SET_FOREACH)),
+                            "clear" => self.stack.push(Value::VmNativeFunction(BUILTIN_SET_CLEAR)),
                             _ => self.stack.push(Value::Undefined),
                         },
                         _ => {
@@ -1624,6 +1842,28 @@ impl<'gc> VM<'gc> {
                             "valueOf" => Value::VmNativeFunction(BUILTIN_NUM_VALUEOF),
                             _ => Value::Undefined,
                         },
+                        Value::VmMap(_) => match key.as_str() {
+                            "set" => Value::VmNativeFunction(BUILTIN_MAP_SET),
+                            "get" => Value::VmNativeFunction(BUILTIN_MAP_GET),
+                            "has" => Value::VmNativeFunction(BUILTIN_MAP_HAS),
+                            "delete" => Value::VmNativeFunction(BUILTIN_MAP_DELETE),
+                            "keys" => Value::VmNativeFunction(BUILTIN_MAP_KEYS),
+                            "values" => Value::VmNativeFunction(BUILTIN_MAP_VALUES),
+                            "entries" => Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
+                            "forEach" => Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
+                            "clear" => Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
+                            _ => Value::Undefined,
+                        },
+                        Value::VmSet(_) => match key.as_str() {
+                            "add" => Value::VmNativeFunction(BUILTIN_SET_ADD),
+                            "has" => Value::VmNativeFunction(BUILTIN_SET_HAS),
+                            "delete" => Value::VmNativeFunction(BUILTIN_SET_DELETE),
+                            "keys" | "values" => Value::VmNativeFunction(BUILTIN_SET_VALUES),
+                            "entries" => Value::VmNativeFunction(BUILTIN_SET_ENTRIES),
+                            "forEach" => Value::VmNativeFunction(BUILTIN_SET_FOREACH),
+                            "clear" => Value::VmNativeFunction(BUILTIN_SET_CLEAR),
+                            _ => Value::Undefined,
+                        },
                         _ => Value::Undefined,
                     };
                     self.stack.push(method);
@@ -1840,6 +2080,48 @@ impl<'gc> VM<'gc> {
                                     }
                                 }
                                 Err(e) => return Err(e),
+                            }
+                        }
+                        Value::VmNativeFunction(id) => {
+                            let args: Vec<Value<'gc>> = (0..arg_count)
+                                .map(|_| self.stack.pop().expect("VM Stack underflow"))
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                            self.stack.pop(); // pop constructor
+                            match id {
+                                BUILTIN_CTOR_MAP => {
+                                    let mut entries = Vec::new();
+                                    // new Map(iterable) — iterable is an array of [key, value] pairs
+                                    if let Some(Value::VmArray(arr)) = args.first() {
+                                        for item in arr.borrow().iter() {
+                                            if let Value::VmArray(pair) = item {
+                                                let p = pair.borrow();
+                                                let k = p.first().cloned().unwrap_or(Value::Undefined);
+                                                let v = p.get(1).cloned().unwrap_or(Value::Undefined);
+                                                entries.push((k, v));
+                                            }
+                                        }
+                                    }
+                                    self.stack.push(Value::VmMap(Rc::new(RefCell::new(VmMapData { entries }))));
+                                }
+                                BUILTIN_CTOR_SET => {
+                                    let mut values = Vec::new();
+                                    // new Set(iterable) — iterable is an array
+                                    if let Some(Value::VmArray(arr)) = args.first() {
+                                        for item in arr.borrow().iter() {
+                                            if !values.iter().any(|v| self.values_equal(v, item)) {
+                                                values.push(item.clone());
+                                            }
+                                        }
+                                    }
+                                    self.stack.push(Value::VmSet(Rc::new(RefCell::new(VmSetData { values }))));
+                                }
+                                _ => {
+                                    log::warn!("NewCall on VmNativeFunction #{}: returning empty object", id);
+                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+                                }
                             }
                         }
                         _ => {

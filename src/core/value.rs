@@ -14,6 +14,18 @@ use num_traits::ToPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// VM Map storage (simple Vec of key-value pairs).
+#[derive(Clone)]
+pub struct VmMapData<'gc> {
+    pub entries: Vec<(Value<'gc>, Value<'gc>)>,
+}
+
+/// VM Set storage (simple Vec of values).
+#[derive(Clone)]
+pub struct VmSetData<'gc> {
+    pub values: Vec<Value<'gc>>,
+}
+
 /// Array storage with optional named properties (e.g. `arr.foo = "bar"`).
 #[derive(Clone)]
 pub struct VmArrayData<'gc> {
@@ -1192,6 +1204,8 @@ pub enum Value<'gc> {
     VmArray(Rc<RefCell<VmArrayData<'gc>>>),
     VmObject(Rc<RefCell<IndexMap<String, Value<'gc>>>>),
     VmNativeFunction(u8), // builtin ID
+    VmMap(Rc<RefCell<VmMapData<'gc>>>),
+    VmSet(Rc<RefCell<VmSetData<'gc>>>),
 
     Closure(Gc<'gc, ClosureData<'gc>>),
     AsyncClosure(Gc<'gc, ClosureData<'gc>>),
@@ -1706,11 +1720,20 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::Uninitialized => "[uninitialized]".to_string(),
         Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),
         Value::VmArray(arr) => {
-            let elems: Vec<String> = arr.borrow().iter().map(value_to_string).collect();
+            let elems: Vec<String> = arr
+                .borrow()
+                .iter()
+                .map(|v| match v {
+                    Value::Undefined | Value::Null => String::new(),
+                    other => value_to_string(other),
+                })
+                .collect();
             elems.join(",")
         }
         Value::VmObject(_) => "[object Object]".to_string(),
         Value::VmNativeFunction(id) => format!("[NativeFunction#{}]", id),
+        Value::VmMap(_) => "[object Map]".to_string(),
+        Value::VmSet(_) => "[object Set]".to_string(),
     }
 }
 

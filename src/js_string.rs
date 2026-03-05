@@ -407,6 +407,8 @@ pub(crate) fn string_constructor<'gc>(
             "function native#{}() {{ [native code] }}",
             id
         )))),
+        Value::VmMap(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
+        Value::VmSet(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
     }
 }
 

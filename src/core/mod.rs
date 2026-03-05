@@ -1165,3 +1165,23 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(script:
 
     Ok(value_to_string(&v))
 }
+
+/// Compile and run a snippet of JS code in a fresh VM, returning the resulting Value.
+/// Used by eval() in the VM.
+pub fn compile_and_run_vm_snippet(code: &str) -> Result<Value<'static>, JSError> {
+    let tokens = tokenize(code)?;
+    let mut index = 0;
+    let statements = parse_statements(&tokens, &mut index)?;
+    let compiler = Compiler::new();
+    let chunk = compiler.compile(&statements)?;
+    let mut vm = VM::new(chunk);
+    vm.run()
+}
+
+/// Convert a Value<'static> to Value<'gc> (safe because VM values don't use Gc)
+pub fn static_to_gc<'gc>(v: Value<'static>) -> Value<'gc> {
+    // SAFETY: VM-produced Value variants (Number, String, Boolean, Null, Undefined,
+    // VmFunction, VmNativeFunction, VmArray, VmObject) never contain Gc pointers.
+    // The lifetime parameter is only relevant for tree-walker Gc-managed variants.
+    unsafe { std::mem::transmute(v) }
+}

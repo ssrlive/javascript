@@ -1,6 +1,7 @@
 use crate::core::opcode::{Chunk, Opcode};
-use crate::core::statement::{BinaryOp, CatchParamPattern, DestructuringElement, Expr, Statement, StatementKind};
+use crate::core::statement::{BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, Statement, StatementKind};
 use crate::core::{JSError, Value};
+use crate::raise_syntax_error;
 
 pub struct Compiler<'gc> {
     chunk: Chunk<'gc>,
@@ -695,6 +696,145 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(idx);
                 }
             }
+            StatementKind::Switch(sw) => {
+                // Compile discriminant once, store in synthetic local/global
+                self.compile_expr(&sw.expr)?;
+                if self.scope_depth > 0 {
+                    self.locals.push("__switch__".to_string());
+                } else {
+                    let n = crate::unicode::utf8_to_utf16("__switch__");
+                    let ni = self.chunk.add_constant(Value::String(n));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(ni);
+                }
+
+                // We need break patches
+                let ctx = LoopContext::default();
+                self.loop_stack.push(ctx);
+
+                // For each case: test → jump to body if match, else next case
+                let mut case_body_patches: Vec<(usize, usize)> = Vec::new(); // (body_start_idx in cases, jump_patch)
+                let mut default_idx: Option<usize> = None;
+
+                for (i, case) in sw.cases.iter().enumerate() {
+                    match case {
+                        crate::core::statement::SwitchCase::Case(val_expr, _body) => {
+                            // push __switch__, push case value, compare
+                            self.emit_helper_get("__switch__");
+                            self.compile_expr(val_expr)?;
+                            self.chunk.write_opcode(Opcode::Equal);
+                            let body_jump = self.emit_jump(Opcode::JumpIfTrue);
+                            case_body_patches.push((i, body_jump));
+                        }
+                        crate::core::statement::SwitchCase::Default(_body) => {
+                            default_idx = Some(i);
+                        }
+                    }
+                }
+
+                // If no case matched, jump to default or end
+                let default_jump = self.emit_jump(Opcode::Jump);
+
+                // Emit bodies in order (fall-through semantics)
+                let mut body_ips: Vec<usize> = Vec::new();
+                for case in &sw.cases {
+                    let body_ip = self.chunk.code.len();
+                    body_ips.push(body_ip);
+                    let body_stmts = match case {
+                        crate::core::statement::SwitchCase::Case(_, body) => body,
+                        crate::core::statement::SwitchCase::Default(body) => body,
+                    };
+                    for s in body_stmts {
+                        self.compile_statement(s, false)?;
+                    }
+                }
+
+                // Patch case jumps to their body IPs
+                for (case_idx, patch) in &case_body_patches {
+                    self.patch_jump_to(*patch, body_ips[*case_idx]);
+                }
+
+                // Patch default jump
+                if let Some(di) = default_idx {
+                    self.patch_jump_to(default_jump, body_ips[di]);
+                } else {
+                    self.patch_jump(default_jump);
+                }
+
+                // Patch break statements
+                let end_ip = self.chunk.code.len();
+                let ctx = self.loop_stack.pop().unwrap();
+                for bp in ctx.break_patches {
+                    self.patch_jump_to(bp, end_ip);
+                }
+
+                // Clean up synthetic local
+                if self.scope_depth > 0 {
+                    self.locals.retain(|l| l != "__switch__");
+                }
+
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
+            StatementKind::Class(class_def) => {
+                // Compile class constructor as a function
+                let name = &class_def.name;
+                let mut ctor_params = Vec::new();
+                let mut ctor_body = Vec::new();
+                for member in &class_def.members {
+                    if let ClassMember::Constructor(params, body) = member {
+                        ctor_params = params.clone();
+                        ctor_body = body.clone();
+                        break;
+                    }
+                }
+                // Count simple params (DestructuringElement::Variable)
+                let arity = ctor_params.len() as u8;
+
+                // Emit jump over function body
+                let jump_over = self.emit_jump(Opcode::Jump);
+                let fn_start = self.chunk.code.len();
+
+                // Push new scope for constructor body
+                self.scope_depth += 1;
+                // Register params as locals
+                for p in &ctor_params {
+                    if let DestructuringElement::Variable(pname, _) = p {
+                        self.locals.push(pname.clone());
+                    }
+                }
+
+                for (i, stmt) in ctor_body.iter().enumerate() {
+                    let _is_last = i == ctor_body.len() - 1;
+                    self.compile_statement(stmt, false)?;
+                }
+                // Constructor returns `this`
+                self.chunk.write_opcode(Opcode::GetThis);
+                self.chunk.write_opcode(Opcode::Return);
+
+                // Clean up locals
+                let locals_to_remove = ctor_params.len();
+                for _ in 0..locals_to_remove {
+                    self.locals.pop();
+                }
+                self.scope_depth -= 1;
+
+                self.patch_jump(jump_over);
+
+                // Define as global function
+                let fn_val = Value::VmFunction(fn_start, arity);
+                let fn_idx = self.chunk.add_constant(fn_val);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(fn_idx);
+
+                let name_u16 = crate::unicode::utf8_to_utf16(name);
+                let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                self.chunk.write_opcode(Opcode::DefineGlobal);
+                self.chunk.write_u16(name_idx);
+            }
             _ => {
                 return Err(crate::raise_syntax_error!(format!(
                     "Unimplemented statement kind for VM: {:?}",
@@ -763,6 +903,8 @@ impl<'gc> Compiler<'gc> {
                     BinaryOp::StrictEqual => self.chunk.write_opcode(Opcode::Equal),
                     BinaryOp::NotEqual => self.chunk.write_opcode(Opcode::NotEqual),
                     BinaryOp::StrictNotEqual => self.chunk.write_opcode(Opcode::StrictNotEqual),
+                    BinaryOp::In => self.chunk.write_opcode(Opcode::In),
+                    BinaryOp::InstanceOf => self.chunk.write_opcode(Opcode::InstanceOf),
                     _ => {
                         return Err(crate::raise_syntax_error!(format!("Unimplemented binary operator for VM: {op:?}")));
                     }
@@ -814,34 +956,27 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(inner)?;
                 self.chunk.write_opcode(Opcode::TypeOf);
             }
-            // Logical operators (short-circuit)
+            // Logical operators (short-circuit) — must return actual operand values
             Expr::LogicalAnd(left, right) => {
-                // Evaluate left; if falsy, short-circuit (keep left value)
+                // left && right: if left is falsy, return left; else return right
                 self.compile_expr(left)?;
+                self.chunk.write_opcode(Opcode::Dup);
                 let end_jump = self.emit_jump(Opcode::JumpIfFalse);
-                // Left was truthy, discard it and evaluate right
+                // Left was truthy: discard it, evaluate right
+                self.chunk.write_opcode(Opcode::Pop);
                 self.compile_expr(right)?;
-                let skip = self.emit_jump(Opcode::Jump);
                 self.patch_jump(end_jump);
-                // Left was falsy, push false
-                let idx = self.chunk.add_constant(Value::Boolean(false));
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(idx);
-                self.patch_jump(skip);
+                // If left was falsy, the dup'd left value remains on stack
             }
             Expr::LogicalOr(left, right) => {
-                // Evaluate left; if truthy, short-circuit (keep left value)
+                // left || right: if left is truthy, return left; else return right
                 self.compile_expr(left)?;
+                self.chunk.write_opcode(Opcode::Dup);
                 let end_jump = self.emit_jump(Opcode::JumpIfTrue);
-                // Left was falsy, discard it and evaluate right
+                // Left was falsy: discard it, evaluate right
+                self.chunk.write_opcode(Opcode::Pop);
                 self.compile_expr(right)?;
-                let skip = self.emit_jump(Opcode::Jump);
                 self.patch_jump(end_jump);
-                // Left was truthy, push true
-                let idx = self.chunk.add_constant(Value::Boolean(true));
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(idx);
-                self.patch_jump(skip);
             }
             // Array literal: [a, b, c]
             Expr::Array(elements) => {
@@ -999,25 +1134,76 @@ impl<'gc> Compiler<'gc> {
             // new Constructor(args) — for now, special-case Error
             Expr::New(constructor, args) => {
                 if let Expr::Var(name, ..) = &**constructor {
-                    if name == "Error" {
-                        // new Error(msg) → VmObject { message: msg }
-                        // Evaluate message arg or default to ""
-                        if let Some(arg) = args.first() {
-                            self.compile_expr(arg)?;
-                        } else {
-                            let idx = self.chunk.add_constant(Value::String(Vec::new()));
+                    match name.as_str() {
+                        "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" => {
+                            // Push error type name
+                            let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(name)));
                             self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(idx);
+                            self.chunk.write_u16(type_idx);
+                            // Push message
+                            if let Some(arg) = args.first() {
+                                self.compile_expr(arg)?;
+                            } else {
+                                let idx = self.chunk.add_constant(Value::String(Vec::new()));
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                            }
+                            self.chunk.write_opcode(Opcode::NewError);
                         }
-                        // Use NewError opcode
-                        self.chunk.write_opcode(Opcode::NewError);
-                    } else {
-                        return Err(crate::raise_syntax_error!(format!("Unimplemented new target for VM: {name}")));
+                        "Array" => {
+                            // new Array("a","b","c") → NewArray
+                            for a in args {
+                                self.compile_expr(a)?;
+                            }
+                            self.chunk.write_opcode(Opcode::NewArray);
+                            self.chunk.write_byte(args.len() as u8);
+                        }
+                        "Object" | "Number" | "Boolean" | "String" | "Date" => {
+                            // Create typed wrapper: { __type__: "TypeName" }
+                            let type_key = crate::unicode::utf8_to_utf16("__type__");
+                            let type_key_idx = self.chunk.add_constant(Value::String(type_key));
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(type_key_idx);
+                            let type_val = crate::unicode::utf8_to_utf16(name);
+                            let type_val_idx = self.chunk.add_constant(Value::String(type_val));
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(type_val_idx);
+                            self.chunk.write_opcode(Opcode::NewObject);
+                            self.chunk.write_byte(1); // 1 key-value pair
+                        }
+                        "Function" => {
+                            // new Function(body) → compile to: push native_fn, push body, Call(1)
+                            let fn_idx = self.chunk.add_constant(Value::VmNativeFunction(72));
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(fn_idx);
+                            if let Some(body_arg) = args.last() {
+                                self.compile_expr(body_arg)?;
+                            } else {
+                                let idx = self.chunk.add_constant(Value::String(Vec::new()));
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                            }
+                            self.chunk.write_opcode(Opcode::Call);
+                            self.chunk.write_byte(1);
+                        }
+                        _ => {
+                            // Generic constructor: create object, call constructor with this
+                            self.compile_expr(constructor)?;
+                            for a in args {
+                                self.compile_expr(a)?;
+                            }
+                            self.chunk.write_opcode(Opcode::NewCall);
+                            self.chunk.write_byte(args.len() as u8);
+                        }
                     }
                 } else {
-                    return Err(crate::raise_syntax_error!(format!(
-                        "Unimplemented new expression for VM: {constructor:?}"
-                    )));
+                    // Dynamic constructor: create object, call constructor with this
+                    self.compile_expr(constructor)?;
+                    for a in args {
+                        self.compile_expr(a)?;
+                    }
+                    self.chunk.write_opcode(Opcode::NewCall);
+                    self.chunk.write_byte(args.len() as u8);
                 }
             }
             // Compound assignment: x += rhs
@@ -1061,11 +1247,187 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(else_expr)?;
                 self.patch_jump(end_jump);
             }
-            _ => {
-                return Err(crate::raise_syntax_error!(format!(
-                    "Unimplemented expression type for VM: {expr:?}"
-                )));
+            // Comma: (a, b) → evaluate a (discard), evaluate b (keep)
+            Expr::Comma(left, right) => {
+                self.compile_expr(left)?;
+                self.chunk.write_opcode(Opcode::Pop);
+                self.compile_expr(right)?;
             }
+            // Delete operator
+            Expr::Delete(inner) => {
+                match &**inner {
+                    Expr::Var(..) => {
+                        // delete variable → SyntaxError in strict mode
+                        // Emit: push SyntaxError type name, push message, NewError, Throw
+                        let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("SyntaxError")));
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(type_idx);
+                        let msg_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(
+                            "Delete of an unqualified identifier in strict mode.",
+                        )));
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(msg_idx);
+                        self.chunk.write_opcode(Opcode::NewError);
+                        self.chunk.write_opcode(Opcode::Throw);
+                    }
+                    Expr::Property(obj, key) => {
+                        self.compile_expr(obj)?;
+                        let key_u16 = crate::unicode::utf8_to_utf16(key);
+                        let name_idx = self.chunk.add_constant(Value::String(key_u16));
+                        self.chunk.write_opcode(Opcode::DeleteProperty);
+                        self.chunk.write_u16(name_idx);
+                    }
+                    Expr::Index(obj, idx_expr) => {
+                        self.compile_expr(obj)?;
+                        self.compile_expr(idx_expr)?;
+                        self.chunk.write_opcode(Opcode::DeleteIndex);
+                    }
+                    _ => {
+                        self.compile_expr(inner)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                        let idx = self.chunk.add_constant(Value::Boolean(true));
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
+                }
+            }
+            // Void operator: evaluate expression, discard, push undefined
+            Expr::Void(inner) => {
+                self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::Pop);
+                let idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(idx);
+            }
+            // Nullish coalescing: a ?? b
+            Expr::NullishCoalescing(left, right) => {
+                // If left is null/undefined, return right; else return left
+                self.compile_expr(left)?;
+                self.chunk.write_opcode(Opcode::Dup);
+                // Check if value is null or undefined: dup, typeof, compare to "undefined", or use IsNullish
+                // Simpler: dup, push null, equal → if null jump; dup, push undefined, equal → if undef jump
+                // Even simpler: just use Dup + JumpIfFalse pattern but also jump on null...
+                // Best approach: dup, check null; if not null dup check undefined; if neither, keep left
+                // Actually the simplest: since null and undefined are both falsy, but 0/"" are also falsy,
+                // we need a proper nullish check. Let's inline it:
+                // push null, Equal → if true jump to rhs
+                // else dup original, push undefined, Equal → if true jump to rhs
+                // Hmm, we already consumed the dup. Let me use a different approach:
+                // eval left → dup → dup → push null → equal → jumpIfTrue(use_right)
+                //                          → push undefined → equal → jumpIfTrue(use_right)
+                //                          → jump(end) → use_right: pop → eval right → end:
+                self.chunk.write_opcode(Opcode::Dup);
+                let null_idx = self.chunk.add_constant(Value::Null);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(null_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                // Not null — check undefined
+                self.chunk.write_opcode(Opcode::Dup);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let is_undef = self.emit_jump(Opcode::JumpIfTrue);
+                // Not nullish — keep left, jump to end
+                let end_jump = self.emit_jump(Opcode::Jump);
+                // is_null / is_undef: pop left value, evaluate right
+                self.patch_jump(is_null);
+                self.patch_jump(is_undef);
+                self.chunk.write_opcode(Opcode::Pop);
+                self.compile_expr(right)?;
+                self.patch_jump(end_jump);
+            }
+            // Optional chaining: obj?.prop
+            Expr::OptionalProperty(obj, key) => {
+                self.compile_expr(obj)?;
+                self.chunk.write_opcode(Opcode::Dup);
+                let null_idx = self.chunk.add_constant(Value::Null);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(null_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                self.chunk.write_opcode(Opcode::Dup);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let is_undef = self.emit_jump(Opcode::JumpIfTrue);
+                // Not nullish: do property access
+                let key_u16 = crate::unicode::utf8_to_utf16(key);
+                let name_idx = self.chunk.add_constant(Value::String(key_u16));
+                self.chunk.write_opcode(Opcode::GetProperty);
+                self.chunk.write_u16(name_idx);
+                let end_jump = self.emit_jump(Opcode::Jump);
+                // Nullish: pop obj, push undefined
+                self.patch_jump(is_null);
+                self.patch_jump(is_undef);
+                self.chunk.write_opcode(Opcode::Pop);
+                let idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(idx);
+                self.patch_jump(end_jump);
+            }
+            // Optional index: obj?.[expr]
+            Expr::OptionalIndex(obj, index_expr) => {
+                self.compile_expr(obj)?;
+                self.chunk.write_opcode(Opcode::Dup);
+                let null_idx = self.chunk.add_constant(Value::Null);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(null_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                self.chunk.write_opcode(Opcode::Dup);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let is_undef = self.emit_jump(Opcode::JumpIfTrue);
+                self.compile_expr(index_expr)?;
+                self.chunk.write_opcode(Opcode::GetIndex);
+                let end_jump = self.emit_jump(Opcode::Jump);
+                self.patch_jump(is_null);
+                self.patch_jump(is_undef);
+                self.chunk.write_opcode(Opcode::Pop);
+                let idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(idx);
+                self.patch_jump(end_jump);
+            }
+            // Optional call: fn?.()
+            Expr::OptionalCall(callee, args) => {
+                self.compile_expr(callee)?;
+                self.chunk.write_opcode(Opcode::Dup);
+                let null_idx = self.chunk.add_constant(Value::Null);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(null_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                self.chunk.write_opcode(Opcode::Dup);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let is_undef = self.emit_jump(Opcode::JumpIfTrue);
+                for arg in args {
+                    self.compile_expr(arg)?;
+                }
+                self.chunk.write_opcode(Opcode::Call);
+                self.chunk.write_byte(args.len() as u8);
+                let end_jump = self.emit_jump(Opcode::Jump);
+                self.patch_jump(is_null);
+                self.patch_jump(is_undef);
+                self.chunk.write_opcode(Opcode::Pop);
+                let idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(idx);
+                self.patch_jump(end_jump);
+            }
+            // Getter/Setter in object literal: compile as the inner function
+            Expr::Getter(inner) | Expr::Setter(inner) => {
+                self.compile_expr(inner)?;
+            }
+            _ => return Err(raise_syntax_error!(format!("Unimplemented expression type for VM: {expr:?}"))),
         }
         Ok(())
     }

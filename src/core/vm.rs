@@ -45,6 +45,20 @@ const BUILTIN_STRING_SUBSTRING: u8 = 41;
 const BUILTIN_JSON_STRINGIFY: u8 = 50;
 const BUILTIN_JSON_PARSE: u8 = 51;
 const BUILTIN_ARRAY_REDUCE: u8 = 52;
+// Constructor sentinels (for typeof → "function" and instanceof checks)
+const BUILTIN_CTOR_ERROR: u8 = 60;
+const BUILTIN_CTOR_TYPEERROR: u8 = 61;
+const BUILTIN_CTOR_SYNTAXERROR: u8 = 62;
+const BUILTIN_CTOR_RANGEERROR: u8 = 63;
+const BUILTIN_CTOR_REFERENCEERROR: u8 = 64;
+const BUILTIN_CTOR_DATE: u8 = 65;
+const BUILTIN_CTOR_FUNCTION: u8 = 66;
+const BUILTIN_CTOR_NUMBER: u8 = 67;
+const BUILTIN_CTOR_STRING: u8 = 68;
+const BUILTIN_CTOR_BOOLEAN: u8 = 69;
+const BUILTIN_CTOR_OBJECT: u8 = 70;
+const BUILTIN_EVAL: u8 = 71;
+const BUILTIN_NEW_FUNCTION: u8 = 72;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame {
@@ -58,6 +72,31 @@ pub struct TryFrame {
     pub stack_depth: usize,            // stack depth at try entry
     pub frame_depth: usize,            // call frame depth at try entry
     pub catch_binding: Option<String>, // variable name for caught value
+}
+
+// JS ToNumber abstract operation
+fn to_number<'gc>(val: &Value<'gc>) -> f64 {
+    match val {
+        Value::Number(n) => *n,
+        Value::Undefined => f64::NAN,
+        Value::Null => 0.0,
+        Value::Boolean(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Value::String(s) => {
+            let s = crate::unicode::utf16_to_utf8(s);
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return 0.0;
+            }
+            trimmed.parse::<f64>().unwrap_or(f64::NAN)
+        }
+        _ => f64::NAN,
+    }
 }
 
 /// Bytecode VM first stage prototype
@@ -115,6 +154,12 @@ impl<'gc> VM<'gc> {
         math_map.insert("min".to_string(), Value::VmNativeFunction(BUILTIN_MATH_MIN));
         math_map.insert("PI".to_string(), Value::Number(std::f64::consts::PI));
         math_map.insert("E".to_string(), Value::Number(std::f64::consts::E));
+        math_map.insert("LN2".to_string(), Value::Number(std::f64::consts::LN_2));
+        math_map.insert("LN10".to_string(), Value::Number(std::f64::consts::LN_10));
+        math_map.insert("LOG2E".to_string(), Value::Number(std::f64::consts::LOG2_E));
+        math_map.insert("LOG10E".to_string(), Value::Number(std::f64::consts::LOG10_E));
+        math_map.insert("SQRT2".to_string(), Value::Number(std::f64::consts::SQRT_2));
+        math_map.insert("SQRT1_2".to_string(), Value::Number(std::f64::consts::FRAC_1_SQRT_2));
         self.globals
             .insert("Math".to_string(), Value::VmObject(Rc::new(RefCell::new(math_map))));
 
@@ -124,6 +169,7 @@ impl<'gc> VM<'gc> {
             .insert("parseInt".to_string(), Value::VmNativeFunction(BUILTIN_PARSEINT));
         self.globals
             .insert("parseFloat".to_string(), Value::VmNativeFunction(BUILTIN_PARSEFLOAT));
+        self.globals.insert("eval".to_string(), Value::VmNativeFunction(BUILTIN_EVAL));
 
         // JSON object
         let mut json_map = IndexMap::new();
@@ -137,6 +183,31 @@ impl<'gc> VM<'gc> {
         array_obj.insert("isArray".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ISARRAY));
         self.globals
             .insert("Array".to_string(), Value::VmObject(Rc::new(RefCell::new(array_obj))));
+
+        // Error constructor sentinels (used by instanceof checks)
+        self.globals
+            .insert("Error".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_ERROR));
+        self.globals
+            .insert("TypeError".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_TYPEERROR));
+        self.globals
+            .insert("SyntaxError".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SYNTAXERROR));
+        self.globals
+            .insert("RangeError".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_RANGEERROR));
+        self.globals
+            .insert("ReferenceError".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_REFERENCEERROR));
+
+        // Type constructor sentinels (for typeof checks / instanceof)
+        self.globals.insert("Date".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_DATE));
+        self.globals
+            .insert("Function".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_FUNCTION));
+        self.globals
+            .insert("Number".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_NUMBER));
+        self.globals
+            .insert("String".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_STRING));
+        self.globals
+            .insert("Boolean".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_BOOLEAN));
+        self.globals
+            .insert("Object".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_OBJECT));
     }
 
     /// Execute a native/built-in function
@@ -243,6 +314,21 @@ impl<'gc> VM<'gc> {
             BUILTIN_JSON_PARSE => {
                 let s = args.first().map(value_to_string).unwrap_or_default();
                 self.json_parse(&s)
+            }
+            BUILTIN_EVAL => {
+                let code = args.first().map(value_to_string).unwrap_or_default();
+                match crate::core::compile_and_run_vm_snippet(&code) {
+                    Ok(v) => crate::core::static_to_gc(v),
+                    Err(_e) => Value::Undefined,
+                }
+            }
+            BUILTIN_NEW_FUNCTION => {
+                // new Function(body): return a callable wrapper with __fn_body__
+                let body = args.first().map(value_to_string).unwrap_or_default();
+                let mut map = IndexMap::new();
+                map.insert("__fn_body__".to_string(), Value::String(crate::unicode::utf8_to_utf16(&body)));
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Function")));
+                Value::VmObject(Rc::new(RefCell::new(map)))
             }
             _ => {
                 log::warn!("Unknown builtin ID: {}", id);
@@ -562,24 +648,31 @@ impl<'gc> VM<'gc> {
     /// JSON.parse helper (simple subset)
     fn json_parse(&self, s: &str) -> Value<'gc> {
         let trimmed = s.trim();
-        if trimmed == "null" {
-            return Value::Null;
+        // Use serde_json for robust parsing, then convert to Value
+        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return self.json_to_value(&json_val);
         }
-        if trimmed == "true" {
-            return Value::Boolean(true);
-        }
-        if trimmed == "false" {
-            return Value::Boolean(false);
-        }
-        if let Ok(n) = trimmed.parse::<f64>() {
-            return Value::Number(n);
-        }
-        if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
-            let inner = &trimmed[1..trimmed.len() - 1];
-            return Value::String(crate::unicode::utf8_to_utf16(inner));
-        }
-        // For complex objects/arrays, fall back to undefined
         Value::Undefined
+    }
+
+    fn json_to_value(&self, v: &serde_json::Value) -> Value<'gc> {
+        match v {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Boolean(*b),
+            serde_json::Value::Number(n) => Value::Number(n.as_f64().unwrap_or(f64::NAN)),
+            serde_json::Value::String(s) => Value::String(crate::unicode::utf8_to_utf16(s)),
+            serde_json::Value::Array(arr) => {
+                let elems: Vec<Value<'gc>> = arr.iter().map(|item| self.json_to_value(item)).collect();
+                Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(elems))))
+            }
+            serde_json::Value::Object(obj) => {
+                let mut map = IndexMap::new();
+                for (key, val) in obj {
+                    map.insert(key.clone(), self.json_to_value(val));
+                }
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+        }
     }
 
     /// Handle a thrown value: unwind to nearest try/catch or return error
@@ -595,7 +688,22 @@ impl<'gc> VM<'gc> {
             }
             Ok(())
         } else {
-            Err(crate::raise_syntax_error!(format!("Uncaught: {}", value_to_string(&thrown))))
+            let msg = match &thrown {
+                Value::VmObject(map) => {
+                    let b = map.borrow();
+                    let type_name = b.get("__type__").map(|v| value_to_string(v)).unwrap_or_default();
+                    let message = b.get("message").map(|v| value_to_string(v)).unwrap_or_default();
+                    if !type_name.is_empty() && !message.is_empty() {
+                        format!("{}: {}", type_name, message)
+                    } else if !message.is_empty() {
+                        message
+                    } else {
+                        value_to_string(&thrown)
+                    }
+                }
+                _ => value_to_string(&thrown),
+            };
+            Err(crate::raise_syntax_error!(format!("Uncaught: {}", msg)))
         }
     }
 
@@ -631,13 +739,13 @@ impl<'gc> VM<'gc> {
                     let result = self.stack.pop().unwrap_or(Value::Undefined);
                     if let Some(frame) = self.frames.pop() {
                         self.stack.truncate(frame.bp - 1);
+                        self.ip = frame.return_ip;
                         if self.frames.len() < min_depth {
                             // Returning from an injected call (call_vm_function)
                             return Ok(result);
                         }
                         // Returning from a function call: pop locals and the function itself
                         self.stack.push(result);
-                        self.ip = frame.return_ip;
                     } else {
                         // Return from top-level script
                         return Ok(result);
@@ -700,10 +808,41 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         _ => {
-                            log::warn!("Attempted to call non-function: {}", value_to_string(&callee));
-                            let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
-                            self.stack.truncate(base);
-                            self.stack.push(Value::Undefined);
+                            // Check if it's a Function wrapper (VmObject with __fn_body__)
+                            if let Value::VmObject(ref map) = callee {
+                                let borrow = map.borrow();
+                                if let Some(Value::String(body_u16)) = borrow.get("__fn_body__") {
+                                    let body = crate::unicode::utf16_to_utf8(body_u16);
+                                    drop(borrow);
+                                    // Pop args and callee
+                                    let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
+                                    self.stack.truncate(base);
+                                    // Eval the body: try with "return" first, then without
+                                    let code_with_return = if body.trim_start().starts_with("return") {
+                                        body.clone()
+                                    } else {
+                                        format!("return {}", body)
+                                    };
+                                    let result = match crate::core::compile_and_run_vm_snippet(&code_with_return) {
+                                        Ok(v) => crate::core::static_to_gc(v),
+                                        Err(_) => match crate::core::compile_and_run_vm_snippet(&body) {
+                                            Ok(v) => crate::core::static_to_gc(v),
+                                            Err(_) => Value::Undefined,
+                                        },
+                                    };
+                                    self.stack.push(result);
+                                } else {
+                                    log::warn!("Attempted to call non-function object");
+                                    let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
+                                    self.stack.truncate(base);
+                                    self.stack.push(Value::Undefined);
+                                }
+                            } else {
+                                log::warn!("Attempted to call non-function: {}", value_to_string(&callee));
+                                let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
+                                self.stack.truncate(base);
+                                self.stack.push(Value::Undefined);
+                            }
                         }
                     }
                 }
@@ -782,38 +921,30 @@ impl<'gc> VM<'gc> {
                             result.extend_from_slice(b_str);
                             self.stack.push(Value::String(result));
                         }
-                        _ => return Err(crate::raise_syntax_error!("Unsupported types in VM Add")),
+                        _ => {
+                            // Coerce both to numbers: undefined → NaN, null → 0, bool → 0/1
+                            let a_num = to_number(&a);
+                            let b_num = to_number(&b);
+                            self.stack.push(Value::Number(a_num + b_num));
+                        }
                     }
                 }
                 Opcode::Sub => {
                     let b = self.stack.pop().expect("VM Stack underflow on Sub (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Sub (a)");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Number(a_num - b_num));
-                        }
-                        _ => return Err(crate::raise_syntax_error!("Only numbers supported in VM Sub")),
-                    }
+                    let a_num = to_number(&a);
+                    let b_num = to_number(&b);
+                    self.stack.push(Value::Number(a_num - b_num));
                 }
                 Opcode::Mul => {
                     let b = self.stack.pop().expect("VM Stack underflow on Mul (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Mul (a)");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Number(a_num * b_num));
-                        }
-                        _ => return Err(crate::raise_syntax_error!("Only numbers supported in VM Mul")),
-                    }
+                    self.stack.push(Value::Number(to_number(&a) * to_number(&b)));
                 }
                 Opcode::Div => {
                     let b = self.stack.pop().expect("VM Stack underflow on Div (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Div (a)");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Number(a_num / b_num));
-                        }
-                        _ => return Err(crate::raise_syntax_error!("Only numbers supported in VM Div")),
-                    }
+                    self.stack.push(Value::Number(to_number(&a) / to_number(&b)));
                 }
                 Opcode::LessThan => {
                     let b = self.stack.pop().expect("VM Stack underflow");
@@ -918,12 +1049,7 @@ impl<'gc> VM<'gc> {
                 Opcode::Mod => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Number(a_num % b_num));
-                        }
-                        _ => return Err(crate::raise_syntax_error!("Only numbers supported in VM Mod")),
-                    }
+                    self.stack.push(Value::Number(to_number(&a) % to_number(&b)));
                 }
                 Opcode::Negate => {
                     let a = self.stack.pop().expect("VM Stack underflow");
@@ -944,7 +1070,14 @@ impl<'gc> VM<'gc> {
                         Value::Boolean(_) => "boolean",
                         Value::Undefined => "undefined",
                         Value::Null => "object",
-                        Value::VmFunction(..) | Value::Closure(..) | Value::Function(..) => "function",
+                        Value::VmFunction(..) | Value::Closure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
+                        Value::VmObject(map) => {
+                            if map.borrow().contains_key("__fn_body__") {
+                                "function"
+                            } else {
+                                "object"
+                            }
+                        }
                         _ => "object",
                     };
                     self.stack.push(Value::String(crate::unicode::utf8_to_utf16(type_str)));
@@ -1216,11 +1349,226 @@ impl<'gc> VM<'gc> {
                     self.stack.push(method);
                 }
                 Opcode::NewError => {
-                    // Pop message from stack, create VmObject { message: msg }
+                    // Stack: [..., type_name, message]
                     let msg = self.stack.pop().unwrap_or(Value::Undefined);
+                    let type_val = self.stack.pop().unwrap_or(Value::Undefined);
+                    let type_name = value_to_string(&type_val);
                     let mut map = IndexMap::new();
                     map.insert("message".to_string(), msg);
+                    map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(&type_name)));
                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
+                }
+                Opcode::Dup => {
+                    let val = self.stack.last().cloned().unwrap_or(Value::Undefined);
+                    self.stack.push(val);
+                }
+                Opcode::In => {
+                    let obj = self.stack.pop().expect("VM Stack underflow on In (obj)");
+                    let key_val = self.stack.pop().expect("VM Stack underflow on In (key)");
+                    let key = value_to_string(&key_val);
+                    let result = match &obj {
+                        Value::VmObject(map) => {
+                            let b = map.borrow();
+                            if b.contains_key(&key) {
+                                true
+                            } else {
+                                // Check built-in properties based on __type__
+                                let type_name = b.get("__type__").map(|v| value_to_string(v)).unwrap_or_default();
+                                matches!(type_name.as_str(), "String" if key == "length")
+                            }
+                        }
+                        Value::VmArray(arr) => {
+                            if let Ok(idx) = key.parse::<usize>() {
+                                let borrow = arr.borrow();
+                                if idx < borrow.len() {
+                                    // Check if the index was deleted (hole)
+                                    !borrow.props.contains_key(&format!("__deleted_{}", idx))
+                                } else {
+                                    false
+                                }
+                            } else if key == "length" {
+                                true
+                            } else {
+                                arr.borrow().props.contains_key(&key)
+                            }
+                        }
+                        _ => false,
+                    };
+                    self.stack.push(Value::Boolean(result));
+                }
+                Opcode::InstanceOf => {
+                    let rhs = self.stack.pop().expect("VM Stack underflow on InstanceOf (rhs)");
+                    let lhs = self.stack.pop().expect("VM Stack underflow on InstanceOf (lhs)");
+                    // Map rhs constructor sentinel to name
+                    let ctor_name = match &rhs {
+                        Value::VmNativeFunction(id) => match *id {
+                            BUILTIN_CTOR_ERROR => "Error",
+                            BUILTIN_CTOR_TYPEERROR => "TypeError",
+                            BUILTIN_CTOR_SYNTAXERROR => "SyntaxError",
+                            BUILTIN_CTOR_RANGEERROR => "RangeError",
+                            BUILTIN_CTOR_REFERENCEERROR => "ReferenceError",
+                            BUILTIN_CTOR_DATE => "Date",
+                            BUILTIN_CTOR_FUNCTION => "Function",
+                            BUILTIN_CTOR_NUMBER => "Number",
+                            BUILTIN_CTOR_STRING => "String",
+                            BUILTIN_CTOR_BOOLEAN => "Boolean",
+                            BUILTIN_CTOR_OBJECT => "Object",
+                            _ => "",
+                        },
+                        Value::String(s) => {
+                            // Fallback for string sentinels
+                            let name = crate::unicode::utf16_to_utf8(s);
+                            // Leak is avoided; use a match approach instead
+                            match name.as_str() {
+                                "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" | "Date" | "Function"
+                                | "Number" | "String" | "Boolean" | "Object" => {
+                                    // handled below via value_to_string
+                                    ""
+                                }
+                                _ => "",
+                            }
+                        }
+                        _ => "",
+                    };
+                    // For VmNativeFunction-based check
+                    let ctor_str = if ctor_name.is_empty() {
+                        value_to_string(&rhs)
+                    } else {
+                        ctor_name.to_string()
+                    };
+                    let result = if let Value::VmObject(map) = &lhs {
+                        let borrow = map.borrow();
+                        if let Some(Value::String(type_u16)) = borrow.get("__type__") {
+                            let type_name = crate::unicode::utf16_to_utf8(type_u16);
+                            match ctor_str.as_str() {
+                                "Error" => type_name == "Error" || type_name.ends_with("Error"),
+                                "Object" => true, // all VmObjects are instances of Object
+                                _ => type_name == ctor_str,
+                            }
+                        } else {
+                            // Object without __type__: instanceof Object = true
+                            ctor_str == "Object"
+                        }
+                    } else {
+                        false
+                    };
+                    self.stack.push(Value::Boolean(result));
+                }
+                Opcode::DeleteProperty => {
+                    let name_idx = self.read_u16() as usize;
+                    let name_val = &self.chunk.constants[name_idx];
+                    let key = if let Value::String(s) = name_val {
+                        crate::unicode::utf16_to_utf8(s)
+                    } else {
+                        value_to_string(name_val)
+                    };
+                    let obj = self.stack.pop().expect("VM Stack underflow on DeleteProperty");
+                    // Check if object is a built-in (non-deletable properties)
+                    let is_builtin = if let Value::VmObject(ref map) = obj {
+                        if let Some(Value::VmObject(math_ref)) = self.globals.get("Math") {
+                            Rc::ptr_eq(map, math_ref)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if is_builtin {
+                        // Non-configurable property: throw TypeError
+                        let mut err_map = IndexMap::new();
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16(&format!(
+                                "Cannot delete property '{}' of #<Object>",
+                                key
+                            ))),
+                        );
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        let err = Value::VmObject(Rc::new(RefCell::new(err_map)));
+                        self.handle_throw(err)?;
+                        // After handle_throw, push undefined as placeholder on stack
+                        self.stack.push(Value::Boolean(false));
+                    } else if let Value::VmObject(map) = &obj {
+                        map.borrow_mut().shift_remove(&key);
+                        self.stack.push(Value::Boolean(true));
+                    } else if let Value::VmArray(arr) = &obj {
+                        arr.borrow_mut().props.shift_remove(&key);
+                        self.stack.push(Value::Boolean(true));
+                    } else {
+                        self.stack.push(Value::Boolean(false));
+                    }
+                }
+                Opcode::NewCall => {
+                    let arg_count = self.read_byte() as usize;
+                    // Stack: [..., constructor, arg0, arg1, ...]
+                    let callee_idx = self.stack.len() - arg_count - 1;
+                    let callee = self.stack[callee_idx].clone();
+                    match callee {
+                        Value::VmFunction(target_ip, _arity) => {
+                            // Create new empty object as `this`
+                            let new_obj = Rc::new(RefCell::new(IndexMap::new()));
+                            let this_val = Value::VmObject(new_obj.clone());
+                            self.this_stack.push(this_val);
+                            // Set up call frame
+                            let frame = CallFrame {
+                                return_ip: self.ip,
+                                bp: callee_idx + 1,
+                            };
+                            self.frames.push(frame);
+                            self.ip = target_ip;
+                            // Run the constructor
+                            let result = self.run_inner(self.frames.len());
+                            self.this_stack.pop();
+                            // The constructor returns `this` (we compiled GetThis+Return)
+                            // but result from run_inner is what was returned
+                            match result {
+                                Ok(val) => {
+                                    // If constructor returned an object, use it; otherwise use `this`
+                                    match &val {
+                                        Value::VmObject(_) => self.stack.push(val),
+                                        _ => self.stack.push(Value::VmObject(new_obj)),
+                                    }
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        _ => {
+                            // Not a function — just call normally
+                            log::warn!("NewCall on non-VmFunction: treating as regular call");
+                            for _i in 0..arg_count {
+                                self.stack.pop();
+                            }
+                            self.stack.pop(); // pop constructor
+                            self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+                        }
+                    }
+                }
+                Opcode::DeleteIndex => {
+                    // Stack: [..., obj, index]
+                    let idx_val = self.stack.pop().expect("VM Stack underflow on DeleteIndex (idx)");
+                    let obj = self.stack.pop().expect("VM Stack underflow on DeleteIndex (obj)");
+                    match &obj {
+                        Value::VmArray(arr) => {
+                            let idx_str = value_to_string(&idx_val);
+                            if let Ok(idx) = idx_str.parse::<usize>() {
+                                let mut borrow = arr.borrow_mut();
+                                if idx < borrow.elements.len() {
+                                    // Set to a "hole" — use a sentinel or remove
+                                    // JS delete arr[3] creates a hole (empty slot)
+                                    borrow.elements[idx] = Value::Undefined;
+                                    // Mark as deleted by storing in a "holes" set
+                                    borrow.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
+                                }
+                            }
+                            self.stack.push(Value::Boolean(true));
+                        }
+                        Value::VmObject(map) => {
+                            let key = value_to_string(&idx_val);
+                            map.borrow_mut().shift_remove(&key);
+                            self.stack.push(Value::Boolean(true));
+                        }
+                        _ => self.stack.push(Value::Boolean(false)),
+                    }
                 }
             }
         }

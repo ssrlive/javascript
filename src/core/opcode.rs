@@ -42,9 +42,15 @@ pub enum Opcode {
     SetupTry = 36,
     TeardownTry = 37,
     GetThis = 38,
-    GetKeys = 39,   // pop object, push array of its string keys
-    GetMethod = 40, // peek object (keep on stack), push method value on top
-    NewError = 41,  // pop message string, push VmObject { message }
+    GetKeys = 39,        // pop object, push array of its string keys
+    GetMethod = 40,      // peek object (keep on stack), push method value on top
+    NewError = 41,       // pop message string, push VmObject { message }
+    Dup = 42,            // duplicate top of stack
+    In = 43,             // pop key and object, push bool (key in object)
+    InstanceOf = 44,     // pop constructor and value, push bool
+    DeleteProperty = 45, // pop object, read constant key, delete, push bool
+    NewCall = 46,        // new Constructor(args): create obj, push this, call, return obj
+    DeleteIndex = 47,    // pop index and object, delete element, push bool}
 }
 
 impl TryFrom<u8> for Opcode {
@@ -94,6 +100,12 @@ impl TryFrom<u8> for Opcode {
             39 => Opcode::GetKeys,
             40 => Opcode::GetMethod,
             41 => Opcode::NewError,
+            42 => Opcode::Dup,
+            43 => Opcode::In,
+            44 => Opcode::InstanceOf,
+            45 => Opcode::DeleteProperty,
+            46 => Opcode::NewCall,
+            47 => Opcode::DeleteIndex,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

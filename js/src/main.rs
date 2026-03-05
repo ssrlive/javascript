@@ -23,6 +23,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     // Initialize logger (controlled by RUST_LOG)
     env_logger::init();
 
+    // Run our VM prototype (1 + 2)
+    javascript::run_vm_demo();
+
     // Run interpreter on a dedicated thread with a larger stack to support
     // deeply nested function-call testcases across platforms.
     let builder = std::thread::Builder::new().stack_size(64 * 1024 * 1024);

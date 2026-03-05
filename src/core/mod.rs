@@ -59,6 +59,12 @@ pub use parser::*;
 pub mod js_error;
 pub use js_error::*;
 
+pub mod opcode;
+pub use opcode::*;
+
+pub mod vm;
+pub use vm::*;
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct JsRoot<'gc> {

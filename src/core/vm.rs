@@ -94,6 +94,18 @@ const BUILTIN_SET_CLEAR: u8 = 98;
 const BUILTIN_CTOR_MAP: u8 = 99;
 const BUILTIN_CTOR_SET: u8 = 100;
 const BUILTIN_ITERATOR_NEXT: u8 = 101;
+const BUILTIN_OBJECT_KEYS: u8 = 102;
+const BUILTIN_OBJECT_VALUES: u8 = 103;
+const BUILTIN_OBJECT_ENTRIES: u8 = 104;
+const BUILTIN_OBJECT_ASSIGN: u8 = 105;
+const BUILTIN_OBJECT_FREEZE: u8 = 106;
+const BUILTIN_OBJECT_HASOWN: u8 = 107;
+const BUILTIN_OBJECT_CREATE: u8 = 108;
+const BUILTIN_OBJECT_GETPROTOTYPEOF: u8 = 109;
+const BUILTIN_OBJECT_DEFINEPROPS: u8 = 110;
+const BUILTIN_OBJECT_PREVENTEXT: u8 = 111;
+const BUILTIN_OBJECT_GROUPBY: u8 = 112;
+const BUILTIN_OBJECT_DEFINEPROP: u8 = 113;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame {
@@ -237,8 +249,25 @@ impl<'gc> VM<'gc> {
             .insert("Function".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_FUNCTION));
         self.globals
             .insert("Boolean".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_BOOLEAN));
+        // Object constructor with static methods
+        let mut object_map = IndexMap::new();
+        let object_proto = Rc::new(RefCell::new(IndexMap::new()));
+        object_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_OBJECT as f64));
+        object_map.insert("prototype".to_string(), Value::VmObject(object_proto.clone()));
+        object_map.insert("keys".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_KEYS));
+        object_map.insert("values".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_VALUES));
+        object_map.insert("entries".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_ENTRIES));
+        object_map.insert("assign".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_ASSIGN));
+        object_map.insert("freeze".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_FREEZE));
+        object_map.insert("hasOwn".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_HASOWN));
+        object_map.insert("create".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_CREATE));
+        object_map.insert("getPrototypeOf".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_GETPROTOTYPEOF));
+        object_map.insert("defineProperties".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_DEFINEPROPS));
+        object_map.insert("preventExtensions".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_PREVENTEXT));
+        object_map.insert("groupBy".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_GROUPBY));
+        object_map.insert("defineProperty".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_DEFINEPROP));
         self.globals
-            .insert("Object".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_OBJECT));
+            .insert("Object".to_string(), Value::VmObject(Rc::new(RefCell::new(object_map))));
 
         // Number object with constants and static methods
         let mut number_map = IndexMap::new();
@@ -495,6 +524,179 @@ impl<'gc> VM<'gc> {
                 map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(type_name)));
                 Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+            // Object.keys(obj) → array of own enumerable string keys
+            BUILTIN_OBJECT_KEYS => {
+                if let Some(Value::VmObject(obj)) = args.first() {
+                    let keys: Vec<Value<'gc>> = obj
+                        .borrow()
+                        .keys()
+                        .filter(|k| !k.starts_with("__"))
+                        .map(|k| Value::String(crate::unicode::utf8_to_utf16(k)))
+                        .collect();
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(keys))))
+                } else {
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![]))))
+                }
+            }
+            // Object.values(obj) → array of own enumerable values
+            BUILTIN_OBJECT_VALUES => {
+                if let Some(Value::VmObject(obj)) = args.first() {
+                    let vals: Vec<Value<'gc>> = obj
+                        .borrow()
+                        .iter()
+                        .filter(|(k, _)| !k.starts_with("__"))
+                        .map(|(_, v)| v.clone())
+                        .collect();
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vals))))
+                } else {
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![]))))
+                }
+            }
+            // Object.entries(obj) → array of [key, value] pairs
+            BUILTIN_OBJECT_ENTRIES => {
+                if let Some(Value::VmObject(obj)) = args.first() {
+                    let entries: Vec<Value<'gc>> = obj
+                        .borrow()
+                        .iter()
+                        .filter(|(k, _)| !k.starts_with("__"))
+                        .map(|(k, v)| {
+                            Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![
+                                Value::String(crate::unicode::utf8_to_utf16(k)),
+                                v.clone(),
+                            ]))))
+                        })
+                        .collect();
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(entries))))
+                } else {
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![]))))
+                }
+            }
+            // Object.assign(target, ...sources)
+            BUILTIN_OBJECT_ASSIGN => {
+                if let Some(Value::VmObject(target)) = args.first() {
+                    for src in args.iter().skip(1) {
+                        if let Value::VmObject(src_map) = src {
+                            let entries: Vec<(String, Value<'gc>)> = src_map
+                                .borrow()
+                                .iter()
+                                .filter(|(k, _)| !k.starts_with("__"))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            let mut tgt = target.borrow_mut();
+                            for (k, v) in entries {
+                                tgt.insert(k, v);
+                            }
+                        }
+                    }
+                    Value::VmObject(target.clone())
+                } else {
+                    args.first().cloned().unwrap_or(Value::Undefined)
+                }
+            }
+            // Object.freeze(obj) — mark as frozen (stub: just returns the object)
+            BUILTIN_OBJECT_FREEZE => {
+                if let Some(Value::VmObject(obj)) = args.first() {
+                    obj.borrow_mut().insert("__frozen__".to_string(), Value::Boolean(true));
+                    Value::VmObject(obj.clone())
+                } else {
+                    args.first().cloned().unwrap_or(Value::Undefined)
+                }
+            }
+            // Object.hasOwn(obj, key)
+            BUILTIN_OBJECT_HASOWN => {
+                let obj = args.first().cloned().unwrap_or(Value::Undefined);
+                let key = args.get(1).map(|v| value_to_string(v)).unwrap_or_default();
+                if let Value::VmObject(map) = &obj {
+                    Value::Boolean(map.borrow().contains_key(&key))
+                } else {
+                    Value::Boolean(false)
+                }
+            }
+            // Object.create(proto) — create object with given prototype (simplified)
+            BUILTIN_OBJECT_CREATE => {
+                let proto = args.first().cloned().unwrap_or(Value::Null);
+                let mut obj = IndexMap::new();
+                // Always store __proto__ so getPrototypeOf can distinguish
+                // Object.create(null) from objects with no explicit proto
+                obj.insert("__proto__".to_string(), proto);
+                Value::VmObject(Rc::new(RefCell::new(obj)))
+            }
+            // Object.getPrototypeOf(obj)
+            BUILTIN_OBJECT_GETPROTOTYPEOF => {
+                if let Some(Value::VmObject(map)) = args.first() {
+                    let borrow = map.borrow();
+                    if let Some(proto) = borrow.get("__proto__") {
+                        proto.clone()
+                    } else {
+                        drop(borrow);
+                        // Default prototype is Object.prototype
+                        if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
+                            obj_global.borrow().get("prototype").cloned().unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        }
+                    }
+                } else {
+                    Value::Null
+                }
+            }
+            // Object.preventExtensions(obj) — stub
+            BUILTIN_OBJECT_PREVENTEXT => {
+                if let Some(Value::VmObject(obj)) = args.first() {
+                    obj.borrow_mut().insert("__non_extensible__".to_string(), Value::Boolean(true));
+                    Value::VmObject(obj.clone())
+                } else {
+                    args.first().cloned().unwrap_or(Value::Undefined)
+                }
+            }
+            // Object.defineProperty(obj, prop, descriptor)
+            BUILTIN_OBJECT_DEFINEPROP => {
+                if let Some(Value::VmObject(obj)) = args.first() {
+                    let key = args.get(1).map(|v| value_to_string(v)).unwrap_or_default();
+                    if let Some(Value::VmObject(desc)) = args.get(2) {
+                        let desc_borrow = desc.borrow();
+                        if let Some(val) = desc_borrow.get("value") {
+                            obj.borrow_mut().insert(key.clone(), val.clone());
+                        } else if let Some(Value::VmFunction(ip, _)) = desc_borrow.get("get") {
+                            let getter_key = format!("__get_{}", key);
+                            obj.borrow_mut().insert(getter_key, Value::VmFunction(*ip, 0));
+                        }
+                        // Handle writable: false
+                        if matches!(desc_borrow.get("writable"), Some(Value::Boolean(false))) {
+                            let ro_key = format!("__readonly_{}__", key);
+                            obj.borrow_mut().insert(ro_key, Value::Boolean(true));
+                        }
+                    }
+                    Value::VmObject(obj.clone())
+                } else {
+                    args.first().cloned().unwrap_or(Value::Undefined)
+                }
+            }
+            // Object.defineProperties — stub
+            BUILTIN_OBJECT_DEFINEPROPS => args.first().cloned().unwrap_or(Value::Undefined),
+            // new Object() constructor
+            BUILTIN_CTOR_OBJECT => Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))),
+            // Object.groupBy(iterable, callbackFn)
+            BUILTIN_OBJECT_GROUPBY => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let mut groups: IndexMap<String, Vec<Value<'gc>>> = IndexMap::new();
+                if let Value::VmArray(arr) = &iterable
+                    && let Value::VmFunction(ip, _arity) = &callback
+                {
+                    let items: Vec<Value<'gc>> = arr.borrow().iter().cloned().collect();
+                    for item in &items {
+                        let key_val = self.call_vm_function(*ip, std::slice::from_ref(item));
+                        let key_str = value_to_string(&key_val);
+                        groups.entry(key_str).or_default().push(item.clone());
+                    }
+                }
+                let mut result = IndexMap::new();
+                for (k, v) in groups {
+                    result.insert(k, Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(v)))));
+                }
+                Value::VmObject(Rc::new(RefCell::new(result)))
             }
             _ => {
                 log::warn!("Unknown builtin ID: {}", id);
@@ -983,6 +1185,11 @@ impl<'gc> VM<'gc> {
             return Value::VmObject(Rc::new(RefCell::new(result)));
         }
 
+        // Object.* static methods: delegate to call_builtin
+        if (BUILTIN_OBJECT_KEYS..=BUILTIN_OBJECT_DEFINEPROP).contains(&id) {
+            return self.call_builtin(id, args);
+        }
+
         log::warn!("Unknown method builtin ID {} on {}", id, value_to_string(&receiver));
         Value::Undefined
     }
@@ -1030,6 +1237,12 @@ impl<'gc> VM<'gc> {
                 let num = Value::Number(if *bv { 1.0 } else { 0.0 });
                 self.loose_equal(a, &num)
             }
+            // Reference equality for objects/arrays/maps/sets
+            (Value::VmObject(a_rc), Value::VmObject(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
+            (Value::VmArray(a_rc), Value::VmArray(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
+            (Value::VmMap(a_rc), Value::VmMap(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
+            (Value::VmSet(a_rc), Value::VmSet(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
+            (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             _ => false,
         }
     }
@@ -1582,9 +1795,13 @@ impl<'gc> VM<'gc> {
                                             "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
                                             "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
                                             "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                            "constructor" => self.globals.get("Number").cloned(),
                                             _ => None,
                                         },
-                                        _ => None,
+                                        _ => match key.as_str() {
+                                            "constructor" => self.globals.get("Object").cloned(),
+                                            _ => None,
+                                        },
                                     };
                                     self.stack.push(resolved.unwrap_or(Value::Undefined));
                                 }
@@ -1677,14 +1894,36 @@ impl<'gc> VM<'gc> {
                     let val = self.stack.pop().expect("VM Stack underflow on SetProperty (val)");
                     let obj = self.stack.pop().expect("VM Stack underflow on SetProperty (obj)");
                     if let Value::VmObject(map) = &obj {
-                        map.borrow_mut().insert(key, val.clone());
+                        let borrow = map.borrow();
+                        let is_frozen = matches!(borrow.get("__frozen__"), Some(Value::Boolean(true)));
+                        let is_non_ext = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
+                        let key_exists = borrow.contains_key(&key);
+                        let readonly_key = format!("__readonly_{}__", key);
+                        let is_readonly = matches!(borrow.get(&readonly_key), Some(Value::Boolean(true)));
+                        drop(borrow);
+                        if is_frozen || (is_non_ext && !key_exists) || is_readonly {
+                            let msg = if is_frozen {
+                                format!("Cannot assign to read only property '{}' of object", key)
+                            } else {
+                                format!("Cannot add property {}, object is not extensible", key)
+                            };
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            let err = Value::VmObject(Rc::new(RefCell::new(err_map)));
+                            self.handle_throw(err)?;
+                            self.stack.push(val);
+                        } else {
+                            map.borrow_mut().insert(key.clone(), val.clone());
+                            self.stack.push(val);
+                        }
                     } else if let Value::VmArray(arr) = &obj {
                         arr.borrow_mut().props.insert(key, val.clone());
+                        self.stack.push(val);
                     } else {
                         log::warn!("SetProperty on non-object: {}", value_to_string(&obj));
+                        self.stack.push(val);
                     }
-                    // Leave the assigned value on stack
-                    self.stack.push(val);
                 }
                 Opcode::GetIndex => {
                     let index = self.stack.pop().expect("VM Stack underflow on GetIndex (index)");
@@ -2162,13 +2401,61 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         _ => {
-                            // Not a function — just call normally
-                            log::warn!("NewCall on non-VmFunction: treating as regular call");
-                            for _i in 0..arg_count {
-                                self.stack.pop();
+                            // Check for VmObject with __native_id__ (e.g. Object, Number, String constructors)
+                            if let Value::VmObject(ref map) = callee {
+                                let borrow = map.borrow();
+                                if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
+                                    let id = *native_id as u8;
+                                    drop(borrow);
+                                    let args: Vec<Value<'gc>> = (0..arg_count)
+                                        .map(|_| self.stack.pop().expect("VM Stack underflow"))
+                                        .collect::<Vec<_>>()
+                                        .into_iter()
+                                        .rev()
+                                        .collect();
+                                    self.stack.pop(); // pop constructor
+                                    let result = self.call_builtin(id, args);
+                                    // For constructors like Number/String/Boolean,
+                                    // wrap the primitive result in an object
+                                    let wrapped = match id {
+                                        BUILTIN_CTOR_NUMBER => {
+                                            let mut m = IndexMap::new();
+                                            m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Number")));
+                                            m.insert("__value__".to_string(), result);
+                                            Value::VmObject(Rc::new(RefCell::new(m)))
+                                        }
+                                        BUILTIN_CTOR_STRING => {
+                                            let mut m = IndexMap::new();
+                                            m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("String")));
+                                            m.insert("__value__".to_string(), result);
+                                            Value::VmObject(Rc::new(RefCell::new(m)))
+                                        }
+                                        BUILTIN_CTOR_BOOLEAN => {
+                                            let mut m = IndexMap::new();
+                                            m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Boolean")));
+                                            m.insert("__value__".to_string(), result);
+                                            Value::VmObject(Rc::new(RefCell::new(m)))
+                                        }
+                                        _ => result,
+                                    };
+                                    self.stack.push(wrapped);
+                                } else {
+                                    drop(borrow);
+                                    log::warn!("NewCall on non-constructor VmObject");
+                                    for _i in 0..arg_count {
+                                        self.stack.pop();
+                                    }
+                                    self.stack.pop();
+                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+                                }
+                            } else {
+                                log::warn!("NewCall on non-VmFunction: treating as regular call");
+                                for _i in 0..arg_count {
+                                    self.stack.pop();
+                                }
+                                self.stack.pop(); // pop constructor
+                                self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
                             }
-                            self.stack.pop(); // pop constructor
-                            self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
                         }
                     }
                 }

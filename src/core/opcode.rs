@@ -50,7 +50,9 @@ pub enum Opcode {
     InstanceOf = 44,     // pop constructor and value, push bool
     DeleteProperty = 45, // pop object, read constant key, delete, push bool
     NewCall = 46,        // new Constructor(args): create obj, push this, call, return obj
-    DeleteIndex = 47,    // pop index and object, delete element, push bool}
+    DeleteIndex = 47,    // pop index and object, delete element, push bool
+    Swap = 48,           // swap top two stack elements
+    ToNumber = 49,       // convert TOS to number
 }
 
 impl TryFrom<u8> for Opcode {
@@ -106,6 +108,8 @@ impl TryFrom<u8> for Opcode {
             45 => Opcode::DeleteProperty,
             46 => Opcode::NewCall,
             47 => Opcode::DeleteIndex,
+            48 => Opcode::Swap,
+            49 => Opcode::ToNumber,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

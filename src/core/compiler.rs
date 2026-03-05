@@ -1031,19 +1031,20 @@ impl<'gc> Compiler<'gc> {
                 self.compile_store(inner)?;
             }
             // Postfix increment: x++
+            // Returns ToNumber(old_value), stores ToNumber(old_value)+1
             Expr::PostIncrement(inner) => {
                 self.compile_expr(inner)?;
-                // Duplicate: keep old value on stack below
-                self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::ToNumber);
+                self.chunk.write_opcode(Opcode::Dup);
                 self.chunk.write_opcode(Opcode::Increment);
                 self.compile_store(inner)?;
-                // Pop the incremented value, keep original
                 self.chunk.write_opcode(Opcode::Pop);
             }
             // Postfix decrement: x--
             Expr::PostDecrement(inner) => {
                 self.compile_expr(inner)?;
-                self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::ToNumber);
+                self.chunk.write_opcode(Opcode::Dup);
                 self.chunk.write_opcode(Opcode::Decrement);
                 self.compile_store(inner)?;
                 self.chunk.write_opcode(Opcode::Pop);
@@ -1159,7 +1160,7 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_byte(args.len() as u8);
                         }
                         "Object" | "Number" | "Boolean" | "String" | "Date" => {
-                            // Create typed wrapper: { __type__: "TypeName" }
+                            // Create typed wrapper: { __type__: "TypeName", __value__: arg }
                             let type_key = crate::unicode::utf8_to_utf16("__type__");
                             let type_key_idx = self.chunk.add_constant(Value::String(type_key));
                             self.chunk.write_opcode(Opcode::Constant);
@@ -1168,8 +1169,18 @@ impl<'gc> Compiler<'gc> {
                             let type_val_idx = self.chunk.add_constant(Value::String(type_val));
                             self.chunk.write_opcode(Opcode::Constant);
                             self.chunk.write_u16(type_val_idx);
-                            self.chunk.write_opcode(Opcode::NewObject);
-                            self.chunk.write_byte(1); // 1 key-value pair
+                            if let Some(first_arg) = args.first() {
+                                let val_key = crate::unicode::utf8_to_utf16("__value__");
+                                let val_key_idx = self.chunk.add_constant(Value::String(val_key));
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(val_key_idx);
+                                self.compile_expr(first_arg)?;
+                                self.chunk.write_opcode(Opcode::NewObject);
+                                self.chunk.write_byte(2); // 2 key-value pairs
+                            } else {
+                                self.chunk.write_opcode(Opcode::NewObject);
+                                self.chunk.write_byte(1); // 1 key-value pair
+                            }
                         }
                         "Function" => {
                             // new Function(body) → compile to: push native_fn, push body, Call(1)
@@ -1446,6 +1457,21 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::SetGlobal);
                     self.chunk.write_u16(name_idx);
                 }
+            }
+            Expr::Property(obj, key) => {
+                // Stack has: [..., new_val]
+                // Need: push obj, swap so stack = [..., obj, new_val], SetProperty
+                self.compile_expr(obj)?;
+                self.chunk.write_opcode(Opcode::Swap);
+                let key_u16 = crate::unicode::utf8_to_utf16(key);
+                let key_idx = self.chunk.add_constant(Value::String(key_u16));
+                self.chunk.write_opcode(Opcode::SetProperty);
+                self.chunk.write_u16(key_idx);
+            }
+            Expr::Index(_obj, _idx) => {
+                // Index store needs 3-way rotate which is complex
+                // For now, fall through to error — handle inline in inc/dec if needed
+                return Err(crate::raise_syntax_error!("Index increment/decrement not yet supported in VM"));
             }
             _ => {
                 return Err(crate::raise_syntax_error!("Invalid increment/decrement target for VM"));

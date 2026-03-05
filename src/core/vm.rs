@@ -59,6 +59,17 @@ const BUILTIN_CTOR_BOOLEAN: u8 = 69;
 const BUILTIN_CTOR_OBJECT: u8 = 70;
 const BUILTIN_EVAL: u8 = 71;
 const BUILTIN_NEW_FUNCTION: u8 = 72;
+// Number static methods
+const BUILTIN_NUMBER_ISNAN: u8 = 73;
+const BUILTIN_NUMBER_ISFINITE: u8 = 74;
+const BUILTIN_NUMBER_ISINTEGER: u8 = 75;
+const BUILTIN_NUMBER_ISSAFEINTEGER: u8 = 76;
+// Number instance methods
+const BUILTIN_NUM_TOFIXED: u8 = 77;
+const BUILTIN_NUM_TOEXPONENTIAL: u8 = 78;
+const BUILTIN_NUM_TOPRECISION: u8 = 79;
+const BUILTIN_NUM_TOSTRING: u8 = 80;
+const BUILTIN_NUM_VALUEOF: u8 = 81;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame {
@@ -201,13 +212,45 @@ impl<'gc> VM<'gc> {
         self.globals
             .insert("Function".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_FUNCTION));
         self.globals
-            .insert("Number".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_NUMBER));
-        self.globals
-            .insert("String".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_STRING));
-        self.globals
             .insert("Boolean".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_BOOLEAN));
         self.globals
             .insert("Object".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_OBJECT));
+
+        // Number object with constants and static methods
+        let mut number_map = IndexMap::new();
+        number_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_NUMBER as f64));
+        number_map.insert("MAX_VALUE".to_string(), Value::Number(f64::MAX));
+        number_map.insert("MIN_VALUE".to_string(), Value::Number(5e-324));
+        number_map.insert("NaN".to_string(), Value::Number(f64::NAN));
+        number_map.insert("POSITIVE_INFINITY".to_string(), Value::Number(f64::INFINITY));
+        number_map.insert("NEGATIVE_INFINITY".to_string(), Value::Number(f64::NEG_INFINITY));
+        number_map.insert("EPSILON".to_string(), Value::Number(f64::EPSILON));
+        number_map.insert("MAX_SAFE_INTEGER".to_string(), Value::Number(9007199254740991.0));
+        number_map.insert("MIN_SAFE_INTEGER".to_string(), Value::Number(-9007199254740991.0));
+        number_map.insert("isNaN".to_string(), Value::VmNativeFunction(BUILTIN_NUMBER_ISNAN));
+        number_map.insert("isFinite".to_string(), Value::VmNativeFunction(BUILTIN_NUMBER_ISFINITE));
+        number_map.insert("isInteger".to_string(), Value::VmNativeFunction(BUILTIN_NUMBER_ISINTEGER));
+        number_map.insert("isSafeInteger".to_string(), Value::VmNativeFunction(BUILTIN_NUMBER_ISSAFEINTEGER));
+        number_map.insert("parseFloat".to_string(), Value::VmNativeFunction(BUILTIN_PARSEFLOAT));
+        number_map.insert("parseInt".to_string(), Value::VmNativeFunction(BUILTIN_PARSEINT));
+        // Number.prototype stubs for test compatibility
+        let mut num_proto = IndexMap::new();
+        num_proto.insert("toFixed".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOFIXED));
+        num_proto.insert("call".to_string(), Value::Undefined); // stub
+        number_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(num_proto))));
+        self.globals
+            .insert("Number".to_string(), Value::VmObject(Rc::new(RefCell::new(number_map))));
+
+        // String constructor (as VmObject with __native_id__ for typeof "function")
+        let mut string_map = IndexMap::new();
+        string_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_STRING as f64));
+        self.globals
+            .insert("String".to_string(), Value::VmObject(Rc::new(RefCell::new(string_map))));
+
+        // Global constants
+        self.globals.insert("Infinity".to_string(), Value::Number(f64::INFINITY));
+        self.globals.insert("NaN".to_string(), Value::Number(f64::NAN));
+        self.globals.insert("undefined".to_string(), Value::Undefined);
     }
 
     /// Execute a native/built-in function
@@ -290,9 +333,35 @@ impl<'gc> VM<'gc> {
             BUILTIN_PARSEINT => {
                 let s = args.first().map(value_to_string).unwrap_or_default();
                 let trimmed = s.trim();
-                match trimmed.parse::<f64>() {
-                    Ok(n) => Value::Number(n.trunc()),
-                    Err(_) => Value::Number(f64::NAN),
+                let radix = args.get(1).map(|v| to_number(v) as u32).unwrap_or(0);
+                // Determine effective radix
+                let effective_radix = if radix == 0 {
+                    if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                        16
+                    } else {
+                        10
+                    }
+                } else {
+                    radix
+                };
+                let parse_str = if effective_radix == 16 {
+                    trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed)
+                } else {
+                    trimmed
+                };
+                match i64::from_str_radix(parse_str, effective_radix) {
+                    Ok(n) => Value::Number(n as f64),
+                    Err(_) => {
+                        // Try parsing as float for radix 10
+                        if effective_radix == 10 {
+                            match trimmed.parse::<f64>() {
+                                Ok(n) => Value::Number(n.trunc()),
+                                Err(_) => Value::Number(f64::NAN),
+                            }
+                        } else {
+                            Value::Number(f64::NAN)
+                        }
+                    }
                 }
             }
             BUILTIN_PARSEFLOAT => {
@@ -330,6 +399,36 @@ impl<'gc> VM<'gc> {
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Function")));
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
+            // Number() as function: convert argument to number
+            BUILTIN_CTOR_NUMBER => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(0.0);
+                Value::Number(n)
+            }
+            // String() as function: convert argument to string
+            BUILTIN_CTOR_STRING => {
+                let s = args.first().map(value_to_string).unwrap_or_default();
+                Value::String(crate::unicode::utf8_to_utf16(&s))
+            }
+            // Number.isNaN: strict check (no coercion)
+            BUILTIN_NUMBER_ISNAN => match args.first() {
+                Some(Value::Number(n)) => Value::Boolean(n.is_nan()),
+                _ => Value::Boolean(false),
+            },
+            // Number.isFinite: strict check
+            BUILTIN_NUMBER_ISFINITE => match args.first() {
+                Some(Value::Number(n)) => Value::Boolean(n.is_finite()),
+                _ => Value::Boolean(false),
+            },
+            // Number.isInteger
+            BUILTIN_NUMBER_ISINTEGER => match args.first() {
+                Some(Value::Number(n)) => Value::Boolean(n.is_finite() && *n == n.trunc()),
+                _ => Value::Boolean(false),
+            },
+            // Number.isSafeInteger
+            BUILTIN_NUMBER_ISSAFEINTEGER => match args.first() {
+                Some(Value::Number(n)) => Value::Boolean(n.is_finite() && *n == n.trunc() && n.abs() <= 9007199254740991.0),
+                _ => Value::Boolean(false),
+            },
             _ => {
                 log::warn!("Unknown builtin ID: {}", id);
                 Value::Undefined
@@ -356,7 +455,13 @@ impl<'gc> VM<'gc> {
             | BUILTIN_MATH_MIN
             | BUILTIN_ISNAN
             | BUILTIN_PARSEINT
-            | BUILTIN_PARSEFLOAT => {
+            | BUILTIN_PARSEFLOAT
+            | BUILTIN_NUMBER_ISNAN
+            | BUILTIN_NUMBER_ISFINITE
+            | BUILTIN_NUMBER_ISINTEGER
+            | BUILTIN_NUMBER_ISSAFEINTEGER
+            | BUILTIN_CTOR_NUMBER
+            | BUILTIN_CTOR_STRING => {
                 return self.call_builtin(id, args);
             }
             _ => {}
@@ -572,6 +677,72 @@ impl<'gc> VM<'gc> {
                     return Value::String(crate::unicode::utf8_to_utf16(&rust_str[s..e]));
                 }
                 _ => {}
+            }
+        }
+
+        // Number instance methods (receiver is a Number value or Number wrapper)
+        {
+            let num = match &receiver {
+                Value::Number(n) => Some(*n),
+                Value::VmObject(map) => {
+                    let b = map.borrow();
+                    if b.get("__type__").map(|v| value_to_string(v)).as_deref() == Some("Number") {
+                        b.get("__value__").map(|v| to_number(v))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(n) = num {
+                match id {
+                    BUILTIN_NUM_TOFIXED => {
+                        let digits = args.first().map(|v| to_number(v) as usize).unwrap_or(0);
+                        return Value::String(crate::unicode::utf8_to_utf16(&format!("{:.prec$}", n, prec = digits)));
+                    }
+                    BUILTIN_NUM_TOEXPONENTIAL => {
+                        let digits = args.first().map(|v| to_number(v) as usize).unwrap_or(0);
+                        return Value::String(crate::unicode::utf8_to_utf16(&format!("{:.prec$e}", n, prec = digits)));
+                    }
+                    BUILTIN_NUM_TOPRECISION => {
+                        let prec = args.first().map(|v| to_number(v) as usize).unwrap_or(1);
+                        // JS toPrecision: up to `prec` significant digits
+                        let s = format!("{:.prec$e}", n, prec = prec.saturating_sub(1));
+                        // Parse back and format without unnecessary trailing zeros
+                        if let Ok(val) = s.parse::<f64>() {
+                            let result = format!("{}", val);
+                            // Pad with trailing zeros if needed
+                            if !result.contains('.') && prec > result.len() {
+                                return Value::String(crate::unicode::utf8_to_utf16(&format!(
+                                    "{}.{}",
+                                    result,
+                                    "0".repeat(prec - result.len())
+                                )));
+                            }
+                            return Value::String(crate::unicode::utf8_to_utf16(&result));
+                        }
+                        return Value::String(crate::unicode::utf8_to_utf16(&s));
+                    }
+                    BUILTIN_NUM_TOSTRING => {
+                        let radix = args.first().map(|v| to_number(v) as u32).unwrap_or(10);
+                        if radix == 10 {
+                            return Value::String(crate::unicode::utf8_to_utf16(&value_to_string(&Value::Number(n))));
+                        }
+                        // Integer-only for non-10 radixes
+                        let i = n as i64;
+                        let s = match radix {
+                            2 => format!("{:b}", i),
+                            8 => format!("{:o}", i),
+                            16 => format!("{:x}", i),
+                            _ => format!("{}", i),
+                        };
+                        return Value::String(crate::unicode::utf8_to_utf16(&s));
+                    }
+                    BUILTIN_NUM_VALUEOF => {
+                        return Value::Number(n);
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -808,10 +979,20 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         _ => {
-                            // Check if it's a Function wrapper (VmObject with __fn_body__)
+                            // Check if it's a Function wrapper (VmObject with __fn_body__ or __native_id__)
                             if let Value::VmObject(ref map) = callee {
                                 let borrow = map.borrow();
-                                if let Some(Value::String(body_u16)) = borrow.get("__fn_body__") {
+                                if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
+                                    let id = *native_id as u8;
+                                    drop(borrow);
+                                    let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
+                                    self.stack.pop(); // pop callee
+                                    if is_method {
+                                        self.stack.pop(); // pop receiver
+                                    }
+                                    let result = self.call_builtin(id, args_collected);
+                                    self.stack.push(result);
+                                } else if let Some(Value::String(body_u16)) = borrow.get("__fn_body__") {
                                     let body = crate::unicode::utf16_to_utf8(body_u16);
                                     drop(borrow);
                                     // Pop args and callee
@@ -1072,7 +1253,8 @@ impl<'gc> VM<'gc> {
                         Value::Null => "object",
                         Value::VmFunction(..) | Value::Closure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
                         Value::VmObject(map) => {
-                            if map.borrow().contains_key("__fn_body__") {
+                            let b = map.borrow();
+                            if b.contains_key("__fn_body__") || b.contains_key("__native_id__") {
                                 "function"
                             } else {
                                 "object"
@@ -1119,8 +1301,28 @@ impl<'gc> VM<'gc> {
                     let obj = self.stack.pop().expect("VM Stack underflow on GetProperty");
                     match &obj {
                         Value::VmObject(map) => {
-                            let val = map.borrow().get(&key).cloned().unwrap_or(Value::Undefined);
-                            self.stack.push(val);
+                            let borrow = map.borrow();
+                            let val = borrow.get(&key).cloned();
+                            if let Some(v) = val {
+                                drop(borrow);
+                                self.stack.push(v);
+                            } else {
+                                // Check if this is a typed wrapper with built-in methods
+                                let type_name = borrow.get("__type__").map(|v| value_to_string(v));
+                                drop(borrow);
+                                let resolved = match type_name.as_deref() {
+                                    Some("Number") => match key.as_str() {
+                                        "toFixed" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
+                                        "toExponential" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
+                                        "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
+                                        "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
+                                        "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                self.stack.push(resolved.unwrap_or(Value::Undefined));
+                            }
                         }
                         Value::VmArray(arr) => match key.as_str() {
                             "length" => self.stack.push(Value::Number(arr.borrow().len() as f64)),
@@ -1158,6 +1360,14 @@ impl<'gc> VM<'gc> {
                             "startsWith" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_STARTSWITH)),
                             "endsWith" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_ENDSWITH)),
                             "substring" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_SUBSTRING)),
+                            _ => self.stack.push(Value::Undefined),
+                        },
+                        Value::Number(_) => match key.as_str() {
+                            "toFixed" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
+                            "toExponential" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
+                            "toPrecision" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
+                            "toString" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
+                            "valueOf" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
                             _ => self.stack.push(Value::Undefined),
                         },
                         _ => {
@@ -1284,11 +1494,19 @@ impl<'gc> VM<'gc> {
                 Opcode::GetKeys => {
                     let obj = self.stack.pop().expect("VM Stack underflow on GetKeys");
                     let keys = match &obj {
-                        Value::VmObject(map) => map
-                            .borrow()
-                            .keys()
-                            .map(|k| Value::String(crate::unicode::utf8_to_utf16(k)))
-                            .collect(),
+                        Value::VmObject(map) => {
+                            let borrow = map.borrow();
+                            // Built-in constructors (with __native_id__) have no enumerable properties
+                            if borrow.contains_key("__native_id__") {
+                                Vec::new()
+                            } else {
+                                borrow
+                                    .keys()
+                                    .filter(|k| !k.starts_with("__"))
+                                    .map(|k| Value::String(crate::unicode::utf8_to_utf16(k)))
+                                    .collect()
+                            }
+                        }
                         Value::VmArray(arr) => {
                             let a = arr.borrow();
                             let mut k: Vec<Value<'gc>> = (0..a.elements.len())
@@ -1315,7 +1533,26 @@ impl<'gc> VM<'gc> {
                     };
                     let obj = self.stack.last().expect("VM Stack underflow on GetMethod");
                     let method = match obj {
-                        Value::VmObject(map) => map.borrow().get(&key).cloned().unwrap_or(Value::Undefined),
+                        Value::VmObject(map) => {
+                            let borrow = map.borrow();
+                            if let Some(v) = borrow.get(&key).cloned() {
+                                v
+                            } else {
+                                // Check typed wrapper methods
+                                let type_name = borrow.get("__type__").map(|v| value_to_string(v));
+                                match type_name.as_deref() {
+                                    Some("Number") => match key.as_str() {
+                                        "toFixed" => Value::VmNativeFunction(BUILTIN_NUM_TOFIXED),
+                                        "toExponential" => Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL),
+                                        "toPrecision" => Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION),
+                                        "toString" => Value::VmNativeFunction(BUILTIN_NUM_TOSTRING),
+                                        "valueOf" => Value::VmNativeFunction(BUILTIN_NUM_VALUEOF),
+                                        _ => Value::Undefined,
+                                    },
+                                    _ => Value::Undefined,
+                                }
+                            }
+                        }
                         Value::VmArray(_arr) => match key.as_str() {
                             "push" => Value::VmNativeFunction(BUILTIN_ARRAY_PUSH),
                             "pop" => Value::VmNativeFunction(BUILTIN_ARRAY_POP),
@@ -1344,6 +1581,14 @@ impl<'gc> VM<'gc> {
                             "substring" => Value::VmNativeFunction(BUILTIN_STRING_SUBSTRING),
                             _ => Value::Undefined,
                         },
+                        Value::Number(_) => match key.as_str() {
+                            "toFixed" => Value::VmNativeFunction(BUILTIN_NUM_TOFIXED),
+                            "toExponential" => Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL),
+                            "toPrecision" => Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION),
+                            "toString" => Value::VmNativeFunction(BUILTIN_NUM_TOSTRING),
+                            "valueOf" => Value::VmNativeFunction(BUILTIN_NUM_VALUEOF),
+                            _ => Value::Undefined,
+                        },
                         _ => Value::Undefined,
                     };
                     self.stack.push(method);
@@ -1361,6 +1606,16 @@ impl<'gc> VM<'gc> {
                 Opcode::Dup => {
                     let val = self.stack.last().cloned().unwrap_or(Value::Undefined);
                     self.stack.push(val);
+                }
+                Opcode::Swap => {
+                    let len = self.stack.len();
+                    if len >= 2 {
+                        self.stack.swap(len - 1, len - 2);
+                    }
+                }
+                Opcode::ToNumber => {
+                    let val = self.stack.pop().expect("VM Stack underflow on ToNumber");
+                    self.stack.push(Value::Number(to_number(&val)));
                 }
                 Opcode::In => {
                     let obj = self.stack.pop().expect("VM Stack underflow on In (obj)");
@@ -1415,6 +1670,22 @@ impl<'gc> VM<'gc> {
                             BUILTIN_CTOR_OBJECT => "Object",
                             _ => "",
                         },
+                        Value::VmObject(map) => {
+                            let b = map.borrow();
+                            if let Some(Value::Number(id)) = b.get("__native_id__") {
+                                match *id as u8 {
+                                    BUILTIN_CTOR_NUMBER => "Number",
+                                    BUILTIN_CTOR_STRING => "String",
+                                    BUILTIN_CTOR_BOOLEAN => "Boolean",
+                                    BUILTIN_CTOR_OBJECT => "Object",
+                                    BUILTIN_CTOR_DATE => "Date",
+                                    BUILTIN_CTOR_FUNCTION => "Function",
+                                    _ => "",
+                                }
+                            } else {
+                                ""
+                            }
+                        }
                         Value::String(s) => {
                             // Fallback for string sentinels
                             let name = crate::unicode::utf16_to_utf8(s);

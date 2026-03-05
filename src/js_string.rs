@@ -403,7 +403,10 @@ pub(crate) fn string_constructor<'gc>(
             Ok(Value::String(utf8_to_utf16(&elems.join(","))))
         }
         Value::VmObject(_) => Ok(Value::String(utf8_to_utf16("[object Object]"))),
-        Value::VmNativeFunction(id) => Ok(Value::String(utf8_to_utf16(&format!("function native#{}() {{ [native code] }}", id)))),
+        Value::VmNativeFunction(id) => Ok(Value::String(utf8_to_utf16(&format!(
+            "function native#{}() {{ [native code] }}",
+            id
+        )))),
     }
 }
 

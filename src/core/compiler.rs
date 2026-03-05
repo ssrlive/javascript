@@ -1,6 +1,6 @@
-use crate::core::opcode::{Chunk, Opcode};
-use crate::core::statement::{BinaryOp, Expr, Statement, StatementKind, CatchParamPattern};
 use crate::Value;
+use crate::core::opcode::{Chunk, Opcode};
+use crate::core::statement::{BinaryOp, CatchParamPattern, Expr, Statement, StatementKind};
 
 pub struct Compiler<'gc> {
     chunk: Chunk<'gc>,
@@ -22,10 +22,10 @@ impl<'gc> Compiler<'gc> {
             let is_last = i == statements.len() - 1;
             self.compile_statement(stmt, is_last)?;
         }
-        
+
         // Ensure returning at the end
         self.chunk.write_opcode(Opcode::Return);
-        
+
         Ok(self.chunk)
     }
 
@@ -58,7 +58,7 @@ impl<'gc> Compiler<'gc> {
             StatementKind::Expr(expr) => {
                 self.compile_expr(expr)?;
                 // Pop if it's not the last evaluated statement, to keep stack clean
-                if !is_last{
+                if !is_last {
                     self.chunk.write_opcode(Opcode::Pop);
                 }
             }
@@ -69,24 +69,32 @@ impl<'gc> Compiler<'gc> {
                     } else {
                         let idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
-                        self.chunk.write_byte(idx);
+                        self.chunk.write_u16(idx);
                     }
 
                     if self.scope_depth > 0 {
-                        // Inside a function: value stays on stack as a local slot
-                        self.locals.push(name.clone());
+                        // Inside a function: check if var already exists (var is function-scoped)
+                        if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                            // Re-declaration: assign to existing slot
+                            self.chunk.write_opcode(Opcode::SetLocal);
+                            self.chunk.write_byte(pos as u8);
+                            self.chunk.write_opcode(Opcode::Pop);
+                        } else {
+                            // New local: value stays on stack as a local slot
+                            self.locals.push(name.clone());
+                        }
                     } else {
                         // Top-level: define as global
                         let name_u16 = crate::unicode::utf8_to_utf16(name);
                         let name_idx = self.chunk.add_constant(Value::String(name_u16));
                         self.chunk.write_opcode(Opcode::DefineGlobal);
-                        self.chunk.write_byte(name_idx);
+                        self.chunk.write_u16(name_idx);
                     }
                 }
                 if is_last {
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_byte(idx);
+                    self.chunk.write_u16(idx);
                 }
             }
             StatementKind::Assign(name, expr) => {
@@ -98,12 +106,13 @@ impl<'gc> Compiler<'gc> {
                     let name_u16 = crate::unicode::utf8_to_utf16(name);
                     let name_idx = self.chunk.add_constant(Value::String(name_u16));
                     self.chunk.write_opcode(Opcode::SetGlobal);
-                    self.chunk.write_byte(name_idx);
+                    self.chunk.write_u16(name_idx);
                 }
-                if !is_last{
+                if !is_last {
                     self.chunk.write_opcode(Opcode::Pop);
                 }
-            }            StatementKind::Block(statements) => {
+            }
+            StatementKind::Block(statements) => {
                 for (i, s) in statements.iter().enumerate() {
                     let s_is_last = is_last && i == statements.len() - 1;
                     self.compile_statement(s, s_is_last)?;
@@ -112,17 +121,17 @@ impl<'gc> Compiler<'gc> {
             StatementKind::If(if_stmt) => {
                 self.compile_expr(&if_stmt.condition)?;
                 let then_jump = self.emit_jump(Opcode::JumpIfFalse);
-                
+
                 // Then branch
                 for (i, s) in if_stmt.then_body.iter().enumerate() {
                     let s_is_last = is_last && i == if_stmt.then_body.len() - 1 && if_stmt.else_body.is_none();
                     self.compile_statement(s, s_is_last)?;
                 }
-                
+
                 if let Some(else_body) = &if_stmt.else_body {
                     let else_jump = self.emit_jump(Opcode::Jump);
                     self.patch_jump(then_jump);
-                    
+
                     for (i, s) in else_body.iter().enumerate() {
                         let s_is_last = is_last && i == else_body.len() - 1;
                         self.compile_statement(s, s_is_last)?;
@@ -136,18 +145,18 @@ impl<'gc> Compiler<'gc> {
                 let loop_start = self.chunk.code.len();
                 self.compile_expr(cond)?;
                 let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
-                
+
                 for s in body {
                     self.compile_statement(s, false)?;
                 }
-                
+
                 self.emit_loop(loop_start);
                 self.patch_jump(exit_jump);
-                
+
                 if is_last {
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_byte(idx);
+                    self.chunk.write_u16(idx);
                 }
             }
             StatementKind::For(for_stmt) => {
@@ -179,15 +188,16 @@ impl<'gc> Compiler<'gc> {
                 if is_last {
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_byte(idx);
+                    self.chunk.write_u16(idx);
                 }
-            }            StatementKind::Return(expr_opt) => {
+            }
+            StatementKind::Return(expr_opt) => {
                 if let Some(expr) = expr_opt {
                     self.compile_expr(expr)?;
                 } else {
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_byte(idx);
+                    self.chunk.write_u16(idx);
                 }
                 self.chunk.write_opcode(Opcode::Return);
             }
@@ -196,23 +206,23 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Throw);
             }
             StatementKind::TryCatch(tc) => {
-                // Determine catch binding name constant index (or 0xff for none)
-                let binding_idx = if let Some(_catch_body) = &tc.catch_body {
+                // Determine catch binding name constant index (or 0xffff for none)
+                let binding_idx: u16 = if let Some(_catch_body) = &tc.catch_body {
                     if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
                         let name_u16 = crate::unicode::utf8_to_utf16(name);
                         self.chunk.add_constant(Value::String(name_u16))
                     } else {
-                        0xff
+                        0xffff
                     }
                 } else {
-                    0xff
+                    0xffff
                 };
 
-                // SetupTry <catch_ip:u16> <binding_idx:u8>
+                // SetupTry <catch_ip:u16> <binding_idx:u16>
                 self.chunk.write_opcode(Opcode::SetupTry);
                 let catch_placeholder = self.chunk.code.len();
                 self.chunk.write_u16(0xffff); // placeholder for catch ip
-                self.chunk.write_byte(binding_idx);
+                self.chunk.write_u16(binding_idx);
 
                 // Try body
                 for s in &tc.try_body {
@@ -247,7 +257,7 @@ impl<'gc> Compiler<'gc> {
                 if is_last {
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_byte(idx);
+                    self.chunk.write_u16(idx);
                 }
             }
             StatementKind::FunctionDeclaration(name, params, body, _is_gen, _is_async) => {
@@ -272,7 +282,7 @@ impl<'gc> Compiler<'gc> {
                 // Implicit return undefined if no explicit return
                 let idx = self.chunk.add_constant(Value::Undefined);
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(idx);
+                self.chunk.write_u16(idx);
                 self.chunk.write_opcode(Opcode::Return);
 
                 self.patch_jump(jump_over);
@@ -283,12 +293,12 @@ impl<'gc> Compiler<'gc> {
                 let func_val = Value::VmFunction(func_ip, params.len() as u8);
                 let func_idx = self.chunk.add_constant(func_val);
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(func_idx);
+                self.chunk.write_u16(func_idx);
 
                 let name_u16 = crate::unicode::utf8_to_utf16(name);
                 let name_idx = self.chunk.add_constant(Value::String(name_u16));
                 self.chunk.write_opcode(Opcode::DefineGlobal);
-                self.chunk.write_byte(name_idx);
+                self.chunk.write_u16(name_idx);
             }
             _ => return Err(format!("Unimplemented statement kind for VM: {:?}", stmt.kind)),
         }
@@ -300,27 +310,27 @@ impl<'gc> Compiler<'gc> {
             Expr::Number(n) => {
                 let constant_index = self.chunk.add_constant(Value::Number(*n));
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(constant_index);
+                self.chunk.write_u16(constant_index);
             }
             Expr::StringLit(s) => {
                 let idx = self.chunk.add_constant(Value::String(s.clone()));
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(idx);
+                self.chunk.write_u16(idx);
             }
             Expr::Boolean(b) => {
                 let idx = self.chunk.add_constant(Value::Boolean(*b));
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(idx);
+                self.chunk.write_u16(idx);
             }
             Expr::Null => {
                 let idx = self.chunk.add_constant(Value::Null);
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(idx);
+                self.chunk.write_u16(idx);
             }
             Expr::Undefined => {
                 let idx = self.chunk.add_constant(Value::Undefined);
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(idx);
+                self.chunk.write_u16(idx);
             }
             Expr::Var(name, ..) => {
                 if let Some(pos) = self.locals.iter().position(|l| l == name) {
@@ -330,12 +340,12 @@ impl<'gc> Compiler<'gc> {
                     let name_u16 = crate::unicode::utf8_to_utf16(name);
                     let name_idx = self.chunk.add_constant(Value::String(name_u16));
                     self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_byte(name_idx);
+                    self.chunk.write_u16(name_idx);
                 }
             }
 
             Expr::Binary(left, op, right) => {
-                // Evaluate left, then evaluate right 
+                // Evaluate left, then evaluate right
                 self.compile_expr(left)?;
                 self.compile_expr(right)?;
 
@@ -399,7 +409,7 @@ impl<'gc> Compiler<'gc> {
                 // Left was falsy, push false
                 let idx = self.chunk.add_constant(Value::Boolean(false));
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(idx);
+                self.chunk.write_u16(idx);
                 self.patch_jump(skip);
             }
             Expr::LogicalOr(left, right) => {
@@ -413,7 +423,7 @@ impl<'gc> Compiler<'gc> {
                 // Left was truthy, push true
                 let idx = self.chunk.add_constant(Value::Boolean(true));
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_byte(idx);
+                self.chunk.write_u16(idx);
                 self.patch_jump(skip);
             }
             // Array literal: [a, b, c]
@@ -424,7 +434,7 @@ impl<'gc> Compiler<'gc> {
                     } else {
                         let idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
-                        self.chunk.write_byte(idx);
+                        self.chunk.write_u16(idx);
                     }
                 }
                 self.chunk.write_opcode(Opcode::NewArray);
@@ -447,7 +457,7 @@ impl<'gc> Compiler<'gc> {
                 let key_u16 = crate::unicode::utf8_to_utf16(key);
                 let name_idx = self.chunk.add_constant(Value::String(key_u16));
                 self.chunk.write_opcode(Opcode::GetProperty);
-                self.chunk.write_byte(name_idx);
+                self.chunk.write_u16(name_idx);
             }
             // Index access: obj[expr]
             Expr::Index(obj, index) => {
@@ -487,37 +497,35 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Pop);
             }
             // Assignment to property: obj.key = val, obj[i] = val
-            Expr::Assign(left, right) => {
-                match &**left {
-                    Expr::Var(name, ..) => {
-                        self.compile_expr(right)?;
-                        if let Some(pos) = self.locals.iter().position(|l| l == name) {
-                            self.chunk.write_opcode(Opcode::SetLocal);
-                            self.chunk.write_byte(pos as u8);
-                        } else {
-                            let name_u16 = crate::unicode::utf8_to_utf16(name);
-                            let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                            self.chunk.write_opcode(Opcode::SetGlobal);
-                            self.chunk.write_byte(name_idx);
-                        }
+            Expr::Assign(left, right) => match &**left {
+                Expr::Var(name, ..) => {
+                    self.compile_expr(right)?;
+                    if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                        self.chunk.write_opcode(Opcode::SetLocal);
+                        self.chunk.write_byte(pos as u8);
+                    } else {
+                        let name_u16 = crate::unicode::utf8_to_utf16(name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::SetGlobal);
+                        self.chunk.write_u16(name_idx);
                     }
-                    Expr::Property(obj, key) => {
-                        self.compile_expr(obj)?;
-                        self.compile_expr(right)?;
-                        let key_u16 = crate::unicode::utf8_to_utf16(key);
-                        let name_idx = self.chunk.add_constant(Value::String(key_u16));
-                        self.chunk.write_opcode(Opcode::SetProperty);
-                        self.chunk.write_byte(name_idx);
-                    }
-                    Expr::Index(obj, idx) => {
-                        self.compile_expr(obj)?;
-                        self.compile_expr(idx)?;
-                        self.compile_expr(right)?;
-                        self.chunk.write_opcode(Opcode::SetIndex);
-                    }
-                    _ => return Err("Invalid assignment target for VM".to_string()),
                 }
-            }
+                Expr::Property(obj, key) => {
+                    self.compile_expr(obj)?;
+                    self.compile_expr(right)?;
+                    let key_u16 = crate::unicode::utf8_to_utf16(key);
+                    let name_idx = self.chunk.add_constant(Value::String(key_u16));
+                    self.chunk.write_opcode(Opcode::SetProperty);
+                    self.chunk.write_u16(name_idx);
+                }
+                Expr::Index(obj, idx) => {
+                    self.compile_expr(obj)?;
+                    self.compile_expr(idx)?;
+                    self.compile_expr(right)?;
+                    self.chunk.write_opcode(Opcode::SetIndex);
+                }
+                _ => return Err("Invalid assignment target for VM".to_string()),
+            },
             _ => return Err(format!("Unimplemented expression type for VM: {:?}", expr)),
         }
         Ok(())
@@ -535,7 +543,7 @@ impl<'gc> Compiler<'gc> {
                     let name_u16 = crate::unicode::utf8_to_utf16(name);
                     let name_idx = self.chunk.add_constant(Value::String(name_u16));
                     self.chunk.write_opcode(Opcode::SetGlobal);
-                    self.chunk.write_byte(name_idx);
+                    self.chunk.write_u16(name_idx);
                 }
             }
             _ => return Err("Invalid increment/decrement target for VM".to_string()),

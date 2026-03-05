@@ -113,14 +113,14 @@ impl<'gc> Chunk<'gc> {
     pub fn write_opcode(&mut self, opcode: Opcode) {
         self.write_byte(opcode as u8);
     }
-    
+
     pub fn write_u16(&mut self, value: u16) {
         self.code.push((value & 0xff) as u8);
         self.code.push(((value >> 8) & 0xff) as u8);
     }
-    
-    pub fn add_constant(&mut self, value: Value<'gc>) -> u8 {
+
+    pub fn add_constant(&mut self, value: Value<'gc>) -> u16 {
         self.constants.push(value);
-        (self.constants.len() - 1) as u8
+        (self.constants.len() - 1) as u16
     }
 }

@@ -60,6 +60,7 @@ pub mod js_error;
 pub use js_error::*;
 
 pub mod opcode;
+#[allow(unused_imports)]
 pub use opcode::*;
 
 pub mod vm;
@@ -1144,14 +1145,14 @@ pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JS
 pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(script: T, script_path: Option<P>) -> Result<String, JSError> {
     let _ = script_path; // For now we ignore the path in the VM, but we may want to use it for better error messages later.
     let script_str = script.as_ref();
-    let mut tokens = tokenize(script_str)?;
+    let tokens = tokenize(script_str)?;
     let mut index = 0;
-    
+
     // allow_top_level_await hacky bypass if needed, omit for vm demo over engineering
     // Just parse right away
     let statements = parse_statements(&tokens, &mut index)?;
 
-    // We can't really do string output exactly easily without gc for strings, 
+    // We can't really do string output exactly easily without gc for strings,
     // but we can compile and run to get a primitive value string.
     let compiler = Compiler::new();
     let chunk = match compiler.compile(&statements) {

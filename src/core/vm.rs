@@ -1,6 +1,6 @@
 use crate::Value;
-use crate::core::value::value_to_string;
 use crate::core::opcode::{Chunk, Opcode};
+use crate::core::value::value_to_string;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -29,9 +29,9 @@ pub struct CallFrame {
 
 #[derive(Debug, Clone)]
 pub struct TryFrame {
-    pub catch_ip: usize,          // where to jump on throw
-    pub stack_depth: usize,       // stack depth at try entry
-    pub frame_depth: usize,       // call frame depth at try entry
+    pub catch_ip: usize,               // where to jump on throw
+    pub stack_depth: usize,            // stack depth at try entry
+    pub frame_depth: usize,            // call frame depth at try entry
     pub catch_binding: Option<String>, // variable name for caught value
 }
 
@@ -43,8 +43,8 @@ pub struct VM<'gc> {
     globals: HashMap<String, Value<'gc>>,
     frames: Vec<CallFrame>,
     try_stack: Vec<TryFrame>,
-    this_stack: Vec<Value<'gc>>,  // this binding stack
-    output: Vec<String>,          // captured output for console.log etc.
+    this_stack: Vec<Value<'gc>>, // this binding stack
+    output: Vec<String>,         // captured output for console.log etc.
 }
 
 impl<'gc> VM<'gc> {
@@ -64,6 +64,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Get captured console output
+    #[allow(dead_code)]
     pub fn take_output(&mut self) -> Vec<String> {
         std::mem::take(&mut self.output)
     }
@@ -75,8 +76,8 @@ impl<'gc> VM<'gc> {
         console_map.insert("log".to_string(), Value::VmNativeFunction(BUILTIN_CONSOLE_LOG));
         console_map.insert("warn".to_string(), Value::VmNativeFunction(BUILTIN_CONSOLE_WARN));
         console_map.insert("error".to_string(), Value::VmNativeFunction(BUILTIN_CONSOLE_ERROR));
-        self.globals.insert("console".to_string(),
-            Value::VmObject(Rc::new(RefCell::new(console_map))));
+        self.globals
+            .insert("console".to_string(), Value::VmObject(Rc::new(RefCell::new(console_map))));
 
         // Math object
         let mut math_map = HashMap::new();
@@ -89,13 +90,15 @@ impl<'gc> VM<'gc> {
         math_map.insert("min".to_string(), Value::VmNativeFunction(BUILTIN_MATH_MIN));
         math_map.insert("PI".to_string(), Value::Number(std::f64::consts::PI));
         math_map.insert("E".to_string(), Value::Number(std::f64::consts::E));
-        self.globals.insert("Math".to_string(),
-            Value::VmObject(Rc::new(RefCell::new(math_map))));
+        self.globals
+            .insert("Math".to_string(), Value::VmObject(Rc::new(RefCell::new(math_map))));
 
         // Global functions
         self.globals.insert("isNaN".to_string(), Value::VmNativeFunction(BUILTIN_ISNAN));
-        self.globals.insert("parseInt".to_string(), Value::VmNativeFunction(BUILTIN_PARSEINT));
-        self.globals.insert("parseFloat".to_string(), Value::VmNativeFunction(BUILTIN_PARSEFLOAT));
+        self.globals
+            .insert("parseInt".to_string(), Value::VmNativeFunction(BUILTIN_PARSEINT));
+        self.globals
+            .insert("parseFloat".to_string(), Value::VmNativeFunction(BUILTIN_PARSEFLOAT));
     }
 
     /// Execute a native/built-in function
@@ -110,48 +113,71 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             BUILTIN_MATH_FLOOR => {
-                if let Some(Value::Number(n)) = args.first() { Value::Number(n.floor()) }
-                else { Value::Number(f64::NAN) }
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.floor())
+                } else {
+                    Value::Number(f64::NAN)
+                }
             }
             BUILTIN_MATH_CEIL => {
-                if let Some(Value::Number(n)) = args.first() { Value::Number(n.ceil()) }
-                else { Value::Number(f64::NAN) }
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.ceil())
+                } else {
+                    Value::Number(f64::NAN)
+                }
             }
             BUILTIN_MATH_ROUND => {
-                if let Some(Value::Number(n)) = args.first() { Value::Number(n.round()) }
-                else { Value::Number(f64::NAN) }
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.round())
+                } else {
+                    Value::Number(f64::NAN)
+                }
             }
             BUILTIN_MATH_ABS => {
-                if let Some(Value::Number(n)) = args.first() { Value::Number(n.abs()) }
-                else { Value::Number(f64::NAN) }
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.abs())
+                } else {
+                    Value::Number(f64::NAN)
+                }
             }
             BUILTIN_MATH_SQRT => {
-                if let Some(Value::Number(n)) = args.first() { Value::Number(n.sqrt()) }
-                else { Value::Number(f64::NAN) }
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.sqrt())
+                } else {
+                    Value::Number(f64::NAN)
+                }
             }
             BUILTIN_MATH_MAX => {
                 let mut result = f64::NEG_INFINITY;
                 for a in &args {
-                    if let Value::Number(n) = a { if *n > result { result = *n; } }
-                    else { return Value::Number(f64::NAN); }
+                    if let Value::Number(n) = a {
+                        if *n > result {
+                            result = *n;
+                        }
+                    } else {
+                        return Value::Number(f64::NAN);
+                    }
                 }
                 Value::Number(result)
             }
             BUILTIN_MATH_MIN => {
                 let mut result = f64::INFINITY;
                 for a in &args {
-                    if let Value::Number(n) = a { if *n < result { result = *n; } }
-                    else { return Value::Number(f64::NAN); }
+                    if let Value::Number(n) = a {
+                        if *n < result {
+                            result = *n;
+                        }
+                    } else {
+                        return Value::Number(f64::NAN);
+                    }
                 }
                 Value::Number(result)
             }
-            BUILTIN_ISNAN => {
-                match args.first() {
-                    Some(Value::Number(n)) => Value::Boolean(n.is_nan()),
-                    Some(Value::Undefined) => Value::Boolean(true),
-                    _ => Value::Boolean(false),
-                }
-            }
+            BUILTIN_ISNAN => match args.first() {
+                Some(Value::Number(n)) => Value::Boolean(n.is_nan()),
+                Some(Value::Undefined) => Value::Boolean(true),
+                _ => Value::Boolean(false),
+            },
             BUILTIN_PARSEINT => {
                 let s = args.first().map(value_to_string).unwrap_or_default();
                 let trimmed = s.trim();
@@ -275,7 +301,7 @@ impl<'gc> VM<'gc> {
                 }
                 Opcode::Constant => {
                     // Read constant pool index and push to stack
-                    let constant_index = self.read_byte() as usize;
+                    let constant_index = self.read_u16() as usize;
                     let constant = self.chunk.constants[constant_index].clone();
                     self.stack.push(constant);
                 }
@@ -283,7 +309,7 @@ impl<'gc> VM<'gc> {
                     self.stack.pop();
                 }
                 Opcode::DefineGlobal => {
-                    let name_idx = self.read_byte() as usize;
+                    let name_idx = self.read_u16() as usize;
                     let name_val = &self.chunk.constants[name_idx];
                     if let Value::String(s) = name_val {
                         let name_str = crate::unicode::utf16_to_utf8(s);
@@ -292,7 +318,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 Opcode::GetGlobal => {
-                    let name_idx = self.read_byte() as usize;
+                    let name_idx = self.read_u16() as usize;
                     let name_val = &self.chunk.constants[name_idx];
                     if let Value::String(s) = name_val {
                         let name_str = crate::unicode::utf16_to_utf8(s);
@@ -301,7 +327,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 Opcode::SetGlobal => {
-                    let name_idx = self.read_byte() as usize;
+                    let name_idx = self.read_u16() as usize;
                     let name_val = &self.chunk.constants[name_idx];
                     if let Value::String(s) = name_val {
                         let name_str = crate::unicode::utf16_to_utf8(s);
@@ -414,8 +440,10 @@ impl<'gc> VM<'gc> {
                         (Value::String(ref a_s), Value::String(ref b_s)) => {
                             self.stack.push(Value::Boolean(a_s == b_s));
                         }
-                        (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined)
-                        | (Value::Null, Value::Undefined) | (Value::Undefined, Value::Null) => {
+                        (Value::Null, Value::Null)
+                        | (Value::Undefined, Value::Undefined)
+                        | (Value::Null, Value::Undefined)
+                        | (Value::Undefined, Value::Null) => {
                             self.stack.push(Value::Boolean(true));
                         }
                         _ => self.stack.push(Value::Boolean(false)),
@@ -434,8 +462,10 @@ impl<'gc> VM<'gc> {
                         (Value::String(ref a_s), Value::String(ref b_s)) => {
                             self.stack.push(Value::Boolean(a_s != b_s));
                         }
-                        (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined)
-                        | (Value::Null, Value::Undefined) | (Value::Undefined, Value::Null) => {
+                        (Value::Null, Value::Null)
+                        | (Value::Undefined, Value::Undefined)
+                        | (Value::Null, Value::Undefined)
+                        | (Value::Undefined, Value::Null) => {
                             self.stack.push(Value::Boolean(false));
                         }
                         _ => self.stack.push(Value::Boolean(true)),
@@ -538,7 +568,7 @@ impl<'gc> VM<'gc> {
                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
                 }
                 Opcode::GetProperty => {
-                    let name_idx = self.read_byte() as usize;
+                    let name_idx = self.read_u16() as usize;
                     let name_val = &self.chunk.constants[name_idx];
                     let key = if let Value::String(s) = name_val {
                         crate::unicode::utf16_to_utf8(s)
@@ -565,7 +595,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 Opcode::SetProperty => {
-                    let name_idx = self.read_byte() as usize;
+                    let name_idx = self.read_u16() as usize;
                     let name_val = &self.chunk.constants[name_idx];
                     let key = if let Value::String(s) = name_val {
                         crate::unicode::utf16_to_utf8(s)
@@ -652,8 +682,8 @@ impl<'gc> VM<'gc> {
                 }
                 Opcode::SetupTry => {
                     let catch_ip = self.read_u16() as usize;
-                    let binding_idx = self.read_byte();
-                    let catch_binding = if binding_idx == 0xff {
+                    let binding_idx = self.read_u16();
+                    let catch_binding = if binding_idx == 0xffff {
                         None
                     } else {
                         let name_val = &self.chunk.constants[binding_idx as usize];

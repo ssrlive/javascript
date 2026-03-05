@@ -10,6 +10,9 @@ use crate::{
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Collect)]
@@ -1157,6 +1160,8 @@ pub enum Value<'gc> {
     Object(JSObjectDataPtr<'gc>),
     Function(String),
     VmFunction(usize, u8), // (ip, arg_count)
+    VmArray(Rc<RefCell<Vec<Value<'gc>>>>),
+    VmObject(Rc<RefCell<HashMap<String, Value<'gc>>>>),
 
     Closure(Gc<'gc, ClosureData<'gc>>),
     AsyncClosure(Gc<'gc, ClosureData<'gc>>),
@@ -1670,6 +1675,11 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         }
         Value::Uninitialized => "[uninitialized]".to_string(),
         Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),
+        Value::VmArray(arr) => {
+            let elems: Vec<String> = arr.borrow().iter().map(value_to_string).collect();
+            elems.join(",")
+        }
+        Value::VmObject(_) => "[object Object]".to_string(),
     }
 }
 

@@ -2846,6 +2846,8 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::Uninitialized => "undefined",
                 Value::PrivateName(..) => "PrivateName",
                 Value::VmFunction(..) => "Function",
+                Value::VmArray(..) => "Array",
+                Value::VmObject(..) => "Object",
             },
             args.len()
         ))
@@ -2997,6 +2999,11 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
         Value::PrivateName(n, _) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
         Value::VmFunction(ip, arity) => Ok(Value::String(utf8_to_utf16(&format!("[VmFunction@{} arity={}]", ip, arity)))),
+        Value::VmArray(arr) => {
+            let elems: Vec<String> = arr.borrow().iter().map(|v| crate::core::value_to_string(v)).collect();
+            Ok(Value::String(utf8_to_utf16(&elems.join(","))))
+        }
+        Value::VmObject(_) => Ok(Value::String(utf8_to_utf16("[object Object]"))),
     }
 }
 
@@ -3096,6 +3103,8 @@ pub(crate) fn handle_value_of_method<'gc>(
                 Value::Uninitialized => "undefined",
                 Value::PrivateName(..) => "PrivateName",
                 Value::VmFunction(..) => "Function",
+                Value::VmArray(..) => "Array",
+                Value::VmObject(..) => "Object",
             },
             args.len()
         ))
@@ -3274,6 +3283,8 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object").into()),
         Value::PrivateName(..) => Err(raise_type_error!("Cannot convert private name to object").into()),
         Value::VmFunction(ip, arity) => Ok(Value::VmFunction(*ip, *arity)),
+        Value::VmArray(arr) => Ok(Value::VmArray(arr.clone())),
+        Value::VmObject(obj) => Ok(Value::VmObject(obj.clone())),
     }
 }
 

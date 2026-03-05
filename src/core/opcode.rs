@@ -30,6 +30,14 @@ pub enum Opcode {
     NotEqual = 24,
     StrictNotEqual = 25,
     JumpIfTrue = 26,
+    NewArray = 27,
+    NewObject = 28,
+    GetProperty = 29,
+    SetProperty = 30,
+    GetIndex = 31,
+    SetIndex = 32,
+    Increment = 33,
+    Decrement = 34,
 }
 
 impl From<u8> for Opcode {
@@ -62,6 +70,14 @@ impl From<u8> for Opcode {
             24 => Opcode::NotEqual,
             25 => Opcode::StrictNotEqual,
             26 => Opcode::JumpIfTrue,
+            27 => Opcode::NewArray,
+            28 => Opcode::NewObject,
+            29 => Opcode::GetProperty,
+            30 => Opcode::SetProperty,
+            31 => Opcode::GetIndex,
+            32 => Opcode::SetIndex,
+            33 => Opcode::Increment,
+            34 => Opcode::Decrement,
             _ => panic!("Unknown opcode: {}", byte),
         }
     }

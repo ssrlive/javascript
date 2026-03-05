@@ -1,7 +1,9 @@
 use crate::Value;
 use crate::core::value::value_to_string;
 use crate::core::opcode::{Chunk, Opcode};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 
 #[derive(Debug, Clone)]
@@ -341,6 +343,134 @@ impl<'gc> VM<'gc> {
                     let val = self.stack.pop().unwrap_or(Value::Undefined);
                     if val.to_truthy() {
                         self.ip = offset as usize;
+                    }
+                }
+                Opcode::NewArray => {
+                    let count = self.read_byte() as usize;
+                    let start = self.stack.len() - count;
+                    let elems: Vec<Value<'gc>> = self.stack.drain(start..).collect();
+                    self.stack.push(Value::VmArray(Rc::new(RefCell::new(elems))));
+                }
+                Opcode::NewObject => {
+                    let count = self.read_byte() as usize;
+                    // Stack has pairs: [key, val, key, val, ...]
+                    let start = self.stack.len() - count * 2;
+                    let pairs: Vec<Value<'gc>> = self.stack.drain(start..).collect();
+                    let mut map = HashMap::new();
+                    for chunk in pairs.chunks(2) {
+                        let key = value_to_string(&chunk[0]);
+                        let val = chunk[1].clone();
+                        map.insert(key, val);
+                    }
+                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
+                }
+                Opcode::GetProperty => {
+                    let name_idx = self.read_byte() as usize;
+                    let name_val = &self.chunk.constants[name_idx];
+                    let key = if let Value::String(s) = name_val {
+                        crate::unicode::utf16_to_utf8(s)
+                    } else {
+                        value_to_string(name_val)
+                    };
+                    let obj = self.stack.pop().expect("VM Stack underflow on GetProperty");
+                    match &obj {
+                        Value::VmObject(map) => {
+                            let val = map.borrow().get(&key).cloned().unwrap_or(Value::Undefined);
+                            self.stack.push(val);
+                        }
+                        Value::VmArray(arr) => {
+                            if key == "length" {
+                                self.stack.push(Value::Number(arr.borrow().len() as f64));
+                            } else {
+                                self.stack.push(Value::Undefined);
+                            }
+                        }
+                        _ => {
+                            log::warn!("GetProperty on non-object: {}", value_to_string(&obj));
+                            self.stack.push(Value::Undefined);
+                        }
+                    }
+                }
+                Opcode::SetProperty => {
+                    let name_idx = self.read_byte() as usize;
+                    let name_val = &self.chunk.constants[name_idx];
+                    let key = if let Value::String(s) = name_val {
+                        crate::unicode::utf16_to_utf8(s)
+                    } else {
+                        value_to_string(name_val)
+                    };
+                    let val = self.stack.pop().expect("VM Stack underflow on SetProperty (val)");
+                    let obj = self.stack.pop().expect("VM Stack underflow on SetProperty (obj)");
+                    if let Value::VmObject(map) = &obj {
+                        map.borrow_mut().insert(key, val.clone());
+                    } else {
+                        log::warn!("SetProperty on non-object: {}", value_to_string(&obj));
+                    }
+                    // Leave the assigned value on stack
+                    self.stack.push(val);
+                }
+                Opcode::GetIndex => {
+                    let index = self.stack.pop().expect("VM Stack underflow on GetIndex (index)");
+                    let obj = self.stack.pop().expect("VM Stack underflow on GetIndex (obj)");
+                    match &obj {
+                        Value::VmArray(arr) => {
+                            if let Value::Number(n) = &index {
+                                let i = *n as usize;
+                                let val = arr.borrow().get(i).cloned().unwrap_or(Value::Undefined);
+                                self.stack.push(val);
+                            } else {
+                                self.stack.push(Value::Undefined);
+                            }
+                        }
+                        Value::VmObject(map) => {
+                            let key = value_to_string(&index);
+                            let val = map.borrow().get(&key).cloned().unwrap_or(Value::Undefined);
+                            self.stack.push(val);
+                        }
+                        _ => {
+                            log::warn!("GetIndex on non-indexable: {}", value_to_string(&obj));
+                            self.stack.push(Value::Undefined);
+                        }
+                    }
+                }
+                Opcode::SetIndex => {
+                    let val = self.stack.pop().expect("VM Stack underflow on SetIndex (val)");
+                    let index = self.stack.pop().expect("VM Stack underflow on SetIndex (index)");
+                    let obj = self.stack.pop().expect("VM Stack underflow on SetIndex (obj)");
+                    match &obj {
+                        Value::VmArray(arr) => {
+                            if let Value::Number(n) = &index {
+                                let i = *n as usize;
+                                let mut a = arr.borrow_mut();
+                                // Grow array if needed
+                                while a.len() <= i {
+                                    a.push(Value::Undefined);
+                                }
+                                a[i] = val.clone();
+                            }
+                        }
+                        Value::VmObject(map) => {
+                            let key = value_to_string(&index);
+                            map.borrow_mut().insert(key, val.clone());
+                        }
+                        _ => {
+                            log::warn!("SetIndex on non-indexable: {}", value_to_string(&obj));
+                        }
+                    }
+                    self.stack.push(val);
+                }
+                Opcode::Increment => {
+                    let a = self.stack.pop().expect("VM Stack underflow on Increment");
+                    match a {
+                        Value::Number(n) => self.stack.push(Value::Number(n + 1.0)),
+                        _ => self.stack.push(Value::Number(f64::NAN)),
+                    }
+                }
+                Opcode::Decrement => {
+                    let a = self.stack.pop().expect("VM Stack underflow on Decrement");
+                    match a {
+                        Value::Number(n) => self.stack.push(Value::Number(n - 1.0)),
+                        _ => self.stack.push(Value::Number(f64::NAN)),
                     }
                 }
             }

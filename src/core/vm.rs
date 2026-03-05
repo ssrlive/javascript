@@ -881,10 +881,15 @@ impl<'gc> VM<'gc> {
                     return self.make_iterator(items);
                 }
                 BUILTIN_MAP_FOREACH => {
-                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, arity)) = args.first() {
                         let entries: Vec<(Value<'gc>, Value<'gc>)> = m.borrow().entries.clone();
+                        let map_ref = receiver.clone();
                         for (k, v) in &entries {
-                            self.call_vm_function(*ip, &[v.clone(), k.clone()]);
+                            if *arity >= 3 {
+                                self.call_vm_function(*ip, &[v.clone(), k.clone(), map_ref.clone()]);
+                            } else {
+                                self.call_vm_function(*ip, &[v.clone(), k.clone()]);
+                            }
                         }
                     }
                     return Value::Undefined;
@@ -935,10 +940,15 @@ impl<'gc> VM<'gc> {
                     return self.make_iterator(items);
                 }
                 BUILTIN_SET_FOREACH => {
-                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, arity)) = args.first() {
                         let vals: Vec<Value<'gc>> = s.borrow().values.clone();
+                        let set_ref = receiver.clone();
                         for v in &vals {
-                            self.call_vm_function(*ip, &[v.clone(), v.clone()]);
+                            if *arity >= 3 {
+                                self.call_vm_function(*ip, &[v.clone(), v.clone(), set_ref.clone()]);
+                            } else {
+                                self.call_vm_function(*ip, &[v.clone(), v.clone()]);
+                            }
                         }
                     }
                     return Value::Undefined;
@@ -1207,8 +1217,11 @@ impl<'gc> VM<'gc> {
                     let callee = self.stack[callee_idx].clone();
                     match callee {
                         Value::VmFunction(target_ip, arity) => {
-                            if arg_count as u8 != arity {
-                                log::warn!("Arity mismatch: expected {}, got {}", arity, arg_count);
+                            // Pad missing args with Undefined
+                            if (arg_count as u8) < arity {
+                                for _ in 0..(arity as usize - arg_count) {
+                                    self.stack.push(Value::Undefined);
+                                }
                             }
                             // For method calls, pop receiver from under callee
                             if is_method {
@@ -1423,15 +1436,30 @@ impl<'gc> VM<'gc> {
                 Opcode::StrictNotEqual => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    match (a, b) {
+                    match (&a, &b) {
                         (Value::Number(a_num), Value::Number(b_num)) => {
                             self.stack.push(Value::Boolean(a_num != b_num));
                         }
                         (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
                             self.stack.push(Value::Boolean(a_bool != b_bool));
                         }
-                        (Value::String(ref a_s), Value::String(ref b_s)) => {
+                        (Value::String(a_s), Value::String(b_s)) => {
                             self.stack.push(Value::Boolean(a_s != b_s));
+                        }
+                        (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined) => {
+                            self.stack.push(Value::Boolean(false));
+                        }
+                        (Value::VmObject(a_rc), Value::VmObject(b_rc)) => {
+                            self.stack.push(Value::Boolean(!Rc::ptr_eq(a_rc, b_rc)));
+                        }
+                        (Value::VmArray(a_rc), Value::VmArray(b_rc)) => {
+                            self.stack.push(Value::Boolean(!Rc::ptr_eq(a_rc, b_rc)));
+                        }
+                        (Value::VmMap(a_rc), Value::VmMap(b_rc)) => {
+                            self.stack.push(Value::Boolean(!Rc::ptr_eq(a_rc, b_rc)));
+                        }
+                        (Value::VmSet(a_rc), Value::VmSet(b_rc)) => {
+                            self.stack.push(Value::Boolean(!Rc::ptr_eq(a_rc, b_rc)));
                         }
                         _ => self.stack.push(Value::Boolean(true)),
                     }
@@ -1531,26 +1559,35 @@ impl<'gc> VM<'gc> {
                     match &obj {
                         Value::VmObject(map) => {
                             let borrow = map.borrow();
-                            let val = borrow.get(&key).cloned();
-                            if let Some(v) = val {
+                            // Check for getter first
+                            let getter_key = format!("__get_{}", key);
+                            if let Some(Value::VmFunction(ip, _)) = borrow.get(&getter_key) {
+                                let ip = *ip;
                                 drop(borrow);
-                                self.stack.push(v);
+                                let result = self.call_vm_function(ip, &[]);
+                                self.stack.push(result);
                             } else {
-                                // Check if this is a typed wrapper with built-in methods
-                                let type_name = borrow.get("__type__").map(|v| value_to_string(v));
-                                drop(borrow);
-                                let resolved = match type_name.as_deref() {
-                                    Some("Number") => match key.as_str() {
-                                        "toFixed" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
-                                        "toExponential" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
-                                        "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
-                                        "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
-                                        "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                let val = borrow.get(&key).cloned();
+                                if let Some(v) = val {
+                                    drop(borrow);
+                                    self.stack.push(v);
+                                } else {
+                                    // Check if this is a typed wrapper with built-in methods
+                                    let type_name = borrow.get("__type__").map(|v| value_to_string(v));
+                                    drop(borrow);
+                                    let resolved = match type_name.as_deref() {
+                                        Some("Number") => match key.as_str() {
+                                            "toFixed" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
+                                            "toExponential" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
+                                            "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
+                                            "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
+                                            "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                            _ => None,
+                                        },
                                         _ => None,
-                                    },
-                                    _ => None,
-                                };
-                                self.stack.push(resolved.unwrap_or(Value::Undefined));
+                                    };
+                                    self.stack.push(resolved.unwrap_or(Value::Undefined));
+                                }
                             }
                         }
                         Value::VmArray(arr) => match key.as_str() {

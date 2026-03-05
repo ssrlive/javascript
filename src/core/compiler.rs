@@ -996,9 +996,49 @@ impl<'gc> Compiler<'gc> {
             Expr::Object(props) => {
                 let mut count = 0u8;
                 for (key, val, _computed, _shorthand) in props {
-                    self.compile_expr(key)?;
-                    self.compile_expr(val)?;
-                    count += 1;
+                    // For getters/setters, prefix the key so the VM can detect them
+                    match val {
+                        Expr::Getter(_) => {
+                            // Emit "__get_<key>" as the property name
+                            let key_str = match key {
+                                Expr::StringLit(s) => crate::unicode::utf16_to_utf8(s),
+                                _ => {
+                                    self.compile_expr(key)?;
+                                    self.compile_expr(val)?;
+                                    count += 1;
+                                    continue;
+                                }
+                            };
+                            let prefixed = format!("__get_{}", key_str);
+                            let idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&prefixed)));
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(idx);
+                            self.compile_expr(val)?;
+                            count += 1;
+                        }
+                        Expr::Setter(_) => {
+                            let key_str = match key {
+                                Expr::StringLit(s) => crate::unicode::utf16_to_utf8(s),
+                                _ => {
+                                    self.compile_expr(key)?;
+                                    self.compile_expr(val)?;
+                                    count += 1;
+                                    continue;
+                                }
+                            };
+                            let prefixed = format!("__set_{}", key_str);
+                            let idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&prefixed)));
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(idx);
+                            self.compile_expr(val)?;
+                            count += 1;
+                        }
+                        _ => {
+                            self.compile_expr(key)?;
+                            self.compile_expr(val)?;
+                            count += 1;
+                        }
+                    }
                 }
                 self.chunk.write_opcode(Opcode::NewObject);
                 self.chunk.write_byte(count);

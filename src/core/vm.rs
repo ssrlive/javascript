@@ -27,6 +27,13 @@ impl<'gc> VM<'gc> {
         byte
     }
 
+    /// Read a u16 from the bytecode array (little endian) and advance the IP
+    fn read_u16(&mut self) -> u16 {
+        let lo = self.read_byte() as u16;
+        let hi = self.read_byte() as u16;
+        (hi << 8) | lo
+    }
+
     /// Core execution loop of the VM (Fetch-Decode-Execute)
     pub fn run(&mut self) -> Result<Value<'gc>, String> {
         loop {
@@ -78,6 +85,17 @@ impl<'gc> VM<'gc> {
                         self.globals.insert(name_str, val);
                     }
                 }
+                Opcode::Jump => {
+                    let offset = self.read_u16();
+                    self.ip = offset as usize;
+                }
+                Opcode::JumpIfFalse => {
+                    let offset = self.read_u16();
+                    let val = self.stack.pop().unwrap_or(Value::Undefined);
+                    if !val.to_truthy() {
+                        self.ip = offset as usize;
+                    }
+                }
                 Opcode::Add => {
                     let b = self.stack.pop().expect("VM Stack underflow on Add (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Add (a)");
@@ -116,6 +134,39 @@ impl<'gc> VM<'gc> {
                             self.stack.push(Value::Number(a_num / b_num));
                         }
                         _ => return Err("Only numbers supported in VM Div".to_string()),
+                    }
+                }
+                Opcode::LessThan => {
+                    let b = self.stack.pop().expect("VM Stack underflow");
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Boolean(a_num < b_num));
+                        }
+                        _ => self.stack.push(Value::Boolean(false)), // Simplified for demo
+                    }
+                }
+                Opcode::GreaterThan => {
+                    let b = self.stack.pop().expect("VM Stack underflow");
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Boolean(a_num > b_num));
+                        }
+                        _ => self.stack.push(Value::Boolean(false)),
+                    }
+                }
+                Opcode::Equal => {
+                    let b = self.stack.pop().expect("VM Stack underflow");
+                    let a = self.stack.pop().expect("VM Stack underflow");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Boolean(a_num == b_num));
+                        }
+                        (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
+                            self.stack.push(Value::Boolean(a_bool == b_bool));
+                        }
+                        _ => self.stack.push(Value::Boolean(false)), // Strict equal for diff types in this demo
                     }
                 }
             }

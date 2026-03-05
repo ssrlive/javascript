@@ -25,6 +25,30 @@ impl<'gc> Compiler<'gc> {
         Ok(self.chunk)
     }
 
+    fn emit_jump(&mut self, opcode: Opcode) -> usize {
+        self.chunk.write_opcode(opcode);
+        // Write placeholder u16
+        self.chunk.write_u16(0xffff);
+        self.chunk.code.len() - 2 // Return the offset to the placeholder
+    }
+
+    fn patch_jump(&mut self, offset: usize) {
+        let jump_target = self.chunk.code.len();
+        if jump_target > u16::MAX as usize {
+            panic!("Jump target too large");
+        }
+        self.chunk.code[offset] = (jump_target & 0xff) as u8;
+        self.chunk.code[offset + 1] = ((jump_target >> 8) & 0xff) as u8;
+    }
+
+    fn emit_loop(&mut self, loop_start: usize) {
+        self.chunk.write_opcode(Opcode::Jump);
+        if loop_start > u16::MAX as usize {
+            panic!("Loop start too large");
+        }
+        self.chunk.write_u16(loop_start as u16);
+    }
+
     fn compile_statement(&mut self, stmt: &Statement, is_last: bool) -> Result<(), String> {
         match &*stmt.kind {
             StatementKind::Expr(expr) => {
@@ -69,8 +93,53 @@ impl<'gc> Compiler<'gc> {
                 if !is_last{
                     self.chunk.write_opcode(Opcode::Pop);
                 }
+            }            StatementKind::Block(statements) => {
+                for (i, s) in statements.iter().enumerate() {
+                    let s_is_last = is_last && i == statements.len() - 1;
+                    self.compile_statement(s, s_is_last)?;
+                }
             }
-            _ => return Err(format!("UnimplementedstatementkindforVM")),
+            StatementKind::If(if_stmt) => {
+                self.compile_expr(&if_stmt.condition)?;
+                let then_jump = self.emit_jump(Opcode::JumpIfFalse);
+                
+                // Then branch
+                for (i, s) in if_stmt.then_body.iter().enumerate() {
+                    let s_is_last = is_last && i == if_stmt.then_body.len() - 1 && if_stmt.else_body.is_none();
+                    self.compile_statement(s, s_is_last)?;
+                }
+                
+                if let Some(else_body) = &if_stmt.else_body {
+                    let else_jump = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(then_jump);
+                    
+                    for (i, s) in else_body.iter().enumerate() {
+                        let s_is_last = is_last && i == else_body.len() - 1;
+                        self.compile_statement(s, s_is_last)?;
+                    }
+                    self.patch_jump(else_jump);
+                } else {
+                    self.patch_jump(then_jump);
+                }
+            }
+            StatementKind::While(cond, body) => {
+                let loop_start = self.chunk.code.len();
+                self.compile_expr(cond)?;
+                let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+                
+                for s in body {
+                    self.compile_statement(s, false)?; // Inside loops, rarely the definitive last val
+                }
+                
+                self.emit_loop(loop_start);
+                self.patch_jump(exit_jump);
+                
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_byte(idx);
+                }
+            }            _ => return Err(format!("UnimplementedstatementkindforVM")),
         }
         Ok(())
     }
@@ -108,8 +177,10 @@ impl<'gc> Compiler<'gc> {
                     BinaryOp::Add => self.chunk.write_opcode(Opcode::Add),
                     BinaryOp::Sub => self.chunk.write_opcode(Opcode::Sub),
                     BinaryOp::Mul => self.chunk.write_opcode(Opcode::Mul),
-                    BinaryOp::Div => self.chunk.write_opcode(Opcode::Div),
-                    // We can add other opcodes easily later
+                    BinaryOp::Div => self.chunk.write_opcode(Opcode::Div),                    BinaryOp::LessThan => self.chunk.write_opcode(Opcode::LessThan),
+                    BinaryOp::GreaterThan => self.chunk.write_opcode(Opcode::GreaterThan),
+                    BinaryOp::Equal => self.chunk.write_opcode(Opcode::Equal),
+                    BinaryOp::StrictEqual => self.chunk.write_opcode(Opcode::Equal), // rough approximation for demo                    // We can add other opcodes easily later
                     _ => return Err(format!("UnimplementedbinaryoperatorforVM")),
                 }
             }

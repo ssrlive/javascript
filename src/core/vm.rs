@@ -44,17 +44,43 @@ impl<'gc> VM<'gc> {
                     self.stack.push(constant);
                 }
                 Opcode::Add => {
-                    // Pop right and left operands (order: pop right first, then left)
                     let b = self.stack.pop().expect("VM Stack underflow on Add (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Add (a)");
-
                     match (a, b) {
                         (Value::Number(a_num), Value::Number(b_num)) => {
-                            // Perform actual addition and push result back to stack
                             self.stack.push(Value::Number(a_num + b_num));
                         }
-                        // If there are other types (strings, etc.), ToPrimitive conversion will be needed later. This is just for demo.
-                        _ => return Err("Only numbers can be added in this basic VM demo".to_string()),
+                        _ => return Err("Only numbers supported in VM Add".to_string()),
+                    }
+                }
+                Opcode::Sub => {
+                    let b = self.stack.pop().expect("VM Stack underflow on Sub (b)");
+                    let a = self.stack.pop().expect("VM Stack underflow on Sub (a)");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Number(a_num - b_num));
+                        }
+                        _ => return Err("Only numbers supported in VM Sub".to_string()),
+                    }
+                }
+                Opcode::Mul => {
+                    let b = self.stack.pop().expect("VM Stack underflow on Mul (b)");
+                    let a = self.stack.pop().expect("VM Stack underflow on Mul (a)");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Number(a_num * b_num));
+                        }
+                        _ => return Err("Only numbers supported in VM Mul".to_string()),
+                    }
+                }
+                Opcode::Div => {
+                    let b = self.stack.pop().expect("VM Stack underflow on Div (b)");
+                    let a = self.stack.pop().expect("VM Stack underflow on Div (a)");
+                    match (a, b) {
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Number(a_num / b_num));
+                        }
+                        _ => return Err("Only numbers supported in VM Div".to_string()),
                     }
                 }
             }

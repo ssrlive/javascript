@@ -17,14 +17,15 @@ struct Cli {
     /// Execute as an ES module (enables import/export handling)
     #[arg(long, default_value_t = false)]
     module: bool,
+
+    /// Run using the new experimental Bytecode VM
+    #[arg(long, default_value_t = false)]
+    use_vm: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     // Initialize logger (controlled by RUST_LOG)
     env_logger::init();
-
-    // Run our VM prototype (1 + 2)
-    javascript::run_vm_demo();
 
     // Run interpreter on a dedicated thread with a larger stack to support
     // deeply nested function-call testcases across platforms.
@@ -76,7 +77,10 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         .unwrap_or(false);
     let run_as_module = cli.module || file_ext_is_mjs;
 
-    let result = if run_as_module {
+    let result = if cli.use_vm {
+        // Experimental VM evaluation
+        evaluate_script_with_vm(&script_content, script_path.as_ref())
+    } else if run_as_module {
         evaluate_module(&script_content, script_path.as_ref())
     } else {
         evaluate_script(&script_content, script_path.as_ref())

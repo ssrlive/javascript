@@ -6,6 +6,9 @@ pub enum Opcode {
     Return = 0,
     Constant = 1,
     Add = 2,
+    Sub = 3,
+    Mul = 4,
+    Div = 5,
 }
 
 impl From<u8> for Opcode {
@@ -14,6 +17,9 @@ impl From<u8> for Opcode {
             0 => Opcode::Return,
             1 => Opcode::Constant,
             2 => Opcode::Add,
+            3 => Opcode::Sub,
+            4 => Opcode::Mul,
+            5 => Opcode::Div,
             _ => panic!("Unknown opcode: {}", byte),
         }
     }

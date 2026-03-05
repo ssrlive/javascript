@@ -4,12 +4,14 @@ use crate::Value;
 
 pub struct Compiler<'gc> {
     chunk: Chunk<'gc>,
+    locals: Vec<String>,
 }
 
 impl<'gc> Compiler<'gc> {
     pub fn new() -> Self {
         Self {
             chunk: Chunk::new(),
+            locals: Vec::new(),
         }
     }
 
@@ -83,13 +85,16 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Assign(name, expr) => {
-                // Wait, some assignments are parsed as statements?
-                // compile rhs
                 self.compile_expr(expr)?;
-                let name_u16 = crate::unicode::utf8_to_utf16(name);
-                let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                self.chunk.write_opcode(Opcode::SetGlobal);
-                self.chunk.write_byte(name_idx);
+                if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(pos as u8);
+                } else {
+                    let name_u16 = crate::unicode::utf8_to_utf16(name);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::SetGlobal);
+                    self.chunk.write_byte(name_idx);
+                }
                 if !is_last{
                     self.chunk.write_opcode(Opcode::Pop);
                 }
@@ -139,7 +144,54 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_byte(idx);
                 }
-            }            _ => return Err(format!("UnimplementedstatementkindforVM")),
+            }            StatementKind::Return(expr_opt) => {
+                if let Some(expr) = expr_opt {
+                    self.compile_expr(expr)?;
+                } else {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_byte(idx);
+                }
+                self.chunk.write_opcode(Opcode::Return);
+            }
+            StatementKind::FunctionDeclaration(name, params, body, _is_gen, _is_async) => {
+                // Jump over the function body in the main bytecode stream
+                let jump_over = self.emit_jump(Opcode::Jump);
+                let func_ip = self.chunk.code.len();
+
+                // Save and reset locals for function scope
+                let old_locals = std::mem::take(&mut self.locals);
+                for param in params {
+                    if let crate::core::statement::DestructuringElement::Variable(param_name, _) = param {
+                        self.locals.push(param_name.clone());
+                    }
+                }
+
+                for (i, s) in body.iter().enumerate() {
+                    self.compile_statement(s, i == body.len() - 1)?;
+                }
+
+                // Implicit return undefined if no explicit return
+                let idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_byte(idx);
+                self.chunk.write_opcode(Opcode::Return);
+
+                self.patch_jump(jump_over);
+                self.locals = old_locals;
+
+                // Push the VmFunction value and define it as a global
+                let func_val = Value::VmFunction(func_ip, params.len() as u8);
+                let func_idx = self.chunk.add_constant(func_val);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_byte(func_idx);
+
+                let name_u16 = crate::unicode::utf8_to_utf16(name);
+                let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                self.chunk.write_opcode(Opcode::DefineGlobal);
+                self.chunk.write_byte(name_idx);
+            }
+            _ => return Err(format!("Unimplemented statement kind for VM: {:?}", stmt.kind)),
         }
         Ok(())
     }
@@ -152,18 +204,29 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_byte(constant_index);
             }
             Expr::Var(name, ..) => {
-                let name_u16 = crate::unicode::utf8_to_utf16(name);
-                let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                self.chunk.write_opcode(Opcode::GetGlobal);
-                self.chunk.write_byte(name_idx);
+                if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(pos as u8);
+                } else {
+                    let name_u16 = crate::unicode::utf8_to_utf16(name);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_byte(name_idx);
+                }
             }
+
             Expr::Assign(left, right) => {
                 if let Expr::Var(name, ..) = &**left {
                     self.compile_expr(right)?;
-                    let name_u16 = crate::unicode::utf8_to_utf16(name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::SetGlobal);
-                    self.chunk.write_byte(name_idx);
+                    if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                        self.chunk.write_opcode(Opcode::SetLocal);
+                        self.chunk.write_byte(pos as u8);
+                    } else {
+                        let name_u16 = crate::unicode::utf8_to_utf16(name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::SetGlobal);
+                        self.chunk.write_byte(name_idx);
+                    }
                 } else {
                     return Err("Invalid assignment target for VM".to_string());
                 }
@@ -184,7 +247,15 @@ impl<'gc> Compiler<'gc> {
                     _ => return Err(format!("UnimplementedbinaryoperatorforVM")),
                 }
             }
-            _ => return Err(format!("UnimplementedexpressiontypeforVM")),
+            Expr::Call(callee, args) => {
+                self.compile_expr(callee)?;
+                for arg in args {
+                    self.compile_expr(arg)?;
+                }
+                self.chunk.write_opcode(Opcode::Call);
+                self.chunk.write_byte(args.len() as u8);
+            }
+            _ => return Err(format!("Unimplemented expression type for VM: {:?}", expr)),
         }
         Ok(())
     }

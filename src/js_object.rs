@@ -2845,6 +2845,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::TypedArray(_) => "TypedArray",
                 Value::Uninitialized => "undefined",
                 Value::PrivateName(..) => "PrivateName",
+                Value::VmFunction(..) => "Function",
             },
             args.len()
         ))
@@ -2995,6 +2996,7 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
         Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
         Value::PrivateName(n, _) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
+        Value::VmFunction(ip, arity) => Ok(Value::String(utf8_to_utf16(&format!("[VmFunction@{} arity={}]", ip, arity)))),
     }
 }
 
@@ -3093,6 +3095,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                 &Value::TypedArray(_) => "TypedArray",
                 Value::Uninitialized => "undefined",
                 Value::PrivateName(..) => "PrivateName",
+                Value::VmFunction(..) => "Function",
             },
             args.len()
         ))
@@ -3270,6 +3273,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::TypedArray(typed_array) => Ok(Value::TypedArray(*typed_array)),
         Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object").into()),
         Value::PrivateName(..) => Err(raise_type_error!("Cannot convert private name to object").into()),
+        Value::VmFunction(ip, arity) => Ok(Value::VmFunction(*ip, *arity)),
     }
 }
 

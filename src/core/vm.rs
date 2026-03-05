@@ -1,6 +1,14 @@
 use crate::Value;
+use crate::core::value::value_to_string;
 use crate::core::opcode::{Chunk, Opcode};
 use std::collections::HashMap;
+
+
+#[derive(Debug, Clone)]
+pub struct CallFrame {
+    pub return_ip: usize,
+    pub bp: usize, // Base pointer
+}
 
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
@@ -8,6 +16,7 @@ pub struct VM<'gc> {
     ip: usize,                // Instruction Pointer: points to the currently executing byte
     stack: Vec<Value<'gc>>,   // Operand Stack
     globals: HashMap<String, Value<'gc>>, // Variables environment
+    frames: Vec<CallFrame>,
 }
 
 impl<'gc> VM<'gc> {
@@ -17,6 +26,7 @@ impl<'gc> VM<'gc> {
             ip: 0,
             stack: Vec::with_capacity(256), // Reserve stack size
             globals: HashMap::new(),
+            frames: Vec::new(),
         }
     }
 
@@ -44,8 +54,49 @@ impl<'gc> VM<'gc> {
             // Execute action based on instruction
             match instruction {
                 Opcode::Return => {
-                    // Return top of stack if available, otherwise return Undefined
-                    return Ok(self.stack.pop().unwrap_or(Value::Undefined));
+                    let result = self.stack.pop().unwrap_or(Value::Undefined);
+                    if let Some(frame) = self.frames.pop() {
+                        // Returning from a function call: pop locals and the function itself
+                        self.stack.truncate(frame.bp - 1);
+                        self.stack.push(result);
+                        self.ip = frame.return_ip;
+                    } else {
+                        // Return from top-level script
+                        return Ok(result);
+                    }
+                }
+                Opcode::GetLocal => {
+                    let index = self.read_byte() as usize;
+                    let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
+                    let val = self.stack[bp + index].clone();
+                    self.stack.push(val);
+                }
+                Opcode::SetLocal => {
+                    let index = self.read_byte() as usize;
+                    let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
+                    let val = self.stack.last().expect("VM Stack underflow").clone();
+                    self.stack[bp + index] = val;
+                }
+                Opcode::Call => {
+                    let arg_count = self.read_byte() as usize;
+                    // Stack: [..., callee, arg0, arg1, ...]
+                    let callee_idx = self.stack.len() - arg_count - 1;
+                    let callee = self.stack[callee_idx].clone();
+                    if let Value::VmFunction(target_ip, arity) = callee {
+                        if arg_count as u8 != arity {
+                            log::warn!("Arity mismatch: expected {}, got {}", arity, arg_count);
+                        }
+                        let frame = CallFrame {
+                            return_ip: self.ip,
+                            bp: callee_idx + 1, // First argument sits right after the callee
+                        };
+                        self.frames.push(frame);
+                        self.ip = target_ip;
+                    } else {
+                        log::warn!("Attempted to call non-function: {}", value_to_string(&callee));
+                        self.stack.truncate(callee_idx);
+                        self.stack.push(Value::Undefined);
+                    }
                 }
                 Opcode::Constant => {
                     // Read constant pool index and push to stack

@@ -1156,6 +1156,8 @@ pub enum Value<'gc> {
     Null,
     Object(JSObjectDataPtr<'gc>),
     Function(String),
+    VmFunction(usize, u8), // (ip, arg_count)
+
     Closure(Gc<'gc, ClosureData<'gc>>),
     AsyncClosure(Gc<'gc, ClosureData<'gc>>),
     GeneratorFunction(Option<String>, Gc<'gc, ClosureData<'gc>>),
@@ -1667,6 +1669,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
             }
         }
         Value::Uninitialized => "[uninitialized]".to_string(),
+        Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),
     }
 }
 

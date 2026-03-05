@@ -18,6 +18,9 @@ pub enum Opcode {
     LessThan = 12,
     GreaterThan = 13,
     Equal = 14,
+    Call = 15,
+    GetLocal = 16,
+    SetLocal = 17,
 }
 
 impl From<u8> for Opcode {
@@ -38,6 +41,9 @@ impl From<u8> for Opcode {
             12 => Opcode::LessThan,
             13 => Opcode::GreaterThan,
             14 => Opcode::Equal,
+            15 => Opcode::Call,
+            16 => Opcode::GetLocal,
+            17 => Opcode::SetLocal,
             _ => panic!("Unknown opcode: {}", byte),
         }
     }

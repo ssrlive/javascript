@@ -113,6 +113,7 @@ const BUILTIN_OBJECT_GETOWNPROPDESC: u8 = 117;
 const BUILTIN_OBJECT_SETPROTOTYPEOF: u8 = 118;
 const BUILTIN_FN_APPLY: u8 = 119;
 const BUILTIN_OBJECT_GETOWNPROPERTYNAMES: u8 = 120;
+const BUILTIN_ARRAY_ITERATOR: u8 = 121;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame {
@@ -279,6 +280,11 @@ impl<'gc> VM<'gc> {
 
         // Global functions
         self.globals.insert("isNaN".to_string(), Value::VmNativeFunction(BUILTIN_ISNAN));
+        // Minimal Symbol object for iterator key
+        let mut sym_obj = IndexMap::new();
+        sym_obj.insert("iterator".to_string(), Value::String(crate::unicode::utf8_to_utf16("iterator")));
+        self.globals
+            .insert("Symbol".to_string(), Value::VmObject(Rc::new(RefCell::new(sym_obj))));
         self.globals
             .insert("parseInt".to_string(), Value::VmNativeFunction(BUILTIN_PARSEINT));
         self.globals
@@ -292,9 +298,13 @@ impl<'gc> VM<'gc> {
         self.globals
             .insert("JSON".to_string(), Value::VmObject(Rc::new(RefCell::new(json_map))));
 
-        // Array.isArray
+        // Array.isArray and prototype
         let mut array_obj = IndexMap::new();
         array_obj.insert("isArray".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ISARRAY));
+        // Create Array.prototype with iterator method
+        let mut arr_proto = IndexMap::new();
+        arr_proto.insert("iterator".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ITERATOR));
+        array_obj.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(arr_proto))));
         self.globals
             .insert("Array".to_string(), Value::VmObject(Rc::new(RefCell::new(array_obj))));
 
@@ -1061,6 +1071,10 @@ impl<'gc> VM<'gc> {
                         return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
                     }
                     return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(Vec::new()))));
+                }
+                BUILTIN_ARRAY_ITERATOR => {
+                    let items = arr.borrow().elements.clone();
+                    return self.make_iterator(items);
                 }
                 BUILTIN_ARRAY_FOREACH => {
                     if let Some(Value::VmFunction(ip, _arity)) = args.first() {
@@ -2030,6 +2044,7 @@ impl<'gc> VM<'gc> {
                         Value::Boolean(_) => "boolean",
                         Value::Undefined => "undefined",
                         Value::Null => "object",
+                        Value::Symbol(_) => "symbol",
                         Value::VmFunction(..) | Value::Closure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
                         Value::VmObject(map) => {
                             let b = map.borrow();
@@ -2054,7 +2069,15 @@ impl<'gc> VM<'gc> {
                     let count = self.read_byte() as usize;
                     let start = self.stack.len() - count;
                     let elems: Vec<Value<'gc>> = self.stack.drain(start..).collect();
-                    self.stack.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(elems)))));
+                    let arr_val = Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(elems))));
+                    // link prototype if Array constructor has prototype property
+                    if let Some(Value::VmObject(array_ctor)) = self.globals.get("Array")
+                        && let Some(proto) = array_ctor.borrow().get("prototype").cloned()
+                        && let Value::VmArray(arr_obj) = &arr_val
+                    {
+                        arr_obj.borrow_mut().props.insert("__proto__".to_string(), proto);
+                    }
+                    self.stack.push(arr_val);
                 }
                 Opcode::NewObject => {
                     let count = self.read_byte() as usize;
@@ -2142,12 +2165,29 @@ impl<'gc> VM<'gc> {
                             "filter" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_FILTER)),
                             "forEach" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_FOREACH)),
                             "reduce" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_REDUCE)),
+                            "iterator" => {
+                                // lookup on Array.prototype so deletion propagates
+                                if let Some(Value::VmObject(arr_ctor)) = self.globals.get("Array") {
+                                    if let Some(Value::VmObject(proto)) = arr_ctor.borrow().get("prototype").cloned() {
+                                        if let Some(v) = proto.borrow().get("iterator").cloned() {
+                                            self.stack.push(v);
+                                        } else {
+                                            self.stack.push(Value::Undefined);
+                                        }
+                                    } else {
+                                        self.stack.push(Value::Undefined);
+                                    }
+                                } else {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            }
                             _ => {
                                 // Check custom named properties
                                 let val = arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined);
                                 self.stack.push(val);
                             }
                         },
+
                         Value::String(_) => match key.as_str() {
                             "length" => {
                                 if let Value::String(s) = &obj {
@@ -2358,6 +2398,12 @@ impl<'gc> VM<'gc> {
                 }
                 Opcode::Throw => {
                     let thrown = self.stack.pop().unwrap_or(Value::Undefined);
+                    // diagnostic logging
+                    log::warn!("Throw opcode value={}", self.vm_to_string(&thrown));
+                    if let Value::VmObject(obj) = &thrown {
+                        let keys: Vec<String> = obj.borrow().keys().cloned().collect();
+                        log::warn!("Thrown object keys={:?}", keys);
+                    }
                     self.handle_throw(thrown)?;
                 }
                 Opcode::SetupTry => {

@@ -2385,6 +2385,28 @@ impl<'gc> Compiler<'gc> {
         self.forin_counter += 1;
         self.emit_define_var(&temp);
 
+        // runtime check: ensure iterator exists on the object (via prototype)
+        self.emit_helper_get(&temp); // push arr
+        let iter_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("iterator")));
+        self.chunk.write_opcode(Opcode::GetProperty); // will traverse prototype
+        self.chunk.write_u16(iter_key);
+        let ok_jump = self.emit_jump(Opcode::JumpIfTrue);
+        // iterator missing → throw TypeError
+        // Use NewError special-case constructor used elsewhere
+        let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(type_idx);
+        let msg_idx = self
+            .chunk
+            .add_constant(Value::String(crate::unicode::utf8_to_utf16("iterator missing")));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(msg_idx);
+        self.chunk.write_opcode(Opcode::NewError);
+        self.chunk.write_opcode(Opcode::Throw);
+        self.patch_jump(ok_jump);
+        // push arr again for further work
+        self.emit_helper_get(&temp);
+
         for (i, elem) in elements.iter().enumerate() {
             match elem {
                 DestructuringElement::Variable(name, default) => {

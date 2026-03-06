@@ -1636,8 +1636,22 @@ fn call_value_of_strict<'gc>(
     }
 }
 
+thread_local! {
+    static VTOS_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
-    match val {
+    let depth = VTOS_DEPTH.with(|d| {
+        let cur = d.get();
+        d.set(cur + 1);
+        cur + 1
+    });
+    if depth > 10 {
+        // too deep, probably cyclic
+        VTOS_DEPTH.with(|d| d.set(d.get() - 1));
+        return "[object]".to_string();
+    }
+    let res = match val {
         Value::Number(n) => {
             if n.is_nan() {
                 "NaN".to_string()
@@ -1720,21 +1734,56 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::Uninitialized => "[uninitialized]".to_string(),
         Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),
         Value::VmArray(arr) => {
+            // Represent arrays similar to Node.js: [ elem1, elem2, ... ]
             let elems: Vec<String> = arr
                 .borrow()
                 .iter()
-                .map(|v| match v {
-                    Value::Undefined | Value::Null => String::new(),
-                    other => value_to_string(other),
+                .map(|v| {
+                    // For strings, wrap in single quotes like Node
+                    let s = value_to_string(v);
+                    match v {
+                        Value::String(_) => format!("'{s}'"),
+                        _ => s,
+                    }
                 })
                 .collect();
-            elems.join(",")
+            format!("[ {} ]", elems.join(", "))
         }
-        Value::VmObject(_) => "[object Object]".to_string(),
+        Value::VmObject(obj) => {
+            {
+                let borrowed = obj.borrow();
+                if let Some(Value::String(tname)) = borrowed.get("__type__") {
+                    let tname_str = crate::unicode::utf16_to_utf8(tname);
+                    if tname_str.ends_with("Error") {
+                        let msg = borrowed
+                            .get("message")
+                            .and_then(|v| if let Value::String(s) = v { Some(utf16_to_utf8(s)) } else { None })
+                            .unwrap_or_default();
+                        return format!("{}: {}", tname_str, msg);
+                    }
+                }
+                if let Some(Value::String(s)) = borrowed.get("message") {
+                    return utf16_to_utf8(s);
+                }
+            }
+            let mut parts = Vec::new();
+            if let Ok(borrowed) = obj.try_borrow() {
+                for (k, v) in borrowed.iter() {
+                    if k.starts_with("__") {
+                        continue;
+                    }
+                    let vs = value_to_string(v);
+                    parts.push(format!("{k}: {vs}"));
+                }
+            }
+            format!("{{ {} }}", parts.join(", "))
+        }
         Value::VmNativeFunction(id) => format!("[NativeFunction#{}]", id),
         Value::VmMap(_) => "[object Map]".to_string(),
         Value::VmSet(_) => "[object Set]".to_string(),
-    }
+    };
+    VTOS_DEPTH.with(|d| d.set(d.get() - 1));
+    res
 }
 
 pub fn format_js_number(n: f64) -> String {

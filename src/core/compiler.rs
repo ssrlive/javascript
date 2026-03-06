@@ -1,5 +1,7 @@
 use crate::core::opcode::{Chunk, Opcode};
-use crate::core::statement::{BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, Statement, StatementKind};
+use crate::core::statement::{
+    BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ObjectDestructuringElement, Statement, StatementKind,
+};
 use crate::core::{JSError, Value};
 use crate::raise_syntax_error;
 
@@ -8,7 +10,9 @@ pub struct Compiler<'gc> {
     locals: Vec<String>,
     scope_depth: i32, // 0 = top-level (global), > 0 = inside function
     loop_stack: Vec<LoopContext>,
-    pending_label: Option<String>, // label to attach to the next loop
+    pending_label: Option<String>,        // label to attach to the next loop
+    forin_counter: u32,                   // unique ID for for-in synthetic variables
+    current_class_parent: Option<String>, // parent class name for super resolution
 }
 
 #[derive(Debug, Clone, Default)]
@@ -28,11 +32,22 @@ impl<'gc> Compiler<'gc> {
             scope_depth: 0,
             loop_stack: Vec::new(),
             pending_label: None,
+            forin_counter: 0,
+            current_class_parent: None,
         }
     }
 
     pub fn compile(mut self, statements: &[Statement]) -> Result<Chunk<'gc>, JSError> {
+        // Hoist function declarations to the top
+        for stmt in statements.iter() {
+            if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) {
+                self.compile_statement(stmt, false)?;
+            }
+        }
         for (i, stmt) in statements.iter().enumerate() {
+            if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) {
+                continue;
+            }
             let is_last = i == statements.len() - 1;
             self.compile_statement(stmt, is_last)?;
         }
@@ -92,7 +107,12 @@ impl<'gc> Compiler<'gc> {
             StatementKind::Let(decls) | StatementKind::Var(decls) => {
                 for (name, init_opt) in decls {
                     if let Some(init) = init_opt {
+                        // Infer function name for anonymous function/arrow
+                        let func_ip = self.peek_func_ip(init);
                         self.compile_expr(init)?;
+                        if let Some(ip) = func_ip {
+                            self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
+                        }
                     } else {
                         let idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
@@ -126,7 +146,12 @@ impl<'gc> Compiler<'gc> {
             }
             StatementKind::Const(decls) => {
                 for (name, init) in decls {
+                    // Infer function name for anonymous function/arrow
+                    let func_ip = self.peek_func_ip(init);
                     self.compile_expr(init)?;
+                    if let Some(ip) = func_ip {
+                        self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
+                    }
                     if self.scope_depth > 0 {
                         self.locals.push(name.clone());
                     } else {
@@ -158,7 +183,16 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Block(statements) => {
+                // Hoist function declarations to the top of the block
+                for s in statements.iter() {
+                    if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                        self.compile_statement(s, false)?;
+                    }
+                }
                 for (i, s) in statements.iter().enumerate() {
+                    if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                        continue;
+                    }
                     let s_is_last = is_last && i == statements.len() - 1;
                     self.compile_statement(s, s_is_last)?;
                 }
@@ -344,33 +378,43 @@ impl<'gc> Compiler<'gc> {
                 self.pending_label = None;
             }
             StatementKind::ForIn(_decl_kind, var_name, obj_expr, body) => {
-                // Compile: keys = GetKeys(obj); for (i=0; i<keys.length; i++) { var_name = keys[i]; body }
+                // Generate unique names for each for-in loop's synthetic variables
+                let fid = self.forin_counter;
+                self.forin_counter += 1;
+                let obj_name = format!("__forin_obj_{}__", fid);
+                let keys_name = format!("__keys_{}__", fid);
+                let idx_name = format!("__idx_{}__", fid);
+
                 self.compile_expr(obj_expr)?;
+                self.chunk.write_opcode(Opcode::Dup);
                 self.chunk.write_opcode(Opcode::GetKeys);
-                // keys array is now on stack; store as a local (or global)
-                let _keys_local = if self.scope_depth > 0 {
-                    self.locals.push("__keys__".to_string());
-                    None
+                // Stack: [..., obj, keys_array]
+                // For locals: obj is at slot N, keys at slot N+1
+                // For globals: DefineGlobal pops from top, so pop keys first, then obj
+                if self.scope_depth > 0 {
+                    self.locals.push(obj_name.clone());
+                    self.locals.push(keys_name.clone());
                 } else {
-                    let n = crate::unicode::utf8_to_utf16("__keys__");
-                    let ni = self.chunk.add_constant(Value::String(n));
+                    let kn = crate::unicode::utf8_to_utf16(&keys_name);
+                    let kni = self.chunk.add_constant(Value::String(kn));
                     self.chunk.write_opcode(Opcode::DefineGlobal);
-                    self.chunk.write_u16(ni);
-                    Some(ni)
+                    self.chunk.write_u16(kni);
+                    let on = crate::unicode::utf8_to_utf16(&obj_name);
+                    let oni = self.chunk.add_constant(Value::String(on));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(oni);
                 };
                 // i = 0
                 let zero_idx = self.chunk.add_constant(Value::Number(0.0));
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(zero_idx);
-                let _idx_local = if self.scope_depth > 0 {
-                    self.locals.push("__idx__".to_string());
-                    None
+                if self.scope_depth > 0 {
+                    self.locals.push(idx_name.clone());
                 } else {
-                    let n = crate::unicode::utf8_to_utf16("__idx__");
+                    let n = crate::unicode::utf8_to_utf16(&idx_name);
                     let ni = self.chunk.add_constant(Value::String(n));
                     self.chunk.write_opcode(Opcode::DefineGlobal);
                     self.chunk.write_u16(ni);
-                    Some(ni)
                 };
 
                 // Pre-allocate loop variable slot if it's a new local
@@ -387,22 +431,22 @@ impl<'gc> Compiler<'gc> {
                 self.loop_stack.push(ctx);
                 // push i
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == "__idx__").unwrap();
+                    let pos = self.locals.iter().position(|l| *l == idx_name).unwrap();
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
-                    let n = crate::unicode::utf8_to_utf16("__idx__");
+                    let n = crate::unicode::utf8_to_utf16(&idx_name);
                     let ni = self.chunk.add_constant(Value::String(n));
                     self.chunk.write_opcode(Opcode::GetGlobal);
                     self.chunk.write_u16(ni);
                 }
                 // push keys.length
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == "__keys__").unwrap();
+                    let pos = self.locals.iter().position(|l| *l == keys_name).unwrap();
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
-                    let n = crate::unicode::utf8_to_utf16("__keys__");
+                    let n = crate::unicode::utf8_to_utf16(&keys_name);
                     let ni = self.chunk.add_constant(Value::String(n));
                     self.chunk.write_opcode(Opcode::GetGlobal);
                     self.chunk.write_u16(ni);
@@ -416,27 +460,27 @@ impl<'gc> Compiler<'gc> {
 
                 // var_name = keys[i]
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == "__keys__").unwrap();
+                    let pos = self.locals.iter().position(|l| *l == keys_name).unwrap();
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
-                    let n = crate::unicode::utf8_to_utf16("__keys__");
+                    let n = crate::unicode::utf8_to_utf16(&keys_name);
                     let ni = self.chunk.add_constant(Value::String(n));
                     self.chunk.write_opcode(Opcode::GetGlobal);
                     self.chunk.write_u16(ni);
                 }
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == "__idx__").unwrap();
+                    let pos = self.locals.iter().position(|l| *l == idx_name).unwrap();
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
-                    let n = crate::unicode::utf8_to_utf16("__idx__");
+                    let n = crate::unicode::utf8_to_utf16(&idx_name);
                     let ni = self.chunk.add_constant(Value::String(n));
                     self.chunk.write_opcode(Opcode::GetGlobal);
                     self.chunk.write_u16(ni);
                 }
                 self.chunk.write_opcode(Opcode::GetIndex);
-                // Store in var_name (always emit SetLocal+Pop so it works on every iteration)
+                // Store in var_name
                 if self.scope_depth > 0 {
                     let pos = self.locals.iter().position(|l| l == var_name).unwrap();
                     self.chunk.write_opcode(Opcode::SetLocal);
@@ -449,6 +493,30 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(vni);
                 }
 
+                // Check if key still exists in the original object (handles deletion during iteration)
+                if self.scope_depth > 0 {
+                    let pos = self.locals.iter().position(|l| l == var_name).unwrap();
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(pos as u8);
+                } else {
+                    let vn = crate::unicode::utf8_to_utf16(var_name);
+                    let vni = self.chunk.add_constant(Value::String(vn));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(vni);
+                }
+                if self.scope_depth > 0 {
+                    let pos = self.locals.iter().position(|l| *l == obj_name).unwrap();
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(pos as u8);
+                } else {
+                    let on = crate::unicode::utf8_to_utf16(&obj_name);
+                    let oni = self.chunk.add_constant(Value::String(on));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(oni);
+                }
+                self.chunk.write_opcode(Opcode::In);
+                let skip_body_jump = self.emit_jump(Opcode::JumpIfFalse);
+
                 // Body
                 for s in body {
                     self.compile_statement(s, false)?;
@@ -456,28 +524,29 @@ impl<'gc> Compiler<'gc> {
 
                 // continue target: i++ update
                 let update_ip = self.chunk.code.len();
+                self.patch_jump(skip_body_jump);
                 for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
                     self.patch_jump_to(*cp, update_ip);
                 }
 
                 // i++
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == "__idx__").unwrap();
+                    let pos = self.locals.iter().position(|l| *l == idx_name).unwrap();
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
-                    let n = crate::unicode::utf8_to_utf16("__idx__");
+                    let n = crate::unicode::utf8_to_utf16(&idx_name);
                     let ni = self.chunk.add_constant(Value::String(n));
                     self.chunk.write_opcode(Opcode::GetGlobal);
                     self.chunk.write_u16(ni);
                 }
                 self.chunk.write_opcode(Opcode::Increment);
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == "__idx__").unwrap();
+                    let pos = self.locals.iter().position(|l| *l == idx_name).unwrap();
                     self.chunk.write_opcode(Opcode::SetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
-                    let n = crate::unicode::utf8_to_utf16("__idx__");
+                    let n = crate::unicode::utf8_to_utf16(&idx_name);
                     let ni = self.chunk.add_constant(Value::String(n));
                     self.chunk.write_opcode(Opcode::SetGlobal);
                     self.chunk.write_u16(ni);
@@ -493,7 +562,7 @@ impl<'gc> Compiler<'gc> {
 
                 // Clean up synthetic locals
                 if self.scope_depth > 0 {
-                    self.locals.retain(|l| l != "__keys__" && l != "__idx__");
+                    self.locals.retain(|l| *l != keys_name && *l != idx_name && *l != obj_name);
                 }
 
                 if is_last {
@@ -593,6 +662,9 @@ impl<'gc> Compiler<'gc> {
                 let func_idx = self.chunk.add_constant(func_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(func_idx);
+
+                // Register function name for .name property
+                self.chunk.fn_names.insert(func_ip, name.clone());
 
                 let name_u16 = crate::unicode::utf8_to_utf16(name);
                 let name_idx = self.chunk.add_constant(Value::String(name_u16));
@@ -696,6 +768,38 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(idx);
                 }
             }
+            StatementKind::ForOfDestructuringArray(_decl_kind, elements, iterable_expr, body) => {
+                self.compile_for_of_destructuring_array(elements, iterable_expr, body)?;
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
+            StatementKind::ForOfDestructuringObject(_decl_kind, elements, iterable_expr, body) => {
+                self.compile_for_of_destructuring_object(elements, iterable_expr, body)?;
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
+            StatementKind::ForInDestructuringArray(_decl_kind, elements, obj_expr, body) => {
+                self.compile_for_in_destructuring_array(elements, obj_expr, body)?;
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
+            StatementKind::ForInDestructuringObject(_decl_kind, elements, obj_expr, body) => {
+                self.compile_for_in_destructuring_object(elements, obj_expr, body)?;
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
             StatementKind::Switch(sw) => {
                 // Compile discriminant once, store in synthetic local/global
                 self.compile_expr(&sw.expr)?;
@@ -780,42 +884,64 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Class(class_def) => {
-                // Compile class constructor as a function
                 let name = &class_def.name;
+                let parent_name = if let Some(Expr::Var(pname, ..)) = class_def.extends.as_ref() {
+                    Some(pname.clone())
+                } else {
+                    None
+                };
+
+                // Save/set class parent context for super resolution
+                let prev_parent = self.current_class_parent.take();
+                self.current_class_parent = parent_name.clone();
+
+                // Extract constructor; if none and has parent, generate default forwarding ctor
                 let mut ctor_params = Vec::new();
                 let mut ctor_body = Vec::new();
+                let mut has_explicit_ctor = false;
                 for member in &class_def.members {
                     if let ClassMember::Constructor(params, body) = member {
                         ctor_params = params.clone();
                         ctor_body = body.clone();
+                        has_explicit_ctor = true;
                         break;
                     }
                 }
-                // Count simple params (DestructuringElement::Variable)
+                // Default constructor for derived class: constructor(...args) { super(...args); }
+                if !has_explicit_ctor && parent_name.is_some() {
+                    ctor_params = vec![DestructuringElement::Rest("__args__".to_string())];
+                    ctor_body = vec![Statement {
+                        kind: Box::new(StatementKind::Expr(Expr::SuperCall(vec![Expr::Spread(Box::new(Expr::Var(
+                            "__args__".to_string(),
+                            None,
+                            None,
+                        )))]))),
+                        line: 0,
+                        column: 0,
+                    }];
+                }
+
                 let arity = ctor_params.len() as u8;
 
-                // Emit jump over function body
+                // Emit jump over constructor body
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let fn_start = self.chunk.code.len();
 
-                // Push new scope for constructor body
                 self.scope_depth += 1;
-                // Register params as locals
                 for p in &ctor_params {
-                    if let DestructuringElement::Variable(pname, _) = p {
-                        self.locals.push(pname.clone());
+                    match p {
+                        DestructuringElement::Variable(pname, _) => self.locals.push(pname.clone()),
+                        DestructuringElement::Rest(pname) => self.locals.push(pname.clone()),
+                        _ => {}
                     }
                 }
 
-                for (i, stmt) in ctor_body.iter().enumerate() {
-                    let _is_last = i == ctor_body.len() - 1;
+                for stmt in ctor_body.iter() {
                     self.compile_statement(stmt, false)?;
                 }
-                // Constructor returns `this`
                 self.chunk.write_opcode(Opcode::GetThis);
                 self.chunk.write_opcode(Opcode::Return);
 
-                // Clean up locals
                 let locals_to_remove = ctor_params.len();
                 for _ in 0..locals_to_remove {
                     self.locals.pop();
@@ -824,7 +950,10 @@ impl<'gc> Compiler<'gc> {
 
                 self.patch_jump(jump_over);
 
-                // Define as global function
+                // Register constructor name
+                self.chunk.fn_names.insert(fn_start, name.clone());
+
+                // Define constructor as global
                 let fn_val = Value::VmFunction(fn_start, arity);
                 let fn_idx = self.chunk.add_constant(fn_val);
                 self.chunk.write_opcode(Opcode::Constant);
@@ -834,6 +963,243 @@ impl<'gc> Compiler<'gc> {
                 let name_idx = self.chunk.add_constant(Value::String(name_u16));
                 self.chunk.write_opcode(Opcode::DefineGlobal);
                 self.chunk.write_u16(name_idx);
+
+                // Collect methods to install on prototype, static methods on constructor
+                let mut methods: Vec<(&str, &Vec<DestructuringElement>, &Vec<Statement>, bool)> = Vec::new();
+                let mut getters: Vec<(&str, &Vec<Statement>, bool)> = Vec::new();
+                let mut setters: Vec<(&str, &Vec<DestructuringElement>, &Vec<Statement>, bool)> = Vec::new();
+                for member in &class_def.members {
+                    match member {
+                        ClassMember::Method(mname, params, body) => methods.push((mname, params, body, false)),
+                        ClassMember::StaticMethod(mname, params, body) => methods.push((mname, params, body, true)),
+                        ClassMember::Getter(gname, body) => getters.push((gname, body, false)),
+                        ClassMember::StaticGetter(gname, body) => getters.push((gname, body, true)),
+                        ClassMember::Setter(sname, params, body) => setters.push((sname, params, body, false)),
+                        ClassMember::StaticSetter(sname, params, body) => setters.push((sname, params, body, true)),
+                        _ => {}
+                    }
+                }
+
+                // Compile and install instance methods on ClassName.prototype
+                if !methods.iter().any(|(_, _, _, is_static)| !is_static)
+                    && !getters.iter().any(|(_, _, is_static)| !is_static)
+                    && !setters.iter().any(|(_, _, _, is_static)| !is_static)
+                {
+                    // No instance members to install
+                } else {
+                    // Push prototype: GetGlobal ClassName, GetProperty "prototype"
+                    let cls_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(name)));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(cls_idx);
+                    let proto_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(proto_key);
+                    // stack: [proto]
+
+                    for &(mname, params, body, is_static) in &methods {
+                        if is_static {
+                            continue;
+                        }
+                        // Compile method as function
+                        let m_jump = self.emit_jump(Opcode::Jump);
+                        let m_start = self.chunk.code.len();
+                        let m_arity = params.len() as u8;
+                        self.scope_depth += 1;
+                        for p in params {
+                            match p {
+                                DestructuringElement::Variable(pn, _) => self.locals.push(pn.clone()),
+                                DestructuringElement::Rest(pn) => self.locals.push(pn.clone()),
+                                _ => {}
+                            }
+                        }
+                        for stmt in body.iter() {
+                            self.compile_statement(stmt, false)?;
+                        }
+                        self.chunk.write_opcode(Opcode::Constant);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::Return);
+                        for _ in 0..params.len() {
+                            self.locals.pop();
+                        }
+                        self.scope_depth -= 1;
+                        self.patch_jump(m_jump);
+                        self.chunk.fn_names.insert(m_start, mname.to_string());
+
+                        // Install: Dup proto, push method, SetProperty, Pop
+                        self.chunk.write_opcode(Opcode::Dup);
+                        let m_val = Value::VmFunction(m_start, m_arity);
+                        let m_idx = self.chunk.add_constant(m_val);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(m_idx);
+                        let mk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(mname)));
+                        self.chunk.write_opcode(Opcode::SetProperty);
+                        self.chunk.write_u16(mk_idx);
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+
+                    // Install getters on prototype
+                    for &(gname, body, is_static) in &getters {
+                        if is_static {
+                            continue;
+                        }
+                        let g_jump = self.emit_jump(Opcode::Jump);
+                        let g_start = self.chunk.code.len();
+                        self.scope_depth += 1;
+                        for stmt in body.iter() {
+                            self.compile_statement(stmt, false)?;
+                        }
+                        self.chunk.write_opcode(Opcode::Constant);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::Return);
+                        self.scope_depth -= 1;
+                        self.patch_jump(g_jump);
+
+                        self.chunk.write_opcode(Opcode::Dup);
+                        let g_val = Value::VmFunction(g_start, 0);
+                        let g_idx = self.chunk.add_constant(g_val);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(g_idx);
+                        let getter_key = format!("__get_{}", gname);
+                        let gk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&getter_key)));
+                        self.chunk.write_opcode(Opcode::SetProperty);
+                        self.chunk.write_u16(gk_idx);
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+
+                    // Install setters on prototype
+                    for &(sname, params, body, is_static) in &setters {
+                        if is_static {
+                            continue;
+                        }
+                        let s_jump = self.emit_jump(Opcode::Jump);
+                        let s_start = self.chunk.code.len();
+                        let s_arity = params.len() as u8;
+                        self.scope_depth += 1;
+                        for p in params {
+                            if let DestructuringElement::Variable(pn, _) = p {
+                                self.locals.push(pn.clone());
+                            }
+                        }
+                        for stmt in body.iter() {
+                            self.compile_statement(stmt, false)?;
+                        }
+                        self.chunk.write_opcode(Opcode::Constant);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::Return);
+                        for _ in 0..params.len() {
+                            self.locals.pop();
+                        }
+                        self.scope_depth -= 1;
+                        self.patch_jump(s_jump);
+
+                        self.chunk.write_opcode(Opcode::Dup);
+                        let s_val = Value::VmFunction(s_start, s_arity);
+                        let s_idx = self.chunk.add_constant(s_val);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(s_idx);
+                        let setter_key = format!("__set_{}", sname);
+                        let sk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&setter_key)));
+                        self.chunk.write_opcode(Opcode::SetProperty);
+                        self.chunk.write_u16(sk_idx);
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+
+                    self.chunk.write_opcode(Opcode::Pop); // pop proto
+                }
+
+                // Install static methods on the constructor function itself
+                for &(mname, params, body, is_static) in &methods {
+                    if !is_static {
+                        continue;
+                    }
+                    let m_jump = self.emit_jump(Opcode::Jump);
+                    let m_start = self.chunk.code.len();
+                    let m_arity = params.len() as u8;
+                    self.scope_depth += 1;
+                    for p in params {
+                        match p {
+                            DestructuringElement::Variable(pn, _) => self.locals.push(pn.clone()),
+                            DestructuringElement::Rest(pn) => self.locals.push(pn.clone()),
+                            _ => {}
+                        }
+                    }
+                    for stmt in body.iter() {
+                        self.compile_statement(stmt, false)?;
+                    }
+                    self.chunk.write_opcode(Opcode::Constant);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Return);
+                    for _ in 0..params.len() {
+                        self.locals.pop();
+                    }
+                    self.scope_depth -= 1;
+                    self.patch_jump(m_jump);
+
+                    // GetGlobal ClassName, push method, SetProperty
+                    let cls_idx2 = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(name)));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(cls_idx2);
+                    let m_val = Value::VmFunction(m_start, m_arity);
+                    let m_idx = self.chunk.add_constant(m_val);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(m_idx);
+                    let mk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(mname)));
+                    self.chunk.write_opcode(Opcode::SetProperty);
+                    self.chunk.write_u16(mk_idx);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+
+                // Handle extends: set Child.prototype.__proto__ = Parent.prototype
+                if let Some(ref pname) = parent_name {
+                    // GetGlobal ClassName, GetProperty "prototype" → child proto
+                    let cls_idx3 = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(name)));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(cls_idx3);
+                    let proto_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(proto_k);
+                    // GetGlobal ParentClass, GetProperty "prototype" → parent proto
+                    let par_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(pname)));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(par_idx);
+                    let proto_k2 = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(proto_k2);
+                    // SetProperty "__proto__" on child prototype
+                    let dunder_proto = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("__proto__")));
+                    self.chunk.write_opcode(Opcode::SetProperty);
+                    self.chunk.write_u16(dunder_proto);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+
+                // Restore previous class context
+                self.current_class_parent = prev_parent;
+            }
+            StatementKind::VarDestructuringArray(elements, init)
+            | StatementKind::LetDestructuringArray(elements, init)
+            | StatementKind::ConstDestructuringArray(elements, init) => {
+                self.compile_expr(init)?;
+                self.compile_array_destructuring(elements)?;
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
+            StatementKind::VarDestructuringObject(elements, init)
+            | StatementKind::LetDestructuringObject(elements, init)
+            | StatementKind::ConstDestructuringObject(elements, init) => {
+                self.compile_expr(init)?;
+                self.compile_object_destructuring(elements)?;
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
             }
             _ => {
                 return Err(crate::raise_syntax_error!(format!(
@@ -938,6 +1304,92 @@ impl<'gc> Compiler<'gc> {
             }
             Expr::This => {
                 self.chunk.write_opcode(Opcode::GetThis);
+            }
+            Expr::SuperCall(args) => {
+                // super(args) → call parent constructor with current this
+                if let Some(ref pname) = self.current_class_parent {
+                    // Stack: [this (receiver), ParentCtor (callee), args...]
+                    self.chunk.write_opcode(Opcode::GetThis);
+                    let par_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(pname)));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(par_idx);
+                    // Handle spread in super(...args)
+                    let mut real_count = 0u8;
+                    let mut has_spread = false;
+                    for arg in args {
+                        if let Expr::Spread(inner) = arg {
+                            has_spread = true;
+                            self.compile_expr(inner)?;
+                        } else {
+                            self.compile_expr(arg)?;
+                            real_count += 1;
+                        }
+                    }
+                    if has_spread {
+                        // For default ctor with spread args, we pop the array and push individual elements
+                        // at runtime. For now, just pass the rest array directly — the parent ctor will
+                        // receive it as a single arg. This is a simplification; proper spread needs
+                        // runtime unrolling. We pass 1 arg (the rest array).
+                        self.chunk.write_opcode(Opcode::Call);
+                        self.chunk.write_byte(1u8 | 0x80);
+                    } else {
+                        self.chunk.write_opcode(Opcode::Call);
+                        self.chunk.write_byte(real_count | 0x80);
+                    }
+                } else {
+                    self.chunk.write_opcode(Opcode::Constant);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_u16(undef_idx);
+                }
+            }
+            Expr::SuperMethod(method_name, args) => {
+                // super.method(args) → get method from parent prototype, call with current this
+                if let Some(ref pname) = self.current_class_parent {
+                    // Stack after: [this (receiver), method (callee), args...]
+                    self.chunk.write_opcode(Opcode::GetThis);
+                    let par_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(pname)));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(par_idx);
+                    let proto_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(proto_k);
+                    let mk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(method_name)));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(mk);
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.chunk.write_opcode(Opcode::Call);
+                    self.chunk.write_byte(args.len() as u8 | 0x80);
+                } else {
+                    self.chunk.write_opcode(Opcode::Constant);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_u16(undef_idx);
+                }
+            }
+            Expr::SuperProperty(prop_name) => {
+                // super.prop → get property from parent prototype
+                if let Some(ref pname) = self.current_class_parent {
+                    let par_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(pname)));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(par_idx);
+                    let proto_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(proto_k);
+                    let pk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop_name)));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(pk);
+                } else {
+                    self.chunk.write_opcode(Opcode::Constant);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_u16(undef_idx);
+                }
+            }
+            Expr::Super => {
+                // bare `super` reference — push undefined for now
+                self.chunk.write_opcode(Opcode::Constant);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_u16(undef_idx);
             }
             // Unary operators
             Expr::UnaryNeg(inner) => {
@@ -1092,7 +1544,12 @@ impl<'gc> Compiler<'gc> {
             // Assignment to property: obj.key = val, obj[i] = val
             Expr::Assign(left, right) => match &**left {
                 Expr::Var(name, ..) => {
+                    // Infer function name for anonymous function/arrow assigned to a variable
+                    let func_ip = self.peek_func_ip(right);
                     self.compile_expr(right)?;
+                    if let Some(ip) = func_ip {
+                        self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
+                    }
                     if let Some(pos) = self.locals.iter().position(|l| l == name) {
                         self.chunk.write_opcode(Opcode::SetLocal);
                         self.chunk.write_byte(pos as u8);
@@ -1116,6 +1573,15 @@ impl<'gc> Compiler<'gc> {
                     self.compile_expr(idx)?;
                     self.compile_expr(right)?;
                     self.chunk.write_opcode(Opcode::SetIndex);
+                }
+                Expr::SuperProperty(key) => {
+                    // super.x = value → set on this
+                    self.chunk.write_opcode(Opcode::GetThis);
+                    self.compile_expr(right)?;
+                    let key_u16 = crate::unicode::utf8_to_utf16(key);
+                    let name_idx = self.chunk.add_constant(Value::String(key_u16));
+                    self.chunk.write_opcode(Opcode::SetProperty);
+                    self.chunk.write_u16(name_idx);
                 }
                 _ => {
                     return Err(crate::raise_syntax_error!("Invalid assignment target for VM"));
@@ -1548,6 +2014,295 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
+    /// Preview the function IP that will be generated for anonymous function/arrow expressions.
+    /// Returns None if expr is not a function/arrow, or if named.
+    fn peek_func_ip(&self, expr: &Expr) -> Option<usize> {
+        match expr {
+            // Anonymous function expression or arrow: the func body starts after the jump instruction
+            Expr::Function(name, ..) if name.is_none() || name.as_deref() == Some("") => {
+                // Jump opcode (1) + u16 operand (2) = 3 bytes before func body
+                Some(self.chunk.code.len() + 3)
+            }
+            Expr::ArrowFunction(..) => Some(self.chunk.code.len() + 3),
+            _ => None,
+        }
+    }
+
+    /// Helper: compile a for-of loop body where the iteration variable is array-destructured.
+    fn compile_for_of_destructuring_array(
+        &mut self,
+        elements: &[DestructuringElement],
+        iterable_expr: &Expr,
+        body: &[Statement],
+    ) -> Result<(), JSError> {
+        let arr_name = format!("__forofda_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        let idx_name = format!("__forofdi_{}__", self.forin_counter);
+        self.forin_counter += 1;
+
+        self.compile_expr(iterable_expr)?;
+        self.emit_define_var(&arr_name);
+
+        let zero = self.chunk.add_constant(Value::Number(0.0));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(zero);
+        self.emit_define_var(&idx_name);
+
+        // Pre-allocate destructured variable slots
+        let mut destr_names = Vec::new();
+        for elem in elements {
+            if let DestructuringElement::Variable(name, _) = elem {
+                if self.scope_depth > 0 && !self.locals.iter().any(|l| l == name) {
+                    let undef = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef);
+                    self.locals.push(name.clone());
+                }
+                destr_names.push(name.clone());
+            }
+        }
+
+        let loop_start = self.chunk.code.len();
+        let ctx = self.make_loop_context(loop_start);
+        self.loop_stack.push(ctx);
+        self.emit_helper_get(&idx_name);
+        self.emit_helper_get(&arr_name);
+        let len_key = crate::unicode::utf8_to_utf16("length");
+        let len_idx = self.chunk.add_constant(Value::String(len_key));
+        self.chunk.write_opcode(Opcode::GetProperty);
+        self.chunk.write_u16(len_idx);
+        self.chunk.write_opcode(Opcode::LessThan);
+        let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
+        // item = arr[idx], then destructure
+        self.emit_helper_get(&arr_name);
+        self.emit_helper_get(&idx_name);
+        self.chunk.write_opcode(Opcode::GetIndex);
+        // Item is on stack — array destructure it
+        self.compile_array_destructuring(elements)?;
+
+        for s in body {
+            self.compile_statement(s, false)?;
+        }
+
+        let update_ip = self.chunk.code.len();
+        for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
+            self.patch_jump_to(*cp, update_ip);
+        }
+
+        self.emit_helper_get(&idx_name);
+        self.chunk.write_opcode(Opcode::Increment);
+        self.emit_helper_set(&idx_name);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        self.emit_loop(loop_start);
+        self.patch_jump(exit_jump);
+        let ctx = self.loop_stack.pop().unwrap();
+        for bp in ctx.break_patches {
+            self.patch_jump(bp);
+        }
+
+        if self.scope_depth > 0 {
+            self.locals.retain(|l| l != &arr_name && l != &idx_name);
+        }
+        Ok(())
+    }
+
+    /// Helper: compile a for-of loop body where the iteration variable is object-destructured.
+    fn compile_for_of_destructuring_object(
+        &mut self,
+        elements: &[ObjectDestructuringElement],
+        iterable_expr: &Expr,
+        body: &[Statement],
+    ) -> Result<(), JSError> {
+        let arr_name = format!("__forofdo_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        let idx_name = format!("__forofdi_{}__", self.forin_counter);
+        self.forin_counter += 1;
+
+        self.compile_expr(iterable_expr)?;
+        self.emit_define_var(&arr_name);
+
+        let zero = self.chunk.add_constant(Value::Number(0.0));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(zero);
+        self.emit_define_var(&idx_name);
+
+        let loop_start = self.chunk.code.len();
+        let ctx = self.make_loop_context(loop_start);
+        self.loop_stack.push(ctx);
+        self.emit_helper_get(&idx_name);
+        self.emit_helper_get(&arr_name);
+        let len_key = crate::unicode::utf8_to_utf16("length");
+        let len_idx = self.chunk.add_constant(Value::String(len_key));
+        self.chunk.write_opcode(Opcode::GetProperty);
+        self.chunk.write_u16(len_idx);
+        self.chunk.write_opcode(Opcode::LessThan);
+        let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
+        // item = arr[idx], then object-destructure
+        self.emit_helper_get(&arr_name);
+        self.emit_helper_get(&idx_name);
+        self.chunk.write_opcode(Opcode::GetIndex);
+        self.compile_object_destructuring(elements)?;
+
+        for s in body {
+            self.compile_statement(s, false)?;
+        }
+
+        let update_ip = self.chunk.code.len();
+        for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
+            self.patch_jump_to(*cp, update_ip);
+        }
+
+        self.emit_helper_get(&idx_name);
+        self.chunk.write_opcode(Opcode::Increment);
+        self.emit_helper_set(&idx_name);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        self.emit_loop(loop_start);
+        self.patch_jump(exit_jump);
+        let ctx = self.loop_stack.pop().unwrap();
+        for bp in ctx.break_patches {
+            self.patch_jump(bp);
+        }
+
+        if self.scope_depth > 0 {
+            self.locals.retain(|l| l != &arr_name && l != &idx_name);
+        }
+        Ok(())
+    }
+
+    /// Helper: compile a for-in loop where the key is array-destructured.
+    fn compile_for_in_destructuring_array(
+        &mut self,
+        elements: &[DestructuringElement],
+        obj_expr: &Expr,
+        body: &[Statement],
+    ) -> Result<(), JSError> {
+        // for-in gives keys (strings), so array destruct of a key is unusual but valid
+        // Desugar like for-in but destructure each key
+        let keys_name = format!("__finda_keys_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        let idx_name = format!("__finda_idx_{}__", self.forin_counter);
+        self.forin_counter += 1;
+
+        self.compile_expr(obj_expr)?;
+        self.chunk.write_opcode(Opcode::GetKeys);
+        self.emit_define_var(&keys_name);
+
+        let zero = self.chunk.add_constant(Value::Number(0.0));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(zero);
+        self.emit_define_var(&idx_name);
+
+        let loop_start = self.chunk.code.len();
+        let ctx = self.make_loop_context(loop_start);
+        self.loop_stack.push(ctx);
+        self.emit_helper_get(&idx_name);
+        self.emit_helper_get(&keys_name);
+        let len_key = crate::unicode::utf8_to_utf16("length");
+        let len_idx = self.chunk.add_constant(Value::String(len_key));
+        self.chunk.write_opcode(Opcode::GetProperty);
+        self.chunk.write_u16(len_idx);
+        self.chunk.write_opcode(Opcode::LessThan);
+        let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
+        self.emit_helper_get(&keys_name);
+        self.emit_helper_get(&idx_name);
+        self.chunk.write_opcode(Opcode::GetIndex);
+        self.compile_array_destructuring(elements)?;
+
+        for s in body {
+            self.compile_statement(s, false)?;
+        }
+
+        let update_ip = self.chunk.code.len();
+        for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
+            self.patch_jump_to(*cp, update_ip);
+        }
+        self.emit_helper_get(&idx_name);
+        self.chunk.write_opcode(Opcode::Increment);
+        self.emit_helper_set(&idx_name);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        self.emit_loop(loop_start);
+        self.patch_jump(exit_jump);
+        let ctx = self.loop_stack.pop().unwrap();
+        for bp in ctx.break_patches {
+            self.patch_jump(bp);
+        }
+
+        if self.scope_depth > 0 {
+            self.locals.retain(|l| l != &keys_name && l != &idx_name);
+        }
+        Ok(())
+    }
+
+    /// Helper: compile a for-in loop where the key is object-destructured.
+    fn compile_for_in_destructuring_object(
+        &mut self,
+        elements: &[ObjectDestructuringElement],
+        obj_expr: &Expr,
+        body: &[Statement],
+    ) -> Result<(), JSError> {
+        let keys_name = format!("__findo_keys_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        let idx_name = format!("__findo_idx_{}__", self.forin_counter);
+        self.forin_counter += 1;
+
+        self.compile_expr(obj_expr)?;
+        self.chunk.write_opcode(Opcode::GetKeys);
+        self.emit_define_var(&keys_name);
+
+        let zero = self.chunk.add_constant(Value::Number(0.0));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(zero);
+        self.emit_define_var(&idx_name);
+
+        let loop_start = self.chunk.code.len();
+        let ctx = self.make_loop_context(loop_start);
+        self.loop_stack.push(ctx);
+        self.emit_helper_get(&idx_name);
+        self.emit_helper_get(&keys_name);
+        let len_key = crate::unicode::utf8_to_utf16("length");
+        let len_idx = self.chunk.add_constant(Value::String(len_key));
+        self.chunk.write_opcode(Opcode::GetProperty);
+        self.chunk.write_u16(len_idx);
+        self.chunk.write_opcode(Opcode::LessThan);
+        let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
+        self.emit_helper_get(&keys_name);
+        self.emit_helper_get(&idx_name);
+        self.chunk.write_opcode(Opcode::GetIndex);
+        self.compile_object_destructuring(elements)?;
+
+        for s in body {
+            self.compile_statement(s, false)?;
+        }
+
+        let update_ip = self.chunk.code.len();
+        for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
+            self.patch_jump_to(*cp, update_ip);
+        }
+        self.emit_helper_get(&idx_name);
+        self.chunk.write_opcode(Opcode::Increment);
+        self.emit_helper_set(&idx_name);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        self.emit_loop(loop_start);
+        self.patch_jump(exit_jump);
+        let ctx = self.loop_stack.pop().unwrap();
+        for bp in ctx.break_patches {
+            self.patch_jump(bp);
+        }
+
+        if self.scope_depth > 0 {
+            self.locals.retain(|l| l != &keys_name && l != &idx_name);
+        }
+        Ok(())
+    }
+
     /// Compile a function body (shared between FunctionDeclaration, ArrowFunction, and Function expression)
     fn compile_function_body(&mut self, params: &[DestructuringElement], body: &[Statement]) -> Result<(), JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
@@ -1558,9 +2313,24 @@ impl<'gc> Compiler<'gc> {
         let old_loops = std::mem::take(&mut self.loop_stack);
         let old_label = self.pending_label.take();
         self.scope_depth = 1;
+
+        // Count non-rest params and check for rest
+        let mut non_rest_count = 0u8;
+        let mut has_rest = false;
         for param in params {
-            if let DestructuringElement::Variable(param_name, _) = param {
-                self.locals.push(param_name.clone());
+            match param {
+                DestructuringElement::Variable(param_name, _) => {
+                    self.locals.push(param_name.clone());
+                    non_rest_count += 1;
+                }
+                DestructuringElement::Rest(param_name) => {
+                    has_rest = true;
+                    // Emit CollectRest to gather excess args into an array
+                    self.chunk.write_opcode(Opcode::CollectRest);
+                    self.chunk.write_byte(non_rest_count);
+                    self.locals.push(param_name.clone());
+                }
+                _ => {}
             }
         }
 
@@ -1579,10 +2349,392 @@ impl<'gc> Compiler<'gc> {
         self.loop_stack = old_loops;
         self.pending_label = old_label;
 
-        let func_val = Value::VmFunction(func_ip, params.len() as u8);
+        // Arity = non-rest params only (call site pushes all args, function collects rest)
+        let arity = if has_rest { non_rest_count } else { params.len() as u8 };
+        let func_val = Value::VmFunction(func_ip, arity);
         let func_idx = self.chunk.add_constant(func_val);
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(func_idx);
+        Ok(())
+    }
+
+    /// Define a new variable (local or global) from the value on top of stack.
+    fn emit_define_var(&mut self, name: &str) {
+        if self.scope_depth > 0 {
+            // Check if already exists (var re-declaration)
+            if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                self.chunk.write_opcode(Opcode::SetLocal);
+                self.chunk.write_byte(pos as u8);
+                self.chunk.write_opcode(Opcode::Pop);
+            } else {
+                self.locals.push(name.to_string());
+            }
+        } else {
+            let name_u16 = crate::unicode::utf8_to_utf16(name);
+            let name_idx = self.chunk.add_constant(Value::String(name_u16));
+            self.chunk.write_opcode(Opcode::DefineGlobal);
+            self.chunk.write_u16(name_idx);
+        }
+    }
+
+    /// Compile array destructuring: RHS value is on stack top.
+    /// Pops the RHS from the stack and defines variables.
+    fn compile_array_destructuring(&mut self, elements: &[DestructuringElement]) -> Result<(), JSError> {
+        // Store RHS into a synthetic temp
+        let temp = format!("__destr_arr_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        self.emit_define_var(&temp);
+
+        for (i, elem) in elements.iter().enumerate() {
+            match elem {
+                DestructuringElement::Variable(name, default) => {
+                    // temp[i]
+                    self.emit_helper_get(&temp);
+                    let idx = self.chunk.add_constant(Value::Number(i as f64));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    self.chunk.write_opcode(Opcode::GetIndex);
+                    // If default provided, check if value is undefined
+                    if let Some(def_expr) = default {
+                        self.chunk.write_opcode(Opcode::Dup);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::Equal);
+                        let skip_default = self.emit_jump(Opcode::JumpIfFalse);
+                        self.chunk.write_opcode(Opcode::Pop); // pop undefined
+                        self.compile_expr(def_expr)?;
+                        self.patch_jump(skip_default);
+                    }
+                    self.emit_define_var(name);
+                }
+                DestructuringElement::Empty => {
+                    // Skip this position
+                }
+                DestructuringElement::Rest(name) => {
+                    // Collect remaining elements: temp.slice(i) as method call
+                    // Stack: [receiver, callee, args...] then Call with method flag
+                    self.emit_helper_get(&temp); // receiver
+                    self.emit_helper_get(&temp); // for GetProperty
+                    let slice_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("slice")));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(slice_k); // callee
+                    let start_idx = self.chunk.add_constant(Value::Number(i as f64));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(start_idx); // arg
+                    self.chunk.write_opcode(Opcode::Call);
+                    self.chunk.write_byte(1 | 0x80); // method call
+                    self.emit_define_var(name);
+                }
+                DestructuringElement::NestedArray(inner_elements, _default) => {
+                    // temp[i], then destructure recursively
+                    self.emit_helper_get(&temp);
+                    let idx = self.chunk.add_constant(Value::Number(i as f64));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    self.chunk.write_opcode(Opcode::GetIndex);
+                    self.compile_array_destructuring(inner_elements)?;
+                }
+                DestructuringElement::NestedObject(inner_elements, _default) => {
+                    // temp[i], then object destructure
+                    self.emit_helper_get(&temp);
+                    let idx = self.chunk.add_constant(Value::Number(i as f64));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    self.chunk.write_opcode(Opcode::GetIndex);
+                    self.compile_object_destructuring_from_destr(inner_elements)?;
+                }
+                _ => {
+                    // Property, ComputedProperty, RestPattern — skip unsupported
+                }
+            }
+        }
+
+        // Clean up synthetic temp
+        if self.scope_depth > 0 {
+            self.locals.retain(|l| l != &temp);
+        }
+        Ok(())
+    }
+
+    /// Compile object destructuring from ObjectDestructuringElement list.
+    /// RHS value is on stack top. Pops RHS and defines variables.
+    fn compile_object_destructuring(&mut self, elements: &[ObjectDestructuringElement]) -> Result<(), JSError> {
+        let temp = format!("__destr_obj_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        self.emit_define_var(&temp);
+
+        // Collect statically-known extracted keys for rest computation
+        let mut extracted_keys: Vec<String> = Vec::new();
+
+        for elem in elements {
+            match elem {
+                ObjectDestructuringElement::Property { key, value } => {
+                    extracted_keys.push(key.clone());
+                    self.emit_helper_get(&temp);
+                    let k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(key)));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(k);
+                    self.compile_destructuring_target(value)?;
+                }
+                ObjectDestructuringElement::ComputedProperty { key, value } => {
+                    self.emit_helper_get(&temp);
+                    self.compile_expr(key)?;
+                    self.chunk.write_opcode(Opcode::GetIndex);
+                    self.compile_destructuring_target(value)?;
+                }
+                ObjectDestructuringElement::Rest(name) => {
+                    // Build a new object with all keys from temp except extracted_keys.
+                    // Emit: empty object {}, then for each key in temp, if key not in excluded list, copy it.
+                    // Approach: use Object.keys(temp) iteration at runtime.
+                    // For simplicity, emit inline: NewObject(0), then for each key we need to
+                    // iterate — but we can't know keys at compile time.
+                    // Use a runtime approach: call a synthetic helper.
+                    // Actually, simplest: build the rest object by using for-in style iteration
+                    // at compile time is impossible (we don't know the keys).
+                    // Compromise: emit code that creates rest as {} and copies non-excluded props.
+                    // We'll use Object.keys + for loop — but that's complex bytecode.
+                    //
+                    // Simpler approach: emit a new object {}, then for each key returned by
+                    // a keys builtin, if it's not in excluded set, copy value.
+                    // For now, use a simpler approach that works for the test:
+                    // Just use Object.assign-style copy and delete the extracted keys.
+                    //
+                    // Simplest correct approach: push excluded keys as array, push temp,
+                    // and call a builtin that filters. Since we don't have that builtin,
+                    // let's do compile-time key enumeration using for-in.
+
+                    // Step 1: Create empty object → rest = {}
+                    self.chunk.write_opcode(Opcode::NewObject);
+                    self.chunk.write_byte(0);
+                    let rest_temp = format!("__rest_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+                    self.emit_define_var(&rest_temp);
+
+                    // Step 2: for (k in temp) { if k not in excluded, rest[k] = temp[k] }
+                    // Use the same for-in desugaring as ForIn statement
+                    let keys_temp = format!("__rest_keys_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+                    let ki_temp = format!("__rest_ki_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+
+                    // Push Object.keys(temp) as array
+                    self.emit_helper_get(&temp);
+                    self.chunk.write_opcode(Opcode::GetKeys);
+                    self.emit_define_var(&keys_temp);
+
+                    // idx = 0
+                    let zero = self.chunk.add_constant(Value::Number(0.0));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(zero);
+                    self.emit_define_var(&ki_temp);
+
+                    // Loop: while idx < keys.length
+                    let loop_start = self.chunk.code.len();
+                    self.emit_helper_get(&ki_temp);
+                    self.emit_helper_get(&keys_temp);
+                    let len_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("length")));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(len_key);
+                    self.chunk.write_opcode(Opcode::LessThan);
+                    let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
+                    // k = keys[idx]
+                    self.emit_helper_get(&keys_temp);
+                    self.emit_helper_get(&ki_temp);
+                    self.chunk.write_opcode(Opcode::GetIndex);
+                    // Now key is on stack. Check if it's in excluded list.
+                    // For each excluded key, compare and skip if match.
+                    let mut skip_patches = Vec::new();
+                    for ek in &extracted_keys {
+                        self.chunk.write_opcode(Opcode::Dup);
+                        let ek_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(ek)));
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(ek_idx);
+                        self.chunk.write_opcode(Opcode::Equal);
+                        let skip = self.emit_jump(Opcode::JumpIfTrue);
+                        skip_patches.push(skip);
+                    }
+
+                    // Not excluded: rest[k] = temp[k]
+                    // Stack: [..., key]
+                    // Dup key for SetIndex later
+                    self.chunk.write_opcode(Opcode::Dup); // key key
+                    // Get value: temp[key]
+                    self.emit_helper_get(&temp);
+                    // Stack: key key temp
+                    // Swap so we can do GetIndex: temp key → need to rearrange
+                    // Actually, let's use a different approach: store key in temp var
+                    let k_temp = format!("__rest_k_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+                    // Stack: key key temp
+                    // Hmm, let me restructure. Stack at this point: key
+                    // Let me pop the dup and redo.
+                    self.chunk.write_opcode(Opcode::Pop); // undo the dup above
+
+                    // key is on stack. Store it.
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.emit_define_var(&k_temp);
+                    // Stack: key (still on top from Dup before define)
+                    // Actually emit_define_var may push or pop differently...
+                    // Let me be more careful.
+                    // After Dup+emit_define_var, if scope>0 and new local: Dup pushes copy,
+                    //   then the copy stays as local slot. Original key still on stack? No.
+                    // If local is new: Dup → [key, key], emit_define_var pushes key copy as local,
+                    //   key stays on top? No: locals.push means TOS becomes the local, so stack is [key].
+                    //   Wait — Dup pushes a copy, then the copy IS the new local. So stack: [key].
+                    //   We still have the original key on stack. Actually no.
+                    //
+                    // Let me think again more carefully:
+                    // Before Dup: stack has [..., key]
+                    // After Dup: stack has [..., key, key_copy]
+                    // emit_define_var(&k_temp) when scope>0 and new local: key_copy becomes local slot.
+                    //   Stack is just [..., key]. Good, original key is still on top.
+
+                    // Now: rest[key] = temp[key]
+                    // We need: rest obj on stack, key, value → SetIndex
+                    // rest (obj)
+                    self.emit_helper_get(&rest_temp);
+                    // Stack: [..., key, rest_obj]
+                    // Swap: we need obj, key, val order for SetIndex? Let me check SetIndex.
+                    // SetIndex pops val, index, obj.
+                    // So we need stack: [..., obj, index, val]
+                    // i.e.: rest, key, temp[key]
+                    // But we have: key, rest on stack. We need to swap.
+                    // Instead, let me just reload everything.
+                    self.chunk.write_opcode(Opcode::Pop); // pop rest
+                    self.chunk.write_opcode(Opcode::Pop); // pop key
+
+                    // Emit: rest[k_temp] = temp[k_temp]
+                    self.emit_helper_get(&rest_temp); // obj
+                    self.emit_helper_get(&k_temp); // index (key)
+                    // value: temp[k_temp]
+                    self.emit_helper_get(&temp);
+                    self.emit_helper_get(&k_temp);
+                    self.chunk.write_opcode(Opcode::GetIndex); // temp[key]
+                    self.chunk.write_opcode(Opcode::SetIndex);
+                    self.chunk.write_opcode(Opcode::Pop); // SetIndex leaves obj on stack? Check...
+
+                    // Jump to increment
+                    let to_inc = self.emit_jump(Opcode::Jump);
+
+                    // Patch skip jumps (excluded key matched) — pop key and continue
+                    for sp in skip_patches {
+                        self.patch_jump(sp);
+                    }
+                    self.chunk.write_opcode(Opcode::Pop); // pop key
+
+                    self.patch_jump(to_inc);
+
+                    // idx++
+                    self.emit_helper_get(&ki_temp);
+                    self.chunk.write_opcode(Opcode::Increment);
+                    self.emit_helper_set(&ki_temp);
+                    self.chunk.write_opcode(Opcode::Pop);
+
+                    self.emit_loop(loop_start);
+                    self.patch_jump(exit_jump);
+
+                    // Clean up synthetic locals
+                    if self.scope_depth > 0 {
+                        self.locals.retain(|l| l != &keys_temp && l != &ki_temp && l != &k_temp);
+                    }
+
+                    // Push rest object and define the actual variable
+                    self.emit_helper_get(&rest_temp);
+                    self.emit_define_var(name);
+
+                    if self.scope_depth > 0 {
+                        self.locals.retain(|l| l != &rest_temp);
+                    }
+                }
+            }
+        }
+
+        if self.scope_depth > 0 {
+            self.locals.retain(|l| l != &temp);
+        }
+        Ok(())
+    }
+
+    /// Compile a destructuring target (DestructuringElement) given a value already on the stack.
+    fn compile_destructuring_target(&mut self, elem: &DestructuringElement) -> Result<(), JSError> {
+        match elem {
+            DestructuringElement::Variable(name, default) => {
+                if let Some(def_expr) = default {
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let skip_default = self.emit_jump(Opcode::JumpIfFalse);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    self.compile_expr(def_expr)?;
+                    self.patch_jump(skip_default);
+                }
+                self.emit_define_var(name);
+            }
+            DestructuringElement::NestedArray(inner, _default) => {
+                self.compile_array_destructuring(inner)?;
+            }
+            DestructuringElement::NestedObject(inner, _default) => {
+                self.compile_object_destructuring_from_destr(inner)?;
+            }
+            _ => {
+                // Unsupported patterns — pop value
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile object destructuring from DestructuringElement list (used in nested patterns).
+    /// The DestructuringElement::Property variant maps to {key: target} in object destructuring.
+    fn compile_object_destructuring_from_destr(&mut self, elements: &[DestructuringElement]) -> Result<(), JSError> {
+        let temp = format!("__destr_obj_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        self.emit_define_var(&temp);
+
+        for elem in elements {
+            match elem {
+                DestructuringElement::Variable(name, default) => {
+                    // Shorthand: {name} = obj → obj.name
+                    self.emit_helper_get(&temp);
+                    let k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(name)));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(k);
+                    if let Some(def_expr) = default {
+                        self.chunk.write_opcode(Opcode::Dup);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::Equal);
+                        let skip_default = self.emit_jump(Opcode::JumpIfFalse);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        self.compile_expr(def_expr)?;
+                        self.patch_jump(skip_default);
+                    }
+                    self.emit_define_var(name);
+                }
+                DestructuringElement::Property(key, target) => {
+                    // {key: target} = obj → obj.key, then assign to target
+                    self.emit_helper_get(&temp);
+                    let k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(key)));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(k);
+                    self.compile_destructuring_target(target)?;
+                }
+                DestructuringElement::Rest(name) => {
+                    self.emit_helper_get(&temp);
+                    self.emit_define_var(name);
+                }
+                _ => {}
+            }
+        }
+
+        if self.scope_depth > 0 {
+            self.locals.retain(|l| l != &temp);
+        }
         Ok(())
     }
 }

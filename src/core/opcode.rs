@@ -53,6 +53,7 @@ pub enum Opcode {
     DeleteIndex = 47,    // pop index and object, delete element, push bool
     Swap = 48,           // swap top two stack elements
     ToNumber = 49,       // convert TOS to number
+    CollectRest = 50,    // collect excess args into rest array; operand = non_rest_count (u8)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -110,6 +111,7 @@ impl TryFrom<u8> for Opcode {
             47 => Opcode::DeleteIndex,
             48 => Opcode::Swap,
             49 => Opcode::ToNumber,
+            50 => Opcode::CollectRest,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -121,6 +123,8 @@ impl TryFrom<u8> for Opcode {
 pub struct Chunk<'gc> {
     pub code: Vec<u8>,
     pub constants: Vec<Value<'gc>>,
+    /// Map from function IP to function name (for .name property)
+    pub fn_names: std::collections::HashMap<usize, String>,
 }
 
 impl<'gc> Chunk<'gc> {
@@ -128,6 +132,7 @@ impl<'gc> Chunk<'gc> {
         Self {
             code: Vec::new(),
             constants: Vec::new(),
+            fn_names: std::collections::HashMap::new(),
         }
     }
 

@@ -187,12 +187,13 @@ const BUILTIN_MATH_IMUL: u8 = 182;
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
     pub return_ip: usize,
-    pub bp: usize,                         // Base pointer
-    pub is_method: bool,                   // Pop this_stack on return
-    pub arg_count: usize,                  // Actual number of arguments passed
-    pub func_ip: usize,                    // instruction pointer of the called function
-    pub arguments_obj: Option<Value<'gc>>, // cached arguments object
-    pub upvalues: Vec<Value<'gc>>,         // captured upvalues (empty for non-closures)
+    pub bp: usize,                           // Base pointer
+    pub is_method: bool,                     // Pop this_stack on return
+    pub arg_count: usize,                    // Actual number of arguments passed
+    pub func_ip: usize,                      // instruction pointer of the called function
+    pub arguments_obj: Option<Value<'gc>>,   // cached arguments object
+    pub upvalues: Vec<Value<'gc>>,           // captured upvalues (empty for non-closures)
+    pub saved_args: Option<Vec<Value<'gc>>>, // saved full arg list when arg_count > arity
 }
 
 #[derive(Debug, Clone)]
@@ -687,6 +688,7 @@ impl<'gc> VM<'gc> {
         // Number object with constants and static methods
         let mut number_map = IndexMap::new();
         number_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_NUMBER as f64));
+        number_map.insert("__frozen__".to_string(), Value::Boolean(true));
         number_map.insert("MAX_VALUE".to_string(), Value::Number(f64::MAX));
         number_map.insert("MIN_VALUE".to_string(), Value::Number(5e-324));
         number_map.insert("NaN".to_string(), Value::Number(f64::NAN));
@@ -1192,11 +1194,15 @@ impl<'gc> VM<'gc> {
                     _ => {}
                 }
                 if let Some(map_fn_val) = map_fn {
+                    let __cb_uv = match &map_fn_val {
+                        Value::VmClosure(_, _, u) => (**u).to_vec(),
+                        _ => Vec::new(),
+                    };
                     let mut mapped = Vec::with_capacity(result.len());
                     for (i, elem) in result.into_iter().enumerate() {
                         let val = match &map_fn_val {
                             Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => {
-                                self.call_vm_function(*ip, &[elem, Value::Number(i as f64)], &[])
+                                self.call_vm_function(*ip, &[elem, Value::Number(i as f64)], &__cb_uv)
                             }
                             Value::VmNativeFunction(id) => self.call_builtin(*id, vec![elem, Value::Number(i as f64)]),
                             _ => elem,
@@ -1259,7 +1265,12 @@ impl<'gc> VM<'gc> {
                     Ok(v) => v,
                     Err(e) => {
                         let msg = format!("{}", e);
-                        let is_syntax = msg.contains("SyntaxError") || msg.contains("Illegal return");
+                        let msg_lower = msg.to_lowercase();
+                        let is_syntax = msg_lower.contains("syntaxerror")
+                            || msg_lower.contains("syntax error")
+                            || msg_lower.contains("illegal return")
+                            || msg_lower.contains("continue outside")
+                            || msg_lower.contains("break outside");
                         let type_name = if is_syntax { "SyntaxError" } else { "Error" };
                         let mut err_map = IndexMap::new();
                         err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(type_name)));
@@ -1720,9 +1731,14 @@ impl<'gc> VM<'gc> {
                 if let Value::VmArray(arr) = &iterable
                     && let Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) = &callback
                 {
+                    let __cb_uv = if let Value::VmClosure(_, _, u) = &callback {
+                        (**u).to_vec()
+                    } else {
+                        Vec::new()
+                    };
                     let items: Vec<Value<'gc>> = arr.borrow().iter().cloned().collect();
                     for item in &items {
-                        let key_val = self.call_vm_function(*ip, std::slice::from_ref(item), &[]);
+                        let key_val = self.call_vm_function(*ip, std::slice::from_ref(item), &__cb_uv);
                         let key_str = value_to_string(&key_val);
                         groups.entry(key_str).or_default().push(item.clone());
                     }
@@ -1932,10 +1948,15 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_MAP => {
                     if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
-                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             result.push(r);
                         }
                         return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
@@ -1944,10 +1965,15 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_FILTER => {
                     if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
-                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if r.to_truthy() {
                                 result.push(elem.clone());
                             }
@@ -1962,15 +1988,25 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_FOREACH => {
                     if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                         }
                     }
                     return Value::Undefined;
                 }
                 BUILTIN_ARRAY_REDUCE => {
                     if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
@@ -1981,7 +2017,7 @@ impl<'gc> VM<'gc> {
                         };
                         let start_i = if args.len() > 1 { 0 } else { 1 };
                         for (i, element) in elements.iter().enumerate().skip(start_i) {
-                            acc = self.call_vm_function(*ip, &[acc, element.clone(), Value::Number(i as f64)], &[]);
+                            acc = self.call_vm_function(*ip, &[acc, element.clone(), Value::Number(i as f64)], &__cb_uv);
                         }
                         return acc;
                     }
@@ -2040,6 +2076,11 @@ impl<'gc> VM<'gc> {
                     let cmp_fn = args.first().cloned();
                     let mut elems = arr.borrow().elements.clone();
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = &cmp_fn {
+                        let __cb_uv = if let Value::VmClosure(_, _, u) = cmp_fn.as_ref().unwrap() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let ip = *ip;
                         elems.sort_by(|a, b| {
                             let result = self.call_vm_function(ip, &[a.clone(), b.clone()], &[]);
@@ -2061,9 +2102,14 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_FIND => {
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if result.to_truthy() {
                                 return elem.clone();
                             }
@@ -2073,9 +2119,14 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_FINDLAST => {
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate().rev() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if result.to_truthy() {
                                 return elem.clone();
                             }
@@ -2085,9 +2136,14 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_FINDINDEX => {
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if result.to_truthy() {
                                 return Value::Number(i as f64);
                             }
@@ -2097,9 +2153,14 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_FINDLASTINDEX => {
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate().rev() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if result.to_truthy() {
                                 return Value::Number(i as f64);
                             }
@@ -2131,10 +2192,15 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_FLATMAP => {
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
-                            let mapped = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let mapped = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if let Value::VmArray(inner) = mapped {
                                 result.extend(inner.borrow().elements.clone());
                             } else {
@@ -2163,9 +2229,14 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_EVERY => {
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if !result.to_truthy() {
                                 return Value::Boolean(false);
                             }
@@ -2176,9 +2247,14 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_SOME => {
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if result.to_truthy() {
                                 return Value::Boolean(true);
                             }
@@ -2242,6 +2318,11 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_REDUCERIGHT => {
                     if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let elements = arr.borrow().elements.clone();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
@@ -2253,7 +2334,7 @@ impl<'gc> VM<'gc> {
                         let skip_last = if args.len() <= 1 { 1 } else { 0 };
                         let end = elements.len().saturating_sub(skip_last);
                         for i in (0..end).rev() {
-                            acc = self.call_vm_function(*ip, &[acc, elements[i].clone(), Value::Number(i as f64)], &[]);
+                            acc = self.call_vm_function(*ip, &[acc, elements[i].clone(), Value::Number(i as f64)], &__cb_uv);
                         }
                         return acc;
                     }
@@ -2602,13 +2683,18 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_MAP_FOREACH => {
                     if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let entries: Vec<(Value<'gc>, Value<'gc>)> = m.borrow().entries.clone();
                         let map_ref = receiver.clone();
                         for (k, v) in &entries {
                             if *arity >= 3 {
-                                self.call_vm_function(*ip, &[v.clone(), k.clone(), map_ref.clone()], &[]);
+                                self.call_vm_function(*ip, &[v.clone(), k.clone(), map_ref.clone()], &__cb_uv);
                             } else {
-                                self.call_vm_function(*ip, &[v.clone(), k.clone()], &[]);
+                                self.call_vm_function(*ip, &[v.clone(), k.clone()], &__cb_uv);
                             }
                         }
                     }
@@ -2661,13 +2747,18 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_SET_FOREACH => {
                     if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
+                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
+                            (**u).to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         let vals: Vec<Value<'gc>> = s.borrow().values.clone();
                         let set_ref = receiver.clone();
                         for v in &vals {
                             if *arity >= 3 {
-                                self.call_vm_function(*ip, &[v.clone(), v.clone(), set_ref.clone()], &[]);
+                                self.call_vm_function(*ip, &[v.clone(), v.clone(), set_ref.clone()], &__cb_uv);
                             } else {
-                                self.call_vm_function(*ip, &[v.clone(), v.clone()], &[]);
+                                self.call_vm_function(*ip, &[v.clone(), v.clone()], &__cb_uv);
                             }
                         }
                     }
@@ -2818,7 +2909,12 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
                     self.this_stack.push(this_arg);
-                    let result = self.call_vm_function(*ip, &call_args, &[]);
+                    let __cb_uv = if let Value::VmClosure(_, _, u) = &receiver {
+                        (**u).to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    let result = self.call_vm_function(*ip, &call_args, &__cb_uv);
                     self.this_stack.pop();
                     return result;
                 }
@@ -2839,7 +2935,12 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
                     self.this_stack.push(this_arg);
-                    let result = self.call_vm_function(*ip, &call_args, &[]);
+                    let __cb_uv = if let Value::VmClosure(_, _, u) = &receiver {
+                        (**u).to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    let result = self.call_vm_function(*ip, &call_args, &__cb_uv);
                     self.this_stack.pop();
                     return result;
                 }
@@ -2936,6 +3037,7 @@ impl<'gc> VM<'gc> {
             func_ip: ip,
             arguments_obj: None,
             upvalues: upvalues.to_vec(),
+            saved_args: None,
         });
         self.ip = ip;
         let result = self.run_inner(target_depth + 1);
@@ -2946,6 +3048,18 @@ impl<'gc> VM<'gc> {
         match result {
             Ok(v) => v,
             Err(_) => Value::Undefined,
+        }
+    }
+
+    /// Call a Value callback (VmFunction or VmClosure), extracting ip and upvalues automatically.
+    fn _call_callback(&mut self, callback: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        match callback {
+            Value::VmFunction(ip, _) => self.call_vm_function(*ip, args, &[]),
+            Value::VmClosure(ip, _, upv) => {
+                let uv = (**upv).clone();
+                self.call_vm_function(*ip, args, &uv)
+            }
+            _ => Value::Undefined,
         }
     }
 
@@ -3175,6 +3289,17 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(Value::Undefined);
                                 }
                             }
+                            // Remove excess args beyond arity to prevent local slot corruption
+                            let saved_args = if arg_count > arity as usize {
+                                let first_arg_idx = callee_idx + 1;
+                                let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
+                                let drain_start = first_arg_idx + arity as usize;
+                                let drain_end = first_arg_idx + arg_count;
+                                self.stack.drain(drain_start..drain_end);
+                                Some(all_args)
+                            } else {
+                                None
+                            };
                             // For method calls, pop receiver from under callee and bind as this
                             if is_method {
                                 // Remove receiver (one slot below callee)
@@ -3189,6 +3314,7 @@ impl<'gc> VM<'gc> {
                                     func_ip: target_ip,
                                     arguments_obj: None,
                                     upvalues: Vec::new(),
+                                    saved_args,
                                 };
                                 self.frames.push(frame);
                             } else {
@@ -3200,6 +3326,7 @@ impl<'gc> VM<'gc> {
                                     func_ip: target_ip,
                                     arguments_obj: None,
                                     upvalues: Vec::new(),
+                                    saved_args,
                                 };
                                 self.frames.push(frame);
                             }
@@ -3211,6 +3338,17 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(Value::Undefined);
                                 }
                             }
+                            // Remove excess args beyond arity to prevent local slot corruption
+                            let saved_args = if arg_count > arity as usize {
+                                let first_arg_idx = callee_idx + 1;
+                                let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
+                                let drain_start = first_arg_idx + arity as usize;
+                                let drain_end = first_arg_idx + arg_count;
+                                self.stack.drain(drain_start..drain_end);
+                                Some(all_args)
+                            } else {
+                                None
+                            };
                             let closure_upvalues = (**upvals).clone();
                             if is_method {
                                 let receiver = self.stack.remove(callee_idx - 1);
@@ -3224,6 +3362,7 @@ impl<'gc> VM<'gc> {
                                     func_ip: target_ip,
                                     arguments_obj: None,
                                     upvalues: closure_upvalues,
+                                    saved_args,
                                 };
                                 self.frames.push(frame);
                             } else {
@@ -3235,6 +3374,7 @@ impl<'gc> VM<'gc> {
                                     func_ip: target_ip,
                                     arguments_obj: None,
                                     upvalues: closure_upvalues,
+                                    saved_args,
                                 };
                                 self.frames.push(frame);
                             }
@@ -3422,13 +3562,18 @@ impl<'gc> VM<'gc> {
                         } else {
                             let arg_count = frame.arg_count;
                             let bp = frame.bp;
+                            let saved = frame.saved_args.clone();
                             let mut map = IndexMap::new();
                             for i in 0..arg_count {
-                                let idx = bp + i;
-                                let val = if idx < self.stack.len() {
-                                    self.stack[idx].clone()
+                                let val = if let Some(ref sa) = saved {
+                                    sa.get(i).cloned().unwrap_or(Value::Undefined)
                                 } else {
-                                    Value::Undefined
+                                    let idx = bp + i;
+                                    if idx < self.stack.len() {
+                                        self.stack[idx].clone()
+                                    } else {
+                                        Value::Undefined
+                                    }
                                 };
                                 map.insert(i.to_string(), val);
                             }
@@ -3770,6 +3915,16 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(Value::Undefined);
                                 }
                             }
+                            let saved_args = if arg_count > arity as usize {
+                                let first_arg_idx = callee_idx + 1;
+                                let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
+                                let drain_start = first_arg_idx + arity as usize;
+                                let drain_end = first_arg_idx + arg_count;
+                                self.stack.drain(drain_start..drain_end);
+                                Some(all_args)
+                            } else {
+                                None
+                            };
                             if is_method {
                                 let receiver = self.stack.remove(callee_idx - 1);
                                 self.this_stack.push(receiver);
@@ -3782,6 +3937,7 @@ impl<'gc> VM<'gc> {
                                     func_ip: target_ip,
                                     arguments_obj: None,
                                     upvalues: Vec::new(),
+                                    saved_args,
                                 });
                             } else {
                                 self.frames.push(CallFrame {
@@ -3792,6 +3948,7 @@ impl<'gc> VM<'gc> {
                                     func_ip: target_ip,
                                     arguments_obj: None,
                                     upvalues: Vec::new(),
+                                    saved_args,
                                 });
                             }
                             self.ip = target_ip;
@@ -3802,6 +3959,16 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(Value::Undefined);
                                 }
                             }
+                            let saved_args = if arg_count > arity as usize {
+                                let first_arg_idx = callee_idx + 1;
+                                let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
+                                let drain_start = first_arg_idx + arity as usize;
+                                let drain_end = first_arg_idx + arg_count;
+                                self.stack.drain(drain_start..drain_end);
+                                Some(all_args)
+                            } else {
+                                None
+                            };
                             let closure_upvalues = (**upvals).clone();
                             if is_method {
                                 let receiver = self.stack.remove(callee_idx - 1);
@@ -3815,6 +3982,7 @@ impl<'gc> VM<'gc> {
                                     func_ip: target_ip,
                                     arguments_obj: None,
                                     upvalues: closure_upvalues,
+                                    saved_args,
                                 });
                             } else {
                                 self.frames.push(CallFrame {
@@ -3825,6 +3993,7 @@ impl<'gc> VM<'gc> {
                                     func_ip: target_ip,
                                     arguments_obj: None,
                                     upvalues: closure_upvalues,
+                                    saved_args,
                                 });
                             }
                             self.ip = target_ip;
@@ -3917,6 +4086,7 @@ impl<'gc> VM<'gc> {
                                 func_ip: target_ip,
                                 arguments_obj: None,
                                 upvalues: closure_uv,
+                                saved_args: None,
                             };
                             self.frames.push(frame);
                             self.ip = target_ip;
@@ -4736,22 +4906,19 @@ impl<'gc> VM<'gc> {
                     let frame = self.frames.last().expect("CollectRest: no call frame");
                     let actual_arg_count = frame.arg_count;
                     let bp = frame.bp;
-                    log::warn!(
-                        "CollectRest: non_rest={}, actual_args={}, bp={}, stack_len={}",
-                        non_rest_count,
-                        actual_arg_count,
-                        bp,
-                        self.stack.len()
-                    );
+                    let saved = frame.saved_args.clone();
                     if actual_arg_count > non_rest_count {
-                        // Collect excess args from stack positions bp+non_rest_count..bp+actual_arg_count
-                        let start = bp + non_rest_count;
-                        let end = bp + actual_arg_count;
-                        log::warn!("CollectRest: collecting stack[{}..{}]", start, end);
-                        let rest_elems: Vec<Value<'gc>> = self.stack[start..end].to_vec();
-                        // Remove the excess args from the stack
-                        self.stack.drain(start..end);
-                        // Push the rest array
+                        let rest_elems: Vec<Value<'gc>> = if let Some(ref sa) = saved {
+                            // Excess args were removed from stack; get them from saved_args
+                            sa[non_rest_count..actual_arg_count].to_vec()
+                        } else {
+                            // No excess args were removed; they're still on the stack
+                            let start = bp + non_rest_count;
+                            let end = bp + actual_arg_count;
+                            let elems = self.stack[start..end].to_vec();
+                            self.stack.drain(start..end);
+                            elems
+                        };
                         self.stack.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(rest_elems)))));
                     } else {
                         // No excess args — push empty array
@@ -4956,6 +5123,7 @@ impl<'gc> VM<'gc> {
                                 func_ip: target_ip,
                                 arguments_obj: None,
                                 upvalues: closure_uv,
+                                saved_args: None,
                             };
                             self.frames.push(frame);
                             self.ip = target_ip;

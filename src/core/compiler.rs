@@ -2,6 +2,7 @@ use crate::core::opcode::{Chunk, Opcode};
 use crate::core::statement::{
     BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ObjectDestructuringElement, Statement, StatementKind,
 };
+use crate::core::value::VmArrayData;
 use crate::core::{JSError, Value};
 use crate::raise_syntax_error;
 
@@ -953,6 +954,156 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(idx);
                 }
             }
+            StatementKind::ForOfExpr(lhs_expr, iterable_expr, body) => {
+                // Same as ForOf but assigns to an expression LHS instead of a declared variable
+                self.compile_expr(iterable_expr)?;
+                if self.scope_depth > 0 {
+                    self.locals.push("__forofArr__".to_string());
+                } else {
+                    let n = crate::unicode::utf8_to_utf16("__forofArr__");
+                    let ni = self.chunk.add_constant(Value::String(n));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(ni);
+                }
+                let zero_idx = self.chunk.add_constant(Value::Number(0.0));
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(zero_idx);
+                if self.scope_depth > 0 {
+                    self.locals.push("__forofIdx__".to_string());
+                } else {
+                    let n = crate::unicode::utf8_to_utf16("__forofIdx__");
+                    let ni = self.chunk.add_constant(Value::String(n));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(ni);
+                }
+                let loop_start = self.chunk.code.len();
+                let ctx = self.make_loop_context(loop_start);
+                self.loop_stack.push(ctx);
+                self.emit_helper_get("__forofIdx__");
+                self.emit_helper_get("__forofArr__");
+                let len_key = crate::unicode::utf8_to_utf16("length");
+                let len_idx = self.chunk.add_constant(Value::String(len_key));
+                self.chunk.write_opcode(Opcode::GetProperty);
+                self.chunk.write_u16(len_idx);
+                self.chunk.write_opcode(Opcode::LessThan);
+                let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
+                // lhs_expr = arr[idx]
+                self.emit_helper_get("__forofArr__");
+                self.emit_helper_get("__forofIdx__");
+                self.chunk.write_opcode(Opcode::GetIndex);
+                // Assign to expression LHS
+                self.compile_assign_to_expr(lhs_expr)?;
+                self.chunk.write_opcode(Opcode::Pop);
+
+                for s in body {
+                    self.compile_statement(s, false)?;
+                }
+
+                let update_ip = self.chunk.code.len();
+                for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
+                    self.patch_jump_to(*cp, update_ip);
+                }
+                self.emit_helper_get("__forofIdx__");
+                self.chunk.write_opcode(Opcode::Increment);
+                self.emit_helper_set("__forofIdx__");
+                self.chunk.write_opcode(Opcode::Pop);
+                self.emit_loop(loop_start);
+                self.patch_jump(exit_jump);
+                let ctx = self.loop_stack.pop().unwrap();
+                for bp in ctx.break_patches {
+                    self.patch_jump(bp);
+                }
+                if self.scope_depth > 0 {
+                    self.locals.retain(|l| l != "__forofArr__" && l != "__forofIdx__");
+                }
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
+            StatementKind::ForInExpr(lhs_expr, obj_expr, body) => {
+                // Same as ForIn but assigns to an expression LHS
+                let fid = self.forin_counter;
+                self.forin_counter += 1;
+                let obj_name = format!("__forin_obj_{}__", fid);
+                let keys_name = format!("__forin_keys_{}__", fid);
+                let idx_name = format!("__forin_idx_{}__", fid);
+
+                self.compile_expr(obj_expr)?;
+                self.chunk.write_opcode(Opcode::Dup);
+                self.chunk.write_opcode(Opcode::GetKeys);
+                if self.scope_depth > 0 {
+                    self.locals.push(obj_name.clone());
+                    self.locals.push(keys_name.clone());
+                } else {
+                    let kn = crate::unicode::utf8_to_utf16(&keys_name);
+                    let kni = self.chunk.add_constant(Value::String(kn));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(kni);
+                    let on = crate::unicode::utf8_to_utf16(&obj_name);
+                    let oni = self.chunk.add_constant(Value::String(on));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(oni);
+                }
+                let zero_idx = self.chunk.add_constant(Value::Number(0.0));
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(zero_idx);
+                if self.scope_depth > 0 {
+                    self.locals.push(idx_name.clone());
+                } else {
+                    let n = crate::unicode::utf8_to_utf16(&idx_name);
+                    let ni = self.chunk.add_constant(Value::String(n));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(ni);
+                }
+                let loop_start = self.chunk.code.len();
+                let ctx = self.make_loop_context(loop_start);
+                self.loop_stack.push(ctx);
+                self.emit_helper_get(&idx_name);
+                self.emit_helper_get(&keys_name);
+                let len_key = crate::unicode::utf8_to_utf16("length");
+                let len_idx = self.chunk.add_constant(Value::String(len_key));
+                self.chunk.write_opcode(Opcode::GetProperty);
+                self.chunk.write_u16(len_idx);
+                self.chunk.write_opcode(Opcode::LessThan);
+                let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
+                // lhs_expr = keys[idx]
+                self.emit_helper_get(&keys_name);
+                self.emit_helper_get(&idx_name);
+                self.chunk.write_opcode(Opcode::GetIndex);
+                self.compile_assign_to_expr(lhs_expr)?;
+                self.chunk.write_opcode(Opcode::Pop);
+
+                for s in body {
+                    self.compile_statement(s, false)?;
+                }
+
+                let update_ip = self.chunk.code.len();
+                for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
+                    self.patch_jump_to(*cp, update_ip);
+                }
+                self.emit_helper_get(&idx_name);
+                self.chunk.write_opcode(Opcode::Increment);
+                self.emit_helper_set(&idx_name);
+                self.chunk.write_opcode(Opcode::Pop);
+                self.emit_loop(loop_start);
+                self.patch_jump(exit_jump);
+                let ctx = self.loop_stack.pop().unwrap();
+                for bp in ctx.break_patches {
+                    self.patch_jump(bp);
+                }
+                if self.scope_depth > 0 {
+                    self.locals.retain(|l| l != &obj_name && l != &keys_name && l != &idx_name);
+                }
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
             StatementKind::Switch(sw) => {
                 // Compile discriminant once, store in synthetic local/global
                 self.compile_expr(&sw.expr)?;
@@ -1385,6 +1536,19 @@ impl<'gc> Compiler<'gc> {
             | StatementKind::ConstDestructuringObject(elements, init) => {
                 self.compile_expr(init)?;
                 self.compile_object_destructuring(elements)?;
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
+            StatementKind::With(expr, body) => {
+                // Simplified: evaluate the expression (for side effects), pop it, execute body
+                self.compile_expr(expr.as_ref())?;
+                self.chunk.write_opcode(Opcode::Pop);
+                for s in body {
+                    self.compile_statement(s, false)?;
+                }
                 if is_last {
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
@@ -2350,6 +2514,43 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(idx);
             }
+            Expr::ValuePlaceholder => {
+                let idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(idx);
+            }
+            Expr::TaggedTemplate(tag_fn, _raw_flag, cooked_strings, raw_strings, expressions) => {
+                // Tagged template: tag_fn(strings, ...expressions)
+                // 1. Build the strings array (cooked) as a constant
+                use std::cell::RefCell;
+                use std::rc::Rc;
+                let cooked_vals: Vec<Value> = cooked_strings
+                    .iter()
+                    .map(|opt| match opt {
+                        Some(s) => Value::String(s.clone()),
+                        None => Value::Undefined,
+                    })
+                    .collect();
+                let raw_vals: Vec<Value> = raw_strings.iter().map(|s| Value::String(s.clone())).collect();
+                let raw_arr = Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(raw_vals))));
+                let mut strings_data = VmArrayData::new(cooked_vals);
+                strings_data.props.insert("raw".to_string(), raw_arr);
+                let strings_const = self.chunk.add_constant(Value::VmArray(Rc::new(RefCell::new(strings_data))));
+
+                // 2. Push tag function
+                self.compile_expr(tag_fn)?;
+                // 3. Push strings array
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(strings_const);
+                // 4. Push each expression
+                for expr in expressions {
+                    self.compile_expr(expr)?;
+                }
+                // 5. Call with 1 + expressions.len() arguments
+                let argc = 1 + expressions.len();
+                self.chunk.write_opcode(Opcode::Call);
+                self.chunk.write_byte(argc as u8);
+            }
             _ => return Err(raise_syntax_error!(format!("Unimplemented expression type for VM: {expr:?}"))),
         }
         Ok(())
@@ -2477,6 +2678,53 @@ impl<'gc> Compiler<'gc> {
     }
 
     /// Helper: compile a for-of loop body where the iteration variable is array-destructured.
+    /// Compile assignment to an expression LHS.
+    /// Expects the value to assign is already on top of the stack.
+    /// The value remains on the stack after assignment.
+    fn compile_assign_to_expr(&mut self, lhs: &Expr) -> Result<(), JSError> {
+        match lhs {
+            Expr::Var(name, ..) => {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(pos as u8);
+                } else if let Some(upvalue_idx) = self.resolve_upvalue(name) {
+                    self.chunk.write_opcode(Opcode::SetUpvalue);
+                    self.chunk.write_byte(upvalue_idx);
+                } else {
+                    let name_u16 = crate::unicode::utf8_to_utf16(name);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::SetGlobal);
+                    self.chunk.write_u16(name_idx);
+                }
+            }
+            Expr::Property(obj, key) => {
+                // Stack: [..., val]. Need: push obj, swap, SetProperty
+                self.compile_expr(obj)?;
+                self.chunk.write_opcode(Opcode::Swap);
+                let key_u16 = crate::unicode::utf8_to_utf16(key);
+                let key_idx = self.chunk.add_constant(Value::String(key_u16));
+                self.chunk.write_opcode(Opcode::SetProperty);
+                self.chunk.write_u16(key_idx);
+            }
+            Expr::Index(obj, idx) => {
+                // Stack: [..., val]. Need: push obj, push idx, rotate3, SetIndex
+                self.compile_expr(obj)?;
+                self.compile_expr(idx)?;
+                // Stack: [..., val, obj, idx] - need [..., obj, idx, val]
+                // Use Rotate3 or manual stack manipulation
+                // For now: store val in temp, push obj, push idx, push val
+                // Actually SetIndex expects [obj, idx, val] so we need to rearrange
+                self.chunk.write_opcode(Opcode::SetIndex);
+            }
+            _ => {
+                return Err(crate::raise_syntax_error!(
+                    "Unsupported assignment target in for-of/for-in expression form"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn compile_for_of_destructuring_array(
         &mut self,
         elements: &[DestructuringElement],

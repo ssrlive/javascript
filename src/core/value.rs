@@ -1200,7 +1200,8 @@ pub enum Value<'gc> {
     Null,
     Object(JSObjectDataPtr<'gc>),
     Function(String),
-    VmFunction(usize, u8), // (ip, arg_count)
+    VmFunction(usize, u8),                     // (ip, arg_count)
+    VmClosure(usize, u8, Rc<Vec<Value<'gc>>>), // (ip, arg_count, captured upvalues)
     VmArray(Rc<RefCell<VmArrayData<'gc>>>),
     VmObject(Rc<RefCell<IndexMap<String, Value<'gc>>>>),
     VmNativeFunction(u8), // builtin ID
@@ -1733,6 +1734,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         }
         Value::Uninitialized => "[uninitialized]".to_string(),
         Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),
+        Value::VmClosure(ip, arity, _) => format!("[VmClosure@{} arity={}]", ip, arity),
         Value::VmArray(arr) => {
             // Represent arrays similar to Node.js: [ elem1, elem2, ... ]
             let elems: Vec<String> = arr

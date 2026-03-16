@@ -14,6 +14,17 @@ pub struct Compiler<'gc> {
     pending_label: Option<String>,        // label to attach to the next loop
     forin_counter: u32,                   // unique ID for for-in synthetic variables
     current_class_parent: Option<String>, // parent class name for super resolution
+    // Closure capture support
+    parent_locals: Vec<String>,        // direct parent function's locals
+    parent_upvalues: Vec<UpvalueInfo>, // direct parent function's upvalues
+    upvalues: Vec<UpvalueInfo>,        // current function's captured upvalues
+}
+
+#[derive(Debug, Clone)]
+struct UpvalueInfo {
+    name: String,
+    index: u8,      // index in parent's locals or upvalues
+    is_local: bool, // true = from parent's locals, false = from parent's upvalues
 }
 
 #[derive(Debug, Clone, Default)]
@@ -36,6 +47,9 @@ impl<'gc> Compiler<'gc> {
             pending_label: None,
             forin_counter: 0,
             current_class_parent: None,
+            parent_locals: Vec::new(),
+            parent_upvalues: Vec::new(),
+            upvalues: Vec::new(),
         }
     }
 
@@ -732,6 +746,13 @@ impl<'gc> Compiler<'gc> {
                 let old_depth = self.scope_depth;
                 let old_loops = std::mem::take(&mut self.loop_stack);
                 let old_strict = self.current_strict;
+                // Save and set up parent scope info for closure capture
+                let old_parent_locals = std::mem::take(&mut self.parent_locals);
+                let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
+                let old_upvalues = std::mem::take(&mut self.upvalues);
+                self.parent_locals = old_locals.clone();
+                self.parent_upvalues = old_upvalues.clone();
+
                 self.current_strict = fn_is_strict;
                 self.scope_depth = 1;
                 let mut non_rest_count = 0u8;
@@ -765,17 +786,35 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Return);
 
                 self.patch_jump(jump_over);
+
+                // Collect upvalues before restoring
+                let fn_upvalues = std::mem::take(&mut self.upvalues);
+
                 self.locals = old_locals;
                 self.scope_depth = old_depth;
                 self.loop_stack = old_loops;
                 self.current_strict = old_strict;
+                self.parent_locals = old_parent_locals;
+                self.parent_upvalues = old_parent_upvalues;
+                self.upvalues = old_upvalues;
 
-                // Push the VmFunction value and define it as a global
+                // Push the function value (closure if captures needed)
                 let arity = if fn_has_rest { non_rest_count } else { params.len() as u8 };
                 let func_val = Value::VmFunction(func_ip, arity);
                 let func_idx = self.chunk.add_constant(func_val);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(func_idx);
+
+                if fn_upvalues.is_empty() {
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(func_idx);
+                } else {
+                    self.chunk.write_opcode(Opcode::MakeClosure);
+                    self.chunk.write_u16(func_idx);
+                    self.chunk.write_byte(fn_upvalues.len() as u8);
+                    for uv in &fn_upvalues {
+                        self.chunk.write_byte(if uv.is_local { 1 } else { 0 });
+                        self.chunk.write_byte(uv.index);
+                    }
+                }
 
                 // Register function name for .name property
                 self.chunk.fn_names.insert(func_ip, name.clone());
@@ -1403,6 +1442,9 @@ impl<'gc> Compiler<'gc> {
                 } else if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
+                } else if let Some(upvalue_idx) = self.resolve_upvalue(name) {
+                    self.chunk.write_opcode(Opcode::GetUpvalue);
+                    self.chunk.write_byte(upvalue_idx);
                 } else {
                     let name_u16 = crate::unicode::utf8_to_utf16(name);
                     let name_idx = self.chunk.add_constant(Value::String(name_u16));
@@ -1598,7 +1640,11 @@ impl<'gc> Compiler<'gc> {
                 // typeof on an undeclared variable must return "undefined", not throw
                 if let Expr::Var(name, ..) = &**inner {
                     if name != "arguments" || self.scope_depth == 0 {
-                        if self.locals.iter().rposition(|l| l == name).is_none() {
+                        let is_local = self.locals.iter().rposition(|l| l == name).is_some();
+                        let is_upvalue = !is_local
+                            && (self.parent_locals.iter().rposition(|l| l == name).is_some()
+                                || self.parent_upvalues.iter().any(|u| u.name.as_str() == name));
+                        if !is_local && !is_upvalue {
                             // Global that might not exist: use non-throwing TypeOfGlobal
                             let name_u16 = crate::unicode::utf8_to_utf16(name);
                             let name_idx = self.chunk.add_constant(Value::String(name_u16));
@@ -1818,6 +1864,9 @@ impl<'gc> Compiler<'gc> {
                     if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                         self.chunk.write_opcode(Opcode::SetLocal);
                         self.chunk.write_byte(pos as u8);
+                    } else if let Some(upvalue_idx) = self.resolve_upvalue(name) {
+                        self.chunk.write_opcode(Opcode::SetUpvalue);
+                        self.chunk.write_byte(upvalue_idx);
                     } else {
                         let name_u16 = crate::unicode::utf8_to_utf16(name);
                         let name_idx = self.chunk.add_constant(Value::String(name_u16));
@@ -1860,6 +1909,13 @@ impl<'gc> Compiler<'gc> {
                 let old_depth = self.scope_depth;
                 let old_loops = std::mem::take(&mut self.loop_stack);
                 let old_strict = self.current_strict;
+                // Save and set up parent scope info for closure capture
+                let old_parent_locals = std::mem::take(&mut self.parent_locals);
+                let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
+                let old_upvalues = std::mem::take(&mut self.upvalues);
+                self.parent_locals = old_locals.clone();
+                self.parent_upvalues = old_upvalues.clone();
+
                 self.current_strict = fn_is_strict;
                 self.scope_depth = 1;
                 let mut arrow_non_rest = 0u8;
@@ -1905,16 +1961,34 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 self.patch_jump(jump_over);
+
+                // Collect upvalues before restoring
+                let fn_upvalues = std::mem::take(&mut self.upvalues);
+
                 self.locals = old_locals;
                 self.scope_depth = old_depth;
                 self.loop_stack = old_loops;
                 self.current_strict = old_strict;
+                self.parent_locals = old_parent_locals;
+                self.parent_upvalues = old_parent_upvalues;
+                self.upvalues = old_upvalues;
 
                 let arrow_arity = if arrow_has_rest { arrow_non_rest } else { params.len() as u8 };
                 let func_val = Value::VmFunction(func_ip, arrow_arity);
                 let func_idx = self.chunk.add_constant(func_val);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(func_idx);
+
+                if fn_upvalues.is_empty() {
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(func_idx);
+                } else {
+                    self.chunk.write_opcode(Opcode::MakeClosure);
+                    self.chunk.write_u16(func_idx);
+                    self.chunk.write_byte(fn_upvalues.len() as u8);
+                    for uv in &fn_upvalues {
+                        self.chunk.write_byte(if uv.is_local { 1 } else { 0 });
+                        self.chunk.write_byte(uv.index);
+                    }
+                }
             }
             // Anonymous function expression: function(params) { body }
             Expr::Function(_name, params, body) => {
@@ -2255,9 +2329,60 @@ impl<'gc> Compiler<'gc> {
             Expr::Spread(inner) => {
                 self.compile_expr(inner)?;
             }
+            // Regex literal: create a VmObject constant with regex metadata
+            Expr::Regex(pattern, flags) => {
+                use std::cell::RefCell;
+                use std::rc::Rc;
+                let mut map = indexmap::IndexMap::new();
+                map.insert(
+                    "__regex_pattern__".to_string(),
+                    Value::String(crate::unicode::utf8_to_utf16(pattern)),
+                );
+                map.insert("__regex_flags__".to_string(), Value::String(crate::unicode::utf8_to_utf16(flags)));
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RegExp")));
+                map.insert("source".to_string(), Value::String(crate::unicode::utf8_to_utf16(pattern)));
+                map.insert("flags".to_string(), Value::String(crate::unicode::utf8_to_utf16(flags)));
+                map.insert("global".to_string(), Value::Boolean(flags.contains('g')));
+                map.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
+                map.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
+                map.insert("lastIndex".to_string(), Value::Number(0.0));
+                let idx = self.chunk.add_constant(Value::VmObject(Rc::new(RefCell::new(map))));
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(idx);
+            }
             _ => return Err(raise_syntax_error!(format!("Unimplemented expression type for VM: {expr:?}"))),
         }
         Ok(())
+    }
+
+    /// Resolve a variable name as an upvalue (captured from a parent scope).
+    /// Returns the upvalue index if found, or None.
+    fn resolve_upvalue(&mut self, name: &str) -> Option<u8> {
+        // Check parent's locals
+        if let Some(parent_idx) = self.parent_locals.iter().rposition(|l| l == name) {
+            return Some(self.add_upvalue(name, parent_idx as u8, true));
+        }
+        // Check parent's upvalues (for multi-level capture)
+        if let Some(parent_uv_idx) = self.parent_upvalues.iter().position(|u| u.name == name) {
+            return Some(self.add_upvalue(name, parent_uv_idx as u8, false));
+        }
+        None
+    }
+
+    /// Add an upvalue to the current function's upvalue list, deduplicating by name.
+    fn add_upvalue(&mut self, name: &str, index: u8, is_local: bool) -> u8 {
+        for (i, uv) in self.upvalues.iter().enumerate() {
+            if uv.name == name {
+                return i as u8;
+            }
+        }
+        let idx = self.upvalues.len() as u8;
+        self.upvalues.push(UpvalueInfo {
+            name: name.to_string(),
+            index,
+            is_local,
+        });
+        idx
     }
 
     /// Write-back helper for increment/decrement: store the top-of-stack value
@@ -2268,6 +2393,9 @@ impl<'gc> Compiler<'gc> {
                 if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     self.chunk.write_opcode(Opcode::SetLocal);
                     self.chunk.write_byte(pos as u8);
+                } else if let Some(upvalue_idx) = self.resolve_upvalue(name) {
+                    self.chunk.write_opcode(Opcode::SetUpvalue);
+                    self.chunk.write_byte(upvalue_idx);
                 } else {
                     let name_u16 = crate::unicode::utf8_to_utf16(name);
                     let name_idx = self.chunk.add_constant(Value::String(name_u16));
@@ -2634,6 +2762,13 @@ impl<'gc> Compiler<'gc> {
         let old_depth = self.scope_depth;
         let old_loops = std::mem::take(&mut self.loop_stack);
         let old_label = self.pending_label.take();
+        // Save and set up parent scope info for closure capture
+        let old_parent_locals = std::mem::take(&mut self.parent_locals);
+        let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
+        let old_upvalues = std::mem::take(&mut self.upvalues);
+        self.parent_locals = old_locals.clone();
+        self.parent_upvalues = old_upvalues.clone();
+
         self.scope_depth = 1;
 
         // Count non-rest params and check for rest
@@ -2666,10 +2801,17 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Return);
 
         self.patch_jump(jump_over);
+
+        // Collect upvalues before restoring
+        let fn_upvalues = std::mem::take(&mut self.upvalues);
+
         self.locals = old_locals;
         self.scope_depth = old_depth;
         self.loop_stack = old_loops;
         self.pending_label = old_label;
+        self.parent_locals = old_parent_locals;
+        self.parent_upvalues = old_parent_upvalues;
+        self.upvalues = old_upvalues;
 
         // restore strict context inherited from outer scope
         self.current_strict = old_ctx;
@@ -2678,8 +2820,19 @@ impl<'gc> Compiler<'gc> {
         let arity = if has_rest { non_rest_count } else { params.len() as u8 };
         let func_val = Value::VmFunction(func_ip, arity);
         let func_idx = self.chunk.add_constant(func_val);
-        self.chunk.write_opcode(Opcode::Constant);
-        self.chunk.write_u16(func_idx);
+
+        if fn_upvalues.is_empty() {
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(func_idx);
+        } else {
+            self.chunk.write_opcode(Opcode::MakeClosure);
+            self.chunk.write_u16(func_idx);
+            self.chunk.write_byte(fn_upvalues.len() as u8);
+            for uv in &fn_upvalues {
+                self.chunk.write_byte(if uv.is_local { 1 } else { 0 });
+                self.chunk.write_byte(uv.index);
+            }
+        }
         Ok(())
     }
 

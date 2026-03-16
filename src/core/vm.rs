@@ -155,6 +155,34 @@ const BUILTIN_ARRAY_LASTINDEXOF: u8 = 151;
 const BUILTIN_ARRAY_FINDLAST: u8 = 152;
 const BUILTIN_ARRAY_FINDLASTINDEX: u8 = 153;
 const BUILTIN_ARRAY_REDUCERIGHT: u8 = 154;
+const BUILTIN_MATH_SIN: u8 = 155;
+const BUILTIN_MATH_COS: u8 = 156;
+const BUILTIN_MATH_TAN: u8 = 157;
+const BUILTIN_MATH_ASIN: u8 = 158;
+const BUILTIN_MATH_ACOS: u8 = 159;
+const BUILTIN_MATH_ATAN: u8 = 160;
+const BUILTIN_MATH_ATAN2: u8 = 161;
+const BUILTIN_MATH_SINH: u8 = 162;
+const BUILTIN_MATH_COSH: u8 = 163;
+const BUILTIN_MATH_TANH: u8 = 164;
+const BUILTIN_MATH_ASINH: u8 = 165;
+const BUILTIN_MATH_ACOSH: u8 = 166;
+const BUILTIN_MATH_ATANH: u8 = 167;
+const BUILTIN_MATH_EXP: u8 = 168;
+const BUILTIN_MATH_EXPM1: u8 = 169;
+const BUILTIN_MATH_LOG: u8 = 170;
+const BUILTIN_MATH_LOG10: u8 = 171;
+const BUILTIN_MATH_LOG1P: u8 = 172;
+const BUILTIN_MATH_LOG2: u8 = 173;
+const BUILTIN_MATH_FROUND: u8 = 174;
+const BUILTIN_MATH_TRUNC: u8 = 175;
+const BUILTIN_MATH_CBRT: u8 = 176;
+const BUILTIN_MATH_HYPOT: u8 = 177;
+const BUILTIN_MATH_SIGN: u8 = 178;
+const BUILTIN_MATH_POW: u8 = 179;
+const BUILTIN_MATH_RANDOM: u8 = 180;
+const BUILTIN_MATH_CLZ32: u8 = 181;
+const BUILTIN_MATH_IMUL: u8 = 182;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -164,6 +192,7 @@ pub struct CallFrame<'gc> {
     pub arg_count: usize,                  // Actual number of arguments passed
     pub func_ip: usize,                    // instruction pointer of the called function
     pub arguments_obj: Option<Value<'gc>>, // cached arguments object
+    pub upvalues: Vec<Value<'gc>>,         // captured upvalues (empty for non-closures)
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +228,22 @@ fn to_number<'gc>(val: &Value<'gc>) -> f64 {
     }
 }
 
+/// Convert Rust exponential format (e.g. "7.71234e1") to JS format ("7.71234e+1")
+fn js_exponential_format(s: &str) -> String {
+    // Rust uses "e" without sign for positive exponents; JS uses "e+"
+    if let Some(idx) = s.find('e') {
+        let (mantissa, exp_part) = s.split_at(idx);
+        let exp_digits = &exp_part[1..]; // skip 'e'
+        if exp_digits.starts_with('-') {
+            format!("{}e{}", mantissa, exp_digits)
+        } else {
+            format!("{}e+{}", mantissa, exp_digits)
+        }
+    } else {
+        s.to_string()
+    }
+}
+
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
     chunk: Chunk<'gc>,
@@ -215,6 +260,7 @@ pub struct VM<'gc> {
     global_this: Rc<RefCell<IndexMap<String, Value<'gc>>>>,
     symbol_counter: u64,
     symbol_registry: HashMap<String, Value<'gc>>, // Symbol.for() registry
+    pending_throw: Option<Value<'gc>>,            // deferred throw from call_builtin
 }
 
 impl<'gc> VM<'gc> {
@@ -233,6 +279,7 @@ impl<'gc> VM<'gc> {
             global_this,
             symbol_counter: 0,
             symbol_registry: HashMap::new(),
+            pending_throw: None,
         };
         vm.register_builtins();
         vm
@@ -282,7 +329,9 @@ impl<'gc> VM<'gc> {
             Value::Undefined => "undefined",
             Value::Null => "object",
             Value::Symbol(_) => "symbol",
-            Value::VmFunction(..) | Value::Closure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::Closure(..) | Value::Function(..) | Value::VmNativeFunction(_) => {
+                "function"
+            }
             Value::VmObject(map) => {
                 let b = map.borrow();
                 if b.contains_key("__vm_symbol__") {
@@ -323,9 +372,9 @@ impl<'gc> VM<'gc> {
             };
             drop(borrow);
 
-            if let Some(Value::VmFunction(setter_ip, _)) = setter {
+            if let Some(Value::VmFunction(setter_ip, _) | Value::VmClosure(setter_ip, _, _)) = setter {
                 self.this_stack.push(obj.clone());
-                let result = self.call_vm_function(setter_ip, std::slice::from_ref(&val));
+                let result = self.call_vm_function(setter_ip, std::slice::from_ref(&val), &[]);
                 self.this_stack.pop();
                 let _ = result;
             } else if is_frozen || (is_non_ext && !key_exists) || is_readonly || proto_readonly {
@@ -363,7 +412,7 @@ impl<'gc> VM<'gc> {
                 arr.borrow_mut().props.insert(key, val.clone());
             }
             Ok(val)
-        } else if let Value::VmFunction(ip, arity) = &obj {
+        } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             let props = self.get_fn_props(*ip, *arity);
             self.assign_named_property(Value::VmObject(props), key, val)
         } else {
@@ -374,7 +423,7 @@ impl<'gc> VM<'gc> {
 
     fn resolve_super_base(&mut self, receiver: &Value<'gc>) -> Option<Value<'gc>> {
         match receiver {
-            Value::VmFunction(ip, arity) => {
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 let props = self.get_fn_props(*ip, *arity);
                 match props.borrow().get("__proto__").cloned().unwrap_or(Value::Null) {
                     Value::Null | Value::Undefined => None,
@@ -413,7 +462,7 @@ impl<'gc> VM<'gc> {
                 drop(borrow);
                 value.or_else(|| self.lookup_proto_chain(&proto, key)).unwrap_or(Value::Undefined)
             }
-            Value::VmFunction(ip, arity) => {
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 let props = self.get_fn_props(ip, arity);
                 let borrow = props.borrow();
                 let value = borrow.get(key).cloned();
@@ -493,6 +542,34 @@ impl<'gc> VM<'gc> {
         math_map.insert("sqrt".to_string(), Value::VmNativeFunction(BUILTIN_MATH_SQRT));
         math_map.insert("max".to_string(), Value::VmNativeFunction(BUILTIN_MATH_MAX));
         math_map.insert("min".to_string(), Value::VmNativeFunction(BUILTIN_MATH_MIN));
+        math_map.insert("sin".to_string(), Value::VmNativeFunction(BUILTIN_MATH_SIN));
+        math_map.insert("cos".to_string(), Value::VmNativeFunction(BUILTIN_MATH_COS));
+        math_map.insert("tan".to_string(), Value::VmNativeFunction(BUILTIN_MATH_TAN));
+        math_map.insert("asin".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ASIN));
+        math_map.insert("acos".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ACOS));
+        math_map.insert("atan".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ATAN));
+        math_map.insert("atan2".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ATAN2));
+        math_map.insert("sinh".to_string(), Value::VmNativeFunction(BUILTIN_MATH_SINH));
+        math_map.insert("cosh".to_string(), Value::VmNativeFunction(BUILTIN_MATH_COSH));
+        math_map.insert("tanh".to_string(), Value::VmNativeFunction(BUILTIN_MATH_TANH));
+        math_map.insert("asinh".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ASINH));
+        math_map.insert("acosh".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ACOSH));
+        math_map.insert("atanh".to_string(), Value::VmNativeFunction(BUILTIN_MATH_ATANH));
+        math_map.insert("exp".to_string(), Value::VmNativeFunction(BUILTIN_MATH_EXP));
+        math_map.insert("expm1".to_string(), Value::VmNativeFunction(BUILTIN_MATH_EXPM1));
+        math_map.insert("log".to_string(), Value::VmNativeFunction(BUILTIN_MATH_LOG));
+        math_map.insert("log10".to_string(), Value::VmNativeFunction(BUILTIN_MATH_LOG10));
+        math_map.insert("log1p".to_string(), Value::VmNativeFunction(BUILTIN_MATH_LOG1P));
+        math_map.insert("log2".to_string(), Value::VmNativeFunction(BUILTIN_MATH_LOG2));
+        math_map.insert("fround".to_string(), Value::VmNativeFunction(BUILTIN_MATH_FROUND));
+        math_map.insert("trunc".to_string(), Value::VmNativeFunction(BUILTIN_MATH_TRUNC));
+        math_map.insert("cbrt".to_string(), Value::VmNativeFunction(BUILTIN_MATH_CBRT));
+        math_map.insert("hypot".to_string(), Value::VmNativeFunction(BUILTIN_MATH_HYPOT));
+        math_map.insert("sign".to_string(), Value::VmNativeFunction(BUILTIN_MATH_SIGN));
+        math_map.insert("pow".to_string(), Value::VmNativeFunction(BUILTIN_MATH_POW));
+        math_map.insert("random".to_string(), Value::VmNativeFunction(BUILTIN_MATH_RANDOM));
+        math_map.insert("clz32".to_string(), Value::VmNativeFunction(BUILTIN_MATH_CLZ32));
+        math_map.insert("imul".to_string(), Value::VmNativeFunction(BUILTIN_MATH_IMUL));
         math_map.insert("PI".to_string(), Value::Number(std::f64::consts::PI));
         math_map.insert("E".to_string(), Value::Number(std::f64::consts::E));
         math_map.insert("LN2".to_string(), Value::Number(std::f64::consts::LN_2));
@@ -687,8 +764,8 @@ impl<'gc> VM<'gc> {
             }
             drop(borrow);
             let ts = map.borrow().get("toString").cloned();
-            if let Some(Value::VmFunction(ip, _arity)) = ts {
-                let result = self.call_vm_function(ip, &[]);
+            if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = ts {
+                let result = self.call_vm_function(ip, &[], &[]);
                 return value_to_string(&result);
             }
             // Check __value__ for wrapper objects (e.g. new String("abc"))
@@ -725,8 +802,8 @@ impl<'gc> VM<'gc> {
             }
             drop(borrow);
             let ts = map.borrow().get("toString").cloned();
-            if let Some(Value::VmFunction(ip, _arity)) = ts {
-                let result = self.call_vm_function(ip, &[]);
+            if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = ts {
+                let result = self.call_vm_function(ip, &[], &[]);
                 return value_to_string(&result);
             }
             let inner = map.borrow().get("__value__").cloned();
@@ -808,6 +885,214 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 Value::Number(result)
+            }
+            BUILTIN_MATH_SIN => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.sin())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_COS => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.cos())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_TAN => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.tan())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_ASIN => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.asin())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_ACOS => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.acos())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_ATAN => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.atan())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_ATAN2 => {
+                let y = if let Some(Value::Number(n)) = args.first() { *n } else { f64::NAN };
+                let x = if let Some(Value::Number(n)) = args.get(1) { *n } else { f64::NAN };
+                Value::Number(y.atan2(x))
+            }
+            BUILTIN_MATH_SINH => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.sinh())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_COSH => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.cosh())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_TANH => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.tanh())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_ASINH => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.asinh())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_ACOSH => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.acosh())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_ATANH => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.atanh())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_EXP => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.exp())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_EXPM1 => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.exp_m1())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_LOG => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.ln())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_LOG10 => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.log10())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_LOG1P => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.ln_1p())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_LOG2 => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.log2())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_FROUND => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number((*n as f32) as f64)
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_TRUNC => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.trunc())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_CBRT => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(n.cbrt())
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_HYPOT => {
+                let mut sum = 0.0_f64;
+                for a in &args {
+                    if let Value::Number(n) = a {
+                        sum += n * n;
+                    } else {
+                        return Value::Number(f64::NAN);
+                    }
+                }
+                Value::Number(sum.sqrt())
+            }
+            BUILTIN_MATH_SIGN => {
+                if let Some(Value::Number(n)) = args.first() {
+                    if n.is_nan() {
+                        Value::Number(f64::NAN)
+                    } else if *n == 0.0 {
+                        Value::Number(*n)
+                    }
+                    // preserves -0
+                    else if *n > 0.0 {
+                        Value::Number(1.0)
+                    } else {
+                        Value::Number(-1.0)
+                    }
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            }
+            BUILTIN_MATH_POW => {
+                let base = if let Some(Value::Number(n)) = args.first() { *n } else { f64::NAN };
+                let exp = if let Some(Value::Number(n)) = args.get(1) { *n } else { f64::NAN };
+                Value::Number(base.powf(exp))
+            }
+            BUILTIN_MATH_RANDOM => {
+                // Simple pseudo-random using system time
+                use std::time::SystemTime;
+                let seed = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                // Simple hash to get [0, 1)
+                let v = ((seed ^ (seed >> 17)).wrapping_mul(0x9E3779B97F4A7C15) >> 11) as f64 / (1u64 << 53) as f64;
+                Value::Number(v)
+            }
+            BUILTIN_MATH_CLZ32 => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number((*n as i32 as u32).leading_zeros() as f64)
+                } else {
+                    Value::Number(32.0)
+                }
+            }
+            BUILTIN_MATH_IMUL => {
+                let a = if let Some(Value::Number(n)) = args.first() { *n as i32 } else { 0 };
+                let b = if let Some(Value::Number(n)) = args.get(1) { *n as i32 } else { 0 };
+                Value::Number((a.wrapping_mul(b)) as f64)
             }
             BUILTIN_ISNAN => match args.first() {
                 Some(Value::Number(n)) => Value::Boolean(n.is_nan()),
@@ -910,7 +1195,9 @@ impl<'gc> VM<'gc> {
                     let mut mapped = Vec::with_capacity(result.len());
                     for (i, elem) in result.into_iter().enumerate() {
                         let val = match &map_fn_val {
-                            Value::VmFunction(ip, _) => self.call_vm_function(*ip, &[elem, Value::Number(i as f64)]),
+                            Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => {
+                                self.call_vm_function(*ip, &[elem, Value::Number(i as f64)], &[])
+                            }
                             Value::VmNativeFunction(id) => self.call_builtin(*id, vec![elem, Value::Number(i as f64)]),
                             _ => elem,
                         };
@@ -939,12 +1226,21 @@ impl<'gc> VM<'gc> {
                     if let Some(super_base) = self.resolve_super_base(&receiver) {
                         return self.read_named_property(super_base, name);
                     }
+                    return Value::Undefined;
                 }
                 // Compile and run eval'd code in a temporary VM that shares globals
                 let result = (|| -> Result<Value<'gc>, JSError> {
                     let tokens = crate::core::tokenize(&code)?;
                     let mut index = 0;
                     let statements = crate::core::parse_statements(&tokens, &mut index)?;
+                    // Check for bare return statements — illegal at top level of eval
+                    for stmt in &statements {
+                        if matches!(*stmt.kind, crate::core::StatementKind::Return(_)) {
+                            return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
+                                message: "Illegal return statement".to_string()
+                            }));
+                        }
+                    }
                     let compiler = crate::core::Compiler::new();
                     let chunk = compiler.compile(&statements)?;
                     let mut eval_vm: VM<'gc> = VM::new(chunk);
@@ -961,7 +1257,16 @@ impl<'gc> VM<'gc> {
                 })();
                 match result {
                     Ok(v) => v,
-                    Err(_e) => Value::Undefined,
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        let is_syntax = msg.contains("SyntaxError") || msg.contains("Illegal return");
+                        let type_name = if is_syntax { "SyntaxError" } else { "Error" };
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(type_name)));
+                        err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
                 }
             }
             BUILTIN_NEW_FUNCTION => {
@@ -1199,7 +1504,7 @@ impl<'gc> VM<'gc> {
                             Value::Null
                         }
                     }
-                } else if let Some(Value::VmFunction(ip, arity)) = args.first() {
+                } else if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
                     let props = self.get_fn_props(*ip, *arity);
                     props.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
                 } else {
@@ -1224,13 +1529,13 @@ impl<'gc> VM<'gc> {
                         if let Some(val) = desc_borrow.get("value") {
                             obj.borrow_mut().insert(key.clone(), val.clone());
                         }
-                        if let Some(Value::VmFunction(ip, _)) = desc_borrow.get("get") {
+                        if let Some(val @ (Value::VmFunction(_ip, _) | Value::VmClosure(_ip, _, _))) = desc_borrow.get("get") {
                             let getter_key = format!("__get_{}", key);
-                            obj.borrow_mut().insert(getter_key, Value::VmFunction(*ip, 0));
+                            obj.borrow_mut().insert(getter_key, val.clone());
                         }
-                        if let Some(Value::VmFunction(ip, arity)) = desc_borrow.get("set") {
+                        if let Some(val @ (Value::VmFunction(_ip, _a) | Value::VmClosure(_ip, _a, _))) = desc_borrow.get("set") {
                             let setter_key = format!("__set_{}", key);
-                            obj.borrow_mut().insert(setter_key, Value::VmFunction(*ip, *arity));
+                            obj.borrow_mut().insert(setter_key, val.clone());
                         }
                         // Handle writable — for accessor descriptors (get/set), skip writable
                         let is_accessor = desc_borrow.contains_key("get") || desc_borrow.contains_key("set");
@@ -1311,7 +1616,7 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
-                    Some(Value::VmFunction(ip, arity)) => {
+                    Some(Value::VmFunction(ip, arity)) | Some(Value::VmClosure(ip, arity, _)) => {
                         let fn_props = self.get_fn_props(*ip, *arity);
                         let borrow = fn_props.borrow();
                         if let Some(val) = borrow.get(&key) {
@@ -1339,11 +1644,15 @@ impl<'gc> VM<'gc> {
                         obj.borrow_mut().insert("__proto__".to_string(), proto);
                     }
                     Value::VmObject(obj.clone())
-                } else if let Some(Value::VmFunction(ip, arity)) = args.first() {
+                } else if let Some(val @ (Value::VmFunction(_, _) | Value::VmClosure(_, _, _))) = args.first() {
+                    let (ip, arity) = match val {
+                        Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => (*ip, *arity),
+                        _ => unreachable!(),
+                    };
                     let proto = args.get(1).cloned().unwrap_or(Value::Null);
-                    let props = self.get_fn_props(*ip, *arity);
+                    let props = self.get_fn_props(ip, arity);
                     props.borrow_mut().insert("__proto__".to_string(), proto);
-                    Value::VmFunction(*ip, *arity)
+                    val.clone()
                 } else {
                     args.first().cloned().unwrap_or(Value::Undefined)
                 }
@@ -1360,13 +1669,13 @@ impl<'gc> VM<'gc> {
                             if let Some(val) = desc_borrow.get("value") {
                                 obj.borrow_mut().insert(key.clone(), val.clone());
                             }
-                            if let Some(Value::VmFunction(ip, _)) = desc_borrow.get("get") {
+                            if let Some(val @ (Value::VmFunction(_ip, _) | Value::VmClosure(_ip, _, _))) = desc_borrow.get("get") {
                                 let getter_key = format!("__get_{}", key);
-                                obj.borrow_mut().insert(getter_key, Value::VmFunction(*ip, 0));
+                                obj.borrow_mut().insert(getter_key, val.clone());
                             }
-                            if let Some(Value::VmFunction(ip, arity)) = desc_borrow.get("set") {
+                            if let Some(val @ (Value::VmFunction(_ip, _a) | Value::VmClosure(_ip, _a, _))) = desc_borrow.get("set") {
                                 let setter_key = format!("__set_{}", key);
-                                obj.borrow_mut().insert(setter_key, Value::VmFunction(*ip, *arity));
+                                obj.borrow_mut().insert(setter_key, val.clone());
                             }
                             if desc_borrow.contains_key("value") && !matches!(desc_borrow.get("writable"), Some(Value::Boolean(true))) {
                                 let ro_key = format!("__readonly_{}__", key);
@@ -1409,11 +1718,11 @@ impl<'gc> VM<'gc> {
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let mut groups: IndexMap<String, Vec<Value<'gc>>> = IndexMap::new();
                 if let Value::VmArray(arr) = &iterable
-                    && let Value::VmFunction(ip, _arity) = &callback
+                    && let Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) = &callback
                 {
                     let items: Vec<Value<'gc>> = arr.borrow().iter().cloned().collect();
                     for item in &items {
-                        let key_val = self.call_vm_function(*ip, std::slice::from_ref(item));
+                        let key_val = self.call_vm_function(*ip, std::slice::from_ref(item), &[]);
                         let key_str = value_to_string(&key_val);
                         groups.entry(key_str).or_default().push(item.clone());
                     }
@@ -1495,6 +1804,34 @@ impl<'gc> VM<'gc> {
             | BUILTIN_MATH_SQRT
             | BUILTIN_MATH_MAX
             | BUILTIN_MATH_MIN
+            | BUILTIN_MATH_SIN
+            | BUILTIN_MATH_COS
+            | BUILTIN_MATH_TAN
+            | BUILTIN_MATH_ASIN
+            | BUILTIN_MATH_ACOS
+            | BUILTIN_MATH_ATAN
+            | BUILTIN_MATH_ATAN2
+            | BUILTIN_MATH_SINH
+            | BUILTIN_MATH_COSH
+            | BUILTIN_MATH_TANH
+            | BUILTIN_MATH_ASINH
+            | BUILTIN_MATH_ACOSH
+            | BUILTIN_MATH_ATANH
+            | BUILTIN_MATH_EXP
+            | BUILTIN_MATH_EXPM1
+            | BUILTIN_MATH_LOG
+            | BUILTIN_MATH_LOG10
+            | BUILTIN_MATH_LOG1P
+            | BUILTIN_MATH_LOG2
+            | BUILTIN_MATH_FROUND
+            | BUILTIN_MATH_TRUNC
+            | BUILTIN_MATH_CBRT
+            | BUILTIN_MATH_HYPOT
+            | BUILTIN_MATH_SIGN
+            | BUILTIN_MATH_POW
+            | BUILTIN_MATH_RANDOM
+            | BUILTIN_MATH_CLZ32
+            | BUILTIN_MATH_IMUL
             | BUILTIN_ISNAN
             | BUILTIN_PARSEINT
             | BUILTIN_PARSEFLOAT
@@ -1594,11 +1931,11 @@ impl<'gc> VM<'gc> {
                     return Value::VmArray(Rc::new(RefCell::new(result)));
                 }
                 BUILTIN_ARRAY_MAP => {
-                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
-                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             result.push(r);
                         }
                         return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
@@ -1606,11 +1943,11 @@ impl<'gc> VM<'gc> {
                     return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(Vec::new()))));
                 }
                 BUILTIN_ARRAY_FILTER => {
-                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
-                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             if r.to_truthy() {
                                 result.push(elem.clone());
                             }
@@ -1624,16 +1961,16 @@ impl<'gc> VM<'gc> {
                     return self.make_iterator(items);
                 }
                 BUILTIN_ARRAY_FOREACH => {
-                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                         }
                     }
                     return Value::Undefined;
                 }
                 BUILTIN_ARRAY_REDUCE => {
-                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
@@ -1644,7 +1981,7 @@ impl<'gc> VM<'gc> {
                         };
                         let start_i = if args.len() > 1 { 0 } else { 1 };
                         for (i, element) in elements.iter().enumerate().skip(start_i) {
-                            acc = self.call_vm_function(*ip, &[acc, element.clone(), Value::Number(i as f64)]);
+                            acc = self.call_vm_function(*ip, &[acc, element.clone(), Value::Number(i as f64)], &[]);
                         }
                         return acc;
                     }
@@ -1702,10 +2039,10 @@ impl<'gc> VM<'gc> {
                 BUILTIN_ARRAY_SORT => {
                     let cmp_fn = args.first().cloned();
                     let mut elems = arr.borrow().elements.clone();
-                    if let Some(Value::VmFunction(ip, _)) = &cmp_fn {
+                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = &cmp_fn {
                         let ip = *ip;
                         elems.sort_by(|a, b| {
-                            let result = self.call_vm_function(ip, &[a.clone(), b.clone()]);
+                            let result = self.call_vm_function(ip, &[a.clone(), b.clone()], &[]);
                             if let Value::Number(n) = result {
                                 n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
                             } else {
@@ -1723,10 +2060,10 @@ impl<'gc> VM<'gc> {
                     return Value::VmArray(arr.clone());
                 }
                 BUILTIN_ARRAY_FIND => {
-                    if let Some(Value::VmFunction(ip, _)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             if result.to_truthy() {
                                 return elem.clone();
                             }
@@ -1735,10 +2072,10 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 BUILTIN_ARRAY_FINDLAST => {
-                    if let Some(Value::VmFunction(ip, _)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate().rev() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             if result.to_truthy() {
                                 return elem.clone();
                             }
@@ -1747,10 +2084,10 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 BUILTIN_ARRAY_FINDINDEX => {
-                    if let Some(Value::VmFunction(ip, _)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             if result.to_truthy() {
                                 return Value::Number(i as f64);
                             }
@@ -1759,10 +2096,10 @@ impl<'gc> VM<'gc> {
                     return Value::Number(-1.0);
                 }
                 BUILTIN_ARRAY_FINDLASTINDEX => {
-                    if let Some(Value::VmFunction(ip, _)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate().rev() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             if result.to_truthy() {
                                 return Value::Number(i as f64);
                             }
@@ -1793,11 +2130,11 @@ impl<'gc> VM<'gc> {
                     return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
                 }
                 BUILTIN_ARRAY_FLATMAP => {
-                    if let Some(Value::VmFunction(ip, _)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
-                            let mapped = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let mapped = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             if let Value::VmArray(inner) = mapped {
                                 result.extend(inner.borrow().elements.clone());
                             } else {
@@ -1825,10 +2162,10 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 BUILTIN_ARRAY_EVERY => {
-                    if let Some(Value::VmFunction(ip, _)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             if !result.to_truthy() {
                                 return Value::Boolean(false);
                             }
@@ -1838,10 +2175,10 @@ impl<'gc> VM<'gc> {
                     return Value::Boolean(true);
                 }
                 BUILTIN_ARRAY_SOME => {
-                    if let Some(Value::VmFunction(ip, _)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         for (i, elem) in elements.iter().enumerate() {
-                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)]);
+                            let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &[]);
                             if result.to_truthy() {
                                 return Value::Boolean(true);
                             }
@@ -1904,7 +2241,7 @@ impl<'gc> VM<'gc> {
                     return Value::Number(-1.0);
                 }
                 BUILTIN_ARRAY_REDUCERIGHT => {
-                    if let Some(Value::VmFunction(ip, _arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
@@ -1916,7 +2253,7 @@ impl<'gc> VM<'gc> {
                         let skip_last = if args.len() <= 1 { 1 } else { 0 };
                         let end = elements.len().saturating_sub(skip_last);
                         for i in (0..end).rev() {
-                            acc = self.call_vm_function(*ip, &[acc, elements[i].clone(), Value::Number(i as f64)]);
+                            acc = self.call_vm_function(*ip, &[acc, elements[i].clone(), Value::Number(i as f64)], &[]);
                         }
                         return acc;
                     }
@@ -2124,27 +2461,61 @@ impl<'gc> VM<'gc> {
                         return Value::String(crate::unicode::utf8_to_utf16(&format!("{:.prec$}", n, prec = digits)));
                     }
                     BUILTIN_NUM_TOEXPONENTIAL => {
-                        let digits = args.first().map(|v| to_number(v) as usize).unwrap_or(0);
-                        return Value::String(crate::unicode::utf8_to_utf16(&format!("{:.prec$e}", n, prec = digits)));
+                        let has_arg = !args.is_empty() && !matches!(args.first(), Some(Value::Undefined));
+                        if has_arg {
+                            let digits = to_number(args.first().unwrap()) as usize;
+                            let s = format!("{:.prec$e}", n, prec = digits);
+                            return Value::String(crate::unicode::utf8_to_utf16(&js_exponential_format(&s)));
+                        } else {
+                            // No argument: show all significant digits
+                            // Use enough precision then strip trailing zeros
+                            let s = format!("{:e}", n);
+                            return Value::String(crate::unicode::utf8_to_utf16(&js_exponential_format(&s)));
+                        }
                     }
                     BUILTIN_NUM_TOPRECISION => {
-                        let prec = args.first().map(|v| to_number(v) as usize).unwrap_or(1);
-                        // JS toPrecision: up to `prec` significant digits
-                        let s = format!("{:.prec$e}", n, prec = prec.saturating_sub(1));
-                        // Parse back and format without unnecessary trailing zeros
-                        if let Ok(val) = s.parse::<f64>() {
-                            let result = format!("{}", val);
-                            // Pad with trailing zeros if needed
-                            if !result.contains('.') && prec > result.len() {
-                                return Value::String(crate::unicode::utf8_to_utf16(&format!(
-                                    "{}.{}",
-                                    result,
-                                    "0".repeat(prec - result.len())
-                                )));
-                            }
-                            return Value::String(crate::unicode::utf8_to_utf16(&result));
+                        let has_arg = !args.is_empty() && !matches!(args.first(), Some(Value::Undefined));
+                        if !has_arg {
+                            // No argument: same as toString()
+                            return Value::String(crate::unicode::utf8_to_utf16(&value_to_string(&Value::Number(n))));
                         }
-                        return Value::String(crate::unicode::utf8_to_utf16(&s));
+                        let prec = to_number(args.first().unwrap()) as usize;
+                        if prec == 0 {
+                            return Value::Undefined;
+                        }
+
+                        if n.is_nan() {
+                            return Value::String(crate::unicode::utf8_to_utf16("NaN"));
+                        }
+                        if n.is_infinite() {
+                            return Value::String(crate::unicode::utf8_to_utf16(if n > 0.0 { "Infinity" } else { "-Infinity" }));
+                        }
+
+                        // Format with exponential to get significant digits
+                        let s = format!("{:.prec$e}", n, prec = prec.saturating_sub(1));
+                        // Parse the exponent
+                        let parts: Vec<&str> = s.split('e').collect();
+                        if parts.len() != 2 {
+                            return Value::String(crate::unicode::utf8_to_utf16(&s));
+                        }
+                        let _mantissa = parts[0];
+                        let exp: i32 = parts[1].parse().unwrap_or(0);
+
+                        if exp < -6 || exp >= prec as i32 {
+                            // Use exponential notation
+                            return Value::String(crate::unicode::utf8_to_utf16(&js_exponential_format(&s)));
+                        }
+
+                        // Fixed notation
+                        let decimal_places = (prec as i32 - 1 - exp).max(0) as usize;
+                        let neg = if n < 0.0 { "-" } else { "" };
+                        let abs_n = n.abs();
+                        return Value::String(crate::unicode::utf8_to_utf16(&format!(
+                            "{}{:.prec$}",
+                            neg,
+                            abs_n,
+                            prec = decimal_places
+                        )));
                     }
                     BUILTIN_NUM_TOSTRING => {
                         let radix = args.first().map(|v| to_number(v) as u32).unwrap_or(10);
@@ -2230,14 +2601,14 @@ impl<'gc> VM<'gc> {
                     return self.make_iterator(items);
                 }
                 BUILTIN_MAP_FOREACH => {
-                    if let Some(Value::VmFunction(ip, arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
                         let entries: Vec<(Value<'gc>, Value<'gc>)> = m.borrow().entries.clone();
                         let map_ref = receiver.clone();
                         for (k, v) in &entries {
                             if *arity >= 3 {
-                                self.call_vm_function(*ip, &[v.clone(), k.clone(), map_ref.clone()]);
+                                self.call_vm_function(*ip, &[v.clone(), k.clone(), map_ref.clone()], &[]);
                             } else {
-                                self.call_vm_function(*ip, &[v.clone(), k.clone()]);
+                                self.call_vm_function(*ip, &[v.clone(), k.clone()], &[]);
                             }
                         }
                     }
@@ -2289,14 +2660,14 @@ impl<'gc> VM<'gc> {
                     return self.make_iterator(items);
                 }
                 BUILTIN_SET_FOREACH => {
-                    if let Some(Value::VmFunction(ip, arity)) = args.first() {
+                    if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
                         let vals: Vec<Value<'gc>> = s.borrow().values.clone();
                         let set_ref = receiver.clone();
                         for v in &vals {
                             if *arity >= 3 {
-                                self.call_vm_function(*ip, &[v.clone(), v.clone(), set_ref.clone()]);
+                                self.call_vm_function(*ip, &[v.clone(), v.clone(), set_ref.clone()], &[]);
                             } else {
-                                self.call_vm_function(*ip, &[v.clone(), v.clone()]);
+                                self.call_vm_function(*ip, &[v.clone(), v.clone()], &[]);
                             }
                         }
                     }
@@ -2413,7 +2784,7 @@ impl<'gc> VM<'gc> {
                 Value::VmArray(_) => "Array",
                 Value::VmMap(_) => "Map",
                 Value::VmSet(_) => "Set",
-                Value::VmFunction(..) | Value::VmNativeFunction(_) => "Function",
+                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => "Function",
                 Value::Number(_) => "Number",
                 Value::String(_) => "String",
                 Value::Boolean(_) => "Boolean",
@@ -2445,9 +2816,9 @@ impl<'gc> VM<'gc> {
                     self.this_stack.pop();
                     return result;
                 }
-                Value::VmFunction(ip, _arity) => {
+                Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
                     self.this_stack.push(this_arg);
-                    let result = self.call_vm_function(*ip, &call_args);
+                    let result = self.call_vm_function(*ip, &call_args, &[]);
                     self.this_stack.pop();
                     return result;
                 }
@@ -2466,9 +2837,9 @@ impl<'gc> VM<'gc> {
                     self.this_stack.pop();
                     return result;
                 }
-                Value::VmFunction(ip, _arity) => {
+                Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
                     self.this_stack.push(this_arg);
-                    let result = self.call_vm_function(*ip, &call_args);
+                    let result = self.call_vm_function(*ip, &call_args, &[]);
                     self.this_stack.pop();
                     return result;
                 }
@@ -2502,6 +2873,9 @@ impl<'gc> VM<'gc> {
             (Value::VmMap(a_rc), Value::VmMap(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
             (Value::VmSet(a_rc), Value::VmSet(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
             (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
+            (Value::VmClosure(a_ip, _, _), Value::VmClosure(b_ip, _, _)) => a_ip == b_ip,
+            (Value::VmFunction(a_ip, _), Value::VmClosure(b_ip, _, _)) => a_ip == b_ip,
+            (Value::VmClosure(a_ip, _, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
             (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             _ => false,
         }
@@ -2536,12 +2910,15 @@ impl<'gc> VM<'gc> {
             (Value::VmSet(a_rc), Value::VmSet(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
             (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
+            (Value::VmClosure(a_ip, _, _), Value::VmClosure(b_ip, _, _)) => a_ip == b_ip,
+            (Value::VmFunction(a_ip, _), Value::VmClosure(b_ip, _, _)) => a_ip == b_ip,
+            (Value::VmClosure(a_ip, _, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
             _ => false,
         }
     }
 
     /// Call a VM function inline (used by map/filter/forEach/reduce)
-    fn call_vm_function(&mut self, ip: usize, args: &[Value<'gc>]) -> Value<'gc> {
+    fn call_vm_function(&mut self, ip: usize, args: &[Value<'gc>], upvalues: &[Value<'gc>]) -> Value<'gc> {
         // Push a dummy callee so Return's truncate(bp-1) removes it
         self.stack.push(Value::Undefined);
         let bp = self.stack.len();
@@ -2558,6 +2935,7 @@ impl<'gc> VM<'gc> {
             arg_count: args.len(),
             func_ip: ip,
             arguments_obj: None,
+            upvalues: upvalues.to_vec(),
         });
         self.ip = ip;
         let result = self.run_inner(target_depth + 1);
@@ -2810,6 +3188,7 @@ impl<'gc> VM<'gc> {
                                     arg_count,
                                     func_ip: target_ip,
                                     arguments_obj: None,
+                                    upvalues: Vec::new(),
                                 };
                                 self.frames.push(frame);
                             } else {
@@ -2820,6 +3199,42 @@ impl<'gc> VM<'gc> {
                                     arg_count,
                                     func_ip: target_ip,
                                     arguments_obj: None,
+                                    upvalues: Vec::new(),
+                                };
+                                self.frames.push(frame);
+                            }
+                            self.ip = target_ip;
+                        }
+                        Value::VmClosure(target_ip, arity, ref upvals) => {
+                            if (arg_count as u8) < arity {
+                                for _ in 0..(arity as usize - arg_count) {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            }
+                            let closure_upvalues = (**upvals).clone();
+                            if is_method {
+                                let receiver = self.stack.remove(callee_idx - 1);
+                                self.this_stack.push(receiver);
+                                let callee_idx = callee_idx - 1;
+                                let frame = CallFrame {
+                                    return_ip: self.ip,
+                                    bp: callee_idx + 1,
+                                    is_method: true,
+                                    arg_count,
+                                    func_ip: target_ip,
+                                    arguments_obj: None,
+                                    upvalues: closure_upvalues,
+                                };
+                                self.frames.push(frame);
+                            } else {
+                                let frame = CallFrame {
+                                    return_ip: self.ip,
+                                    bp: callee_idx + 1,
+                                    is_method: false,
+                                    arg_count,
+                                    func_ip: target_ip,
+                                    arguments_obj: None,
+                                    upvalues: closure_upvalues,
                                 };
                                 self.frames.push(frame);
                             }
@@ -2842,6 +3257,7 @@ impl<'gc> VM<'gc> {
                                             | Value::VmMap(_)
                                             | Value::VmSet(_)
                                             | Value::VmFunction(..)
+                                            | Value::VmClosure(..)
                                             | Value::Closure(..)
                                     );
                                     if !target_is_object {
@@ -2873,6 +3289,7 @@ impl<'gc> VM<'gc> {
                                                 | Value::VmMap(_)
                                                 | Value::VmSet(_)
                                                 | Value::VmFunction(..)
+                                                | Value::VmClosure(..)
                                                 | Value::Closure(..)
                                         );
                                         if !tok_ok {
@@ -2890,9 +3307,17 @@ impl<'gc> VM<'gc> {
                                 }
                                 let result = self.call_method_builtin(id, recv, args);
                                 self.stack.push(result);
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(thrown)?;
+                                    continue;
+                                }
                             } else {
                                 let result = self.call_builtin(id, args);
                                 self.stack.push(result);
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(thrown)?;
+                                    continue;
+                                }
                             }
                         }
                         _ => {
@@ -2909,6 +3334,10 @@ impl<'gc> VM<'gc> {
                                     }
                                     let result = self.call_builtin(id, args_collected);
                                     self.stack.push(result);
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(thrown)?;
+                                        continue;
+                                    }
                                 } else if let Some(Value::String(body_u16)) = borrow.get("__fn_body__") {
                                     let body = crate::unicode::utf16_to_utf8(body_u16);
                                     drop(borrow);
@@ -3188,7 +3617,10 @@ impl<'gc> VM<'gc> {
                         (Value::VmSet(a_rc), Value::VmSet(b_rc)) => {
                             self.stack.push(Value::Boolean(!Rc::ptr_eq(a_rc, b_rc)));
                         }
-                        (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _)) => {
+                        (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _))
+                        | (Value::VmClosure(a_ip, _, _), Value::VmClosure(b_ip, _, _))
+                        | (Value::VmFunction(a_ip, _), Value::VmClosure(b_ip, _, _))
+                        | (Value::VmClosure(a_ip, _, _), Value::VmFunction(b_ip, _)) => {
                             self.stack.push(Value::Boolean(a_ip != b_ip));
                         }
                         (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => {
@@ -3349,6 +3781,7 @@ impl<'gc> VM<'gc> {
                                     arg_count,
                                     func_ip: target_ip,
                                     arguments_obj: None,
+                                    upvalues: Vec::new(),
                                 });
                             } else {
                                 self.frames.push(CallFrame {
@@ -3358,6 +3791,40 @@ impl<'gc> VM<'gc> {
                                     arg_count,
                                     func_ip: target_ip,
                                     arguments_obj: None,
+                                    upvalues: Vec::new(),
+                                });
+                            }
+                            self.ip = target_ip;
+                        }
+                        Value::VmClosure(target_ip, arity, ref upvals) => {
+                            if (arg_count as u8) < arity {
+                                for _ in 0..(arity as usize - arg_count) {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            }
+                            let closure_upvalues = (**upvals).clone();
+                            if is_method {
+                                let receiver = self.stack.remove(callee_idx - 1);
+                                self.this_stack.push(receiver);
+                                let callee_idx = callee_idx - 1;
+                                self.frames.push(CallFrame {
+                                    return_ip: self.ip,
+                                    bp: callee_idx + 1,
+                                    is_method: true,
+                                    arg_count,
+                                    func_ip: target_ip,
+                                    arguments_obj: None,
+                                    upvalues: closure_upvalues,
+                                });
+                            } else {
+                                self.frames.push(CallFrame {
+                                    return_ip: self.ip,
+                                    bp: callee_idx + 1,
+                                    is_method: false,
+                                    arg_count,
+                                    func_ip: target_ip,
+                                    arguments_obj: None,
+                                    upvalues: closure_upvalues,
                                 });
                             }
                             self.ip = target_ip;
@@ -3369,9 +3836,17 @@ impl<'gc> VM<'gc> {
                                 let recv = self.stack.pop().unwrap_or(Value::Undefined);
                                 let result = self.call_method_builtin(id, recv, args);
                                 self.stack.push(result);
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(thrown)?;
+                                    continue;
+                                }
                             } else {
                                 let result = self.call_builtin(id, args);
                                 self.stack.push(result);
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(thrown)?;
+                                    continue;
+                                }
                             }
                         }
                         _ => {
@@ -3388,6 +3863,10 @@ impl<'gc> VM<'gc> {
                                     }
                                     let result = self.call_builtin(id, args_collected);
                                     self.stack.push(result);
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(thrown)?;
+                                        continue;
+                                    }
                                 } else {
                                     drop(borrow);
                                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
@@ -3417,7 +3896,7 @@ impl<'gc> VM<'gc> {
                     let callee_idx = self.stack.len() - arg_count - 1;
                     let constructor = self.stack[callee_idx].clone();
                     match constructor {
-                        Value::VmFunction(target_ip, _arity) => {
+                        Value::VmFunction(target_ip, _arity) | Value::VmClosure(target_ip, _arity, _) => {
                             let new_obj = Rc::new(RefCell::new(IndexMap::new()));
                             let fn_props = self.get_fn_props(target_ip, _arity);
                             if let Some(proto) = fn_props.borrow().get("prototype").cloned() {
@@ -3425,6 +3904,11 @@ impl<'gc> VM<'gc> {
                             }
                             let this_val = Value::VmObject(new_obj.clone());
                             self.this_stack.push(this_val);
+                            let closure_uv = if let Value::VmClosure(_, _, ref uv) = constructor {
+                                (**uv).clone()
+                            } else {
+                                Vec::new()
+                            };
                             let frame = CallFrame {
                                 return_ip: self.ip,
                                 bp: callee_idx + 1,
@@ -3432,6 +3916,7 @@ impl<'gc> VM<'gc> {
                                 arg_count,
                                 func_ip: target_ip,
                                 arguments_obj: None,
+                                upvalues: closure_uv,
                             };
                             self.frames.push(frame);
                             self.ip = target_ip;
@@ -3480,6 +3965,64 @@ impl<'gc> VM<'gc> {
                             _ => {}
                         }
                     }
+                }
+                Opcode::GetUpvalue => {
+                    let idx = self.read_byte() as usize;
+                    let val = if let Some(frame) = self.frames.last() {
+                        frame.upvalues.get(idx).cloned().unwrap_or(Value::Undefined)
+                    } else {
+                        Value::Undefined
+                    };
+                    self.stack.push(val);
+                }
+                Opcode::SetUpvalue => {
+                    let idx = self.read_byte() as usize;
+                    let val = self.stack.last().cloned().unwrap_or(Value::Undefined);
+                    if let Some(frame) = self.frames.last_mut()
+                        && idx < frame.upvalues.len()
+                    {
+                        frame.upvalues[idx] = val;
+                    }
+                }
+                Opcode::MakeClosure => {
+                    let const_idx = self.read_u16() as usize;
+                    let capture_count = self.read_byte() as usize;
+                    let func = self.chunk.constants[const_idx].clone();
+                    let (ip, arity) = match func {
+                        Value::VmFunction(ip, arity) => (ip, arity),
+                        _ => {
+                            // Skip capture bytes and push undefined
+                            for _ in 0..capture_count * 2 {
+                                self.read_byte();
+                            }
+                            self.stack.push(Value::Undefined);
+                            continue;
+                        }
+                    };
+                    let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
+                    let mut captures = Vec::with_capacity(capture_count);
+                    for _ in 0..capture_count {
+                        let is_local = self.read_byte() != 0;
+                        let index = self.read_byte() as usize;
+                        if is_local {
+                            // Capture from current frame's locals (stack)
+                            let val = if bp + index < self.stack.len() {
+                                self.stack[bp + index].clone()
+                            } else {
+                                Value::Undefined
+                            };
+                            captures.push(val);
+                        } else {
+                            // Capture from current frame's upvalues
+                            let val = if let Some(frame) = self.frames.last() {
+                                frame.upvalues.get(index).cloned().unwrap_or(Value::Undefined)
+                            } else {
+                                Value::Undefined
+                            };
+                            captures.push(val);
+                        }
+                    }
+                    self.stack.push(Value::VmClosure(ip, arity, Rc::new(captures)));
                 }
                 Opcode::Negate => {
                     let a = self.stack.pop().expect("VM Stack underflow");
@@ -3568,12 +4111,17 @@ impl<'gc> VM<'gc> {
                             let borrow = map.borrow();
                             // Check for getter first
                             let getter_key = format!("__get_{}", key);
-                            if let Some(Value::VmFunction(ip, _)) = borrow.get(&getter_key) {
+                            if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = borrow.get(&getter_key) {
                                 let ip = *ip;
+                                let upvals: Vec<Value<'gc>> = if let Some(Value::VmClosure(_, _, ups)) = borrow.get(&getter_key) {
+                                    ups.as_ref().clone()
+                                } else {
+                                    Vec::new()
+                                };
                                 drop(borrow);
                                 // Push the object as `this` for the getter
                                 self.this_stack.push(obj.clone());
-                                let result = self.call_vm_function(ip, &[]);
+                                let result = self.call_vm_function(ip, &[], &upvals);
                                 self.this_stack.pop();
                                 self.stack.push(result);
                             } else {
@@ -3764,7 +4312,7 @@ impl<'gc> VM<'gc> {
                             "clear" => self.stack.push(Value::VmNativeFunction(BUILTIN_SET_CLEAR)),
                             _ => self.stack.push(Value::Undefined),
                         },
-                        Value::VmFunction(ip, arity) => {
+                        Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                             let props = self.get_fn_props(*ip, *arity);
                             let val = props.borrow().get(&key).cloned();
                             let result = val.unwrap_or_else(|| match key.as_str() {
@@ -4131,7 +4679,7 @@ impl<'gc> VM<'gc> {
                             "clear" => Value::VmNativeFunction(BUILTIN_SET_CLEAR),
                             _ => Value::Undefined,
                         },
-                        Value::VmFunction(ip, arity) => {
+                        Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                             let props = self.get_fn_props(*ip, *arity);
                             let borrow = props.borrow();
                             if let Some(value) = borrow.get(&key).cloned() {
@@ -4326,8 +4874,8 @@ impl<'gc> VM<'gc> {
                             ctor_str == "Object"
                         }
                     } else if ctor_str == "Function" {
-                        // VmNativeFunction / VmFunction are instances of Function
-                        matches!(&lhs, Value::VmNativeFunction(_) | Value::VmFunction(..))
+                        // VmNativeFunction / VmFunction / VmClosure are instances of Function
+                        matches!(&lhs, Value::VmNativeFunction(_) | Value::VmFunction(..) | Value::VmClosure(..))
                             || matches!(&lhs, Value::VmObject(m) if m.borrow().contains_key("__native_id__"))
                     } else {
                         false
@@ -4384,7 +4932,7 @@ impl<'gc> VM<'gc> {
                     let callee_idx = self.stack.len() - arg_count - 1;
                     let callee = self.stack[callee_idx].clone();
                     match callee {
-                        Value::VmFunction(target_ip, _arity) => {
+                        Value::VmFunction(target_ip, _arity) | Value::VmClosure(target_ip, _arity, _) => {
                             // Create new empty object as `this`
                             let new_obj = Rc::new(RefCell::new(IndexMap::new()));
                             // Set __proto__ to constructor's prototype property
@@ -4394,6 +4942,11 @@ impl<'gc> VM<'gc> {
                             }
                             let this_val = Value::VmObject(new_obj.clone());
                             self.this_stack.push(this_val);
+                            let closure_uv = if let Value::VmClosure(_, _, ref uv) = callee {
+                                (**uv).clone()
+                            } else {
+                                Vec::new()
+                            };
                             // Set up call frame
                             let frame = CallFrame {
                                 return_ip: self.ip,
@@ -4402,6 +4955,7 @@ impl<'gc> VM<'gc> {
                                 arg_count,
                                 func_ip: target_ip,
                                 arguments_obj: None,
+                                upvalues: closure_uv,
                             };
                             self.frames.push(frame);
                             self.ip = target_ip;
@@ -4483,6 +5037,7 @@ impl<'gc> VM<'gc> {
                                         | Value::VmMap(_)
                                         | Value::VmSet(_)
                                         | Value::VmFunction(..)
+                                        | Value::VmClosure(..)
                                         | Value::Closure(..)
                                         | Value::Symbol(_) => true,
                                         _ => false,
@@ -4511,12 +5066,13 @@ impl<'gc> VM<'gc> {
                                 BUILTIN_CTOR_FR => {
                                     // new FinalizationRegistry(callback)
                                     let callback = args.into_iter().next().unwrap_or(Value::Undefined);
-                                    let is_callable =
-                                        matches!(callback, Value::VmFunction(..) | Value::VmNativeFunction(_) | Value::Closure(..))
-                                            || matches!(&callback, Value::VmObject(o) if {
-                                                let b = o.borrow();
-                                                b.contains_key("__fn_body__") || b.contains_key("__native_id__")
-                                            });
+                                    let is_callable = matches!(
+                                        callback,
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Closure(..)
+                                    ) || matches!(&callback, Value::VmObject(o) if {
+                                        let b = o.borrow();
+                                        b.contains_key("__fn_body__") || b.contains_key("__native_id__")
+                                    });
                                     if !is_callable {
                                         let mut err_map = IndexMap::new();
                                         err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));

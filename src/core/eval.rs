@@ -12556,6 +12556,7 @@ pub fn evaluate_call_dispatch<'gc>(
         Value::Object(_) => "Object",
         Value::Function(_) => "Function",
         Value::VmFunction(_, _) => "VmFunction",
+        Value::VmClosure(_, _, _) => "VmClosure",
         Value::VmArray(_) => "VmArray",
         Value::VmObject(_) => "VmObject",
         Value::VmNativeFunction(_) => "VmNativeFunction",

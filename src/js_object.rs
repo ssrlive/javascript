@@ -2845,7 +2845,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                 Value::TypedArray(_) => "TypedArray",
                 Value::Uninitialized => "undefined",
                 Value::PrivateName(..) => "PrivateName",
-                Value::VmFunction(..) => "Function",
+                Value::VmFunction(..) | Value::VmClosure(..) => "Function",
                 Value::VmArray(..) => "Array",
                 Value::VmObject(..) => "Object",
                 Value::VmNativeFunction(..) => "Function",
@@ -3002,6 +3002,7 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
         Value::PrivateName(n, _) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
         Value::VmFunction(ip, arity) => Ok(Value::String(utf8_to_utf16(&format!("[VmFunction@{} arity={}]", ip, arity)))),
+        Value::VmClosure(ip, arity, _) => Ok(Value::String(utf8_to_utf16(&format!("[VmClosure@{} arity={}]", ip, arity)))),
         Value::VmArray(arr) => {
             let elems: Vec<String> = arr.borrow().iter().map(|v| crate::core::value_to_string(v)).collect();
             Ok(Value::String(utf8_to_utf16(&elems.join(","))))
@@ -3111,7 +3112,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                 &Value::TypedArray(_) => "TypedArray",
                 Value::Uninitialized => "undefined",
                 Value::PrivateName(..) => "PrivateName",
-                Value::VmFunction(..) => "Function",
+                Value::VmFunction(..) | Value::VmClosure(..) => "Function",
                 Value::VmArray(..) => "Array",
                 Value::VmObject(..) => "Object",
                 Value::VmNativeFunction(..) => "Function",
@@ -3295,6 +3296,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object").into()),
         Value::PrivateName(..) => Err(raise_type_error!("Cannot convert private name to object").into()),
         Value::VmFunction(ip, arity) => Ok(Value::VmFunction(*ip, *arity)),
+        Value::VmClosure(ip, arity, uv) => Ok(Value::VmClosure(*ip, *arity, uv.clone())),
         Value::VmArray(arr) => Ok(Value::VmArray(arr.clone())),
         Value::VmObject(obj) => Ok(Value::VmObject(obj.clone())),
         Value::VmNativeFunction(id) => Ok(Value::VmNativeFunction(*id)),

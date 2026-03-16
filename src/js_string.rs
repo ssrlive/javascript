@@ -398,6 +398,7 @@ pub(crate) fn string_constructor<'gc>(
         Value::Uninitialized => Ok(Value::String(utf8_to_utf16("undefined"))),
         Value::PrivateName(n, _) => Ok(Value::String(utf8_to_utf16(&format!("#{}", n)))),
         Value::VmFunction(ip, arity) => Ok(Value::String(utf8_to_utf16(&format!("[VmFunction@{} arity={}]", ip, arity)))),
+        Value::VmClosure(ip, arity, _) => Ok(Value::String(utf8_to_utf16(&format!("[VmClosure@{} arity={}]", ip, arity)))),
         Value::VmArray(arr) => {
             let elems: Vec<String> = arr.borrow().iter().map(|v| crate::core::value_to_string(v)).collect();
             Ok(Value::String(utf8_to_utf16(&elems.join(","))))

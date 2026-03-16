@@ -8,7 +8,8 @@ use crate::raise_syntax_error;
 pub struct Compiler<'gc> {
     chunk: Chunk<'gc>,
     locals: Vec<String>,
-    scope_depth: i32, // 0 = top-level (global), > 0 = inside function
+    scope_depth: i32,     // 0 = top-level (global), > 0 = inside function
+    current_strict: bool, // whether surrounding context is strict mode
     loop_stack: Vec<LoopContext>,
     pending_label: Option<String>,        // label to attach to the next loop
     forin_counter: u32,                   // unique ID for for-in synthetic variables
@@ -30,6 +31,7 @@ impl<'gc> Compiler<'gc> {
             chunk: Chunk::new(),
             locals: Vec::new(),
             scope_depth: 0,
+            current_strict: false,
             loop_stack: Vec::new(),
             pending_label: None,
             forin_counter: 0,
@@ -38,6 +40,18 @@ impl<'gc> Compiler<'gc> {
     }
 
     pub fn compile(mut self, statements: &[Statement]) -> Result<Chunk<'gc>, JSError> {
+        // Check for global "use strict" directive in prologue before hoisting
+        for stmt in statements.iter() {
+            match &*stmt.kind {
+                StatementKind::Expr(Expr::StringLit(s)) => {
+                    if crate::unicode::utf16_to_utf8(s) == "use strict" {
+                        self.current_strict = true;
+                    }
+                    // continue scanning until non-string-literal
+                }
+                _ => break,
+            }
+        }
         // Hoist function declarations to the top
         for stmt in statements.iter() {
             if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) {
@@ -86,6 +100,24 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_u16(loop_start as u16);
     }
 
+    fn function_is_strict(&self, body: &[Statement], force_strict: bool) -> bool {
+        if force_strict || self.current_strict {
+            return true;
+        }
+
+        matches!(
+            body.first().map(|stmt| &*stmt.kind),
+            Some(StatementKind::Expr(Expr::StringLit(s)))
+                if *s == crate::unicode::utf8_to_utf16("use strict")
+        )
+    }
+
+    fn record_fn_strictness(&mut self, func_ip: usize, body: &[Statement], force_strict: bool) -> bool {
+        let is_strict = self.function_is_strict(body, force_strict);
+        self.chunk.fn_strictness.insert(func_ip, is_strict);
+        is_strict
+    }
+
     /// Create a LoopContext, consuming any pending label
     fn make_loop_context(&mut self, loop_start: usize) -> LoopContext {
         LoopContext {
@@ -98,6 +130,14 @@ impl<'gc> Compiler<'gc> {
     fn compile_statement(&mut self, stmt: &Statement, is_last: bool) -> Result<(), JSError> {
         match &*stmt.kind {
             StatementKind::Expr(expr) => {
+                // Detect 'use strict' directive at top-level or inside function
+                if let Expr::StringLit(s) = expr {
+                    if crate::unicode::utf16_to_utf8(s) == "use strict" {
+                        if self.scope_depth == 0 {
+                            self.current_strict = true;
+                        }
+                    }
+                }
                 self.compile_expr(expr)?;
                 // Pop if it's not the last evaluated statement, to keep stack clean
                 if !is_last {
@@ -630,11 +670,14 @@ impl<'gc> Compiler<'gc> {
                 // Jump over the function body in the main bytecode stream
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
+                let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
 
                 // Save and reset locals/scope for function scope
                 let old_locals = std::mem::take(&mut self.locals);
                 let old_depth = self.scope_depth;
                 let old_loops = std::mem::take(&mut self.loop_stack);
+                let old_strict = self.current_strict;
+                self.current_strict = fn_is_strict;
                 self.scope_depth = 1;
                 for param in params {
                     if let DestructuringElement::Variable(param_name, _) = param {
@@ -656,6 +699,7 @@ impl<'gc> Compiler<'gc> {
                 self.locals = old_locals;
                 self.scope_depth = old_depth;
                 self.loop_stack = old_loops;
+                self.current_strict = old_strict;
 
                 // Push the VmFunction value and define it as a global
                 let func_val = Value::VmFunction(func_ip, params.len() as u8);
@@ -926,7 +970,10 @@ impl<'gc> Compiler<'gc> {
                 // Emit jump over constructor body
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let fn_start = self.chunk.code.len();
+                let ctor_is_strict = self.record_fn_strictness(fn_start, &ctor_body, true);
 
+                let old_strict = self.current_strict;
+                self.current_strict = ctor_is_strict;
                 self.scope_depth += 1;
                 for p in &ctor_params {
                     match p {
@@ -947,9 +994,9 @@ impl<'gc> Compiler<'gc> {
                     self.locals.pop();
                 }
                 self.scope_depth -= 1;
+                self.current_strict = old_strict;
 
                 self.patch_jump(jump_over);
-
                 // Register constructor name
                 self.chunk.fn_names.insert(fn_start, name.clone());
 
@@ -1003,7 +1050,10 @@ impl<'gc> Compiler<'gc> {
                         // Compile method as function
                         let m_jump = self.emit_jump(Opcode::Jump);
                         let m_start = self.chunk.code.len();
+                        let method_is_strict = self.record_fn_strictness(m_start, body, true);
                         let m_arity = params.len() as u8;
+                        let old_strict = self.current_strict;
+                        self.current_strict = method_is_strict;
                         self.scope_depth += 1;
                         for p in params {
                             match p {
@@ -1023,6 +1073,7 @@ impl<'gc> Compiler<'gc> {
                             self.locals.pop();
                         }
                         self.scope_depth -= 1;
+                        self.current_strict = old_strict;
                         self.patch_jump(m_jump);
                         self.chunk.fn_names.insert(m_start, mname.to_string());
 
@@ -1239,7 +1290,10 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_u16(idx);
             }
             Expr::Var(name, ..) => {
-                if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                if name == "arguments" && self.scope_depth > 0 {
+                    // inside a function, treat `arguments` as the special arguments object
+                    self.chunk.write_opcode(Opcode::GetArguments);
+                } else if let Some(pos) = self.locals.iter().position(|l| l == name) {
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
@@ -1368,22 +1422,9 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             Expr::SuperProperty(prop_name) => {
-                // super.prop → get property from parent prototype
-                if let Some(ref pname) = self.current_class_parent {
-                    let par_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(pname)));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(par_idx);
-                    let proto_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
-                    self.chunk.write_opcode(Opcode::GetProperty);
-                    self.chunk.write_u16(proto_k);
-                    let pk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop_name)));
-                    self.chunk.write_opcode(Opcode::GetProperty);
-                    self.chunk.write_u16(pk);
-                } else {
-                    self.chunk.write_opcode(Opcode::Constant);
-                    let undef_idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_u16(undef_idx);
-                }
+                let pk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop_name)));
+                self.chunk.write_opcode(Opcode::GetSuperProperty);
+                self.chunk.write_u16(pk);
             }
             Expr::Super => {
                 // bare `super` reference — push undefined for now
@@ -1575,12 +1616,10 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::SetIndex);
                 }
                 Expr::SuperProperty(key) => {
-                    // super.x = value → set on this
-                    self.chunk.write_opcode(Opcode::GetThis);
                     self.compile_expr(right)?;
                     let key_u16 = crate::unicode::utf8_to_utf16(key);
                     let name_idx = self.chunk.add_constant(Value::String(key_u16));
-                    self.chunk.write_opcode(Opcode::SetProperty);
+                    self.chunk.write_opcode(Opcode::SetSuperProperty);
                     self.chunk.write_u16(name_idx);
                 }
                 _ => {
@@ -1591,10 +1630,13 @@ impl<'gc> Compiler<'gc> {
             Expr::ArrowFunction(params, body) => {
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
+                let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
 
                 let old_locals = std::mem::take(&mut self.locals);
                 let old_depth = self.scope_depth;
                 let old_loops = std::mem::take(&mut self.loop_stack);
+                let old_strict = self.current_strict;
+                self.current_strict = fn_is_strict;
                 self.scope_depth = 1;
                 for param in params {
                     if let DestructuringElement::Variable(param_name, _) = param {
@@ -1628,6 +1670,7 @@ impl<'gc> Compiler<'gc> {
                 self.locals = old_locals;
                 self.scope_depth = old_depth;
                 self.loop_stack = old_loops;
+                self.current_strict = old_strict;
 
                 let func_val = Value::VmFunction(func_ip, params.len() as u8);
                 let func_idx = self.chunk.add_constant(func_val);
@@ -2303,10 +2346,12 @@ impl<'gc> Compiler<'gc> {
         Ok(())
     }
 
-    /// Compile a function body (shared between FunctionDeclaration, ArrowFunction, and Function expression)
     fn compile_function_body(&mut self, params: &[DestructuringElement], body: &[Statement]) -> Result<(), JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
+        let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
+        let old_ctx = self.current_strict;
+        self.current_strict = fn_is_strict;
 
         let old_locals = std::mem::take(&mut self.locals);
         let old_depth = self.scope_depth;
@@ -2348,6 +2393,9 @@ impl<'gc> Compiler<'gc> {
         self.scope_depth = old_depth;
         self.loop_stack = old_loops;
         self.pending_label = old_label;
+
+        // restore strict context inherited from outer scope
+        self.current_strict = old_ctx;
 
         // Arity = non-rest params only (call site pushes all args, function collects rest)
         let arity = if has_rest { non_rest_count } else { params.len() as u8 };

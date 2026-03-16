@@ -42,18 +42,21 @@ pub enum Opcode {
     SetupTry = 36,
     TeardownTry = 37,
     GetThis = 38,
-    GetKeys = 39,        // pop object, push array of its string keys
-    GetMethod = 40,      // peek object (keep on stack), push method value on top
-    NewError = 41,       // pop message string, push VmObject { message }
-    Dup = 42,            // duplicate top of stack
-    In = 43,             // pop key and object, push bool (key in object)
-    InstanceOf = 44,     // pop constructor and value, push bool
-    DeleteProperty = 45, // pop object, read constant key, delete, push bool
-    NewCall = 46,        // new Constructor(args): create obj, push this, call, return obj
-    DeleteIndex = 47,    // pop index and object, delete element, push bool
-    Swap = 48,           // swap top two stack elements
-    ToNumber = 49,       // convert TOS to number
-    CollectRest = 50,    // collect excess args into rest array; operand = non_rest_count (u8)
+    GetKeys = 39,          // pop object, push array of its string keys
+    GetMethod = 40,        // peek object (keep on stack), push method value on top
+    NewError = 41,         // pop message string, push VmObject { message }
+    Dup = 42,              // duplicate top of stack
+    In = 43,               // pop key and object, push bool (key in object)
+    InstanceOf = 44,       // pop constructor and value, push bool
+    DeleteProperty = 45,   // pop object, read constant key, delete, push bool
+    NewCall = 46,          // new Constructor(args): create obj, push this, call, return obj
+    DeleteIndex = 47,      // pop index and object, delete element, push bool
+    Swap = 48,             // swap top two stack elements
+    ToNumber = 49,         // convert TOS to number
+    CollectRest = 50,      // collect excess args into rest array; operand = non_rest_count (u8)
+    GetArguments = 51,     // push current function's arguments object (special variable)
+    SetSuperProperty = 52, // assign to super.prop using current this as receiver
+    GetSuperProperty = 53, // read super.prop using current this as receiver
 }
 
 impl TryFrom<u8> for Opcode {
@@ -112,6 +115,9 @@ impl TryFrom<u8> for Opcode {
             48 => Opcode::Swap,
             49 => Opcode::ToNumber,
             50 => Opcode::CollectRest,
+            51 => Opcode::GetArguments,
+            52 => Opcode::SetSuperProperty,
+            53 => Opcode::GetSuperProperty,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -125,6 +131,8 @@ pub struct Chunk<'gc> {
     pub constants: Vec<Value<'gc>>,
     /// Map from function IP to function name (for .name property)
     pub fn_names: std::collections::HashMap<usize, String>,
+    /// Recorded strictness flag for functions by their starting IP
+    pub fn_strictness: std::collections::HashMap<usize, bool>,
 }
 
 impl<'gc> Chunk<'gc> {
@@ -133,6 +141,7 @@ impl<'gc> Chunk<'gc> {
             code: Vec::new(),
             constants: Vec::new(),
             fn_names: std::collections::HashMap::new(),
+            fn_strictness: std::collections::HashMap::new(),
         }
     }
 

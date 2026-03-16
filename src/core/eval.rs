@@ -12545,6 +12545,58 @@ pub fn evaluate_call_dispatch<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Debug: show the concrete variant of func_val when calling
     log::trace!("CALL_DISPATCH: func_val variant = {:?}", func_val);
+    // also log a simple type string so we can distinguish '[value]' cases
+    let kind = match func_val {
+        Value::Number(_) => "Number",
+        Value::BigInt(_) => "BigInt",
+        Value::String(_) => "String",
+        Value::Boolean(_) => "Boolean",
+        Value::Undefined => "Undefined",
+        Value::Null => "Null",
+        Value::Object(_) => "Object",
+        Value::Function(_) => "Function",
+        Value::VmFunction(_, _) => "VmFunction",
+        Value::VmArray(_) => "VmArray",
+        Value::VmObject(_) => "VmObject",
+        Value::VmNativeFunction(_) => "VmNativeFunction",
+        Value::VmMap(_) => "VmMap",
+        Value::VmSet(_) => "VmSet",
+        Value::Closure(_) => "Closure",
+        Value::AsyncClosure(_) => "AsyncClosure",
+        Value::GeneratorFunction(_, _) => "GeneratorFunction",
+        Value::AsyncGeneratorFunction(_, _) => "AsyncGeneratorFunction",
+        Value::ClassDefinition(_) => "ClassDefinition",
+        Value::Getter { .. } => "Getter",
+        Value::Setter { .. } => "Setter",
+        Value::Promise(_) => "Promise",
+        Value::Map(_) => "Map",
+        Value::Set(_) => "Set",
+        Value::WeakMap(_) => "WeakMap",
+        Value::WeakSet(_) => "WeakSet",
+        Value::Generator(_) => "Generator",
+        Value::AsyncGenerator(_) => "AsyncGenerator",
+        Value::Proxy(_) => "Proxy",
+        Value::ArrayBuffer(_) => "ArrayBuffer",
+        Value::DataView(_) => "DataView",
+        Value::TypedArray(_) => "TypedArray",
+        Value::PrivateName(_, _) => "PrivateName",
+        Value::Property { .. } => "Property",
+        Value::Symbol(_) => "Symbol",
+        Value::Uninitialized => "Uninitialized",
+    };
+    log::trace!("CALL_DISPATCH kind = {}", kind);
+    // If the value is an object, dump whether it has callable slots or a closure
+    if let Value::Object(o) = func_val {
+        let has_closure = o.borrow().get_closure().is_some();
+        let has_callable_slot = crate::core::slot_get_chained(o, &InternalSlot::Callable).is_some();
+        log::trace!(
+            "CALL_DISPATCH-OBJ: obj={:p} has_closure={} has_callable_slot={} is_constructor={:?}",
+            o,
+            has_closure,
+            has_callable_slot,
+            crate::core::slot_get_chained(o, &InternalSlot::IsConstructor)
+        );
+    }
     match func_val {
         Value::Closure(cl) => call_closure(mc, cl, this_val, eval_args, env, None),
         Value::AsyncClosure(cl) => Ok(handle_async_closure_call(mc, cl, this_val, eval_args, env, None)?),
@@ -13758,7 +13810,11 @@ pub fn evaluate_call_dispatch<'gc>(
                 Err(raise_type_error!("Not a function").into())
             }
         }
-        _ => Err(raise_type_error!("Not a function").into()),
+        other => {
+            // unexpected kind of value was invoked; dump it for diagnostics
+            log::trace!("CALL_DISPATCH-UNCAUGHT-VALUE: {:?}", other);
+            Err(raise_type_error!("Not a function").into())
+        }
     }
 }
 

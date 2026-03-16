@@ -659,6 +659,10 @@ fn get_for_await_iterator<'gc>(
         && let Value::Object(obj) = iter_val
     {
         let method = crate::core::get_property_with_accessors(mc, env, obj, async_iter_sym_data)?;
+        let method = match method {
+            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+            other => other,
+        };
         if !matches!(method, Value::Undefined | Value::Null) {
             let res = evaluate_call_dispatch(mc, env, &method, Some(iter_val), &[])?;
             let res = await_value(mc, env, res).map_err(|v| EvalError::Throw(v, None, None))?;
@@ -677,6 +681,10 @@ fn get_for_await_iterator<'gc>(
         && let Value::Object(obj) = iter_val
     {
         let method = crate::core::get_property_with_accessors(mc, env, obj, iter_sym_data)?;
+        let method = match method {
+            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+            other => other,
+        };
         if !matches!(method, Value::Undefined | Value::Null) {
             let res = evaluate_call_dispatch(mc, env, &method, Some(iter_val), &[])?;
             if let Value::Object(iter_obj) = res {
@@ -700,6 +708,11 @@ fn for_await_next_value<'gc>(
     is_async_iter: bool,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
     let next_method = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
+    // unwrap descriptor if necessary
+    let next_method = match next_method {
+        Value::Property { value: Some(v), .. } => v.borrow().clone(),
+        other => other,
+    };
     if matches!(next_method, Value::Undefined | Value::Null) {
         return Err(EvalError::Js(raise_type_error!("Iterator has no next method")));
     }
@@ -2528,6 +2541,7 @@ fn handle_yield_star_call<'gc>(
     method: &str,
     args: Vec<Value<'gc>>,
 ) -> Result<(), JSError> {
+    // retrieve the method (next/throw/return) from iterator object
     let method_func = if method == "next" {
         if let Some(cached) = slot_get(&iter_obj, &InternalSlot::YieldStarNextMethod) {
             cached.borrow().clone()
@@ -2542,6 +2556,11 @@ fn handle_yield_star_call<'gc>(
                     reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
                     return Ok(());
                 }
+            };
+            // unwrap property descriptor if necessary before caching/calling
+            let fetched = match fetched {
+                Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                other => other,
             };
             if !matches!(fetched, Value::Undefined | Value::Null) {
                 slot_set(mc, &iter_obj, InternalSlot::YieldStarNextMethod, &fetched.clone());
@@ -2562,7 +2581,38 @@ fn handle_yield_star_call<'gc>(
             }
         }
     };
+    // debug info to investigate crashing case: classify method_func and whether it's callable
+    let method_type = match &method_func {
+        Value::Function(name) => format!("Function({})", name),
+        Value::Closure(_) => "Closure".to_string(),
+        Value::Object(o) => {
+            let is_callable = crate::core::slot_get_chained(o, &InternalSlot::Callable).is_some() || o.borrow().get_closure().is_some();
+            format!("Object(callable={})", is_callable)
+        }
+        Value::Property { .. } => "Property".to_string(),
+        other => format!("{:?}", other),
+    };
+
+    log::warn!(
+        "handle_yield_star_call method={} iter_keys={:?} method_type={}",
+        method,
+        iter_obj
+            .borrow()
+            .properties
+            .keys()
+            .map(|k| match k {
+                crate::core::PropertyKey::String(s) => s.clone(),
+                other => format!("{}", other),
+            })
+            .collect::<Vec<_>>(),
+        method_type
+    );
     if !matches!(method_func, Value::Undefined) {
+        log::debug!(
+            "handle_yield_star_call: about to call method='{}' method_func_variant={:?}",
+            method,
+            method_func
+        );
         let call_res = evaluate_call_dispatch(mc, env, &method_func, Some(&Value::Object(iter_obj)), &args);
 
         let res_val = match call_res {

@@ -58,6 +58,20 @@ pub enum Opcode {
     SetSuperProperty = 52, // assign to super.prop using current this as receiver
     GetSuperProperty = 53, // read super.prop using current this as receiver
     TypeOfGlobal = 54,     // typeof a global variable (returns "undefined" if not defined)
+    DeleteGlobal = 55,     // delete a global variable by name (for block-scoped fn cleanup)
+    Pow = 56,
+    BitwiseAnd = 57,
+    BitwiseOr = 58,
+    BitwiseXor = 59,
+    ShiftLeft = 60,
+    ShiftRight = 61,
+    UnsignedShiftRight = 62,
+    BitwiseNot = 63,
+    ArrayPush = 64,
+    ArraySpread = 65,
+    CallSpread = 66,
+    NewCallSpread = 67,
+    ObjectSpread = 68,
 }
 
 impl TryFrom<u8> for Opcode {
@@ -120,6 +134,20 @@ impl TryFrom<u8> for Opcode {
             52 => Opcode::SetSuperProperty,
             53 => Opcode::GetSuperProperty,
             54 => Opcode::TypeOfGlobal,
+            55 => Opcode::DeleteGlobal,
+            56 => Opcode::Pow,
+            57 => Opcode::BitwiseAnd,
+            58 => Opcode::BitwiseOr,
+            59 => Opcode::BitwiseXor,
+            60 => Opcode::ShiftLeft,
+            61 => Opcode::ShiftRight,
+            62 => Opcode::UnsignedShiftRight,
+            63 => Opcode::BitwiseNot,
+            64 => Opcode::ArrayPush,
+            65 => Opcode::ArraySpread,
+            66 => Opcode::CallSpread,
+            67 => Opcode::NewCallSpread,
+            68 => Opcode::ObjectSpread,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

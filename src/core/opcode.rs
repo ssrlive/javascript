@@ -57,6 +57,7 @@ pub enum Opcode {
     GetArguments = 51,     // push current function's arguments object (special variable)
     SetSuperProperty = 52, // assign to super.prop using current this as receiver
     GetSuperProperty = 53, // read super.prop using current this as receiver
+    TypeOfGlobal = 54,     // typeof a global variable (returns "undefined" if not defined)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -118,6 +119,7 @@ impl TryFrom<u8> for Opcode {
             51 => Opcode::GetArguments,
             52 => Opcode::SetSuperProperty,
             53 => Opcode::GetSuperProperty,
+            54 => Opcode::TypeOfGlobal,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

@@ -131,12 +131,11 @@ impl<'gc> Compiler<'gc> {
         match &*stmt.kind {
             StatementKind::Expr(expr) => {
                 // Detect 'use strict' directive at top-level or inside function
-                if let Expr::StringLit(s) = expr {
-                    if crate::unicode::utf16_to_utf8(s) == "use strict" {
-                        if self.scope_depth == 0 {
-                            self.current_strict = true;
-                        }
-                    }
+                if let Expr::StringLit(s) = expr
+                    && crate::unicode::utf16_to_utf8(s) == "use strict"
+                    && self.scope_depth == 0
+                {
+                    self.current_strict = true;
                 }
                 self.compile_expr(expr)?;
                 // Pop if it's not the last evaluated statement, to keep stack clean
@@ -144,10 +143,9 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::Pop);
                 }
             }
-            StatementKind::Let(decls) | StatementKind::Var(decls) => {
+            StatementKind::Let(decls) => {
                 for (name, init_opt) in decls {
                     if let Some(init) = init_opt {
-                        // Infer function name for anonymous function/arrow
                         let func_ip = self.peek_func_ip(init);
                         self.compile_expr(init)?;
                         if let Some(ip) = func_ip {
@@ -160,18 +158,45 @@ impl<'gc> Compiler<'gc> {
                     }
 
                     if self.scope_depth > 0 {
-                        // Inside a function: check if var already exists (var is function-scoped)
+                        // let is block-scoped: always create a new local slot
+                        self.locals.push(name.clone());
+                    } else {
+                        let name_u16 = crate::unicode::utf8_to_utf16(name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(name_idx);
+                    }
+                }
+                if is_last {
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                }
+            }
+            StatementKind::Var(decls) => {
+                for (name, init_opt) in decls {
+                    if let Some(init) = init_opt {
+                        let func_ip = self.peek_func_ip(init);
+                        self.compile_expr(init)?;
+                        if let Some(ip) = func_ip {
+                            self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
+                        }
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
+
+                    if self.scope_depth > 0 {
+                        // var is function-scoped: reuse existing slot if found
                         if let Some(pos) = self.locals.iter().position(|l| l == name) {
-                            // Re-declaration: assign to existing slot
                             self.chunk.write_opcode(Opcode::SetLocal);
                             self.chunk.write_byte(pos as u8);
                             self.chunk.write_opcode(Opcode::Pop);
                         } else {
-                            // New local: value stays on stack as a local slot
                             self.locals.push(name.clone());
                         }
                     } else {
-                        // Top-level: define as global
                         let name_u16 = crate::unicode::utf8_to_utf16(name);
                         let name_idx = self.chunk.add_constant(Value::String(name_u16));
                         self.chunk.write_opcode(Opcode::DefineGlobal);
@@ -209,7 +234,7 @@ impl<'gc> Compiler<'gc> {
             }
             StatementKind::Assign(name, expr) => {
                 self.compile_expr(expr)?;
-                if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     self.chunk.write_opcode(Opcode::SetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
@@ -223,6 +248,7 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Block(statements) => {
+                let saved_locals = self.locals.len();
                 // Hoist function declarations to the top of the block
                 for s in statements.iter() {
                     if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
@@ -235,6 +261,13 @@ impl<'gc> Compiler<'gc> {
                     }
                     let s_is_last = is_last && i == statements.len() - 1;
                     self.compile_statement(s, s_is_last)?;
+                }
+                // Clean up block-scoped locals
+                if is_last {
+                    // Frame is about to return; just fix compiler state
+                    self.locals.truncate(saved_locals);
+                } else {
+                    self.end_block_scope(saved_locals);
                 }
             }
             StatementKind::If(if_stmt) => {
@@ -630,10 +663,12 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_u16(0xffff); // placeholder for catch ip
                 self.chunk.write_u16(binding_idx);
 
-                // Try body
+                // Try body (block-scoped)
+                let saved_try = self.locals.len();
                 for s in &tc.try_body {
                     self.compile_statement(s, false)?;
                 }
+                self.end_block_scope(saved_try);
                 self.chunk.write_opcode(Opcode::TeardownTry);
 
                 // Jump over catch block
@@ -644,21 +679,25 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.code[catch_placeholder] = (catch_start & 0xff) as u8;
                 self.chunk.code[catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
 
-                // Catch body
+                // Catch body (block-scoped)
+                let saved_catch = self.locals.len();
                 if let Some(ref catch_body) = tc.catch_body {
                     for s in catch_body {
                         self.compile_statement(s, false)?;
                     }
                 }
+                self.end_block_scope(saved_catch);
 
                 self.patch_jump(jump_over_catch);
 
-                // Finally body
+                // Finally body (block-scoped)
+                let saved_finally = self.locals.len();
                 if let Some(ref finally_body) = tc.finally_body {
                     for s in finally_body {
                         self.compile_statement(s, false)?;
                     }
                 }
+                self.end_block_scope(saved_finally);
 
                 if is_last {
                     let idx = self.chunk.add_constant(Value::Undefined);
@@ -766,7 +805,7 @@ impl<'gc> Compiler<'gc> {
                 self.emit_helper_get("__forofIdx__");
                 self.chunk.write_opcode(Opcode::GetIndex);
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == var_name).unwrap();
+                    let pos = self.locals.iter().rposition(|l| l == var_name).unwrap();
                     self.chunk.write_opcode(Opcode::SetLocal);
                     self.chunk.write_byte(pos as u8);
                     self.chunk.write_opcode(Opcode::Pop);
@@ -1293,7 +1332,7 @@ impl<'gc> Compiler<'gc> {
                 if name == "arguments" && self.scope_depth > 0 {
                     // inside a function, treat `arguments` as the special arguments object
                     self.chunk.write_opcode(Opcode::GetArguments);
-                } else if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                } else if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
@@ -1446,8 +1485,27 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(inner)?;
             }
             Expr::TypeOf(inner) => {
-                self.compile_expr(inner)?;
-                self.chunk.write_opcode(Opcode::TypeOf);
+                // typeof on an undeclared variable must return "undefined", not throw
+                if let Expr::Var(name, ..) = &**inner {
+                    if name != "arguments" || self.scope_depth == 0 {
+                        if self.locals.iter().rposition(|l| l == name).is_none() {
+                            // Global that might not exist: use non-throwing TypeOfGlobal
+                            let name_u16 = crate::unicode::utf8_to_utf16(name);
+                            let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                            self.chunk.write_opcode(Opcode::TypeOfGlobal);
+                            self.chunk.write_u16(name_idx);
+                        } else {
+                            self.compile_expr(inner)?;
+                            self.chunk.write_opcode(Opcode::TypeOf);
+                        }
+                    } else {
+                        self.compile_expr(inner)?;
+                        self.chunk.write_opcode(Opcode::TypeOf);
+                    }
+                } else {
+                    self.compile_expr(inner)?;
+                    self.chunk.write_opcode(Opcode::TypeOf);
+                }
             }
             // Logical operators (short-circuit) — must return actual operand values
             Expr::LogicalAnd(left, right) => {
@@ -1591,7 +1649,7 @@ impl<'gc> Compiler<'gc> {
                     if let Some(ip) = func_ip {
                         self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
                     }
-                    if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                    if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                         self.chunk.write_opcode(Opcode::SetLocal);
                         self.chunk.write_byte(pos as u8);
                     } else {
@@ -1997,7 +2055,7 @@ impl<'gc> Compiler<'gc> {
     fn compile_store(&mut self, expr: &Expr) -> Result<(), JSError> {
         match expr {
             Expr::Var(name, ..) => {
-                if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     self.chunk.write_opcode(Opcode::SetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
@@ -2027,6 +2085,15 @@ impl<'gc> Compiler<'gc> {
             }
         }
         Ok(())
+    }
+
+    /// Pop block-scoped locals created since `saved` count, emitting Pop opcodes.
+    fn end_block_scope(&mut self, saved: usize) {
+        let to_pop = self.locals.len() - saved;
+        for _ in 0..to_pop {
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+        self.locals.truncate(saved);
     }
 
     /// Emit get for a synthetic local/global variable

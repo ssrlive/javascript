@@ -114,6 +114,10 @@ const BUILTIN_OBJECT_SETPROTOTYPEOF: u8 = 118;
 const BUILTIN_FN_APPLY: u8 = 119;
 const BUILTIN_OBJECT_GETOWNPROPERTYNAMES: u8 = 120;
 const BUILTIN_ARRAY_ITERATOR: u8 = 121;
+const BUILTIN_CTOR_WEAKMAP: u8 = 122;
+const BUILTIN_CTOR_WEAKSET: u8 = 123;
+const BUILTIN_CTOR_WEAKREF: u8 = 124;
+const BUILTIN_WEAKREF_DEREF: u8 = 125;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -227,6 +231,27 @@ impl<'gc> VM<'gc> {
         let props_rc = Rc::new(RefCell::new(props));
         self.fn_props.insert(ip, props_rc.clone());
         props_rc
+    }
+
+    fn typeof_value(val: &Value<'gc>) -> &'static str {
+        match val {
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Boolean(_) => "boolean",
+            Value::Undefined => "undefined",
+            Value::Null => "object",
+            Value::Symbol(_) => "symbol",
+            Value::VmFunction(..) | Value::Closure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
+            Value::VmObject(map) => {
+                let b = map.borrow();
+                if b.contains_key("__fn_body__") || b.contains_key("__native_id__") {
+                    "function"
+                } else {
+                    "object"
+                }
+            }
+            _ => "object",
+        }
     }
 
     fn assign_named_property(&mut self, obj: Value<'gc>, key: String, val: Value<'gc>) -> Result<Value<'gc>, JSError> {
@@ -544,6 +569,12 @@ impl<'gc> VM<'gc> {
         // Map / Set constructors
         self.globals.insert("Map".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_MAP));
         self.globals.insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
+        self.globals
+            .insert("WeakMap".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKMAP));
+        self.globals
+            .insert("WeakSet".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKSET));
+        self.globals
+            .insert("WeakRef".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKREF));
 
         // globalThis — refers to the global this object
         self.globals
@@ -576,6 +607,34 @@ impl<'gc> VM<'gc> {
                 return value_to_string(&v);
             }
         }
+        // Array.prototype.toString() → join elements with ","
+        if let Value::VmArray(arr) = val {
+            let elems: Vec<String> = arr
+                .borrow()
+                .iter()
+                .map(|v| match v {
+                    Value::Null | Value::Undefined => String::new(),
+                    other => self.vm_to_string(other),
+                })
+                .collect();
+            return elems.join(",");
+        }
+        value_to_string(val)
+    }
+
+    /// Display a value for console.log (uses inspect-style format for arrays/objects)
+    fn vm_display_string(&mut self, val: &Value<'gc>) -> String {
+        if let Value::VmObject(map) = val {
+            let ts = map.borrow().get("toString").cloned();
+            if let Some(Value::VmFunction(ip, _arity)) = ts {
+                let result = self.call_vm_function(ip, &[]);
+                return value_to_string(&result);
+            }
+            let inner = map.borrow().get("__value__").cloned();
+            if let Some(v) = inner {
+                return value_to_string(&v);
+            }
+        }
         value_to_string(val)
     }
 
@@ -583,7 +642,7 @@ impl<'gc> VM<'gc> {
     fn call_builtin(&mut self, id: u8, args: Vec<Value<'gc>>) -> Value<'gc> {
         match id {
             BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
-                let parts: Vec<String> = args.iter().map(|v| self.vm_to_string(v)).collect();
+                let parts: Vec<String> = args.iter().map(|v| self.vm_display_string(v)).collect();
                 let msg = parts.join(" ");
                 self.output.push(msg.clone());
                 // Match existing console behavior: print to stdout
@@ -1604,6 +1663,14 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        // WeakRef.deref()
+        if let Value::VmObject(ref obj) = receiver
+            && id == BUILTIN_WEAKREF_DEREF
+        {
+            let borrow = obj.borrow();
+            return borrow.get("__target__").cloned().unwrap_or(Value::Undefined);
+        }
+
         // Iterator next() on VmObject with __items__ / __index__
         if let Value::VmObject(ref obj) = receiver
             && id == BUILTIN_ITERATOR_NEXT
@@ -1714,6 +1781,12 @@ impl<'gc> VM<'gc> {
             (Value::String(x), Value::String(y)) => x == y,
             (Value::Boolean(x), Value::Boolean(y)) => x == y,
             (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined) => true,
+            (Value::VmObject(a_rc), Value::VmObject(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
+            (Value::VmArray(a_rc), Value::VmArray(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
+            (Value::VmMap(a_rc), Value::VmMap(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
+            (Value::VmSet(a_rc), Value::VmSet(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
+            (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
+            (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             _ => false,
         }
     }
@@ -2133,14 +2206,14 @@ impl<'gc> VM<'gc> {
                             }
                             let obj_val = Value::VmObject(Rc::new(RefCell::new(map)));
                             // debug log the created arguments object keys and current func_ip
-                            if let Some(frame_ip) = Some(frame.func_ip) {
-                                if let Value::VmObject(m) = &obj_val {
-                                    log::warn!(
-                                        "constructed arguments object for func_ip={} keys={:?}",
-                                        frame_ip,
-                                        m.borrow().keys().cloned().collect::<Vec<_>>()
-                                    );
-                                }
+                            if let Some(frame_ip) = Some(frame.func_ip)
+                                && let Value::VmObject(m) = &obj_val
+                            {
+                                log::warn!(
+                                    "constructed arguments object for func_ip={} keys={:?}",
+                                    frame_ip,
+                                    m.borrow().keys().cloned().collect::<Vec<_>>()
+                                );
                             }
                             frame.arguments_obj = Some(obj_val.clone());
                             self.stack.push(obj_val);
@@ -2327,23 +2400,20 @@ impl<'gc> VM<'gc> {
                 }
                 Opcode::TypeOf => {
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    let type_str = match &a {
-                        Value::Number(_) => "number",
-                        Value::String(_) => "string",
-                        Value::Boolean(_) => "boolean",
-                        Value::Undefined => "undefined",
-                        Value::Null => "object",
-                        Value::Symbol(_) => "symbol",
-                        Value::VmFunction(..) | Value::Closure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
-                        Value::VmObject(map) => {
-                            let b = map.borrow();
-                            if b.contains_key("__fn_body__") || b.contains_key("__native_id__") {
-                                "function"
-                            } else {
-                                "object"
-                            }
-                        }
-                        _ => "object",
+                    let type_str = Self::typeof_value(&a);
+                    self.stack.push(Value::String(crate::unicode::utf8_to_utf16(type_str)));
+                }
+                Opcode::TypeOfGlobal => {
+                    let name_idx = self.read_u16() as usize;
+                    let name = if let Value::String(s) = &self.chunk.constants[name_idx] {
+                        crate::unicode::utf16_to_utf8(s)
+                    } else {
+                        String::new()
+                    };
+                    let type_str = if let Some(val) = self.globals.get(&name) {
+                        Self::typeof_value(val)
+                    } else {
+                        "undefined"
                     };
                     self.stack.push(Value::String(crate::unicode::utf8_to_utf16(type_str)));
                 }
@@ -2771,31 +2841,37 @@ impl<'gc> VM<'gc> {
                             if let Some(v) = borrow.get(&key).cloned() {
                                 v
                             } else {
+                                // Check WeakRef
+                                let is_weakref = borrow.contains_key("__weakref__");
                                 // Check typed wrapper methods first
                                 let type_name = borrow.get("__type__").map(|v| value_to_string(v));
                                 let proto = borrow.get("__proto__").cloned();
                                 drop(borrow);
-                                let typed_result = match type_name.as_deref() {
-                                    Some("Number") => match key.as_str() {
-                                        "toFixed" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
-                                        "toExponential" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
-                                        "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
-                                        "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
-                                        "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                if is_weakref && key == "deref" {
+                                    Value::VmNativeFunction(BUILTIN_WEAKREF_DEREF)
+                                } else {
+                                    let typed_result = match type_name.as_deref() {
+                                        Some("Number") => match key.as_str() {
+                                            "toFixed" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
+                                            "toExponential" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
+                                            "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
+                                            "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
+                                            "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                            _ => None,
+                                        },
                                         _ => None,
-                                    },
-                                    _ => None,
-                                };
-                                typed_result.unwrap_or_else(|| {
-                                    let effective_proto = proto.or_else(|| {
-                                        if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
-                                            obj_global.borrow().get("prototype").cloned()
-                                        } else {
-                                            None
-                                        }
-                                    });
-                                    self.lookup_proto_chain(&effective_proto, &key).unwrap_or(Value::Undefined)
-                                })
+                                    };
+                                    typed_result.unwrap_or_else(|| {
+                                        let effective_proto = proto.or_else(|| {
+                                            if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
+                                                obj_global.borrow().get("prototype").cloned()
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                        self.lookup_proto_chain(&effective_proto, &key).unwrap_or(Value::Undefined)
+                                    })
+                                }
                             }
                         }
                         Value::VmArray(_arr) => match key.as_str() {
@@ -3177,6 +3253,45 @@ impl<'gc> VM<'gc> {
                                         }
                                     }
                                     self.stack.push(Value::VmSet(Rc::new(RefCell::new(VmSetData { values }))));
+                                }
+                                BUILTIN_CTOR_WEAKMAP => {
+                                    // WeakMap: implemented as regular Map (no GC)
+                                    self.stack
+                                        .push(Value::VmMap(Rc::new(RefCell::new(VmMapData { entries: Vec::new() }))));
+                                }
+                                BUILTIN_CTOR_WEAKSET => {
+                                    // WeakSet: implemented as regular Set (no GC)
+                                    self.stack
+                                        .push(Value::VmSet(Rc::new(RefCell::new(VmSetData { values: Vec::new() }))));
+                                }
+                                BUILTIN_CTOR_WEAKREF => {
+                                    // WeakRef: target must be an object or symbol
+                                    let target = args.into_iter().next().unwrap_or(Value::Undefined);
+                                    match &target {
+                                        Value::VmObject(_)
+                                        | Value::VmArray(_)
+                                        | Value::VmMap(_)
+                                        | Value::VmSet(_)
+                                        | Value::VmFunction(..)
+                                        | Value::Closure(..)
+                                        | Value::Symbol(_) => {
+                                            let mut m = IndexMap::new();
+                                            m.insert("__weakref__".to_string(), Value::Boolean(true));
+                                            m.insert("__target__".to_string(), target);
+                                            self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
+                                        }
+                                        _ => {
+                                            let mut err_map = IndexMap::new();
+                                            err_map
+                                                .insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                            err_map.insert(
+                                                "message".to_string(),
+                                                Value::String(crate::unicode::utf8_to_utf16("Invalid value used as weak reference target")),
+                                            );
+                                            let err = Value::VmObject(Rc::new(RefCell::new(err_map)));
+                                            self.handle_throw(err)?;
+                                        }
+                                    }
                                 }
                                 _ => {
                                     log::warn!("NewCall on VmNativeFunction #{}: returning empty object", id);

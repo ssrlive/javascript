@@ -2656,6 +2656,12 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Mod);
                 self.compile_store(lhs)?;
             }
+            Expr::PowAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.compile_expr(rhs)?;
+                self.chunk.write_opcode(Opcode::Pow);
+                self.compile_store(lhs)?;
+            }
             // Ternary: cond ? a : b
             Expr::Conditional(cond, then_expr, else_expr) => {
                 self.compile_expr(cond)?;

@@ -6234,12 +6234,35 @@ impl<'gc> VM<'gc> {
                 Opcode::Mod => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    self.stack.push(Value::Number(to_number(&a) % to_number(&b)));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone() % (**b_bi).clone())));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in %"));
+                        }
+                        _ => self.stack.push(Value::Number(to_number(&a) % to_number(&b))),
+                    }
                 }
                 Opcode::Pow => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    self.stack.push(Value::Number(to_number(&a).powf(to_number(&b))));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            let exp_opt = (**b_bi).clone().try_into().ok();
+                            let exp: u32 = match exp_opt {
+                                Some(v) => v,
+                                None => {
+                                    return Err(crate::raise_range_error!("Exponent must be a non-negative BigInt"));
+                                }
+                            };
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone().pow(exp))));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in **"));
+                        }
+                        _ => self.stack.push(Value::Number(to_number(&a).powf(to_number(&b)))),
+                    }
                 }
                 Opcode::BitwiseAnd => {
                     let b = self.stack.pop().expect("VM Stack underflow");
@@ -6289,20 +6312,69 @@ impl<'gc> VM<'gc> {
                 Opcode::ShiftLeft => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    self.stack
-                        .push(Value::Number(((to_number(&a) as i32) << ((to_number(&b) as u32) & 0x1f)) as f64));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            let shift_i64: i64 = match (**b_bi).clone().try_into() {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    return Err(crate::raise_range_error!("BigInt shift count is out of range"));
+                                }
+                            };
+                            let result = if shift_i64 >= 0 {
+                                (**a_bi).clone() << (shift_i64 as usize)
+                            } else {
+                                (**a_bi).clone() >> ((-shift_i64) as usize)
+                            };
+                            self.stack.push(Value::BigInt(Box::new(result)));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in <<"));
+                        }
+                        _ => {
+                            self.stack
+                                .push(Value::Number(((to_number(&a) as i32) << ((to_number(&b) as u32) & 0x1f)) as f64));
+                        }
+                    }
                 }
                 Opcode::ShiftRight => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    self.stack
-                        .push(Value::Number(((to_number(&a) as i32) >> ((to_number(&b) as u32) & 0x1f)) as f64));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            let shift_i64: i64 = match (**b_bi).clone().try_into() {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    return Err(crate::raise_range_error!("BigInt shift count is out of range"));
+                                }
+                            };
+                            let result = if shift_i64 >= 0 {
+                                (**a_bi).clone() >> (shift_i64 as usize)
+                            } else {
+                                (**a_bi).clone() << ((-shift_i64) as usize)
+                            };
+                            self.stack.push(Value::BigInt(Box::new(result)));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in >>"));
+                        }
+                        _ => {
+                            self.stack
+                                .push(Value::Number(((to_number(&a) as i32) >> ((to_number(&b) as u32) & 0x1f)) as f64));
+                        }
+                    }
                 }
                 Opcode::UnsignedShiftRight => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    self.stack
-                        .push(Value::Number(((to_number(&a) as u32) >> ((to_number(&b) as u32) & 0x1f)) as f64));
+                    match (&a, &b) {
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("BigInt has no unsigned right shift"));
+                        }
+                        _ => {
+                            self.stack
+                                .push(Value::Number(((to_number(&a) as u32) >> ((to_number(&b) as u32) & 0x1f)) as f64));
+                        }
+                    }
                 }
                 Opcode::BitwiseNot => {
                     let a = self.stack.pop().expect("VM Stack underflow");

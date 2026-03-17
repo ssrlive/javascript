@@ -1052,6 +1052,187 @@ impl<'gc> VM<'gc> {
         value_to_string(val)
     }
 
+    fn resolve_eval_binding(&self, name: &str) -> Option<Value<'gc>> {
+        if self.direct_eval {
+            for frame in self.frames.iter().rev() {
+                if let Some(local_names) = self.chunk.fn_local_names.get(&frame.func_ip) {
+                    for (idx, local_name) in local_names.iter().enumerate() {
+                        if local_name == name {
+                            if let Some(cell) = frame.local_cells.get(&idx) {
+                                return Some(cell.borrow().clone());
+                            }
+                            let stack_idx = frame.bp + idx;
+                            if stack_idx < self.stack.len() {
+                                return Some(self.stack[stack_idx].clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.globals.get(name).cloned()
+    }
+
+    fn try_eval_optional_chain_expression(&mut self, code: &str) -> Result<Option<Value<'gc>>, JSError> {
+        enum EvalRef<'gc> {
+            Value(Value<'gc>),
+            Reference { base: Value<'gc>, value: Value<'gc> },
+        }
+
+        fn is_nullish<'gc>(v: &Value<'gc>) -> bool {
+            matches!(v, Value::Null | Value::Undefined)
+        }
+
+        fn to_prop_key<'gc>(v: &Value<'gc>) -> String {
+            match v {
+                Value::String(s) => crate::unicode::utf16_to_utf8(s),
+                _ => value_to_string(v),
+            }
+        }
+
+        fn eval_expr<'gc>(vm: &mut VM<'gc>, expr: &crate::core::statement::Expr) -> Result<EvalRef<'gc>, JSError> {
+            use crate::core::statement::Expr;
+            match expr {
+                Expr::Var(name, ..) => Ok(EvalRef::Value(vm.resolve_eval_binding(name).unwrap_or(Value::Undefined))),
+                Expr::This => Ok(EvalRef::Value(vm.this_stack.last().cloned().unwrap_or(Value::Undefined))),
+                Expr::Null => Ok(EvalRef::Value(Value::Null)),
+                Expr::Undefined => Ok(EvalRef::Value(Value::Undefined)),
+                Expr::Number(n) => Ok(EvalRef::Value(Value::Number(*n))),
+                Expr::StringLit(s) => Ok(EvalRef::Value(Value::String(s.clone()))),
+                Expr::Boolean(b) => Ok(EvalRef::Value(Value::Boolean(*b))),
+                Expr::Property(obj, key) => {
+                    let base = match eval_expr(vm, obj)? {
+                        EvalRef::Reference { value, .. } => value,
+                        EvalRef::Value(v) => v,
+                    };
+                    let val = vm.read_named_property(base.clone(), key);
+                    Ok(EvalRef::Reference { base, value: val })
+                }
+                Expr::OptionalProperty(obj, key) => {
+                    let base = match eval_expr(vm, obj)? {
+                        EvalRef::Reference { value, .. } => value,
+                        EvalRef::Value(v) => v,
+                    };
+                    if is_nullish(&base) {
+                        return Ok(EvalRef::Value(Value::Undefined));
+                    }
+                    let val = vm.read_named_property(base.clone(), key);
+                    Ok(EvalRef::Reference { base, value: val })
+                }
+                Expr::Index(obj, idx_expr) => {
+                    let base = match eval_expr(vm, obj)? {
+                        EvalRef::Reference { value, .. } => value,
+                        EvalRef::Value(v) => v,
+                    };
+                    let idx_val = match eval_expr(vm, idx_expr)? {
+                        EvalRef::Reference { value, .. } => value,
+                        EvalRef::Value(v) => v,
+                    };
+                    let key = to_prop_key(&idx_val);
+                    let val = vm.read_named_property(base.clone(), &key);
+                    Ok(EvalRef::Reference { base, value: val })
+                }
+                Expr::OptionalIndex(obj, idx_expr) => {
+                    let base = match eval_expr(vm, obj)? {
+                        EvalRef::Reference { value, .. } => value,
+                        EvalRef::Value(v) => v,
+                    };
+                    if is_nullish(&base) {
+                        return Ok(EvalRef::Value(Value::Undefined));
+                    }
+                    let idx_val = match eval_expr(vm, idx_expr)? {
+                        EvalRef::Reference { value, .. } => value,
+                        EvalRef::Value(v) => v,
+                    };
+                    let key = to_prop_key(&idx_val);
+                    let val = vm.read_named_property(base.clone(), &key);
+                    Ok(EvalRef::Reference { base, value: val })
+                }
+                Expr::Call(callee, args) | Expr::OptionalCall(callee, args) => {
+                    let optional_call = matches!(expr, Expr::OptionalCall(..));
+                    let callee_ref = eval_expr(vm, callee)?;
+                    let (callee_val, this_val) = match callee_ref {
+                        EvalRef::Reference { base, value } => (value, base),
+                        EvalRef::Value(v) => (v, Value::Undefined),
+                    };
+
+                    if optional_call && is_nullish(&callee_val) {
+                        return Ok(EvalRef::Value(Value::Undefined));
+                    }
+
+                    let mut arg_vals = Vec::with_capacity(args.len());
+                    for a in args {
+                        let v = match eval_expr(vm, a)? {
+                            EvalRef::Reference { value, .. } => value,
+                            EvalRef::Value(v) => v,
+                        };
+                        arg_vals.push(v);
+                    }
+
+                    let ret = match callee_val {
+                        Value::VmFunction(ip, _) => {
+                            vm.this_stack.push(this_val.clone());
+                            let r = vm.call_vm_function(ip, &arg_vals, &[]);
+                            vm.this_stack.pop();
+                            r
+                        }
+                        Value::VmClosure(ip, _, upv) => {
+                            vm.this_stack.push(this_val.clone());
+                            let uv = (*upv).clone();
+                            let r = vm.call_vm_function(ip, &arg_vals, &uv);
+                            vm.this_stack.pop();
+                            r
+                        }
+                        Value::VmNativeFunction(id) => {
+                            if matches!(this_val, Value::Undefined | Value::Null) {
+                                vm.call_builtin(id, arg_vals)
+                            } else {
+                                vm.call_method_builtin(id, this_val, arg_vals)
+                            }
+                        }
+                        Value::VmObject(obj) => {
+                            if let Some(Value::Number(native_id)) = obj.borrow().get("__native_id__") {
+                                vm.call_builtin(*native_id as u8, arg_vals)
+                            } else {
+                                return Err(crate::make_js_error!(crate::JSErrorKind::TypeError {
+                                    message: "is not a function".to_string()
+                                }));
+                            }
+                        }
+                        _ => {
+                            return Err(crate::make_js_error!(crate::JSErrorKind::TypeError {
+                                message: "is not a function".to_string()
+                            }));
+                        }
+                    };
+                    Ok(EvalRef::Value(ret))
+                }
+                _ => Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
+                    message: "unsupported optional-chain eval expression".to_string()
+                })),
+            }
+        }
+
+        let tokens = crate::core::tokenize(code)?;
+        let (expr, mut next) = crate::core::parse_simple_expression(&tokens, 0)?;
+        while next < tokens.len() {
+            if matches!(
+                tokens[next].token,
+                crate::core::Token::Semicolon | crate::core::Token::LineTerminator
+            ) {
+                next += 1;
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let out = match eval_expr(self, &expr)? {
+            EvalRef::Reference { value, .. } => value,
+            EvalRef::Value(v) => v,
+        };
+        Ok(Some(out))
+    }
+
     /// Execute a native/built-in function
     fn call_builtin(&mut self, id: u8, args: Vec<Value<'gc>>) -> Value<'gc> {
         match id {
@@ -1860,6 +2041,20 @@ impl<'gc> VM<'gc> {
                         return self.read_named_property(super_base, name);
                     }
                     return Value::Undefined;
+                }
+                if code.contains("?.") {
+                    match self.try_eval_optional_chain_expression(&code) {
+                        Ok(Some(v)) => return v,
+                        Ok(None) => {}
+                        Err(e) => {
+                            let msg = format!("{}", e);
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Error")));
+                            err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                    }
                 }
                 // Compile and run eval'd code in a temporary VM that shares globals
                 let result = (|| -> Result<Value<'gc>, JSError> {

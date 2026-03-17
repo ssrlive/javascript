@@ -191,6 +191,36 @@ const BUILTIN_STRING_MATCH: u8 = 186;
 const BUILTIN_STRING_REPLACEALL: u8 = 187;
 const BUILTIN_STRING_SEARCH: u8 = 188;
 
+// Date methods
+const BUILTIN_DATE_NOW: u8 = 189;
+const BUILTIN_DATE_GETTIME: u8 = 190;
+const BUILTIN_DATE_TOSTRING: u8 = 191;
+const BUILTIN_DATE_TOLOCALEDATESTRING: u8 = 192;
+const BUILTIN_DATE_GETFULLYEAR: u8 = 193;
+const BUILTIN_DATE_GETMONTH: u8 = 194;
+const BUILTIN_DATE_GETDATE: u8 = 195;
+const BUILTIN_DATE_GETDAY: u8 = 196;
+const BUILTIN_DATE_GETHOURS: u8 = 197;
+const BUILTIN_DATE_GETMINUTES: u8 = 198;
+const BUILTIN_DATE_GETSECONDS: u8 = 199;
+const BUILTIN_DATE_GETMILLISECONDS: u8 = 200;
+const BUILTIN_DATE_VALUEOF: u8 = 201;
+const BUILTIN_DATE_SETFULLYEAR: u8 = 202;
+const BUILTIN_DATE_SETMONTH: u8 = 203;
+const BUILTIN_DATE_SETDATE: u8 = 204;
+const BUILTIN_DATE_SETHOURS: u8 = 205;
+const BUILTIN_DATE_SETMINUTES: u8 = 206;
+const BUILTIN_DATE_TOLOCALETIMESTRING: u8 = 207;
+const BUILTIN_DATE_TOLOCALESTRING: u8 = 208;
+const BUILTIN_DATE_TOISOSTRING: u8 = 209;
+const BUILTIN_DATE_GETUTCFULLYEAR: u8 = 210;
+const BUILTIN_DATE_GETUTCMONTH: u8 = 211;
+const BUILTIN_DATE_GETUTCDATE: u8 = 212;
+const BUILTIN_DATE_GETUTCHOURS: u8 = 213;
+const BUILTIN_DATE_GETUTCMINUTES: u8 = 214;
+const BUILTIN_DATE_GETUTCSECONDS: u8 = 215;
+const BUILTIN_DATE_GETTIMEZONEOFFSET: u8 = 216;
+
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
     pub return_ip: usize,
@@ -347,7 +377,7 @@ impl<'gc> VM<'gc> {
                 let b = map.borrow();
                 if b.contains_key("__vm_symbol__") {
                     "symbol"
-                } else if b.contains_key("__fn_body__") || b.contains_key("__native_id__") {
+                } else if b.contains_key("__fn_body__") || b.contains_key("__native_id__") || b.contains_key("__bound_target__") {
                     "function"
                 } else {
                     "object"
@@ -365,6 +395,13 @@ impl<'gc> VM<'gc> {
             let key_exists = borrow.contains_key(&key);
             let readonly_key = format!("__readonly_{}__", key);
             let is_readonly = matches!(borrow.get(&readonly_key), Some(Value::Boolean(true)));
+            let getter_key = format!("__get_{}", key);
+            let has_getter = borrow.get(&getter_key).is_some()
+                || borrow
+                    .get("__proto__")
+                    .cloned()
+                    .and_then(|proto| self.lookup_proto_chain(&Some(proto), &getter_key))
+                    .is_some();
             let setter_key = format!("__set_{}", key);
             let setter = borrow.get(&setter_key).cloned().or_else(|| {
                 borrow
@@ -382,15 +419,29 @@ impl<'gc> VM<'gc> {
                 false
             };
             drop(borrow);
+            let getter_only = has_getter && setter.is_none();
 
-            if let Some(Value::VmFunction(setter_ip, _) | Value::VmClosure(setter_ip, _, _)) = setter {
-                self.this_stack.push(obj.clone());
-                let result = self.call_vm_function(setter_ip, std::slice::from_ref(&val), &[]);
-                self.this_stack.pop();
-                let _ = result;
-            } else if is_frozen || (is_non_ext && !key_exists) || is_readonly || proto_readonly {
+            if let Some(setter_fn) = setter {
+                match setter_fn {
+                    Value::VmFunction(setter_ip, _) => {
+                        self.this_stack.push(obj.clone());
+                        let result = self.call_vm_function(setter_ip, std::slice::from_ref(&val), &[]);
+                        self.this_stack.pop();
+                        let _ = result;
+                    }
+                    Value::VmClosure(setter_ip, _, ups) => {
+                        self.this_stack.push(obj.clone());
+                        let result = self.call_vm_function(setter_ip, std::slice::from_ref(&val), &ups);
+                        self.this_stack.pop();
+                        let _ = result;
+                    }
+                    _ => {}
+                }
+            } else if is_frozen || (is_non_ext && !key_exists) || is_readonly || proto_readonly || getter_only {
                 let msg = if is_frozen {
                     format!("Cannot assign to read only property '{}' of object", key)
+                } else if getter_only {
+                    format!("Cannot set property {} of object which has only a getter", key)
                 } else {
                     format!("Cannot add property {}, object is not extensible", key)
                 };
@@ -660,7 +711,12 @@ impl<'gc> VM<'gc> {
             .insert("ReferenceError".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_REFERENCEERROR));
 
         // Type constructor sentinels (for typeof checks / instanceof)
-        self.globals.insert("Date".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_DATE));
+        // Date constructor with static methods
+        let mut date_map = IndexMap::new();
+        date_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_DATE as f64));
+        date_map.insert("now".to_string(), Value::VmNativeFunction(BUILTIN_DATE_NOW));
+        self.globals
+            .insert("Date".to_string(), Value::VmObject(Rc::new(RefCell::new(date_map))));
         self.globals
             .insert("Boolean".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_BOOLEAN));
         // Object constructor with static methods
@@ -844,6 +900,14 @@ impl<'gc> VM<'gc> {
     /// Execute a native/built-in function
     fn call_builtin(&mut self, id: u8, args: Vec<Value<'gc>>) -> Value<'gc> {
         match id {
+            BUILTIN_DATE_NOW => {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as f64)
+                    .unwrap_or(0.0);
+                Value::Number(ms)
+            }
             BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
                 let parts: Vec<String> = args.iter().map(|v| self.vm_display_string(v)).collect();
                 let msg = parts.join(" ");
@@ -1103,10 +1167,12 @@ impl<'gc> VM<'gc> {
                 use std::time::SystemTime;
                 let seed = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
+                    .map(|d| d.as_nanos() as u64)
                     .unwrap_or(0);
-                // Simple hash to get [0, 1)
-                let v = ((seed ^ (seed >> 17)).wrapping_mul(0x9E3779B97F4A7C15) >> 11) as f64 / (1u64 << 53) as f64;
+                // Simple hash and keep 53 random bits to map into [0, 1)
+                let mixed = seed ^ (seed >> 17) ^ (seed << 13);
+                let bits53 = mixed & ((1u64 << 53) - 1);
+                let v = (bits53 as f64) / ((1u64 << 53) as f64);
                 Value::Number(v)
             }
             BUILTIN_MATH_CLZ32 => {
@@ -1541,6 +1607,18 @@ impl<'gc> VM<'gc> {
                 Some(Value::Number(n)) => Value::Boolean(n.is_finite() && *n == n.trunc() && n.abs() <= 9007199254740991.0),
                 _ => Value::Boolean(false),
             },
+            // Date() called as a function returns a date-time string in JS.
+            // Keep it simple and deterministic enough for tests.
+            BUILTIN_CTOR_DATE => {
+                use chrono::{Local, TimeZone, Utc};
+                let now = Utc::now().timestamp_millis();
+                if let Some(dt) = Local.timestamp_millis_opt(now).single() {
+                    let s = dt.format("%a %b %d %Y %H:%M:%S GMT%z").to_string();
+                    Value::String(crate::unicode::utf8_to_utf16(&s))
+                } else {
+                    Value::String(crate::unicode::utf8_to_utf16("Invalid Date"))
+                }
+            }
             // Error constructors called as functions (without `new`) — still create error objects
             BUILTIN_CTOR_ERROR
             | BUILTIN_CTOR_TYPEERROR
@@ -2076,10 +2154,116 @@ impl<'gc> VM<'gc> {
             | BUILTIN_STRING_FROMCHARCODE
             | BUILTIN_EVAL
             | BUILTIN_NEW_FUNCTION
-            | BUILTIN_BIGINT => {
+            | BUILTIN_BIGINT
+            | BUILTIN_DATE_NOW
+            | BUILTIN_CTOR_DATE => {
                 return self.call_builtin(id, args);
             }
             _ => {}
+        }
+
+        // Date instance methods
+        if let Value::VmObject(ref obj) = receiver {
+            let date_ms = {
+                let borrow = obj.borrow();
+                match borrow.get("__date_ms__") {
+                    Some(Value::Number(ms)) => Some(*ms),
+                    _ => None,
+                }
+            };
+            if let Some(ms) = date_ms {
+                use chrono::{Datelike, Local, TimeZone, Timelike, Utc};
+                let to_local = || Local.timestamp_millis_opt(ms as i64).single();
+                let to_utc = || Utc.timestamp_millis_opt(ms as i64).single();
+                match id {
+                    BUILTIN_DATE_GETTIME | BUILTIN_DATE_VALUEOF => return Value::Number(ms),
+                    BUILTIN_DATE_TOSTRING => {
+                        if let Some(dt) = to_local() {
+                            let s = dt.format("%a %b %d %Y %H:%M:%S GMT%z").to_string();
+                            return Value::String(crate::unicode::utf8_to_utf16(&s));
+                        }
+                        return Value::String(crate::unicode::utf8_to_utf16("Invalid Date"));
+                    }
+                    BUILTIN_DATE_TOLOCALEDATESTRING => {
+                        if let Some(dt) = to_local() {
+                            let s = format!("{}/{}/{}", dt.month(), dt.day(), dt.year());
+                            return Value::String(crate::unicode::utf8_to_utf16(&s));
+                        }
+                        return Value::String(crate::unicode::utf8_to_utf16("Invalid Date"));
+                    }
+                    BUILTIN_DATE_TOLOCALETIMESTRING => {
+                        if let Some(dt) = to_local() {
+                            let s = dt.format("%H:%M:%S").to_string();
+                            return Value::String(crate::unicode::utf8_to_utf16(&s));
+                        }
+                        return Value::String(crate::unicode::utf8_to_utf16("Invalid Date"));
+                    }
+                    BUILTIN_DATE_TOLOCALESTRING => {
+                        if let Some(dt) = to_local() {
+                            let s = format!("{}/{}/{} {}", dt.month(), dt.day(), dt.year(), dt.format("%H:%M:%S"));
+                            return Value::String(crate::unicode::utf8_to_utf16(&s));
+                        }
+                        return Value::String(crate::unicode::utf8_to_utf16("Invalid Date"));
+                    }
+                    BUILTIN_DATE_TOISOSTRING => {
+                        if let Some(dt) = to_utc() {
+                            let s = dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+                            return Value::String(crate::unicode::utf8_to_utf16(&s));
+                        }
+                        return Value::String(crate::unicode::utf8_to_utf16("Invalid Date"));
+                    }
+                    BUILTIN_DATE_GETFULLYEAR => {
+                        return Value::Number(to_local().map(|dt| dt.year() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETMONTH => {
+                        return Value::Number(to_local().map(|dt| (dt.month0()) as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETDATE => {
+                        return Value::Number(to_local().map(|dt| dt.day() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETDAY => {
+                        return Value::Number(to_local().map(|dt| dt.weekday().num_days_from_sunday() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETHOURS => {
+                        return Value::Number(to_local().map(|dt| dt.hour() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETMINUTES => {
+                        return Value::Number(to_local().map(|dt| dt.minute() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETSECONDS => {
+                        return Value::Number(to_local().map(|dt| dt.second() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETMILLISECONDS => {
+                        return Value::Number(to_local().map(|dt| dt.timestamp_subsec_millis() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETUTCFULLYEAR => {
+                        return Value::Number(to_utc().map(|dt| dt.year() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETUTCMONTH => {
+                        return Value::Number(to_utc().map(|dt| dt.month0() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETUTCDATE => {
+                        return Value::Number(to_utc().map(|dt| dt.day() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETUTCHOURS => {
+                        return Value::Number(to_utc().map(|dt| dt.hour() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETUTCMINUTES => {
+                        return Value::Number(to_utc().map(|dt| dt.minute() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETUTCSECONDS => {
+                        return Value::Number(to_utc().map(|dt| dt.second() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETTIMEZONEOFFSET => {
+                        if let Some(dt) = to_local() {
+                            let mins = -(dt.offset().local_minus_utc() as f64 / 60.0);
+                            return Value::Number(mins);
+                        }
+                        return Value::Number(f64::NAN);
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Array methods
@@ -3327,6 +3511,26 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        // Function.prototype.bind(thisArg, ...args)
+        if id == BUILTIN_FN_BIND {
+            let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
+            let bound_args: Vec<Value<'gc>> = args.into_iter().skip(1).collect();
+            return match receiver {
+                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
+                    let mut m = IndexMap::new();
+                    m.insert("__bound_target__".to_string(), receiver);
+                    m.insert("__bound_this__".to_string(), this_arg);
+                    m.insert(
+                        "__bound_args__".to_string(),
+                        Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(bound_args)))),
+                    );
+                    m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Function")));
+                    Value::VmObject(Rc::new(RefCell::new(m)))
+                }
+                _ => Value::Undefined,
+            };
+        }
+
         // RegExp.prototype.exec(string)
         if id == BUILTIN_REGEX_EXEC {
             if let Value::VmObject(ref map) = receiver {
@@ -3695,9 +3899,9 @@ impl<'gc> VM<'gc> {
             (Value::VmMap(a_rc), Value::VmMap(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
             (Value::VmSet(a_rc), Value::VmSet(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
             (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
-            (Value::VmClosure(a_ip, _, _), Value::VmClosure(b_ip, _, _)) => a_ip == b_ip,
-            (Value::VmFunction(a_ip, _), Value::VmClosure(b_ip, _, _)) => a_ip == b_ip,
-            (Value::VmClosure(a_ip, _, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
+            (Value::VmClosure(a_ip, _, a_uv), Value::VmClosure(b_ip, _, b_uv)) => a_ip == b_ip && Rc::ptr_eq(a_uv, b_uv),
+            (Value::VmFunction(_, _), Value::VmClosure(_, _, _)) => false,
+            (Value::VmClosure(_, _, _), Value::VmFunction(_, _)) => false,
             (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             _ => false,
         }
@@ -3732,9 +3936,9 @@ impl<'gc> VM<'gc> {
             (Value::VmSet(a_rc), Value::VmSet(b_rc)) => Rc::ptr_eq(a_rc, b_rc),
             (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
-            (Value::VmClosure(a_ip, _, _), Value::VmClosure(b_ip, _, _)) => a_ip == b_ip,
-            (Value::VmFunction(a_ip, _), Value::VmClosure(b_ip, _, _)) => a_ip == b_ip,
-            (Value::VmClosure(a_ip, _, _), Value::VmFunction(b_ip, _)) => a_ip == b_ip,
+            (Value::VmClosure(a_ip, _, a_uv), Value::VmClosure(b_ip, _, b_uv)) => a_ip == b_ip && Rc::ptr_eq(a_uv, b_uv),
+            (Value::VmFunction(_, _), Value::VmClosure(_, _, _)) => false,
+            (Value::VmClosure(_, _, _), Value::VmFunction(_, _)) => false,
             _ => false,
         }
     }
@@ -3998,6 +4202,19 @@ impl<'gc> VM<'gc> {
                 Opcode::GetLocal => {
                     let index = self.read_byte() as usize;
                     let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
+                    if bp + index >= self.stack.len() {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Invalid local access")),
+                        );
+                        err_map.insert(
+                            "__type__".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
+                        );
+                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                        continue;
+                    }
                     // Check if this local has been captured as an upvalue cell
                     let val = if let Some(frame) = self.frames.last() {
                         if let Some(cell) = frame.local_cells.get(&index) {
@@ -4028,6 +4245,19 @@ impl<'gc> VM<'gc> {
                 Opcode::SetLocal => {
                     let index = self.read_byte() as usize;
                     let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
+                    if bp + index >= self.stack.len() {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Invalid local assignment")),
+                        );
+                        err_map.insert(
+                            "__type__".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
+                        );
+                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                        continue;
+                    }
                     let val = self.stack.last().expect("VM Stack underflow").clone();
                     // Check if this local has been captured as an upvalue cell
                     let has_cell = self.frames.last().map(|f| f.local_cells.contains_key(&index)).unwrap_or(false);
@@ -4050,6 +4280,43 @@ impl<'gc> VM<'gc> {
                     let callee = self.stack[callee_idx].clone();
                     match callee {
                         Value::VmFunction(target_ip, arity) => {
+                            if is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                                let in_ctor_context = self.frames.iter().any(|f| self.chunk.class_constructor_ips.contains(&f.func_ip));
+                                if !in_ctor_context {
+                                    let receiver = self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined);
+                                    let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
+                                    let base = callee_idx.saturating_sub(1);
+                                    self.stack.truncate(base);
+                                    self.this_stack.push(receiver);
+                                    let result = self.call_vm_function(target_ip, &args_vec, &[]);
+                                    self.this_stack.pop();
+                                    self.stack.push(result);
+
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert(
+                                        "__type__".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
+                                    );
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16(
+                                            "Super constructor may only be called directly in a derived constructor",
+                                        )),
+                                    );
+                                    self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                    continue;
+                                }
+                            }
+                            if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Class constructor cannot be invoked without 'new'")),
+                                );
+                                self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                continue;
+                            }
                             // Pad missing args with Undefined
                             if (arg_count as u8) < arity {
                                 for _ in 0..(arity as usize - arg_count) {
@@ -4108,6 +4375,43 @@ impl<'gc> VM<'gc> {
                             self.ip = target_ip;
                         }
                         Value::VmClosure(target_ip, arity, ref upvals) => {
+                            if is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                                let in_ctor_context = self.frames.iter().any(|f| self.chunk.class_constructor_ips.contains(&f.func_ip));
+                                if !in_ctor_context {
+                                    let receiver = self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined);
+                                    let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
+                                    let base = callee_idx.saturating_sub(1);
+                                    self.stack.truncate(base);
+                                    self.this_stack.push(receiver);
+                                    let result = self.call_vm_function(target_ip, &args_vec, upvals);
+                                    self.this_stack.pop();
+                                    self.stack.push(result);
+
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert(
+                                        "__type__".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
+                                    );
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16(
+                                            "Super constructor may only be called directly in a derived constructor",
+                                        )),
+                                    );
+                                    self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                    continue;
+                                }
+                            }
+                            if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Class constructor cannot be invoked without 'new'")),
+                                );
+                                self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                continue;
+                            }
                             if (arg_count as u8) < arity {
                                 for _ in 0..(arity as usize - arg_count) {
                                     self.stack.push(Value::Undefined);
@@ -4246,7 +4550,48 @@ impl<'gc> VM<'gc> {
                             // Check if it's a Function wrapper (VmObject with __fn_body__ or __native_id__)
                             if let Value::VmObject(ref map) = callee {
                                 let borrow = map.borrow();
-                                if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
+                                if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
+                                    let bound_this = borrow.get("__bound_this__").cloned().unwrap_or(Value::Undefined);
+                                    let mut final_args: Vec<Value<'gc>> = match borrow.get("__bound_args__") {
+                                        Some(Value::VmArray(arr)) => arr.borrow().iter().cloned().collect(),
+                                        _ => Vec::new(),
+                                    };
+                                    drop(borrow);
+
+                                    let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
+                                    self.stack.pop(); // pop callee
+                                    if is_method {
+                                        self.stack.pop(); // pop receiver
+                                    }
+                                    final_args.extend(args_collected);
+
+                                    let result = match bound_target {
+                                        Value::VmFunction(ip, _) => {
+                                            self.this_stack.push(bound_this.clone());
+                                            let r = self.call_vm_function(ip, &final_args, &[]);
+                                            self.this_stack.pop();
+                                            r
+                                        }
+                                        Value::VmClosure(ip, _, ups) => {
+                                            self.this_stack.push(bound_this.clone());
+                                            let r = self.call_vm_function(ip, &final_args, &ups);
+                                            self.this_stack.pop();
+                                            r
+                                        }
+                                        Value::VmNativeFunction(id) => {
+                                            self.this_stack.push(bound_this.clone());
+                                            let r = self.call_method_builtin(id, bound_this, final_args);
+                                            self.this_stack.pop();
+                                            r
+                                        }
+                                        _ => Value::Undefined,
+                                    };
+                                    self.stack.push(result);
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(thrown)?;
+                                        continue;
+                                    }
+                                } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
                                     let id = *native_id as u8;
                                     drop(borrow);
                                     let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
@@ -4544,11 +4889,14 @@ impl<'gc> VM<'gc> {
                         (Value::VmSet(a_rc), Value::VmSet(b_rc)) => {
                             self.stack.push(Value::Boolean(!Rc::ptr_eq(a_rc, b_rc)));
                         }
-                        (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _))
-                        | (Value::VmClosure(a_ip, _, _), Value::VmClosure(b_ip, _, _))
-                        | (Value::VmFunction(a_ip, _), Value::VmClosure(b_ip, _, _))
-                        | (Value::VmClosure(a_ip, _, _), Value::VmFunction(b_ip, _)) => {
+                        (Value::VmFunction(a_ip, _), Value::VmFunction(b_ip, _)) => {
                             self.stack.push(Value::Boolean(a_ip != b_ip));
+                        }
+                        (Value::VmClosure(a_ip, _, a_uv), Value::VmClosure(b_ip, _, b_uv)) => {
+                            self.stack.push(Value::Boolean(a_ip != b_ip || !Rc::ptr_eq(a_uv, b_uv)));
+                        }
+                        (Value::VmFunction(_, _), Value::VmClosure(_, _, _)) | (Value::VmClosure(_, _, _), Value::VmFunction(_, _)) => {
+                            self.stack.push(Value::Boolean(true));
                         }
                         (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => {
                             self.stack.push(Value::Boolean(a_id != b_id));
@@ -5188,8 +5536,28 @@ impl<'gc> VM<'gc> {
                                                 None
                                             }
                                         });
-                                        let found = self.lookup_proto_chain(&effective_proto, &key);
-                                        self.stack.push(found.unwrap_or(Value::Undefined));
+                                        // Accessor lookup on prototype chain: __get_<key>
+                                        let getter_key = format!("__get_{}", key);
+                                        if let Some(getter_fn) = self.lookup_proto_chain(&effective_proto, &getter_key) {
+                                            match getter_fn {
+                                                Value::VmFunction(ip, _) => {
+                                                    self.this_stack.push(obj.clone());
+                                                    let result = self.call_vm_function(ip, &[], &[]);
+                                                    self.this_stack.pop();
+                                                    self.stack.push(result);
+                                                }
+                                                Value::VmClosure(ip, _, ups) => {
+                                                    self.this_stack.push(obj.clone());
+                                                    let result = self.call_vm_function(ip, &[], &ups);
+                                                    self.this_stack.pop();
+                                                    self.stack.push(result);
+                                                }
+                                                _ => self.stack.push(Value::Undefined),
+                                            }
+                                        } else {
+                                            let found = self.lookup_proto_chain(&effective_proto, &key);
+                                            self.stack.push(found.unwrap_or(Value::Undefined));
+                                        }
                                     }
                                 }
                             }
@@ -5876,6 +6244,7 @@ impl<'gc> VM<'gc> {
                             let fn_props = self.get_fn_props(*ip, *arity);
                             fn_props.borrow().get("prototype").cloned()
                         }
+                        Value::VmObject(map) => map.borrow().get("prototype").cloned(),
                         _ => None,
                     };
 
@@ -5934,6 +6303,23 @@ impl<'gc> VM<'gc> {
                                 BUILTIN_CTOR_FR => "FinalizationRegistry",
                                 _ => "",
                             },
+                            Value::VmObject(map) => {
+                                let borrow = map.borrow();
+                                if let Some(Value::Number(n)) = borrow.get("__native_id__") {
+                                    match *n as u8 {
+                                        BUILTIN_CTOR_FUNCTION => "Function",
+                                        BUILTIN_CTOR_OBJECT => "Object",
+                                        BUILTIN_CTOR_ERROR => "Error",
+                                        BUILTIN_CTOR_TYPEERROR => "TypeError",
+                                        BUILTIN_CTOR_SYNTAXERROR => "SyntaxError",
+                                        BUILTIN_CTOR_RANGEERROR => "RangeError",
+                                        BUILTIN_CTOR_REFERENCEERROR => "ReferenceError",
+                                        _ => "",
+                                    }
+                                } else {
+                                    ""
+                                }
+                            }
                             _ => "",
                         };
                         let ctor_str = if ctor_name.is_empty() {
@@ -6208,6 +6594,118 @@ impl<'gc> VM<'gc> {
                                     map.insert("lastIndex".to_string(), Value::Number(0.0));
                                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
                                 }
+                                BUILTIN_CTOR_DATE => {
+                                    use std::time::{SystemTime, UNIX_EPOCH};
+                                    let ms = if args.is_empty() {
+                                        // new Date() — current timestamp
+                                        SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as f64)
+                                            .unwrap_or(0.0)
+                                    } else if args.len() == 1 {
+                                        // new Date(value) — parse or timestamp
+                                        match &args[0] {
+                                            Value::Number(n) => *n,
+                                            Value::String(s) => {
+                                                let s_str = crate::unicode::utf16_to_utf8(s);
+                                                // Try to parse ISO date string
+                                                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s_str) {
+                                                    dt.timestamp_millis() as f64
+                                                } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%Y-%m-%d") {
+                                                    dt.and_hms_opt(0, 0, 0)
+                                                        .map(|d| d.and_utc().timestamp_millis() as f64)
+                                                        .unwrap_or(f64::NAN)
+                                                } else {
+                                                    f64::NAN
+                                                }
+                                            }
+                                            _ => f64::NAN,
+                                        }
+                                    } else {
+                                        // new Date(year, month, day?, hours?, min?, sec?, ms?)
+                                        let year = if let Value::Number(n) = &args[0] { *n as i32 } else { 0 };
+                                        let month = if let Value::Number(n) = args.get(1).unwrap_or(&Value::Number(0.0)) {
+                                            *n as u32
+                                        } else {
+                                            0
+                                        };
+                                        let day = if let Value::Number(n) = args.get(2).unwrap_or(&Value::Number(1.0)) {
+                                            *n as u32
+                                        } else {
+                                            1
+                                        };
+                                        let hour = if let Value::Number(n) = args.get(3).unwrap_or(&Value::Number(0.0)) {
+                                            *n as u32
+                                        } else {
+                                            0
+                                        };
+                                        let min = if let Value::Number(n) = args.get(4).unwrap_or(&Value::Number(0.0)) {
+                                            *n as u32
+                                        } else {
+                                            0
+                                        };
+                                        let sec = if let Value::Number(n) = args.get(5).unwrap_or(&Value::Number(0.0)) {
+                                            *n as u32
+                                        } else {
+                                            0
+                                        };
+                                        let ms_part = if let Value::Number(n) = args.get(6).unwrap_or(&Value::Number(0.0)) {
+                                            *n as u32
+                                        } else {
+                                            0
+                                        };
+                                        // Adjust year: 0-99 maps to 1900-1999
+                                        let full_year = if (0..100).contains(&year) { year + 1900 } else { year };
+                                        // Use chrono to build the date in local timezone
+                                        use chrono::{Local, TimeZone};
+                                        let result = Local.with_ymd_and_hms(full_year, month + 1, day, hour, min, sec);
+                                        match result {
+                                            chrono::LocalResult::Single(dt) => dt.timestamp_millis() as f64 + ms_part as f64,
+                                            _ => f64::NAN,
+                                        }
+                                    };
+                                    let mut map = IndexMap::new();
+                                    map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Date")));
+                                    map.insert("__date_ms__".to_string(), Value::Number(ms));
+                                    // Install Date instance methods
+                                    map.insert("getTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETTIME));
+                                    map.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_DATE_VALUEOF));
+                                    map.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOSTRING));
+                                    map.insert(
+                                        "toLocaleDateString".to_string(),
+                                        Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING),
+                                    );
+                                    map.insert(
+                                        "toLocaleTimeString".to_string(),
+                                        Value::VmNativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING),
+                                    );
+                                    map.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOLOCALESTRING));
+                                    map.insert("toISOString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOISOSTRING));
+                                    map.insert("getFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETFULLYEAR));
+                                    map.insert("getMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMONTH));
+                                    map.insert("getDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDATE));
+                                    map.insert("getDay".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDAY));
+                                    map.insert("getHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETHOURS));
+                                    map.insert("getMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMINUTES));
+                                    map.insert("getSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETSECONDS));
+                                    map.insert("getMilliseconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS));
+                                    map.insert("setFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETFULLYEAR));
+                                    map.insert("setMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMONTH));
+                                    map.insert("setDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETDATE));
+                                    map.insert("setHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETHOURS));
+                                    map.insert("setMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMINUTES));
+                                    map.insert(
+                                        "getTimezoneOffset".to_string(),
+                                        Value::VmNativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET),
+                                    );
+                                    map.insert("getUTCFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCFULLYEAR));
+                                    map.insert("getUTCMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMONTH));
+                                    map.insert("getUTCDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCDATE));
+                                    map.insert("getUTCHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS));
+                                    map.insert("getUTCMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES));
+                                    map.insert("getUTCSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS));
+                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
+                                }
                                 _ => {
                                     log::warn!("NewCall on VmNativeFunction #{}: returning empty object", id);
                                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
@@ -6228,6 +6726,88 @@ impl<'gc> VM<'gc> {
                                         .rev()
                                         .collect();
                                     self.stack.pop(); // pop constructor
+
+                                    // Date is exposed as a constructor object (with __native_id__),
+                                    // so handle `new Date(...)` here as well.
+                                    if id == BUILTIN_CTOR_DATE {
+                                        use std::time::{SystemTime, UNIX_EPOCH};
+                                        let ms = if args.is_empty() {
+                                            SystemTime::now()
+                                                .duration_since(UNIX_EPOCH)
+                                                .map(|d| d.as_millis() as f64)
+                                                .unwrap_or(0.0)
+                                        } else if args.len() == 1 {
+                                            match &args[0] {
+                                                Value::Number(n) => *n,
+                                                Value::String(s) => {
+                                                    let s_str = crate::unicode::utf16_to_utf8(s);
+                                                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s_str) {
+                                                        dt.timestamp_millis() as f64
+                                                    } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%Y-%m-%d") {
+                                                        dt.and_hms_opt(0, 0, 0)
+                                                            .map(|d| d.and_utc().timestamp_millis() as f64)
+                                                            .unwrap_or(f64::NAN)
+                                                    } else {
+                                                        f64::NAN
+                                                    }
+                                                }
+                                                _ => f64::NAN,
+                                            }
+                                        } else {
+                                            let year = if let Value::Number(n) = &args[0] { *n as i32 } else { 0 };
+                                            let month = if let Value::Number(n) = args.get(1).unwrap_or(&Value::Number(0.0)) {
+                                                *n as u32
+                                            } else {
+                                                0
+                                            };
+                                            let day = if let Value::Number(n) = args.get(2).unwrap_or(&Value::Number(1.0)) {
+                                                *n as u32
+                                            } else {
+                                                1
+                                            };
+                                            let hour = if let Value::Number(n) = args.get(3).unwrap_or(&Value::Number(0.0)) {
+                                                *n as u32
+                                            } else {
+                                                0
+                                            };
+                                            let min = if let Value::Number(n) = args.get(4).unwrap_or(&Value::Number(0.0)) {
+                                                *n as u32
+                                            } else {
+                                                0
+                                            };
+                                            let sec = if let Value::Number(n) = args.get(5).unwrap_or(&Value::Number(0.0)) {
+                                                *n as u32
+                                            } else {
+                                                0
+                                            };
+                                            let ms_part = if let Value::Number(n) = args.get(6).unwrap_or(&Value::Number(0.0)) {
+                                                *n as u32
+                                            } else {
+                                                0
+                                            };
+                                            let full_year = if (0..100).contains(&year) { year + 1900 } else { year };
+                                            use chrono::{Local, TimeZone};
+                                            let result = Local.with_ymd_and_hms(full_year, month + 1, day, hour, min, sec);
+                                            match result {
+                                                chrono::LocalResult::Single(dt) => dt.timestamp_millis() as f64 + ms_part as f64,
+                                                _ => f64::NAN,
+                                            }
+                                        };
+
+                                        let mut m = IndexMap::new();
+                                        m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Date")));
+                                        m.insert("__date_ms__".to_string(), Value::Number(ms));
+                                        m.insert("getTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETTIME));
+                                        m.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_DATE_VALUEOF));
+                                        m.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOSTRING));
+                                        m.insert(
+                                            "toLocaleDateString".to_string(),
+                                            Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING),
+                                        );
+                                        self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
+                                        continue;
+                                    }
+
                                     let result = self.call_builtin(id, args);
                                     // For constructors like Number/String/Boolean,
                                     // wrap the primitive result in an object

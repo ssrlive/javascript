@@ -169,6 +169,8 @@ pub struct Chunk<'gc> {
     pub constants: Vec<Value<'gc>>,
     /// Map from function IP to function name (for .name property)
     pub fn_names: std::collections::HashMap<usize, String>,
+    /// Function IPs that correspond to class constructors.
+    pub class_constructor_ips: std::collections::HashSet<usize>,
     /// Recorded strictness flag for functions by their starting IP
     pub fn_strictness: std::collections::HashMap<usize, bool>,
     /// Map from function IP to local variable names (for direct eval)
@@ -181,6 +183,7 @@ impl<'gc> Chunk<'gc> {
             code: Vec::new(),
             constants: Vec::new(),
             fn_names: std::collections::HashMap::new(),
+            class_constructor_ips: std::collections::HashSet::new(),
             fn_strictness: std::collections::HashMap::new(),
             fn_local_names: std::collections::HashMap::new(),
         }

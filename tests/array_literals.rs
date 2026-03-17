@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -13,7 +13,7 @@ fn test_empty_array_literal() {
         let arr = [];
         arr.length
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
     match result {
         Ok(n) => assert_eq!(n, "0"),
         _ => panic!("Expected number 0, got {:?}", result),
@@ -26,7 +26,7 @@ fn test_array_literal_with_elements() {
         let arr = [1, 2, 3];
         arr.length
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
     match result {
         Ok(n) => assert_eq!(n, "3"),
         _ => panic!("Expected number 3, got {:?}", result),
@@ -39,7 +39,7 @@ fn test_array_literal_indexing() {
         let arr = [10, 20, 30];
         arr[0] + arr[1] + arr[2]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
     match result {
         Ok(n) => assert_eq!(n, "60"),
         _ => panic!("Expected number 60, got {:?}", result),
@@ -52,7 +52,7 @@ fn test_array_literal_mixed_types() {
         let arr = [1, "hello", true];
         arr.length
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
     match result {
         Ok(n) => assert_eq!(n, "3"),
         _ => panic!("Expected number 3, got {:?}", result),
@@ -94,7 +94,7 @@ fn test_array_literal_nested() {
         let arr = [ [1, 2], [3, 4] ];
         arr[0][0] + arr[0][1] + arr[1][0] + arr[1][1]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
     match result {
         Ok(n) => assert_eq!(n, "10"),
         _ => panic!("Expected number 10, got {result:?}"),

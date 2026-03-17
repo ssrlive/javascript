@@ -54,6 +54,8 @@ const BUILTIN_STRING_LASTINDEXOF: u8 = 49;
 const BUILTIN_JSON_STRINGIFY: u8 = 50;
 const BUILTIN_JSON_PARSE: u8 = 51;
 const BUILTIN_ARRAY_REDUCE: u8 = 52;
+const BUILTIN_BIGINT_ASUINTN: u8 = 53;
+const BUILTIN_BIGINT_ASINTN: u8 = 54;
 // Constructor sentinels (for typeof → "function" and instanceof checks)
 const BUILTIN_CTOR_ERROR: u8 = 60;
 const BUILTIN_CTOR_TYPEERROR: u8 = 61;
@@ -302,6 +304,67 @@ fn to_number<'gc>(val: &Value<'gc>) -> f64 {
             trimmed.parse::<f64>().unwrap_or(f64::NAN)
         }
         _ => f64::NAN,
+    }
+}
+
+fn bigint_from_integral_number(n: f64) -> Option<num_bigint::BigInt> {
+    if !n.is_finite() || n != n.trunc() {
+        return None;
+    }
+    if n == 0.0 {
+        return Some(num_bigint::BigInt::from(0));
+    }
+
+    let bits = n.to_bits();
+    let sign_negative = (bits >> 63) != 0;
+    let exp_bits = ((bits >> 52) & 0x7ff) as i32;
+    let frac_bits = bits & ((1u64 << 52) - 1);
+
+    // Subnormal non-zero values are not integral.
+    if exp_bits == 0 {
+        return None;
+    }
+
+    let exponent = exp_bits - 1023;
+    let mut sig = num_bigint::BigInt::from((1u64 << 52) | frac_bits);
+    if exponent >= 52 {
+        sig <<= (exponent - 52) as usize;
+    } else {
+        let rshift = (52 - exponent) as u32;
+        let mask = (1u64 << rshift) - 1;
+        if frac_bits & mask != 0 {
+            return None;
+        }
+        sig >>= rshift as usize;
+    }
+
+    if sign_negative {
+        sig = -sig;
+    }
+    Some(sig)
+}
+
+fn compare_bigint_number(a: &num_bigint::BigInt, b: f64) -> Option<std::cmp::Ordering> {
+    if b.is_nan() {
+        return None;
+    }
+    if b == f64::INFINITY {
+        return Some(std::cmp::Ordering::Less);
+    }
+    if b == f64::NEG_INFINITY {
+        return Some(std::cmp::Ordering::Greater);
+    }
+
+    if let Some(bi) = bigint_from_integral_number(b) {
+        return Some(a.cmp(&bi));
+    }
+
+    // For finite non-integer Number, BigInt is always strictly less-or-greater.
+    let floor_bi = bigint_from_integral_number(b.floor())?;
+    if a <= &floor_bi {
+        Some(std::cmp::Ordering::Less)
+    } else {
+        Some(std::cmp::Ordering::Greater)
     }
 }
 
@@ -801,9 +864,13 @@ impl<'gc> VM<'gc> {
             .insert("Atomics".to_string(), Value::VmObject(Rc::new(RefCell::new(atomics_map))));
 
         let mut promise_map = IndexMap::new();
+        let mut promise_proto = IndexMap::new();
+        promise_proto.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+        let promise_proto_obj = Value::VmObject(Rc::new(RefCell::new(promise_proto)));
         promise_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROMISE as f64));
         promise_map.insert("resolve".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_RESOLVE));
         promise_map.insert("all".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_ALL));
+        promise_map.insert("prototype".to_string(), promise_proto_obj);
         self.globals
             .insert("Promise".to_string(), Value::VmObject(Rc::new(RefCell::new(promise_map))));
 
@@ -1313,6 +1380,11 @@ impl<'gc> VM<'gc> {
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
                 map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                    && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+                {
+                    map.insert("__proto__".to_string(), proto);
+                }
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
             BUILTIN_PROMISE_RESOLVE | BUILTIN_PROMISE_ALL => {
@@ -1321,6 +1393,11 @@ impl<'gc> VM<'gc> {
                 map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
                 if let Some(v) = args.first() {
                     map.insert("__promise_value__".to_string(), v.clone());
+                }
+                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                    && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+                {
+                    map.insert("__proto__".to_string(), proto);
                 }
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
@@ -2342,6 +2419,142 @@ impl<'gc> VM<'gc> {
                     _ => Value::Undefined,
                 }
             }
+            BUILTIN_BIGINT_ASUINTN | BUILTIN_BIGINT_ASINTN => {
+                let bits_num = args.first().map(to_number).unwrap_or(0.0);
+                let bits = if bits_num.is_finite() && bits_num > 0.0 {
+                    bits_num.trunc() as usize
+                } else {
+                    0usize
+                };
+
+                if bits == 0 {
+                    return Value::BigInt(Box::new(num_bigint::BigInt::from(0)));
+                }
+
+                let as_bigint = match args.get(1).cloned().unwrap_or(Value::Undefined) {
+                    Value::BigInt(bi) => (*bi).clone(),
+                    Value::String(s) => {
+                        let text = crate::unicode::utf16_to_utf8(&s);
+                        match crate::js_bigint::parse_bigint_string(&text) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert value to BigInt")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                    Value::Boolean(b) => num_bigint::BigInt::from(if b { 1 } else { 0 }),
+                    Value::VmObject(obj) => {
+                        let borrow = obj.borrow();
+                        if borrow.get("__type__").map(value_to_string).as_deref() == Some("BigInt") {
+                            if let Some(Value::BigInt(inner)) = borrow.get("__value__") {
+                                (**inner).clone()
+                            } else {
+                                num_bigint::BigInt::from(0)
+                            }
+                        } else {
+                            let value_of = borrow.get("valueOf").cloned();
+                            drop(borrow);
+                            if let Some(value_of) = value_of {
+                                let out = match value_of {
+                                    Value::VmFunction(ip, _) => self.call_vm_function(ip, &[], &[]),
+                                    Value::VmClosure(ip, _, uv) => self.call_vm_function(ip, &[], &uv),
+                                    Value::VmNativeFunction(id) => self.call_method_builtin(id, Value::VmObject(obj.clone()), Vec::new()),
+                                    _ => Value::Undefined,
+                                };
+                                match out {
+                                    Value::BigInt(inner) => (*inner).clone(),
+                                    Value::Boolean(b) => num_bigint::BigInt::from(if b { 1 } else { 0 }),
+                                    Value::String(s) => {
+                                        let text = crate::unicode::utf16_to_utf8(&s);
+                                        match crate::js_bigint::parse_bigint_string(&text) {
+                                            Ok(v) => v,
+                                            Err(_) => {
+                                                let mut err_map = IndexMap::new();
+                                                err_map.insert(
+                                                    "__type__".to_string(),
+                                                    Value::String(crate::unicode::utf8_to_utf16("TypeError")),
+                                                );
+                                                err_map.insert(
+                                                    "message".to_string(),
+                                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert value to BigInt")),
+                                                );
+                                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                                return Value::Undefined;
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        let mut err_map = IndexMap::new();
+                                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                        err_map.insert(
+                                            "message".to_string(),
+                                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert value to BigInt")),
+                                        );
+                                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                        return Value::Undefined;
+                                    }
+                                }
+                            } else {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert value to BigInt")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                    Value::Number(n) => {
+                        if n.is_finite() && n < 0.0 && n == n.trunc() {
+                            num_bigint::BigInt::from(n as i64)
+                        } else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Cannot convert Number to BigInt")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert value to BigInt")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+                };
+
+                let modulus = num_bigint::BigInt::from(1u8) << bits;
+                let mut uint = as_bigint % &modulus;
+                if uint < num_bigint::BigInt::from(0) {
+                    uint += &modulus;
+                }
+                if id == BUILTIN_BIGINT_ASUINTN {
+                    Value::BigInt(Box::new(uint))
+                } else {
+                    let sign_bit = num_bigint::BigInt::from(1u8) << (bits - 1);
+                    if uint >= sign_bit {
+                        Value::BigInt(Box::new(uint - modulus))
+                    } else {
+                        Value::BigInt(Box::new(uint))
+                    }
+                }
+            }
             BUILTIN_CTOR_ARRAY => {
                 // Array(a, b, c) → creates array from args
                 // Array(n) where n is a number → creates array with n empty slots (holes)
@@ -2763,6 +2976,25 @@ impl<'gc> VM<'gc> {
             }
             // new Object() constructor
             BUILTIN_CTOR_OBJECT => {
+                if let Some(arg) = args.first() {
+                    match arg {
+                        Value::BigInt(bi) => {
+                            let mut obj = IndexMap::new();
+                            obj.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("BigInt")));
+                            obj.insert("__value__".to_string(), Value::BigInt(bi.clone()));
+                            if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
+                                && let Some(proto) = obj_global.borrow().get("prototype").cloned()
+                            {
+                                obj.insert("__proto__".to_string(), proto);
+                            }
+                            return Value::VmObject(Rc::new(RefCell::new(obj)));
+                        }
+                        Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => {
+                            return arg.clone();
+                        }
+                        _ => {}
+                    }
+                }
                 let mut obj = IndexMap::new();
                 if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
                     && let Some(proto) = obj_global.borrow().get("prototype").cloned()
@@ -2926,6 +3158,8 @@ impl<'gc> VM<'gc> {
             | BUILTIN_EVAL
             | BUILTIN_NEW_FUNCTION
             | BUILTIN_BIGINT
+            | BUILTIN_BIGINT_ASUINTN
+            | BUILTIN_BIGINT_ASINTN
             | BUILTIN_DATE_NOW
             | BUILTIN_CTOR_SHAREDARRAYBUFFER
             | BUILTIN_ATOMICS_ISLOCKFREE
@@ -2946,21 +3180,31 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_PROMISE_THEN {
+            let receiver_value = if let Value::VmObject(obj) = &receiver {
+                obj.borrow().get("__promise_value__").cloned().unwrap_or(Value::Undefined)
+            } else {
+                Value::Undefined
+            };
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
             let callback_result = match callback {
-                Value::VmFunction(ip, _) => self.call_vm_function(ip, &[], &[]),
+                Value::VmFunction(ip, _) => self.call_vm_function(ip, std::slice::from_ref(&receiver_value), &[]),
                 Value::VmClosure(ip, _, upv) => {
                     let uv = (*upv).clone();
-                    self.call_vm_function(ip, &[], &uv)
+                    self.call_vm_function(ip, std::slice::from_ref(&receiver_value), &uv)
                 }
-                Value::VmNativeFunction(native_id) => self.call_builtin(native_id, vec![]),
-                _ => Value::Undefined,
+                Value::VmNativeFunction(native_id) => self.call_builtin(native_id, vec![receiver_value.clone()]),
+                _ => receiver_value,
             };
 
             let mut map = IndexMap::new();
             map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
             map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
             map.insert("__promise_value__".to_string(), callback_result);
+            if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+            {
+                map.insert("__proto__".to_string(), proto);
+            }
             return Value::VmObject(Rc::new(RefCell::new(map)));
         }
 
@@ -4014,6 +4258,21 @@ impl<'gc> VM<'gc> {
                 }
                 _ => None,
             };
+            let bigint = match &receiver {
+                Value::BigInt(b) => Some((**b).clone()),
+                Value::VmObject(map) => {
+                    let b = map.borrow();
+                    if b.get("__type__").map(|v| value_to_string(v)).as_deref() == Some("BigInt") {
+                        match b.get("__value__") {
+                            Some(Value::BigInt(inner)) => Some((**inner).clone()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
             if let Some(n) = num {
                 match id {
                     BUILTIN_NUM_TOFIXED => {
@@ -4094,6 +4353,25 @@ impl<'gc> VM<'gc> {
                     }
                     BUILTIN_NUM_VALUEOF => {
                         return Value::Number(n);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(bi) = bigint {
+                match id {
+                    BUILTIN_NUM_TOSTRING => {
+                        let radix = args.first().map(|v| to_number(v) as u32).unwrap_or(10);
+                        let s = match radix {
+                            2 => bi.to_str_radix(2),
+                            8 => bi.to_str_radix(8),
+                            10 => bi.to_string(),
+                            16 => bi.to_str_radix(16),
+                            _ => bi.to_string(),
+                        };
+                        return Value::String(crate::unicode::utf8_to_utf16(&s));
+                    }
+                    BUILTIN_NUM_VALUEOF => {
+                        return Value::BigInt(Box::new(bi));
                     }
                     _ => {}
                 }
@@ -4842,6 +5120,7 @@ impl<'gc> VM<'gc> {
     fn values_equal(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
         match (a, b) {
             (Value::Number(x), Value::Number(y)) => x == y,
+            (Value::BigInt(x), Value::BigInt(y)) => x == y,
             (Value::String(x), Value::String(y)) => x == y,
             (Value::Boolean(x), Value::Boolean(y)) => x == y,
             (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined) => true,
@@ -4862,6 +5141,9 @@ impl<'gc> VM<'gc> {
     fn loose_equal(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
         match (a, b) {
             (Value::Number(x), Value::Number(y)) => x == y,
+            (Value::BigInt(x), Value::BigInt(y)) => x == y,
+            (Value::BigInt(x), Value::Number(n)) => compare_bigint_number(x, *n) == Some(std::cmp::Ordering::Equal),
+            (Value::Number(n), Value::BigInt(x)) => compare_bigint_number(x, *n) == Some(std::cmp::Ordering::Equal),
             (Value::String(x), Value::String(y)) => x == y,
             (Value::Boolean(x), Value::Boolean(y)) => x == y,
             (Value::Null, Value::Null)
@@ -4968,6 +5250,7 @@ impl<'gc> VM<'gc> {
     fn strict_equal(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
         match (a, b) {
             (Value::Number(a), Value::Number(b)) => a == b,
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::Undefined, Value::Undefined) => true,
@@ -5084,22 +5367,31 @@ impl<'gc> VM<'gc> {
             }
             Ok(())
         } else {
-            let msg = match &thrown {
+            match &thrown {
                 Value::VmObject(map) => {
                     let b = map.borrow();
                     let type_name = b.get("__type__").map(|v| value_to_string(v)).unwrap_or_default();
-                    let message = b.get("message").map(|v| value_to_string(v)).unwrap_or_default();
-                    if !type_name.is_empty() && !message.is_empty() {
-                        format!("{}: {}", type_name, message)
-                    } else if !message.is_empty() {
-                        message
-                    } else {
-                        value_to_string(&thrown)
+                    let message = b
+                        .get("message")
+                        .map(|v| value_to_string(v))
+                        .unwrap_or_else(|| value_to_string(&thrown));
+                    let uncaught_message = format!("Uncaught: {}", message);
+                    match type_name.as_str() {
+                        "TypeError" => Err(crate::raise_type_error!(uncaught_message)),
+                        "RangeError" => Err(crate::raise_range_error!(uncaught_message)),
+                        "ReferenceError" => Err(crate::raise_reference_error!(uncaught_message)),
+                        "SyntaxError" => Err(crate::raise_syntax_error!(uncaught_message)),
+                        _ => {
+                            if !type_name.is_empty() {
+                                Err(crate::raise_syntax_error!(format!("Uncaught: {}: {}", type_name, message)))
+                            } else {
+                                Err(crate::raise_syntax_error!(format!("Uncaught: {}", message)))
+                            }
+                        }
                     }
                 }
-                _ => value_to_string(&thrown),
-            };
-            Err(crate::raise_syntax_error!(format!("Uncaught: {}", msg)))
+                _ => Err(crate::raise_syntax_error!(format!("Uncaught: {}", value_to_string(&thrown)))),
+            }
         }
     }
 
@@ -5737,15 +6029,7 @@ impl<'gc> VM<'gc> {
                     let is_a_str = matches!(&a, Value::String(_));
                     let is_b_str = matches!(&b, Value::String(_));
                     match (&a, &b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Number(a_num + b_num));
-                        }
-                        // String concatenation
-                        (Value::String(a_str), Value::String(b_str)) => {
-                            let mut result = a_str.clone();
-                            result.extend_from_slice(b_str);
-                            self.stack.push(Value::String(result));
-                        }
+                        // String concatenation happens before numeric BigInt checks.
                         _ if is_a_str
                             || is_b_str
                             || matches!(&a, Value::VmArray(_) | Value::VmObject(_))
@@ -5755,6 +6039,21 @@ impl<'gc> VM<'gc> {
                             let b_s = self.vm_to_string(&b);
                             let mut result = crate::unicode::utf8_to_utf16(&a_s);
                             result.extend_from_slice(&crate::unicode::utf8_to_utf16(&b_s));
+                            self.stack.push(Value::String(result));
+                        }
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone() + (**b_bi).clone())));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in +"));
+                        }
+                        (Value::Number(a_num), Value::Number(b_num)) => {
+                            self.stack.push(Value::Number(a_num + b_num));
+                        }
+                        // String concatenation
+                        (Value::String(a_str), Value::String(b_str)) => {
+                            let mut result = a_str.clone();
+                            result.extend_from_slice(b_str);
                             self.stack.push(Value::String(result));
                         }
                         _ => {
@@ -5768,24 +6067,57 @@ impl<'gc> VM<'gc> {
                 Opcode::Sub => {
                     let b = self.stack.pop().expect("VM Stack underflow on Sub (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Sub (a)");
-                    let a_num = to_number(&a);
-                    let b_num = to_number(&b);
-                    self.stack.push(Value::Number(a_num - b_num));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone() - (**b_bi).clone())));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in -"));
+                        }
+                        _ => {
+                            let a_num = to_number(&a);
+                            let b_num = to_number(&b);
+                            self.stack.push(Value::Number(a_num - b_num));
+                        }
+                    }
                 }
                 Opcode::Mul => {
                     let b = self.stack.pop().expect("VM Stack underflow on Mul (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Mul (a)");
-                    self.stack.push(Value::Number(to_number(&a) * to_number(&b)));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone() * (**b_bi).clone())));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in *"));
+                        }
+                        _ => self.stack.push(Value::Number(to_number(&a) * to_number(&b))),
+                    }
                 }
                 Opcode::Div => {
                     let b = self.stack.pop().expect("VM Stack underflow on Div (b)");
                     let a = self.stack.pop().expect("VM Stack underflow on Div (a)");
-                    self.stack.push(Value::Number(to_number(&a) / to_number(&b)));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone() / (**b_bi).clone())));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in /"));
+                        }
+                        _ => self.stack.push(Value::Number(to_number(&a) / to_number(&b))),
+                    }
                 }
                 Opcode::LessThan => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
                     let result = match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi < b_bi,
+                        (Value::BigInt(a_bi), Value::Number(b_num)) => {
+                            compare_bigint_number(a_bi, *b_num) == Some(std::cmp::Ordering::Less)
+                        }
+                        (Value::Number(a_num), Value::BigInt(b_bi)) => {
+                            compare_bigint_number(b_bi, *a_num) == Some(std::cmp::Ordering::Greater)
+                        }
                         (Value::String(a_s), Value::String(b_s)) => a_s < b_s,
                         (Value::Number(a_num), Value::Number(b_num)) => a_num < b_num,
                         _ => to_number(&a) < to_number(&b),
@@ -5796,6 +6128,13 @@ impl<'gc> VM<'gc> {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
                     let result = match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi > b_bi,
+                        (Value::BigInt(a_bi), Value::Number(b_num)) => {
+                            compare_bigint_number(a_bi, *b_num) == Some(std::cmp::Ordering::Greater)
+                        }
+                        (Value::Number(a_num), Value::BigInt(b_bi)) => {
+                            compare_bigint_number(b_bi, *a_num) == Some(std::cmp::Ordering::Less)
+                        }
                         (Value::String(a_s), Value::String(b_s)) => a_s > b_s,
                         (Value::Number(a_num), Value::Number(b_num)) => a_num > b_num,
                         _ => to_number(&a) > to_number(&b),
@@ -5818,6 +6157,9 @@ impl<'gc> VM<'gc> {
                     match (&a, &b) {
                         (Value::Number(a_num), Value::Number(b_num)) => {
                             self.stack.push(Value::Boolean(a_num != b_num));
+                        }
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::Boolean(a_bi != b_bi));
                         }
                         (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
                             self.stack.push(Value::Boolean(a_bool != b_bool));
@@ -5859,6 +6201,13 @@ impl<'gc> VM<'gc> {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
                     let result = match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi <= b_bi,
+                        (Value::BigInt(a_bi), Value::Number(b_num)) => {
+                            !matches!(compare_bigint_number(a_bi, *b_num), Some(std::cmp::Ordering::Greater) | None)
+                        }
+                        (Value::Number(a_num), Value::BigInt(b_bi)) => {
+                            !matches!(compare_bigint_number(b_bi, *a_num), Some(std::cmp::Ordering::Less) | None)
+                        }
                         (Value::String(a_s), Value::String(b_s)) => a_s <= b_s,
                         (Value::Number(a_num), Value::Number(b_num)) => a_num <= b_num,
                         _ => to_number(&a) <= to_number(&b),
@@ -5869,6 +6218,13 @@ impl<'gc> VM<'gc> {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
                     let result = match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi >= b_bi,
+                        (Value::BigInt(a_bi), Value::Number(b_num)) => {
+                            !matches!(compare_bigint_number(a_bi, *b_num), Some(std::cmp::Ordering::Less) | None)
+                        }
+                        (Value::Number(a_num), Value::BigInt(b_bi)) => {
+                            !matches!(compare_bigint_number(b_bi, *a_num), Some(std::cmp::Ordering::Greater) | None)
+                        }
                         (Value::String(a_s), Value::String(b_s)) => a_s >= b_s,
                         (Value::Number(a_num), Value::Number(b_num)) => a_num >= b_num,
                         _ => to_number(&a) >= to_number(&b),
@@ -5888,20 +6244,47 @@ impl<'gc> VM<'gc> {
                 Opcode::BitwiseAnd => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    self.stack
-                        .push(Value::Number(((to_number(&a) as i32) & (to_number(&b) as i32)) as f64));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone() & (**b_bi).clone())));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in &"));
+                        }
+                        _ => self
+                            .stack
+                            .push(Value::Number(((to_number(&a) as i32) & (to_number(&b) as i32)) as f64)),
+                    }
                 }
                 Opcode::BitwiseOr => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    self.stack
-                        .push(Value::Number(((to_number(&a) as i32) | (to_number(&b) as i32)) as f64));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone() | (**b_bi).clone())));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in |"));
+                        }
+                        _ => self
+                            .stack
+                            .push(Value::Number(((to_number(&a) as i32) | (to_number(&b) as i32)) as f64)),
+                    }
                 }
                 Opcode::BitwiseXor => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    self.stack
-                        .push(Value::Number(((to_number(&a) as i32) ^ (to_number(&b) as i32)) as f64));
+                    match (&a, &b) {
+                        (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                            self.stack.push(Value::BigInt(Box::new((**a_bi).clone() ^ (**b_bi).clone())));
+                        }
+                        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                            return Err(crate::raise_type_error!("Cannot mix BigInt and other types in ^"));
+                        }
+                        _ => self
+                            .stack
+                            .push(Value::Number(((to_number(&a) as i32) ^ (to_number(&b) as i32)) as f64)),
+                    }
                 }
                 Opcode::ShiftLeft => {
                     let b = self.stack.pop().expect("VM Stack underflow");
@@ -6321,6 +6704,7 @@ impl<'gc> VM<'gc> {
                     let a = self.stack.pop().expect("VM Stack underflow");
                     match a {
                         Value::Number(n) => self.stack.push(Value::Number(-n)),
+                        Value::BigInt(bi) => self.stack.push(Value::BigInt(Box::new(-*bi))),
                         _ => self.stack.push(Value::Number(f64::NAN)),
                     }
                 }
@@ -6481,6 +6865,12 @@ impl<'gc> VM<'gc> {
                                             "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
                                             "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
                                             "constructor" => self.globals.get("Number").cloned(),
+                                            _ => None,
+                                        },
+                                        Some("BigInt") => match key.as_str() {
+                                            "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
+                                            "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                            "constructor" => self.globals.get("BigInt").cloned(),
                                             _ => None,
                                         },
                                         _ => None,
@@ -6694,6 +7084,8 @@ impl<'gc> VM<'gc> {
                                     Value::String(crate::unicode::utf8_to_utf16(name))
                                 }
                                 "length" => Value::Number(1.0),
+                                "asUintN" if *id == BUILTIN_BIGINT => Value::VmNativeFunction(BUILTIN_BIGINT_ASUINTN),
+                                "asIntN" if *id == BUILTIN_BIGINT => Value::VmNativeFunction(BUILTIN_BIGINT_ASINTN),
                                 "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                                 "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
                                 "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
@@ -7051,6 +7443,11 @@ impl<'gc> VM<'gc> {
                                             "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
                                             _ => None,
                                         },
+                                        Some("BigInt") => match key.as_str() {
+                                            "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
+                                            "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                            _ => None,
+                                        },
                                         Some("RegExp") => match key.as_str() {
                                             "exec" => Some(Value::VmNativeFunction(BUILTIN_REGEX_EXEC)),
                                             "test" => Some(Value::VmNativeFunction(BUILTIN_REGEX_TEST)),
@@ -7174,6 +7571,8 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         Value::VmNativeFunction(_) => match key.as_str() {
+                            "asUintN" => Value::VmNativeFunction(BUILTIN_BIGINT_ASUINTN),
+                            "asIntN" => Value::VmNativeFunction(BUILTIN_BIGINT_ASINTN),
                             "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                             "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
                             "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),

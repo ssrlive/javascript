@@ -1163,7 +1163,16 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(script:
     let mut vm = VM::new(chunk);
     let v = vm.run()?;
 
-    Ok(value_to_string(&v))
+    match v {
+        Value::String(s) => {
+            let s_utf8 = crate::unicode::utf16_to_utf8(&s);
+            match serde_json::to_string(&s_utf8) {
+                Ok(quoted) => Ok(quoted),
+                Err(_) => Ok(format!("\"{}\"", s_utf8)),
+            }
+        }
+        _ => Ok(value_to_string(&v)),
+    }
 }
 
 /// Compile and run a snippet of JS code in a fresh VM, returning the resulting Value.

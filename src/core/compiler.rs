@@ -1790,7 +1790,11 @@ impl<'gc> Compiler<'gc> {
                     BinaryOp::LessEqual => self.chunk.write_opcode(Opcode::LessEqual),
                     BinaryOp::GreaterEqual => self.chunk.write_opcode(Opcode::GreaterEqual),
                     BinaryOp::Equal => self.chunk.write_opcode(Opcode::Equal),
-                    BinaryOp::StrictEqual => self.chunk.write_opcode(Opcode::Equal),
+                    BinaryOp::StrictEqual => {
+                        // VM has StrictNotEqual opcode; synthesize strict equality as !(a !== b).
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        self.chunk.write_opcode(Opcode::Not);
+                    }
                     BinaryOp::NotEqual => self.chunk.write_opcode(Opcode::NotEqual),
                     BinaryOp::StrictNotEqual => self.chunk.write_opcode(Opcode::StrictNotEqual),
                     BinaryOp::In => self.chunk.write_opcode(Opcode::In),
@@ -2295,6 +2299,7 @@ impl<'gc> Compiler<'gc> {
             },
             // Arrow function / async arrow function: (params) => body
             Expr::ArrowFunction(params, body) | Expr::AsyncArrowFunction(params, body) => {
+                let is_async_arrow = matches!(expr, Expr::AsyncArrowFunction(_, _));
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
                 let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
@@ -2336,23 +2341,72 @@ impl<'gc> Compiler<'gc> {
 
                 if body.len() == 1 {
                     if let StatementKind::Expr(expr) = &*body[0].kind {
-                        // Single expression body: implicitly return the value
-                        self.compile_expr(expr)?;
+                        // Single expression body: implicitly return the value.
+                        // Async arrows return Promise.resolve(expr) to preserve promise shape.
+                        if is_async_arrow {
+                            let wrapped = Expr::Call(
+                                Box::new(Expr::Property(
+                                    Box::new(Expr::Var("Promise".to_string(), None, None)),
+                                    "resolve".to_string(),
+                                )),
+                                vec![expr.clone()],
+                            );
+                            self.compile_expr(&wrapped)?;
+                        } else {
+                            self.compile_expr(expr)?;
+                        }
                         self.chunk.write_opcode(Opcode::Return);
                     } else {
-                        self.compile_statement(&body[0], true)?;
-                        let idx = self.chunk.add_constant(Value::Undefined);
-                        self.chunk.write_opcode(Opcode::Constant);
-                        self.chunk.write_u16(idx);
-                        self.chunk.write_opcode(Opcode::Return);
+                        if is_async_arrow {
+                            if let StatementKind::Return(ret_expr) = &*body[0].kind {
+                                let wrapped_arg = ret_expr.clone().unwrap_or(Expr::Undefined);
+                                let wrapped = Expr::Call(
+                                    Box::new(Expr::Property(
+                                        Box::new(Expr::Var("Promise".to_string(), None, None)),
+                                        "resolve".to_string(),
+                                    )),
+                                    vec![wrapped_arg],
+                                );
+                                self.compile_expr(&wrapped)?;
+                                self.chunk.write_opcode(Opcode::Return);
+                            } else {
+                                self.compile_statement(&body[0], true)?;
+                                let wrapped = Expr::Call(
+                                    Box::new(Expr::Property(
+                                        Box::new(Expr::Var("Promise".to_string(), None, None)),
+                                        "resolve".to_string(),
+                                    )),
+                                    vec![Expr::Undefined],
+                                );
+                                self.compile_expr(&wrapped)?;
+                                self.chunk.write_opcode(Opcode::Return);
+                            }
+                        } else {
+                            self.compile_statement(&body[0], true)?;
+                            let idx = self.chunk.add_constant(Value::Undefined);
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(idx);
+                            self.chunk.write_opcode(Opcode::Return);
+                        }
                     }
                 } else {
                     for (i, s) in body.iter().enumerate() {
                         self.compile_statement(s, i == body.len() - 1)?;
                     }
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    if is_async_arrow {
+                        let wrapped = Expr::Call(
+                            Box::new(Expr::Property(
+                                Box::new(Expr::Var("Promise".to_string(), None, None)),
+                                "resolve".to_string(),
+                            )),
+                            vec![Expr::Undefined],
+                        );
+                        self.compile_expr(&wrapped)?;
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
                     self.chunk.write_opcode(Opcode::Return);
                 }
 

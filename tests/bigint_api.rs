@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
 #[ctor::ctor]
 fn __init_test_logger() {
@@ -8,14 +8,14 @@ fn __init_test_logger() {
 #[test]
 fn bigint_global_and_prototype_to_string_value_of() {
     // BigInt with numeric literal string
-    let r1 = evaluate_script("BigInt('123')", None::<&std::path::Path>);
+    let r1 = evaluate_script_with_vm("BigInt('123')", None::<&std::path::Path>);
     match r1 {
         Ok(h) => assert_eq!(h, "123"),
         other => panic!("expected BigInt result for BigInt('123'), got {:?}", other),
     }
 
     // BigInt with number argument (integer)
-    let r2 = evaluate_script("BigInt(42)", None::<&std::path::Path>);
+    let r2 = evaluate_script_with_vm("BigInt(42)", None::<&std::path::Path>);
     match r2 {
         Ok(h) => assert_eq!(h, "42"),
         other => panic!("expected BigInt result for BigInt(42), got {:?}", other),
@@ -23,28 +23,28 @@ fn bigint_global_and_prototype_to_string_value_of() {
 
     // toString on boxed BigInt via Object wrapper
     // Converting BigInt to string via global String() should work
-    let r3 = evaluate_script("String(123n)", None::<&std::path::Path>);
+    let r3 = evaluate_script_with_vm("String(123n)", None::<&std::path::Path>);
     match r3 {
         Ok(h) => assert_eq!(h, "\"123\""),
         other => panic!("expected string result for String(123n), got {:?}", other),
     }
 
     // BigInt constructed from number equals BigInt literal
-    let r4 = evaluate_script("BigInt(7) === 7n", None::<&std::path::Path>);
+    let r4 = evaluate_script_with_vm("BigInt(7) === 7n", None::<&std::path::Path>);
     match r4 {
         Ok(h) => assert_eq!(h, "true"),
         other => panic!("expected boolean result for BigInt(7) === 7n, got {:?}", other),
     }
 
     // Boxed BigInt: Object(123n).toString() should use BigInt.prototype.toString
-    let r5 = evaluate_script("Object(123n).toString()", None::<&std::path::Path>);
+    let r5 = evaluate_script_with_vm("Object(123n).toString()", None::<&std::path::Path>);
     match r5 {
         Ok(h) => assert_eq!(h, "\"123\""),
         other => panic!("expected string result for Object(123n).toString(), got {:?}", other),
     }
 
     // Boxed BigInt: Object(7n).valueOf() === 7n
-    let r6 = evaluate_script("Object(7n).valueOf() === 7n", None::<&std::path::Path>);
+    let r6 = evaluate_script_with_vm("Object(7n).valueOf() === 7n", None::<&std::path::Path>);
     match r6 {
         Ok(h) => assert_eq!(h, "true"),
         other => panic!("expected boolean result for Object(7n).valueOf() === 7n, got {:?}", other),

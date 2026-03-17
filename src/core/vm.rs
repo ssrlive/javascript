@@ -1,6 +1,7 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{JSError, Value};
+use crate::js_regexp::get_or_compile_regex;
 use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -183,6 +184,12 @@ const BUILTIN_MATH_POW: u8 = 179;
 const BUILTIN_MATH_RANDOM: u8 = 180;
 const BUILTIN_MATH_CLZ32: u8 = 181;
 const BUILTIN_MATH_IMUL: u8 = 182;
+const BUILTIN_CTOR_REGEXP: u8 = 183;
+const BUILTIN_REGEX_EXEC: u8 = 184;
+const BUILTIN_REGEX_TEST: u8 = 185;
+const BUILTIN_STRING_MATCH: u8 = 186;
+const BUILTIN_STRING_REPLACEALL: u8 = 187;
+const BUILTIN_STRING_SEARCH: u8 = 188;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -745,6 +752,8 @@ impl<'gc> VM<'gc> {
         self.globals
             .insert("FinalizationRegistry".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_FR));
         self.globals.insert("BigInt".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT));
+        self.globals
+            .insert("RegExp".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_REGEXP));
 
         // globalThis — refers to the global this object
         self.globals
@@ -811,6 +820,12 @@ impl<'gc> VM<'gc> {
                     Some(Value::String(d)) => format!("Symbol({})", crate::unicode::utf16_to_utf8(d)),
                     _ => "Symbol()".to_string(),
                 };
+            }
+            // RegExp display: /pattern/flags
+            if borrow.get("__type__").map(value_to_string) == Some("RegExp".to_string()) {
+                let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+                return format!("/{}/{}", pattern, flags);
             }
             drop(borrow);
             let ts = map.borrow().get("toString").cloned();
@@ -1338,11 +1353,64 @@ impl<'gc> VM<'gc> {
                     for (k, v) in &self.globals {
                         eval_vm.globals.insert(k.clone(), v.clone());
                     }
+                    // For direct eval, inject caller's local variables as globals
+                    if self.direct_eval {
+                        // Walk all frames from outermost to innermost so inner scopes shadow outer
+                        for frame in self.frames.iter() {
+                            if let Some(local_names) = self.chunk.fn_local_names.get(&frame.func_ip) {
+                                for (idx, name) in local_names.iter().enumerate() {
+                                    if name.starts_with("__") && name.ends_with("__") {
+                                        continue; // skip synthetic locals
+                                    }
+                                    if let Some(cell) = frame.local_cells.get(&idx) {
+                                        eval_vm.globals.insert(name.clone(), cell.borrow().clone());
+                                    } else {
+                                        let stack_idx = frame.bp + idx;
+                                        if stack_idx < self.stack.len() {
+                                            eval_vm.globals.insert(name.clone(), self.stack[stack_idx].clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Set up `this` for the eval VM
+                    if self.direct_eval {
+                        // Direct eval inherits caller's `this`
+                        let caller_this = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
+                        eval_vm.this_stack.push(caller_this);
+                    } else {
+                        // Indirect eval: `this` is globalThis
+                        let global_this = self.globals.get("globalThis").cloned().unwrap_or(Value::Undefined);
+                        eval_vm.this_stack.push(global_this);
+                    }
                     let result = eval_vm.run()?;
                     // Copy globals back — strict mode keeps eval's own scope isolated
                     if !is_strict {
                         for (k, v) in &eval_vm.globals {
                             self.globals.insert(k.clone(), v.clone());
+                        }
+                    }
+                    // For direct eval, write back modified local variables to caller's stack
+                    if self.direct_eval {
+                        for frame in self.frames.iter().rev() {
+                            if let Some(local_names) = self.chunk.fn_local_names.get(&frame.func_ip) {
+                                for (idx, name) in local_names.iter().enumerate() {
+                                    if name.starts_with("__") && name.ends_with("__") {
+                                        continue;
+                                    }
+                                    if let Some(new_val) = eval_vm.globals.get(name) {
+                                        if let Some(cell) = frame.local_cells.get(&idx) {
+                                            *cell.borrow_mut() = new_val.clone();
+                                        } else {
+                                            let stack_idx = frame.bp + idx;
+                                            if stack_idx < self.stack.len() {
+                                                self.stack[stack_idx] = new_val.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(result)
@@ -1661,6 +1729,32 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     Value::VmObject(obj.clone())
+                } else if let Some(Value::VmArray(arr)) = args.first() {
+                    let key = args.get(1).map(|v| value_to_string(v)).unwrap_or_default();
+                    if let Some(Value::VmObject(desc)) = args.get(2) {
+                        let desc_borrow = desc.borrow();
+                        let mut arr_borrow = arr.borrow_mut();
+                        // Check if key is a numeric index
+                        if let Ok(idx) = key.parse::<usize>() {
+                            // Extend elements if needed
+                            while arr_borrow.elements.len() <= idx {
+                                arr_borrow.elements.push(Value::Undefined);
+                            }
+                            if let Some(val) = desc_borrow.get("value") {
+                                arr_borrow.elements[idx] = val.clone();
+                            }
+                        }
+                        // Store getter/setter in props
+                        if let Some(val @ (Value::VmFunction(_ip, _) | Value::VmClosure(_ip, _, _))) = desc_borrow.get("get") {
+                            let getter_key = format!("__get_{}", key);
+                            arr_borrow.props.insert(getter_key, val.clone());
+                        }
+                        if let Some(val @ (Value::VmFunction(_ip, _a) | Value::VmClosure(_ip, _a, _))) = desc_borrow.get("set") {
+                            let setter_key = format!("__set_{}", key);
+                            arr_borrow.props.insert(setter_key, val.clone());
+                        }
+                    }
+                    Value::VmArray(arr.clone())
                 } else {
                     args.first().cloned().unwrap_or(Value::Undefined)
                 }
@@ -1979,7 +2073,10 @@ impl<'gc> VM<'gc> {
             | BUILTIN_OBJECT_GETOWNPROPERTYNAMES
             | BUILTIN_ARRAY_OF
             | BUILTIN_ARRAY_FROM
-            | BUILTIN_STRING_FROMCHARCODE => {
+            | BUILTIN_STRING_FROMCHARCODE
+            | BUILTIN_EVAL
+            | BUILTIN_NEW_FUNCTION
+            | BUILTIN_BIGINT => {
                 return self.call_builtin(id, args);
             }
             _ => {}
@@ -2547,6 +2644,18 @@ impl<'gc> VM<'gc> {
             let rust_str = crate::unicode::utf16_to_utf8(s);
             match id {
                 BUILTIN_STRING_SPLIT => {
+                    let limit = args.get(1).and_then(|v| match v {
+                        Value::Number(n) => Some(*n as usize),
+                        _ => None,
+                    });
+                    // Check if first arg is a regex
+                    if let Some(Value::VmObject(re_obj)) = args.first() {
+                        let is_regex = re_obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string());
+                        if is_regex {
+                            let parts = self.regex_split_string(&rust_str, re_obj, limit);
+                            return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(parts))));
+                        }
+                    }
                     let sep = args.first().map(value_to_string).unwrap_or_default();
                     let parts: Vec<Value<'gc>> = if sep.is_empty() {
                         rust_str
@@ -2554,8 +2663,10 @@ impl<'gc> VM<'gc> {
                             .map(|c| Value::String(crate::unicode::utf8_to_utf16(&c.to_string())))
                             .collect()
                     } else {
-                        rust_str
-                            .split(&sep)
+                        let all: Vec<&str> = rust_str.split(&sep).collect();
+                        let take = limit.unwrap_or(all.len());
+                        all.into_iter()
+                            .take(take)
                             .map(|p| Value::String(crate::unicode::utf8_to_utf16(p)))
                             .collect()
                     };
@@ -2609,10 +2720,80 @@ impl<'gc> VM<'gc> {
                     return Value::Boolean(rust_str.contains(&needle));
                 }
                 BUILTIN_STRING_REPLACE => {
+                    if let Some(Value::VmObject(re_obj)) = args.first() {
+                        let is_regex = re_obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string());
+                        if is_regex {
+                            let replacement = args.get(1).map(value_to_string).unwrap_or_default();
+                            let result = self.regex_replace_string(&rust_str, re_obj, &replacement, false);
+                            return Value::String(crate::unicode::utf8_to_utf16(&result));
+                        }
+                    }
                     let pattern = args.first().map(value_to_string).unwrap_or_default();
                     let replacement = args.get(1).map(value_to_string).unwrap_or_default();
                     let result = rust_str.replacen(&pattern, &replacement, 1);
                     return Value::String(crate::unicode::utf8_to_utf16(&result));
+                }
+                BUILTIN_STRING_REPLACEALL => {
+                    if let Some(Value::VmObject(re_obj)) = args.first() {
+                        let borrow = re_obj.borrow();
+                        let is_regex = borrow.get("__type__").map(value_to_string) == Some("RegExp".to_string());
+                        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+                        drop(borrow);
+                        if is_regex {
+                            if !flags.contains('g') {
+                                eprintln!("TypeError: String.prototype.replaceAll called with a non-global RegExp argument");
+                                return Value::String(crate::unicode::utf8_to_utf16(&rust_str));
+                            }
+                            let replacement = args.get(1).map(value_to_string).unwrap_or_default();
+                            let result = self.regex_replace_string(&rust_str, re_obj, &replacement, true);
+                            return Value::String(crate::unicode::utf8_to_utf16(&result));
+                        }
+                    }
+                    let pattern = args.first().map(value_to_string).unwrap_or_default();
+                    let replacement = args.get(1).map(value_to_string).unwrap_or_default();
+                    let result = rust_str.replace(&pattern, &replacement);
+                    return Value::String(crate::unicode::utf8_to_utf16(&result));
+                }
+                BUILTIN_STRING_MATCH => {
+                    if let Some(Value::VmObject(re_obj)) = args.first() {
+                        let is_regex = re_obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string());
+                        if is_regex {
+                            let borrow = re_obj.borrow();
+                            let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+                            drop(borrow);
+                            if flags.contains('g') {
+                                // Global match: return array of all full matches
+                                return self.regex_match_all(&rust_str, re_obj);
+                            } else {
+                                // Non-global: return same as exec()
+                                return self.regex_exec(re_obj, &rust_str);
+                            }
+                        }
+                    }
+                    return Value::Null;
+                }
+                BUILTIN_STRING_SEARCH => {
+                    if let Some(Value::VmObject(re_obj)) = args.first() {
+                        let is_regex = re_obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string());
+                        if is_regex {
+                            let borrow = re_obj.borrow();
+                            let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                            let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+                            drop(borrow);
+                            let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+                            if let Ok(re) = get_or_compile_regex(&pattern_u16, &flags) {
+                                let input_u16: Vec<u16> = rust_str.encode_utf16().collect();
+                                let use_unicode = flags.contains('u') || flags.contains('v');
+                                let m = if use_unicode {
+                                    re.find_from_utf16(&input_u16, 0).next()
+                                } else {
+                                    re.find_from_ucs2(&input_u16, 0).next()
+                                };
+                                return Value::Number(m.map(|m| m.range.start as f64).unwrap_or(-1.0));
+                            }
+                        }
+                    }
+                    return Value::Number(-1.0);
                 }
                 BUILTIN_STRING_STARTSWITH => {
                     let prefix = args.first().map(value_to_string).unwrap_or_default();
@@ -3146,8 +3327,350 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        // RegExp.prototype.exec(string)
+        if id == BUILTIN_REGEX_EXEC {
+            if let Value::VmObject(ref map) = receiver {
+                let input = args.first().map(value_to_string).unwrap_or_default();
+                return self.regex_exec(map, &input);
+            }
+            return Value::Null;
+        }
+
+        // RegExp.prototype.test(string)
+        if id == BUILTIN_REGEX_TEST {
+            if let Value::VmObject(ref map) = receiver {
+                let input = args.first().map(value_to_string).unwrap_or_default();
+                let result = self.regex_exec(map, &input);
+                return Value::Boolean(!matches!(result, Value::Null));
+            }
+            return Value::Boolean(false);
+        }
+
         log::warn!("Unknown method builtin ID {} on {}", id, value_to_string(&receiver));
         Value::Undefined
+    }
+
+    /// Execute a regex match, returning an array result or Null
+    fn regex_exec(&self, re_obj: &Rc<RefCell<IndexMap<String, Value<'gc>>>>, input: &str) -> Value<'gc> {
+        let borrow = re_obj.borrow();
+        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+        let is_global = flags.contains('g') || flags.contains('y');
+        let last_index = if is_global {
+            match borrow.get("lastIndex") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        drop(borrow);
+
+        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+        let re = match get_or_compile_regex(&pattern_u16, &flags) {
+            Ok(r) => r,
+            Err(_) => return Value::Null,
+        };
+
+        let input_u16: Vec<u16> = input.encode_utf16().collect();
+        let match_result = if flags.contains('u') || flags.contains('v') {
+            re.find_from_utf16(&input_u16, last_index).next()
+        } else {
+            re.find_from_ucs2(&input_u16, last_index).next()
+        };
+
+        match match_result {
+            Some(m) => {
+                let matched_str = &input_u16[m.range.start..m.range.end];
+                let matched = crate::unicode::utf16_to_utf8(matched_str);
+
+                let mut result_items: Vec<Value<'gc>> = vec![Value::String(crate::unicode::utf8_to_utf16(&matched))];
+                // Add capturing groups
+                for cap in &m.captures {
+                    match cap {
+                        Some(r) => {
+                            let s = &input_u16[r.start..r.end];
+                            result_items.push(Value::String(s.to_vec()));
+                        }
+                        None => result_items.push(Value::Undefined),
+                    }
+                }
+
+                let mut arr_data = VmArrayData::new(result_items);
+                arr_data.props.insert("index".to_string(), Value::Number(m.range.start as f64));
+                arr_data
+                    .props
+                    .insert("input".to_string(), Value::String(crate::unicode::utf8_to_utf16(input)));
+
+                // Add indices array when 'd' (hasIndices) flag is set
+                if flags.contains('d') {
+                    let mut indices_items: Vec<Value<'gc>> = Vec::new();
+                    // Full match indices
+                    let pair = vec![Value::Number(m.range.start as f64), Value::Number(m.range.end as f64)];
+                    indices_items.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(pair)))));
+                    // Capturing group indices
+                    for cap in &m.captures {
+                        match cap {
+                            Some(r) => {
+                                let pair = vec![Value::Number(r.start as f64), Value::Number(r.end as f64)];
+                                indices_items.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(pair)))));
+                            }
+                            None => indices_items.push(Value::Undefined),
+                        }
+                    }
+                    arr_data.props.insert(
+                        "indices".to_string(),
+                        Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(indices_items)))),
+                    );
+                }
+
+                let arr = Value::VmArray(Rc::new(RefCell::new(arr_data)));
+
+                // Update lastIndex for global/sticky
+                if is_global {
+                    re_obj
+                        .borrow_mut()
+                        .insert("lastIndex".to_string(), Value::Number(m.range.end as f64));
+                }
+
+                arr
+            }
+            None => {
+                if is_global {
+                    re_obj.borrow_mut().insert("lastIndex".to_string(), Value::Number(0.0));
+                }
+                Value::Null
+            }
+        }
+    }
+
+    /// Global match: return array of all full match strings
+    fn regex_match_all(&self, input: &str, re_obj: &Rc<RefCell<IndexMap<String, Value<'gc>>>>) -> Value<'gc> {
+        let borrow = re_obj.borrow();
+        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+        drop(borrow);
+
+        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+        let re = match get_or_compile_regex(&pattern_u16, &flags) {
+            Ok(r) => r,
+            Err(_) => return Value::Null,
+        };
+
+        let input_u16: Vec<u16> = input.encode_utf16().collect();
+        let use_unicode = flags.contains('u') || flags.contains('v');
+        let mut results: Vec<Value<'gc>> = Vec::new();
+        let mut pos = 0usize;
+        loop {
+            let m = if use_unicode {
+                re.find_from_utf16(&input_u16, pos).next()
+            } else {
+                re.find_from_ucs2(&input_u16, pos).next()
+            };
+            match m {
+                Some(m) => {
+                    let matched = &input_u16[m.range.start..m.range.end];
+                    results.push(Value::String(matched.to_vec()));
+                    pos = if m.range.end == m.range.start {
+                        m.range.end + 1
+                    } else {
+                        m.range.end
+                    };
+                    if pos > input_u16.len() {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        if results.is_empty() {
+            Value::Null
+        } else {
+            Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(results))))
+        }
+    }
+
+    /// Replace string content using a regex pattern
+    fn regex_replace_string(
+        &self,
+        input: &str,
+        re_obj: &Rc<RefCell<IndexMap<String, Value<'gc>>>>,
+        replacement: &str,
+        replace_all: bool,
+    ) -> String {
+        let borrow = re_obj.borrow();
+        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+        drop(borrow);
+
+        let is_global = flags.contains('g');
+        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+        let re = match get_or_compile_regex(&pattern_u16, &flags) {
+            Ok(r) => r,
+            Err(_) => return input.to_string(),
+        };
+
+        let input_u16: Vec<u16> = input.encode_utf16().collect();
+        let use_unicode = flags.contains('u') || flags.contains('v');
+        let mut result_u16: Vec<u16> = Vec::new();
+        let mut pos = 0usize;
+        let mut replaced = false;
+
+        loop {
+            let m = if use_unicode {
+                re.find_from_utf16(&input_u16, pos).next()
+            } else {
+                re.find_from_ucs2(&input_u16, pos).next()
+            };
+            match m {
+                Some(m) => {
+                    // Append text before match
+                    result_u16.extend_from_slice(&input_u16[pos..m.range.start]);
+                    // Process replacement string with backreferences
+                    let repl = self.apply_replacement(replacement, &input_u16, &m);
+                    result_u16.extend_from_slice(&crate::unicode::utf8_to_utf16(&repl));
+                    pos = m.range.end;
+                    if pos == m.range.start {
+                        pos += 1;
+                    } // prevent infinite loop on zero-width match
+                    replaced = true;
+                    if !is_global && !replace_all {
+                        break;
+                    }
+                    if pos > input_u16.len() {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        // Append remainder
+        if pos <= input_u16.len() {
+            result_u16.extend_from_slice(&input_u16[pos..]);
+        }
+        if !replaced {
+            return input.to_string();
+        }
+        crate::unicode::utf16_to_utf8(&result_u16)
+    }
+
+    /// Apply replacement string backreferences ($1, $2, $&, etc.)
+    fn apply_replacement(&self, replacement: &str, input_u16: &[u16], m: &regress::Match) -> String {
+        let matched = crate::unicode::utf16_to_utf8(&input_u16[m.range.start..m.range.end]);
+        let mut result = String::new();
+        let chars: Vec<char> = replacement.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() {
+                match chars[i + 1] {
+                    '&' => {
+                        result.push_str(&matched);
+                        i += 2;
+                    }
+                    '`' => {
+                        result.push_str(&crate::unicode::utf16_to_utf8(&input_u16[..m.range.start]));
+                        i += 2;
+                    }
+                    '\'' => {
+                        result.push_str(&crate::unicode::utf16_to_utf8(&input_u16[m.range.end..]));
+                        i += 2;
+                    }
+                    '$' => {
+                        result.push('$');
+                        i += 2;
+                    }
+                    d if d.is_ascii_digit() => {
+                        // Check for two-digit group reference ($10, $11, etc.)
+                        let mut num_str = String::new();
+                        num_str.push(d);
+                        if i + 2 < chars.len() && chars[i + 2].is_ascii_digit() {
+                            let two_digit = format!("{}{}", d, chars[i + 2]);
+                            let two_num: usize = two_digit.parse().unwrap_or(0);
+                            if two_num >= 1 && two_num <= m.captures.len() {
+                                if let Some(Some(r)) = m.captures.get(two_num - 1) {
+                                    result.push_str(&crate::unicode::utf16_to_utf8(&input_u16[r.start..r.end]));
+                                }
+                                i += 3;
+                                continue;
+                            }
+                        }
+                        let num: usize = num_str.parse().unwrap_or(0);
+                        if num >= 1
+                            && num <= m.captures.len()
+                            && let Some(Some(r)) = m.captures.get(num - 1)
+                        {
+                            result.push_str(&crate::unicode::utf16_to_utf8(&input_u16[r.start..r.end]));
+                        }
+                        i += 2;
+                    }
+                    _ => {
+                        result.push('$');
+                        i += 1;
+                    }
+                }
+            } else {
+                result.push(chars[i]);
+                i += 1;
+            }
+        }
+        result
+    }
+
+    /// Split a string using a regex separator, with optional capturing groups
+    fn regex_split_string(&self, input: &str, re_obj: &Rc<RefCell<IndexMap<String, Value<'gc>>>>, limit: Option<usize>) -> Vec<Value<'gc>> {
+        let borrow = re_obj.borrow();
+        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+        drop(borrow);
+
+        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+        let re = match get_or_compile_regex(&pattern_u16, &flags) {
+            Ok(r) => r,
+            Err(_) => return vec![Value::String(crate::unicode::utf8_to_utf16(input))],
+        };
+
+        let input_u16: Vec<u16> = input.encode_utf16().collect();
+        let use_unicode = flags.contains('u') || flags.contains('v');
+        let mut results: Vec<Value<'gc>> = Vec::new();
+        let max = limit.unwrap_or(usize::MAX);
+        let mut pos = 0usize;
+
+        loop {
+            if results.len() >= max {
+                break;
+            }
+            let m = if use_unicode {
+                re.find_from_utf16(&input_u16, pos).next()
+            } else {
+                re.find_from_ucs2(&input_u16, pos).next()
+            };
+            match m {
+                Some(m) if m.range.start < input_u16.len() => {
+                    // Prevent infinite loop on zero-width match at same position
+                    if m.range.start == m.range.end && m.range.start == pos {
+                        pos += 1;
+                        continue;
+                    }
+                    results.push(Value::String(input_u16[pos..m.range.start].to_vec()));
+                    // Add capturing groups
+                    for cap in &m.captures {
+                        if results.len() >= max {
+                            break;
+                        }
+                        match cap {
+                            Some(r) => results.push(Value::String(input_u16[r.start..r.end].to_vec())),
+                            None => results.push(Value::Undefined),
+                        }
+                    }
+                    pos = m.range.end;
+                }
+                _ => break,
+            }
+        }
+        if results.len() < max {
+            results.push(Value::String(input_u16[pos..].to_vec()));
+        }
+        results
     }
 
     /// Create an iterator object from a Vec of values
@@ -3485,7 +4008,22 @@ impl<'gc> VM<'gc> {
                     } else {
                         self.stack[bp + index].clone()
                     };
-                    self.stack.push(val);
+                    // TDZ check: Uninitialized variables throw ReferenceError
+                    if matches!(val, Value::Uninitialized) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot access variable before initialization")),
+                        );
+                        err_map.insert(
+                            "__type__".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
+                        );
+                        let err = Value::VmObject(Rc::new(RefCell::new(err_map)));
+                        self.handle_throw(err)?;
+                    } else {
+                        self.stack.push(val);
+                    }
                 }
                 Opcode::SetLocal => {
                     let index = self.read_byte() as usize;
@@ -3548,10 +4086,16 @@ impl<'gc> VM<'gc> {
                                 };
                                 self.frames.push(frame);
                             } else {
+                                // In strict mode, non-method calls get `this = undefined`
+                                let fn_strict = self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false);
+                                let push_this = fn_strict;
+                                if push_this {
+                                    self.this_stack.push(Value::Undefined);
+                                }
                                 let frame = CallFrame {
                                     return_ip: self.ip,
                                     bp: callee_idx + 1,
-                                    is_method: false,
+                                    is_method: push_this,
                                     arg_count,
                                     func_ip: target_ip,
                                     arguments_obj: None,
@@ -3598,10 +4142,15 @@ impl<'gc> VM<'gc> {
                                 };
                                 self.frames.push(frame);
                             } else {
+                                let fn_strict = self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false);
+                                let push_this = fn_strict;
+                                if push_this {
+                                    self.this_stack.push(Value::Undefined);
+                                }
                                 let frame = CallFrame {
                                     return_ip: self.ip,
                                     bp: callee_idx + 1,
-                                    is_method: false,
+                                    is_method: push_this,
                                     arg_count,
                                     func_ip: target_ip,
                                     arguments_obj: None,
@@ -4723,6 +5272,10 @@ impl<'gc> VM<'gc> {
                             "trimStart" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_TRIMSTART)),
                             "trimEnd" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_TRIMEND)),
                             "lastIndexOf" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_LASTINDEXOF)),
+                            "match" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_MATCH)),
+                            "replaceAll" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_REPLACEALL)),
+                            "search" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_SEARCH)),
+                            "iterator" => self.stack.push(Value::Boolean(true)), // strings are iterable
                             _ => self.stack.push(Value::Undefined),
                         },
                         Value::Number(_) => match key.as_str() {
@@ -4850,8 +5403,37 @@ impl<'gc> VM<'gc> {
                             if let Value::Number(n) = &index {
                                 let i = *n as usize;
                                 if *n >= 0.0 && *n == (i as f64) {
-                                    let val = arr.borrow().get(i).cloned().unwrap_or(Value::Undefined);
-                                    self.stack.push(val);
+                                    // Check for getter defined via Object.defineProperty
+                                    let getter_key = format!("__get_{}", i);
+                                    let getter = arr.borrow().props.get(&getter_key).cloned();
+                                    if let Some(getter_fn) = getter {
+                                        // Invoke getter by setting up an inline call frame
+                                        let (ip, upv) = match &getter_fn {
+                                            Value::VmFunction(ip, _) => (*ip, vec![]),
+                                            Value::VmClosure(ip, _, uv) => (*ip, (**uv).clone()),
+                                            _ => {
+                                                self.stack.push(Value::Undefined);
+                                                continue;
+                                            }
+                                        };
+                                        self.stack.push(Value::Undefined); // dummy callee
+                                        let bp = self.stack.len();
+                                        self.frames.push(CallFrame {
+                                            return_ip: self.ip,
+                                            bp,
+                                            is_method: false,
+                                            arg_count: 0,
+                                            func_ip: ip,
+                                            arguments_obj: None,
+                                            upvalues: upv,
+                                            saved_args: None,
+                                            local_cells: std::collections::HashMap::new(),
+                                        });
+                                        self.ip = ip;
+                                    } else {
+                                        let val = arr.borrow().get(i).cloned().unwrap_or(Value::Undefined);
+                                        self.stack.push(val);
+                                    }
                                 } else {
                                     let key = value_to_string(&index);
                                     let val = arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined);
@@ -5057,6 +5639,11 @@ impl<'gc> VM<'gc> {
                                             "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
                                             _ => None,
                                         },
+                                        Some("RegExp") => match key.as_str() {
+                                            "exec" => Some(Value::VmNativeFunction(BUILTIN_REGEX_EXEC)),
+                                            "test" => Some(Value::VmNativeFunction(BUILTIN_REGEX_TEST)),
+                                            _ => None,
+                                        },
                                         _ => None,
                                     };
                                     typed_result.unwrap_or_else(|| {
@@ -5123,6 +5710,9 @@ impl<'gc> VM<'gc> {
                             "trimStart" => Value::VmNativeFunction(BUILTIN_STRING_TRIMSTART),
                             "trimEnd" => Value::VmNativeFunction(BUILTIN_STRING_TRIMEND),
                             "lastIndexOf" => Value::VmNativeFunction(BUILTIN_STRING_LASTINDEXOF),
+                            "match" => Value::VmNativeFunction(BUILTIN_STRING_MATCH),
+                            "replaceAll" => Value::VmNativeFunction(BUILTIN_STRING_REPLACEALL),
+                            "search" => Value::VmNativeFunction(BUILTIN_STRING_SEARCH),
                             _ => Value::Undefined,
                         },
                         Value::Number(_) => match key.as_str() {
@@ -5276,82 +5866,99 @@ impl<'gc> VM<'gc> {
                 Opcode::InstanceOf => {
                     let rhs = self.stack.pop().expect("VM Stack underflow on InstanceOf (rhs)");
                     let lhs = self.stack.pop().expect("VM Stack underflow on InstanceOf (lhs)");
-                    // Map rhs constructor sentinel to name
-                    let ctor_name = match &rhs {
-                        Value::VmNativeFunction(id) => match *id {
-                            BUILTIN_CTOR_ERROR => "Error",
-                            BUILTIN_CTOR_TYPEERROR => "TypeError",
-                            BUILTIN_CTOR_SYNTAXERROR => "SyntaxError",
-                            BUILTIN_CTOR_RANGEERROR => "RangeError",
-                            BUILTIN_CTOR_REFERENCEERROR => "ReferenceError",
-                            BUILTIN_CTOR_DATE => "Date",
-                            BUILTIN_CTOR_FUNCTION => "Function",
-                            BUILTIN_CTOR_NUMBER => "Number",
-                            BUILTIN_CTOR_STRING => "String",
-                            BUILTIN_CTOR_BOOLEAN => "Boolean",
-                            BUILTIN_CTOR_OBJECT => "Object",
-                            BUILTIN_CTOR_WEAKREF => "WeakRef",
-                            BUILTIN_CTOR_WEAKMAP => "WeakMap",
-                            BUILTIN_CTOR_WEAKSET => "WeakSet",
-                            BUILTIN_CTOR_FR => "FinalizationRegistry",
+
+                    // Try prototype-chain based instanceof first (works for user-defined classes)
+                    let mut proto_chain_result: Option<bool> = None;
+
+                    // Get rhs.prototype for prototype chain walking
+                    let rhs_proto = match &rhs {
+                        Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                            let fn_props = self.get_fn_props(*ip, *arity);
+                            fn_props.borrow().get("prototype").cloned()
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(target_proto) = &rhs_proto {
+                        // Walk __proto__ chain of lhs looking for target_proto
+                        if let Value::VmObject(obj) = &lhs {
+                            let mut current = obj.borrow().get("__proto__").cloned();
+                            let mut depth = 0;
+                            loop {
+                                if depth > 100 {
+                                    break;
+                                }
+                                depth += 1;
+                                let proto_val = match current {
+                                    Some(v) => v,
+                                    None => break,
+                                };
+                                if let (Value::VmObject(a), Value::VmObject(b)) = (&proto_val, target_proto)
+                                    && Rc::ptr_eq(a, b)
+                                {
+                                    proto_chain_result = Some(true);
+                                    break;
+                                }
+                                current = if let Value::VmObject(proto_obj) = &proto_val {
+                                    proto_obj.borrow().get("__proto__").cloned()
+                                } else {
+                                    None
+                                };
+                            }
+                            if proto_chain_result.is_none() {
+                                proto_chain_result = Some(false);
+                            }
+                        }
+                    }
+
+                    let result = if let Some(r) = proto_chain_result {
+                        r
+                    } else {
+                        // Fallback: name-based instanceof for built-in types
+                        let ctor_name = match &rhs {
+                            Value::VmNativeFunction(id) => match *id {
+                                BUILTIN_CTOR_ERROR => "Error",
+                                BUILTIN_CTOR_TYPEERROR => "TypeError",
+                                BUILTIN_CTOR_SYNTAXERROR => "SyntaxError",
+                                BUILTIN_CTOR_RANGEERROR => "RangeError",
+                                BUILTIN_CTOR_REFERENCEERROR => "ReferenceError",
+                                BUILTIN_CTOR_DATE => "Date",
+                                BUILTIN_CTOR_FUNCTION => "Function",
+                                BUILTIN_CTOR_NUMBER => "Number",
+                                BUILTIN_CTOR_STRING => "String",
+                                BUILTIN_CTOR_BOOLEAN => "Boolean",
+                                BUILTIN_CTOR_OBJECT => "Object",
+                                BUILTIN_CTOR_WEAKREF => "WeakRef",
+                                BUILTIN_CTOR_WEAKMAP => "WeakMap",
+                                BUILTIN_CTOR_WEAKSET => "WeakSet",
+                                BUILTIN_CTOR_FR => "FinalizationRegistry",
+                                _ => "",
+                            },
                             _ => "",
-                        },
-                        Value::VmObject(map) => {
-                            let b = map.borrow();
-                            if let Some(Value::Number(id)) = b.get("__native_id__") {
-                                match *id as u8 {
-                                    BUILTIN_CTOR_NUMBER => "Number",
-                                    BUILTIN_CTOR_STRING => "String",
-                                    BUILTIN_CTOR_BOOLEAN => "Boolean",
-                                    BUILTIN_CTOR_OBJECT => "Object",
-                                    BUILTIN_CTOR_DATE => "Date",
-                                    BUILTIN_CTOR_FUNCTION => "Function",
-                                    _ => "",
+                        };
+                        let ctor_str = if ctor_name.is_empty() {
+                            value_to_string(&rhs)
+                        } else {
+                            ctor_name.to_string()
+                        };
+                        if let Value::VmObject(map) = &lhs {
+                            let borrow = map.borrow();
+                            if let Some(Value::String(type_u16)) = borrow.get("__type__") {
+                                let type_name = crate::unicode::utf16_to_utf8(type_u16);
+                                match ctor_str.as_str() {
+                                    "Error" => type_name == "Error" || type_name.ends_with("Error"),
+                                    "Object" => true,
+                                    _ => type_name == ctor_str,
                                 }
                             } else {
-                                ""
+                                ctor_str == "Object"
                             }
-                        }
-                        Value::String(s) => {
-                            // Fallback for string sentinels
-                            let name = crate::unicode::utf16_to_utf8(s);
-                            // Leak is avoided; use a match approach instead
-                            match name.as_str() {
-                                "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" | "Date" | "Function"
-                                | "Number" | "String" | "Boolean" | "Object" => {
-                                    // handled below via value_to_string
-                                    ""
-                                }
-                                _ => "",
-                            }
-                        }
-                        _ => "",
-                    };
-                    // For VmNativeFunction-based check
-                    let ctor_str = if ctor_name.is_empty() {
-                        value_to_string(&rhs)
-                    } else {
-                        ctor_name.to_string()
-                    };
-                    let result = if let Value::VmObject(map) = &lhs {
-                        let borrow = map.borrow();
-                        if let Some(Value::String(type_u16)) = borrow.get("__type__") {
-                            let type_name = crate::unicode::utf16_to_utf8(type_u16);
-                            match ctor_str.as_str() {
-                                "Error" => type_name == "Error" || type_name.ends_with("Error"),
-                                "Object" => true, // all VmObjects are instances of Object
-                                _ => type_name == ctor_str,
-                            }
+                        } else if ctor_str == "Function" {
+                            matches!(&lhs, Value::VmNativeFunction(_) | Value::VmFunction(..) | Value::VmClosure(..))
+                                || matches!(&lhs, Value::VmObject(m) if m.borrow().contains_key("__native_id__"))
                         } else {
-                            // Object without __type__: instanceof Object = true
-                            ctor_str == "Object"
+                            false
                         }
-                    } else if ctor_str == "Function" {
-                        // VmNativeFunction / VmFunction / VmClosure are instances of Function
-                        matches!(&lhs, Value::VmNativeFunction(_) | Value::VmFunction(..) | Value::VmClosure(..))
-                            || matches!(&lhs, Value::VmObject(m) if m.borrow().contains_key("__native_id__"))
-                    } else {
-                        false
                     };
                     self.stack.push(Value::Boolean(result));
                 }
@@ -5576,6 +6183,30 @@ impl<'gc> VM<'gc> {
                                         m.insert("unregister".to_string(), Value::VmNativeFunction(BUILTIN_FR_UNREGISTER));
                                         self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
                                     }
+                                }
+                                BUILTIN_CTOR_REGEXP => {
+                                    // new RegExp(pattern, flags)
+                                    let pattern = args.first().map(value_to_string).unwrap_or_default();
+                                    let flags = args.get(1).map(value_to_string).unwrap_or_default();
+                                    let mut map = IndexMap::new();
+                                    map.insert(
+                                        "__regex_pattern__".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16(&pattern)),
+                                    );
+                                    map.insert("__regex_flags__".to_string(), Value::String(crate::unicode::utf8_to_utf16(&flags)));
+                                    map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RegExp")));
+                                    map.insert("source".to_string(), Value::String(crate::unicode::utf8_to_utf16(&pattern)));
+                                    map.insert("flags".to_string(), Value::String(crate::unicode::utf8_to_utf16(&flags)));
+                                    map.insert("global".to_string(), Value::Boolean(flags.contains('g')));
+                                    map.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
+                                    map.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
+                                    map.insert("dotAll".to_string(), Value::Boolean(flags.contains('s')));
+                                    map.insert("sticky".to_string(), Value::Boolean(flags.contains('y')));
+                                    map.insert("unicode".to_string(), Value::Boolean(flags.contains('u')));
+                                    map.insert("hasIndices".to_string(), Value::Boolean(flags.contains('d')));
+                                    map.insert("unicodeSets".to_string(), Value::Boolean(flags.contains('v')));
+                                    map.insert("lastIndex".to_string(), Value::Number(0.0));
+                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
                                 }
                                 _ => {
                                     log::warn!("NewCall on VmNativeFunction #{}: returning empty object", id);

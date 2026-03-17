@@ -19,6 +19,12 @@ pub struct Compiler<'gc> {
     parent_locals: Vec<String>,        // direct parent function's locals
     parent_upvalues: Vec<UpvalueInfo>, // direct parent function's upvalues
     upvalues: Vec<UpvalueInfo>,        // current function's captured upvalues
+    // Completion value tracking for eval loop results
+    completion_var: Option<String>, // synthetic variable name holding loop completion value
+    completion_counter: u32,        // unique ID for completion variables
+    // Try-finally: allow break/continue to pass through finally blocks
+    try_finally_stack: Vec<TryFinallyContext>,
+    try_finally_counter: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +43,13 @@ struct LoopContext {
     break_patches: Vec<usize>,    // offsets to patch with post-loop address
 }
 
+#[derive(Debug, Clone)]
+struct TryFinallyContext {
+    break_flag_var: String,           // synthetic variable name for pending-break flag
+    saved_cv_var: Option<String>,     // synthetic variable to save completion value before finally
+    finally_jump_patches: Vec<usize>, // Jump addresses to patch to finally body start
+}
+
 impl<'gc> Compiler<'gc> {
     pub fn new() -> Self {
         Self {
@@ -51,6 +64,10 @@ impl<'gc> Compiler<'gc> {
             parent_locals: Vec::new(),
             parent_upvalues: Vec::new(),
             upvalues: Vec::new(),
+            completion_var: None,
+            completion_counter: 0,
+            try_finally_stack: Vec::new(),
+            try_finally_counter: 0,
         }
     }
 
@@ -155,6 +172,7 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(expr)?;
                 // Pop if it's not the last evaluated statement, to keep stack clean
                 if !is_last {
+                    self.emit_save_completion();
                     self.chunk.write_opcode(Opcode::Pop);
                 }
             }
@@ -325,6 +343,10 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::DoWhile(body, cond) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 let loop_start = self.chunk.code.len();
                 let ctx = self.make_loop_context(loop_start);
                 self.loop_stack.push(ctx);
@@ -350,12 +372,16 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::While(cond, body) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 let loop_start = self.chunk.code.len();
                 let ctx = self.make_loop_context(loop_start);
                 self.loop_stack.push(ctx);
@@ -381,16 +407,22 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::For(for_stmt) => {
-                // Compile init
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
+                // Init should not affect completion value
+                let body_cv = self.completion_var.take();
                 if let Some(init) = &for_stmt.init {
                     self.compile_statement(init, false)?;
                 }
+                self.completion_var = body_cv;
                 // Loop start: test
                 let loop_start = self.chunk.code.len();
                 let ctx = self.make_loop_context(loop_start);
@@ -406,7 +438,8 @@ impl<'gc> Compiler<'gc> {
                 for s in &for_stmt.body {
                     self.compile_statement(s, false)?;
                 }
-                // Update — continue jumps here (not to condition)
+                // Update should not affect completion value
+                let body_cv = self.completion_var.take();
                 let update_ip = self.chunk.code.len();
                 for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
                     self.patch_jump_to(*cp, update_ip);
@@ -414,6 +447,7 @@ impl<'gc> Compiler<'gc> {
                 if let Some(update) = &for_stmt.update {
                     self.compile_statement(update, false)?;
                 }
+                self.completion_var = body_cv;
                 // Jump back to test
                 self.emit_loop(loop_start);
                 if let Some(ej) = exit_jump {
@@ -426,9 +460,9 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::Return(expr_opt) => {
@@ -446,18 +480,43 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Throw);
             }
             StatementKind::Break(label_opt) => {
-                let patch = self.emit_jump(Opcode::Jump);
-                if let Some(label) = label_opt {
-                    // Labeled break: find the matching loop context
-                    if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
+                if !self.try_finally_stack.is_empty() {
+                    // Inside try-finally: set break flag, save cv, teardown try, jump to finally
+                    let tfc = self.try_finally_stack.last().unwrap();
+                    let flag_name = tfc.break_flag_var.clone();
+                    let saved_cv_name = tfc.saved_cv_var.clone();
+                    // Set break flag to 1 (true)
+                    let one_idx = self.chunk.add_constant(Value::Number(1.0));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(one_idx);
+                    self.emit_helper_set(&flag_name);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    // Save current completion value before entering finally
+                    if let (Some(cv), Some(sv)) = (&self.completion_var, &saved_cv_name) {
+                        let cv = cv.clone();
+                        let sv = sv.clone();
+                        self.emit_helper_get(&cv);
+                        self.emit_helper_set(&sv);
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    // Teardown try handler
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    // Jump to finally body (will be patched later)
+                    let patch = self.emit_jump(Opcode::Jump);
+                    self.try_finally_stack.last_mut().unwrap().finally_jump_patches.push(patch);
+                } else {
+                    let patch = self.emit_jump(Opcode::Jump);
+                    if let Some(label) = label_opt {
+                        if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
+                            ctx.break_patches.push(patch);
+                        } else {
+                            return Err(crate::raise_syntax_error!(format!("label '{}' not found for break", label)));
+                        }
+                    } else if let Some(ctx) = self.loop_stack.last_mut() {
                         ctx.break_patches.push(patch);
                     } else {
-                        return Err(crate::raise_syntax_error!(format!("label '{}' not found for break", label)));
+                        return Err(crate::raise_syntax_error!("break outside of loop"));
                     }
-                } else if let Some(ctx) = self.loop_stack.last_mut() {
-                    ctx.break_patches.push(patch);
-                } else {
-                    return Err(crate::raise_syntax_error!("break outside of loop"));
                 }
             }
             StatementKind::Continue(label_opt) => {
@@ -475,13 +534,56 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Label(label, inner) => {
-                // Set pending label so the next loop picks it up
-                self.pending_label = Some(label.clone());
-                self.compile_statement(inner, is_last)?;
-                // Clear in case it wasn't consumed (non-loop label)
-                self.pending_label = None;
+                // Check if inner is a loop/switch that consumes the label via pending_label
+                let is_loop = matches!(
+                    &*inner.kind,
+                    StatementKind::While(..)
+                        | StatementKind::DoWhile(..)
+                        | StatementKind::For(..)
+                        | StatementKind::ForIn(..)
+                        | StatementKind::ForOf(..)
+                        | StatementKind::ForOfExpr(..)
+                        | StatementKind::ForInExpr(..)
+                        | StatementKind::ForOfDestructuringArray(..)
+                        | StatementKind::ForOfDestructuringObject(..)
+                        | StatementKind::ForInDestructuringArray(..)
+                        | StatementKind::ForInDestructuringObject(..)
+                        | StatementKind::Switch(..)
+                );
+                if is_loop {
+                    self.pending_label = Some(label.clone());
+                    self.compile_statement(inner, is_last)?;
+                    self.pending_label = None;
+                } else {
+                    // Labeled non-loop: push a pseudo LoopContext so break L can find it
+                    let saved_cv = self.completion_var.clone();
+                    if is_last {
+                        self.setup_completion_var();
+                    }
+                    let ctx = LoopContext {
+                        loop_start: 0,
+                        label: Some(label.clone()),
+                        ..LoopContext::default()
+                    };
+                    self.loop_stack.push(ctx);
+                    // Compile inner with is_last=false; completion tracked via completion_var
+                    self.compile_statement(inner, false)?;
+                    let ctx = self.loop_stack.pop().unwrap();
+                    for bp in ctx.break_patches {
+                        self.patch_jump(bp);
+                    }
+                    if is_last {
+                        self.emit_load_completion();
+                    } else {
+                        self.completion_var = saved_cv;
+                    }
+                }
             }
             StatementKind::ForIn(_decl_kind, var_name, obj_expr, body) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 // Generate unique names for each for-in loop's synthetic variables
                 let fid = self.forin_counter;
                 self.forin_counter += 1;
@@ -670,9 +772,9 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::TryCatch(tc) => {
@@ -686,6 +788,52 @@ impl<'gc> Compiler<'gc> {
                     }
                 } else {
                     0xffff
+                };
+
+                // If there's a finally block, set up break-through-finally tracking
+                let has_finally = tc.finally_body.is_some();
+                let break_flag_var = if has_finally {
+                    let id = self.try_finally_counter;
+                    self.try_finally_counter += 1;
+                    let flag_name = format!("__tf_brk_{}__", id);
+                    // Initialize break flag to 0
+                    let zero = self.chunk.add_constant(Value::Number(0.0));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(zero);
+                    if self.scope_depth > 0 {
+                        self.locals.push(flag_name.clone());
+                    } else {
+                        let n = crate::unicode::utf8_to_utf16(&flag_name);
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(ni);
+                    }
+                    // Also create a variable to save the completion value before finally
+                    let saved_cv_name = if self.completion_var.is_some() {
+                        let sv_name = format!("__tf_cv_{}__", id);
+                        let undef = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef);
+                        if self.scope_depth > 0 {
+                            self.locals.push(sv_name.clone());
+                        } else {
+                            let n = crate::unicode::utf8_to_utf16(&sv_name);
+                            let ni = self.chunk.add_constant(Value::String(n));
+                            self.chunk.write_opcode(Opcode::DefineGlobal);
+                            self.chunk.write_u16(ni);
+                        }
+                        Some(sv_name)
+                    } else {
+                        None
+                    };
+                    self.try_finally_stack.push(TryFinallyContext {
+                        break_flag_var: flag_name.clone(),
+                        saved_cv_var: saved_cv_name,
+                        finally_jump_patches: Vec::new(),
+                    });
+                    Some(flag_name)
+                } else {
+                    None
                 };
 
                 // SetupTry <catch_ip:u16> <binding_idx:u16>
@@ -721,6 +869,17 @@ impl<'gc> Compiler<'gc> {
 
                 self.patch_jump(jump_over_catch);
 
+                // Patch break-through-finally jumps to here (the finally body start)
+                let saved_cv_var_for_restore = if has_finally {
+                    let tfc = self.try_finally_stack.pop().unwrap();
+                    for jp in &tfc.finally_jump_patches {
+                        self.patch_jump(*jp);
+                    }
+                    tfc.saved_cv_var.clone()
+                } else {
+                    None
+                };
+
                 // Finally body (block-scoped)
                 let saved_finally = self.locals.len();
                 if let Some(ref finally_body) = tc.finally_body {
@@ -729,6 +888,39 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
                 self.end_block_scope(saved_finally);
+
+                // After finally: check break flag and restore cv, then jump to break target
+                if let Some(ref flag_name) = break_flag_var {
+                    self.emit_helper_get(flag_name);
+                    let skip_break = self.emit_jump(Opcode::JumpIfFalse);
+
+                    // Restore completion value from saved_cv before breaking
+                    if let (Some(sv), Some(cv)) = (&saved_cv_var_for_restore, &self.completion_var) {
+                        let sv = sv.clone();
+                        let cv = cv.clone();
+                        self.emit_helper_get(&sv);
+                        self.emit_helper_set(&cv);
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+
+                    // Actual break jump (registered as break patch)
+                    let break_jump = self.emit_jump(Opcode::Jump);
+                    if let Some(ctx) = self.loop_stack.last_mut() {
+                        ctx.break_patches.push(break_jump);
+                    }
+
+                    self.patch_jump(skip_break);
+
+                    // Clean up synthetic variables
+                    if self.scope_depth > 0 {
+                        let flag = flag_name.clone();
+                        self.locals.retain(|l| l != &flag);
+                        if let Some(ref sv) = saved_cv_var_for_restore {
+                            let sv = sv.clone();
+                            self.locals.retain(|l| l != &sv);
+                        }
+                    }
+                }
 
                 if is_last {
                     let idx = self.chunk.add_constant(Value::Undefined);
@@ -788,6 +980,9 @@ impl<'gc> Compiler<'gc> {
 
                 self.patch_jump(jump_over);
 
+                // Save local variable names for direct eval support
+                self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+
                 // Collect upvalues before restoring
                 let fn_upvalues = std::mem::take(&mut self.upvalues);
 
@@ -828,6 +1023,11 @@ impl<'gc> Compiler<'gc> {
             StatementKind::ForOf(decl_kind, var_name, iterable_expr, body) => {
                 // Desugar: arr = iterable; for (idx=0; idx<arr.length; idx++) { var_name = arr[idx]; body }
 
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
+
                 // For let/const at top level, bump scope_depth so loop variable becomes a local
                 // (enables per-iteration binding for closures)
                 let forced_local = self.scope_depth == 0
@@ -839,6 +1039,19 @@ impl<'gc> Compiler<'gc> {
                     self.scope_depth = 1;
                 }
                 let saved_locals = self.locals.len();
+
+                // TDZ: For const/let, declare the loop variable as Uninitialized BEFORE evaluating the iterable
+                let is_tdz = self.scope_depth > 0
+                    && matches!(
+                        decl_kind,
+                        Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
+                    );
+                if is_tdz && !self.locals.iter().any(|l| l == var_name) {
+                    let uninit = self.chunk.add_constant(Value::Uninitialized);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(uninit);
+                    self.locals.push(var_name.clone());
+                }
 
                 self.compile_expr(iterable_expr)?;
                 // Store iterable as __forofArr__
@@ -925,7 +1138,7 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 // Clean up synthetic locals
-                if self.scope_depth > 0 {
+                if self.scope_depth > 0 && !forced_local {
                     self.locals.retain(|l| l != "__forofArr__" && l != "__forofIdx__");
                 }
 
@@ -936,45 +1149,65 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::ForOfDestructuringArray(_decl_kind, elements, iterable_expr, body) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 self.compile_for_of_destructuring_array(elements, iterable_expr, body)?;
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::ForOfDestructuringObject(_decl_kind, elements, iterable_expr, body) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 self.compile_for_of_destructuring_object(elements, iterable_expr, body)?;
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::ForInDestructuringArray(_decl_kind, elements, obj_expr, body) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 self.compile_for_in_destructuring_array(elements, obj_expr, body)?;
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::ForInDestructuringObject(_decl_kind, elements, obj_expr, body) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 self.compile_for_in_destructuring_object(elements, obj_expr, body)?;
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::ForOfExpr(lhs_expr, iterable_expr, body) => {
                 // Same as ForOf but assigns to an expression LHS instead of a declared variable
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 self.compile_expr(iterable_expr)?;
                 if self.scope_depth > 0 {
                     self.locals.push("__forofArr__".to_string());
@@ -1037,13 +1270,17 @@ impl<'gc> Compiler<'gc> {
                     self.locals.retain(|l| l != "__forofArr__" && l != "__forofIdx__");
                 }
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::ForInExpr(lhs_expr, obj_expr, body) => {
                 // Same as ForIn but assigns to an expression LHS
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 let fid = self.forin_counter;
                 self.forin_counter += 1;
                 let obj_name = format!("__forin_obj_{}__", fid);
@@ -1118,12 +1355,16 @@ impl<'gc> Compiler<'gc> {
                     self.locals.retain(|l| l != &obj_name && l != &keys_name && l != &idx_name);
                 }
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::Switch(sw) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
                 // Compile discriminant once, store in synthetic local/global
                 self.compile_expr(&sw.expr)?;
                 if self.scope_depth > 0 {
@@ -1201,9 +1442,9 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::Class(class_def) => {
@@ -2147,6 +2388,9 @@ impl<'gc> Compiler<'gc> {
 
                 self.patch_jump(jump_over);
 
+                // Save local variable names for direct eval support
+                self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+
                 // Collect upvalues before restoring
                 let fn_upvalues = std::mem::take(&mut self.upvalues);
 
@@ -2530,6 +2774,11 @@ impl<'gc> Compiler<'gc> {
                 map.insert("global".to_string(), Value::Boolean(flags.contains('g')));
                 map.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
                 map.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
+                map.insert("dotAll".to_string(), Value::Boolean(flags.contains('s')));
+                map.insert("sticky".to_string(), Value::Boolean(flags.contains('y')));
+                map.insert("unicode".to_string(), Value::Boolean(flags.contains('u')));
+                map.insert("hasIndices".to_string(), Value::Boolean(flags.contains('d')));
+                map.insert("unicodeSets".to_string(), Value::Boolean(flags.contains('v')));
                 map.insert("lastIndex".to_string(), Value::Number(0.0));
                 let idx = self.chunk.add_constant(Value::VmObject(Rc::new(RefCell::new(map))));
                 self.chunk.write_opcode(Opcode::Constant);
@@ -2681,6 +2930,45 @@ impl<'gc> Compiler<'gc> {
             let ni = self.chunk.add_constant(Value::String(n));
             self.chunk.write_opcode(Opcode::SetGlobal);
             self.chunk.write_u16(ni);
+        }
+    }
+
+    /// Set up a completion value variable for tracking eval loop results.
+    /// Returns the synthetic variable name. Pushes `undefined` as initial value.
+    fn setup_completion_var(&mut self) {
+        let id = self.completion_counter;
+        self.completion_counter += 1;
+        let name = format!("__cv_{}__", id);
+        let undef = self.chunk.add_constant(Value::Undefined);
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(undef);
+        if self.scope_depth > 0 {
+            self.locals.push(name.clone());
+        } else {
+            let n = crate::unicode::utf8_to_utf16(&name);
+            let ni = self.chunk.add_constant(Value::String(n));
+            self.chunk.write_opcode(Opcode::DefineGlobal);
+            self.chunk.write_u16(ni);
+        }
+        self.completion_var = Some(name);
+    }
+
+    /// Emit code to save top-of-stack value into the completion variable (value stays on stack).
+    fn emit_save_completion(&mut self) {
+        if let Some(ref cv) = self.completion_var.clone() {
+            self.emit_helper_set(cv);
+        }
+    }
+
+    /// Emit code to load the completion value onto the stack and clear tracking.
+    fn emit_load_completion(&mut self) {
+        if let Some(ref cv) = self.completion_var.clone() {
+            self.emit_helper_get(cv);
+            // Clean up the synthetic local
+            if self.scope_depth > 0 {
+                self.locals.retain(|l| l != cv);
+            }
+            self.completion_var = None;
         }
     }
 
@@ -3070,6 +3358,9 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Return);
 
         self.patch_jump(jump_over);
+
+        // Save local variable names for direct eval support
+        self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
 
         // Collect upvalues before restoring
         let fn_upvalues = std::mem::take(&mut self.upvalues);

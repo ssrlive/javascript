@@ -1756,6 +1756,11 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
                 let borrowed = obj.borrow();
                 if let Some(Value::String(tname)) = borrowed.get("__type__") {
                     let tname_str = crate::unicode::utf16_to_utf8(tname);
+                    if tname_str == "RegExp" {
+                        let pattern = borrowed.get("__regex_pattern__").map(|v| value_to_string(v)).unwrap_or_default();
+                        let flags = borrowed.get("__regex_flags__").map(|v| value_to_string(v)).unwrap_or_default();
+                        return format!("/{}/{}", pattern, flags);
+                    }
                     if tname_str.ends_with("Error") {
                         let msg = borrowed
                             .get("message")

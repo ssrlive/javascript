@@ -220,6 +220,41 @@ const BUILTIN_DATE_GETUTCHOURS: u8 = 213;
 const BUILTIN_DATE_GETUTCMINUTES: u8 = 214;
 const BUILTIN_DATE_GETUTCSECONDS: u8 = 215;
 const BUILTIN_DATE_GETTIMEZONEOFFSET: u8 = 216;
+const BUILTIN_DATE_PARSE: u8 = 217;
+const BUILTIN_DATE_SETTIME: u8 = 218;
+const BUILTIN_DATE_TODATESTRING: u8 = 219;
+const BUILTIN_SETTIMEOUT: u8 = 220;
+const BUILTIN_CLEARTIMEOUT: u8 = 221;
+const BUILTIN_SETINTERVAL: u8 = 222;
+const BUILTIN_CLEARINTERVAL: u8 = 223;
+const BUILTIN_CTOR_ARRAYBUFFER: u8 = 224;
+const BUILTIN_CTOR_DATAVIEW: u8 = 225;
+const BUILTIN_ARRAYBUFFER_RESIZE: u8 = 226;
+const BUILTIN_CTOR_INT8ARRAY: u8 = 227;
+const BUILTIN_CTOR_UINT8ARRAY: u8 = 228;
+const BUILTIN_CTOR_UINT8CLAMPEDARRAY: u8 = 229;
+const BUILTIN_CTOR_INT16ARRAY: u8 = 230;
+const BUILTIN_CTOR_UINT16ARRAY: u8 = 231;
+const BUILTIN_CTOR_INT32ARRAY: u8 = 232;
+const BUILTIN_CTOR_UINT32ARRAY: u8 = 233;
+const BUILTIN_CTOR_FLOAT32ARRAY: u8 = 234;
+const BUILTIN_CTOR_FLOAT64ARRAY: u8 = 235;
+const BUILTIN_CTOR_PROMISE: u8 = 236;
+const BUILTIN_PROMISE_RESOLVE: u8 = 237;
+const BUILTIN_PROMISE_ALL: u8 = 238;
+const BUILTIN_PROMISE_THEN: u8 = 239;
+const BUILTIN_PROMISE_NOOP: u8 = 240;
+const BUILTIN_CTOR_PROXY: u8 = 241;
+const BUILTIN_CTOR_SHAREDARRAYBUFFER: u8 = 242;
+const BUILTIN_ATOMICS_ISLOCKFREE: u8 = 243;
+const BUILTIN_ATOMICS_LOAD: u8 = 244;
+const BUILTIN_ATOMICS_STORE: u8 = 245;
+const BUILTIN_ATOMICS_COMPAREEXCHANGE: u8 = 246;
+const BUILTIN_ATOMICS_ADD: u8 = 247;
+const BUILTIN_ATOMICS_EXCHANGE: u8 = 248;
+const BUILTIN_ATOMICS_WAIT: u8 = 249;
+const BUILTIN_ATOMICS_NOTIFY: u8 = 250;
+const BUILTIN_ATOMICS_WAITASYNC: u8 = 251;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -677,6 +712,14 @@ impl<'gc> VM<'gc> {
         self.globals
             .insert("parseFloat".to_string(), Value::VmNativeFunction(BUILTIN_PARSEFLOAT));
         self.globals.insert("eval".to_string(), Value::VmNativeFunction(BUILTIN_EVAL));
+        self.globals
+            .insert("setTimeout".to_string(), Value::VmNativeFunction(BUILTIN_SETTIMEOUT));
+        self.globals
+            .insert("clearTimeout".to_string(), Value::VmNativeFunction(BUILTIN_CLEARTIMEOUT));
+        self.globals
+            .insert("setInterval".to_string(), Value::VmNativeFunction(BUILTIN_SETINTERVAL));
+        self.globals
+            .insert("clearInterval".to_string(), Value::VmNativeFunction(BUILTIN_CLEARINTERVAL));
 
         // JSON object
         let mut json_map = IndexMap::new();
@@ -715,8 +758,120 @@ impl<'gc> VM<'gc> {
         let mut date_map = IndexMap::new();
         date_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_DATE as f64));
         date_map.insert("now".to_string(), Value::VmNativeFunction(BUILTIN_DATE_NOW));
+        date_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_DATE_PARSE));
         self.globals
             .insert("Date".to_string(), Value::VmObject(Rc::new(RefCell::new(date_map))));
+        let mut array_buffer_map = IndexMap::new();
+        array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAYBUFFER as f64));
+        self.globals
+            .insert("ArrayBuffer".to_string(), Value::VmObject(Rc::new(RefCell::new(array_buffer_map))));
+
+        let mut data_view_map = IndexMap::new();
+        data_view_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_DATAVIEW as f64));
+        self.globals
+            .insert("DataView".to_string(), Value::VmObject(Rc::new(RefCell::new(data_view_map))));
+
+        let mut shared_array_buffer_map = IndexMap::new();
+        shared_array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_SHAREDARRAYBUFFER as f64));
+        self.globals.insert(
+            "SharedArrayBuffer".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(shared_array_buffer_map))),
+        );
+
+        let mut atomics_map = IndexMap::new();
+        atomics_map.insert("isLockFree".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_ISLOCKFREE));
+        atomics_map.insert("load".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_LOAD));
+        atomics_map.insert("store".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_STORE));
+        atomics_map.insert(
+            "compareExchange".to_string(),
+            Value::VmNativeFunction(BUILTIN_ATOMICS_COMPAREEXCHANGE),
+        );
+        atomics_map.insert("add".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_ADD));
+        atomics_map.insert("exchange".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_EXCHANGE));
+        atomics_map.insert("wait".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_WAIT));
+        atomics_map.insert("notify".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_NOTIFY));
+        let mut wait_async_fn = IndexMap::new();
+        wait_async_fn.insert("__native_id__".to_string(), Value::Number(BUILTIN_ATOMICS_WAITASYNC as f64));
+        wait_async_fn.insert("length".to_string(), Value::Number(4.0));
+        atomics_map.insert("waitAsync".to_string(), Value::VmObject(Rc::new(RefCell::new(wait_async_fn))));
+        self.globals
+            .insert("Atomics".to_string(), Value::VmObject(Rc::new(RefCell::new(atomics_map))));
+
+        let mut promise_map = IndexMap::new();
+        promise_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROMISE as f64));
+        promise_map.insert("resolve".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_RESOLVE));
+        promise_map.insert("all".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_ALL));
+        self.globals
+            .insert("Promise".to_string(), Value::VmObject(Rc::new(RefCell::new(promise_map))));
+
+        let mut proxy_map = IndexMap::new();
+        proxy_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROXY as f64));
+        self.globals
+            .insert("Proxy".to_string(), Value::VmObject(Rc::new(RefCell::new(proxy_map))));
+
+        let mut int8_array_map = IndexMap::new();
+        int8_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_INT8ARRAY as f64));
+        int8_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedInt8Array")),
+        );
+        int8_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(1.0));
+        self.globals
+            .insert("Int8Array".to_string(), Value::VmObject(Rc::new(RefCell::new(int8_array_map))));
+
+        let mut uint8_array_map = IndexMap::new();
+        uint8_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT8ARRAY as f64));
+        uint8_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(1.0));
+        self.globals
+            .insert("Uint8Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint8_array_map))));
+
+        let mut uint8_clamped_array_map = IndexMap::new();
+        uint8_clamped_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT8CLAMPEDARRAY as f64));
+        uint8_clamped_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(1.0));
+        self.globals.insert(
+            "Uint8ClampedArray".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(uint8_clamped_array_map))),
+        );
+
+        let mut int16_array_map = IndexMap::new();
+        int16_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_INT16ARRAY as f64));
+        int16_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(2.0));
+        self.globals
+            .insert("Int16Array".to_string(), Value::VmObject(Rc::new(RefCell::new(int16_array_map))));
+
+        let mut uint16_array_map = IndexMap::new();
+        uint16_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT16ARRAY as f64));
+        uint16_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(2.0));
+        self.globals
+            .insert("Uint16Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint16_array_map))));
+
+        let mut int32_array_map = IndexMap::new();
+        int32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_INT32ARRAY as f64));
+        int32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
+        self.globals
+            .insert("Int32Array".to_string(), Value::VmObject(Rc::new(RefCell::new(int32_array_map))));
+
+        let mut uint32_array_map = IndexMap::new();
+        uint32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT32ARRAY as f64));
+        uint32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
+        self.globals
+            .insert("Uint32Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint32_array_map))));
+
+        let mut float32_array_map = IndexMap::new();
+        float32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FLOAT32ARRAY as f64));
+        float32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
+        self.globals.insert(
+            "Float32Array".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(float32_array_map))),
+        );
+
+        let mut float64_array_map = IndexMap::new();
+        float64_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FLOAT64ARRAY as f64));
+        float64_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
+        self.globals.insert(
+            "Float64Array".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(float64_array_map))),
+        );
         self.globals
             .insert("Boolean".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_BOOLEAN));
         // Object constructor with static methods
@@ -900,6 +1055,367 @@ impl<'gc> VM<'gc> {
     /// Execute a native/built-in function
     fn call_builtin(&mut self, id: u8, args: Vec<Value<'gc>>) -> Value<'gc> {
         match id {
+            BUILTIN_SETTIMEOUT | BUILTIN_SETINTERVAL => {
+                if let Some(callback) = args.first() {
+                    match callback {
+                        Value::VmFunction(ip, _) => {
+                            let _ = self.call_vm_function(*ip, &[], &[]);
+                        }
+                        Value::VmClosure(ip, _, upv) => {
+                            let uv = (**upv).clone();
+                            let _ = self.call_vm_function(*ip, &[], &uv);
+                        }
+                        Value::VmNativeFunction(native_id) => {
+                            let _ = self.call_builtin(*native_id, Vec::new());
+                        }
+                        _ => {}
+                    }
+                }
+                Value::Number(1.0)
+            }
+            BUILTIN_CLEARTIMEOUT | BUILTIN_CLEARINTERVAL => Value::Undefined,
+            BUILTIN_PROMISE_NOOP => Value::Undefined,
+            BUILTIN_CTOR_PROMISE => {
+                if let Some(executor) = args.first() {
+                    let resolve = Value::VmNativeFunction(BUILTIN_PROMISE_NOOP);
+                    let reject = Value::VmNativeFunction(BUILTIN_PROMISE_NOOP);
+                    match executor {
+                        Value::VmFunction(ip, _) => {
+                            let _ = self.call_vm_function(*ip, &[resolve.clone(), reject.clone()], &[]);
+                        }
+                        Value::VmClosure(ip, _, upv) => {
+                            let uv = (**upv).clone();
+                            let _ = self.call_vm_function(*ip, &[resolve.clone(), reject.clone()], &uv);
+                        }
+                        Value::VmNativeFunction(native_id) => {
+                            let _ = self.call_builtin(*native_id, vec![resolve.clone(), reject.clone()]);
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+            BUILTIN_PROMISE_RESOLVE | BUILTIN_PROMISE_ALL => {
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                if let Some(v) = args.first() {
+                    map.insert("__promise_value__".to_string(), v.clone());
+                }
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+            BUILTIN_CTOR_PROXY => match args.first().cloned() {
+                Some(Value::VmObject(target)) => Value::VmObject(target),
+                Some(Value::VmArray(target)) => Value::VmArray(target),
+                Some(Value::VmMap(target)) => Value::VmMap(target),
+                Some(Value::VmSet(target)) => Value::VmSet(target),
+                Some(other) => other,
+                None => Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))),
+            },
+            BUILTIN_CTOR_SHAREDARRAYBUFFER => {
+                let len = match args.first() {
+                    Some(Value::Number(n)) if n.is_finite() && *n > 0.0 => *n as usize,
+                    _ => 0,
+                };
+                let bytes = vec![Value::Number(0.0); len];
+                let mut map = IndexMap::new();
+                map.insert(
+                    "__type__".to_string(),
+                    Value::String(crate::unicode::utf8_to_utf16("SharedArrayBuffer")),
+                );
+                map.insert("byteLength".to_string(), Value::Number(len as f64));
+                map.insert(
+                    "__buffer_bytes__".to_string(),
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(bytes)))),
+                );
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+            BUILTIN_ATOMICS_ISLOCKFREE => {
+                let size = args
+                    .first()
+                    .and_then(|v| if let Value::Number(n) = v { Some(*n as i64) } else { None })
+                    .unwrap_or(0);
+                Value::Boolean(matches!(size, 1 | 2 | 4 | 8))
+            }
+            BUILTIN_ATOMICS_LOAD => {
+                if let (Some(Value::VmArray(arr)), Some(Value::Number(idx))) = (args.first(), args.get(1)) {
+                    let i = (*idx as isize).max(0) as usize;
+                    return arr.borrow().elements.get(i).cloned().unwrap_or(Value::Undefined);
+                }
+                Value::Undefined
+            }
+            BUILTIN_ATOMICS_STORE => {
+                if let (Some(Value::VmArray(arr)), Some(Value::Number(idx)), Some(val)) = (args.first(), args.get(1), args.get(2)) {
+                    let i = (*idx as isize).max(0) as usize;
+                    if i < arr.borrow().elements.len() {
+                        arr.borrow_mut().elements[i] = val.clone();
+                    }
+                    return val.clone();
+                }
+                Value::Undefined
+            }
+            BUILTIN_ATOMICS_COMPAREEXCHANGE => {
+                if let (Some(Value::VmArray(arr)), Some(Value::Number(idx)), Some(expected), Some(replacement)) =
+                    (args.first(), args.get(1), args.get(2), args.get(3))
+                {
+                    let i = (*idx as isize).max(0) as usize;
+                    let old = arr.borrow().elements.get(i).cloned().unwrap_or(Value::Undefined);
+                    if self.strict_equal(&old, expected) && i < arr.borrow().elements.len() {
+                        arr.borrow_mut().elements[i] = replacement.clone();
+                    }
+                    return old;
+                }
+                Value::Undefined
+            }
+            BUILTIN_ATOMICS_ADD => {
+                if let (Some(Value::VmArray(arr)), Some(Value::Number(idx)), Some(Value::Number(delta))) =
+                    (args.first(), args.get(1), args.get(2))
+                {
+                    let i = (*idx as isize).max(0) as usize;
+                    let old_num = match arr.borrow().elements.get(i) {
+                        Some(Value::Number(n)) => *n,
+                        _ => 0.0,
+                    };
+                    if i < arr.borrow().elements.len() {
+                        arr.borrow_mut().elements[i] = Value::Number(old_num + *delta);
+                    }
+                    return Value::Number(old_num);
+                }
+                Value::Undefined
+            }
+            BUILTIN_ATOMICS_EXCHANGE => {
+                if let (Some(Value::VmArray(arr)), Some(Value::Number(idx)), Some(new_value)) = (args.first(), args.get(1), args.get(2)) {
+                    let i = (*idx as isize).max(0) as usize;
+                    let old = arr.borrow().elements.get(i).cloned().unwrap_or(Value::Undefined);
+                    if i < arr.borrow().elements.len() {
+                        arr.borrow_mut().elements[i] = new_value.clone();
+                    }
+                    return old;
+                }
+                Value::Undefined
+            }
+            BUILTIN_ATOMICS_WAIT => {
+                if let (Some(Value::VmArray(arr)), Some(Value::Number(idx)), Some(expected)) = (args.first(), args.get(1), args.get(2)) {
+                    let i = (*idx as isize).max(0) as usize;
+                    let current = arr.borrow().elements.get(i).cloned().unwrap_or(Value::Undefined);
+                    if !self.strict_equal(&current, expected) {
+                        return Value::String(crate::unicode::utf8_to_utf16("not-equal"));
+                    }
+                    return Value::String(crate::unicode::utf8_to_utf16("timed-out"));
+                }
+                Value::String(crate::unicode::utf8_to_utf16("not-equal"))
+            }
+            BUILTIN_ATOMICS_NOTIFY => Value::Number(0.0),
+            BUILTIN_ATOMICS_WAITASYNC => {
+                if let Some(Value::VmArray(arr)) = args.first() {
+                    let arr_borrow = arr.borrow();
+                    let ta_name = arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();
+                    let buffer_type = arr_borrow.props.get("__buffer_type__").map(value_to_string).unwrap_or_default();
+                    drop(arr_borrow);
+
+                    if ta_name != "Int32Array" && ta_name != "BigInt64Array" {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16(
+                                "Atomics.waitAsync requires Int32Array or BigInt64Array",
+                            )),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+
+                    if buffer_type != "SharedArrayBuffer" {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16(
+                                "Atomics.waitAsync requires SharedArrayBuffer-backed typed array",
+                            )),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+
+                    let idx = args
+                        .get(1)
+                        .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                        .unwrap_or(0);
+                    let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
+                    let timeout = args
+                        .get(3)
+                        .and_then(|v| if let Value::Number(n) = v { Some(*n) } else { None })
+                        .unwrap_or(f64::INFINITY);
+                    let current = arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined);
+
+                    let mut result = IndexMap::new();
+                    if !self.strict_equal(&current, &expected) {
+                        result.insert("async".to_string(), Value::Boolean(false));
+                        result.insert("value".to_string(), Value::String(crate::unicode::utf8_to_utf16("not-equal")));
+                        return Value::VmObject(Rc::new(RefCell::new(result)));
+                    }
+
+                    if timeout <= 0.0 {
+                        result.insert("async".to_string(), Value::Boolean(false));
+                        result.insert("value".to_string(), Value::String(crate::unicode::utf8_to_utf16("timed-out")));
+                        return Value::VmObject(Rc::new(RefCell::new(result)));
+                    }
+
+                    let mut promise = IndexMap::new();
+                    promise.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                    promise.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                    result.insert("async".to_string(), Value::Boolean(true));
+                    result.insert("value".to_string(), Value::VmObject(Rc::new(RefCell::new(promise))));
+                    return Value::VmObject(Rc::new(RefCell::new(result)));
+                }
+
+                let mut err_map = IndexMap::new();
+                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                err_map.insert(
+                    "message".to_string(),
+                    Value::String(crate::unicode::utf8_to_utf16("Atomics.waitAsync requires typed array")),
+                );
+                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                Value::Undefined
+            }
+            BUILTIN_CTOR_ARRAYBUFFER => {
+                if args.get(1).is_some() {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Unimplemented: resizable ArrayBuffer options")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
+                let len = match args.first() {
+                    Some(Value::Number(n)) if n.is_finite() && *n > 0.0 => *n as usize,
+                    _ => 0,
+                };
+                let bytes = vec![Value::Number(0.0); len];
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer")));
+                map.insert("byteLength".to_string(), Value::Number(len as f64));
+                map.insert("resize".to_string(), Value::VmNativeFunction(BUILTIN_ARRAYBUFFER_RESIZE));
+                map.insert(
+                    "__buffer_bytes__".to_string(),
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(bytes)))),
+                );
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+            BUILTIN_CTOR_DATAVIEW => {
+                let buffer = args.first().cloned().unwrap_or(Value::Undefined);
+                let byte_len = if let Value::VmObject(obj) = &buffer {
+                    match obj.borrow().get("byteLength") {
+                        Some(Value::Number(n)) => *n,
+                        _ => 0.0,
+                    }
+                } else {
+                    0.0
+                };
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("DataView")));
+                map.insert("buffer".to_string(), buffer);
+                map.insert("byteLength".to_string(), Value::Number(byte_len));
+                map.insert("byteOffset".to_string(), Value::Number(0.0));
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+            BUILTIN_CTOR_INT8ARRAY
+            | BUILTIN_CTOR_UINT8ARRAY
+            | BUILTIN_CTOR_UINT8CLAMPEDARRAY
+            | BUILTIN_CTOR_INT16ARRAY
+            | BUILTIN_CTOR_UINT16ARRAY
+            | BUILTIN_CTOR_INT32ARRAY
+            | BUILTIN_CTOR_UINT32ARRAY
+            | BUILTIN_CTOR_FLOAT32ARRAY
+            | BUILTIN_CTOR_FLOAT64ARRAY => {
+                let bytes_per_element = match id {
+                    BUILTIN_CTOR_INT16ARRAY | BUILTIN_CTOR_UINT16ARRAY => 2usize,
+                    BUILTIN_CTOR_INT32ARRAY | BUILTIN_CTOR_UINT32ARRAY | BUILTIN_CTOR_FLOAT32ARRAY => 4usize,
+                    BUILTIN_CTOR_FLOAT64ARRAY => 8usize,
+                    _ => 1usize,
+                };
+                let typedarray_name = match id {
+                    BUILTIN_CTOR_INT8ARRAY => "Int8Array",
+                    BUILTIN_CTOR_UINT8ARRAY => "Uint8Array",
+                    BUILTIN_CTOR_UINT8CLAMPEDARRAY => "Uint8ClampedArray",
+                    BUILTIN_CTOR_INT16ARRAY => "Int16Array",
+                    BUILTIN_CTOR_UINT16ARRAY => "Uint16Array",
+                    BUILTIN_CTOR_INT32ARRAY => "Int32Array",
+                    BUILTIN_CTOR_UINT32ARRAY => "Uint32Array",
+                    BUILTIN_CTOR_FLOAT32ARRAY => "Float32Array",
+                    BUILTIN_CTOR_FLOAT64ARRAY => "Float64Array",
+                    _ => "TypedArray",
+                };
+
+                if let Some(Value::VmObject(buf_obj)) = args.first() {
+                    let buffer_type = buf_obj.borrow().get("__type__").map(value_to_string).unwrap_or_default();
+                    let is_array_buffer = matches!(
+                        buf_obj.borrow().get("__type__"),
+                        Some(Value::String(s))
+                            if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer"
+                                || crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer"
+                    );
+                    if is_array_buffer {
+                        let byte_len = match buf_obj.borrow().get("byteLength") {
+                            Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
+                            _ => 0,
+                        };
+                        let byte_offset = match args.get(1) {
+                            Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
+                            _ => 0,
+                        };
+
+                        if args.get(2).is_some() || byte_offset > 0 {
+                            println!("Unimplemented: typed array views with offset/explicit length");
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(
+                                    "Unimplemented: typed array views with offset/explicit length",
+                                )),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let available = byte_len.saturating_sub(byte_offset) / bytes_per_element;
+                        let mut data = VmArrayData::new(vec![Value::Number(0.0); available]);
+                        data.props.insert(
+                            "__typedarray_name__".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16(typedarray_name)),
+                        );
+                        data.props.insert(
+                            "__buffer_type__".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16(&buffer_type)),
+                        );
+                        return Value::VmArray(Rc::new(RefCell::new(data)));
+                    }
+                }
+
+                let length = match args.first() {
+                    Some(Value::Number(n)) if n.is_finite() && *n > 0.0 => *n as usize,
+                    _ => 0,
+                };
+                let mut data = VmArrayData::new(vec![Value::Number(0.0); length]);
+                data.props.insert(
+                    "__typedarray_name__".to_string(),
+                    Value::String(crate::unicode::utf8_to_utf16(typedarray_name)),
+                );
+                data.props.insert(
+                    "__buffer_type__".to_string(),
+                    Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer")),
+                );
+                Value::VmArray(Rc::new(RefCell::new(data)))
+            }
             BUILTIN_DATE_NOW => {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let ms = SystemTime::now()
@@ -907,6 +1423,26 @@ impl<'gc> VM<'gc> {
                     .map(|d| d.as_millis() as f64)
                     .unwrap_or(0.0);
                 Value::Number(ms)
+            }
+            BUILTIN_DATE_PARSE => {
+                let s_str = args.first().map(|v| value_to_string(v)).unwrap_or_default();
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s_str) {
+                    return Value::Number(dt.timestamp_millis() as f64);
+                } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%Y-%m-%d") {
+                    let ms = dt
+                        .and_hms_opt(0, 0, 0)
+                        .map(|d| d.and_utc().timestamp_millis() as f64)
+                        .unwrap_or(f64::NAN);
+                    return Value::Number(ms);
+                } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%b %d, %Y") {
+                    // "Aug 9, 1995"
+                    let ms = dt
+                        .and_hms_opt(0, 0, 0)
+                        .map(|d| d.and_utc().timestamp_millis() as f64)
+                        .unwrap_or(f64::NAN);
+                    return Value::Number(ms);
+                }
+                Value::Number(f64::NAN)
             }
             BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
                 let parts: Vec<String> = args.iter().map(|v| self.vm_display_string(v)).collect();
@@ -2156,10 +2692,61 @@ impl<'gc> VM<'gc> {
             | BUILTIN_NEW_FUNCTION
             | BUILTIN_BIGINT
             | BUILTIN_DATE_NOW
+            | BUILTIN_CTOR_SHAREDARRAYBUFFER
+            | BUILTIN_ATOMICS_ISLOCKFREE
+            | BUILTIN_ATOMICS_LOAD
+            | BUILTIN_ATOMICS_STORE
+            | BUILTIN_ATOMICS_COMPAREEXCHANGE
+            | BUILTIN_ATOMICS_ADD
+            | BUILTIN_ATOMICS_EXCHANGE
+            | BUILTIN_ATOMICS_WAIT
+            | BUILTIN_ATOMICS_NOTIFY
+            | BUILTIN_ATOMICS_WAITASYNC
+            | BUILTIN_PROMISE_RESOLVE
+            | BUILTIN_PROMISE_ALL
             | BUILTIN_CTOR_DATE => {
                 return self.call_builtin(id, args);
             }
             _ => {}
+        }
+
+        if id == BUILTIN_PROMISE_THEN {
+            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+            let callback_result = match callback {
+                Value::VmFunction(ip, _) => self.call_vm_function(ip, &[], &[]),
+                Value::VmClosure(ip, _, upv) => {
+                    let uv = (*upv).clone();
+                    self.call_vm_function(ip, &[], &uv)
+                }
+                Value::VmNativeFunction(native_id) => self.call_builtin(native_id, vec![]),
+                _ => Value::Undefined,
+            };
+
+            let mut map = IndexMap::new();
+            map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+            map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+            map.insert("__promise_value__".to_string(), callback_result);
+            return Value::VmObject(Rc::new(RefCell::new(map)));
+        }
+
+        if id == BUILTIN_ARRAYBUFFER_RESIZE
+            && let Value::VmObject(obj) = &receiver
+        {
+            let mut b = obj.borrow_mut();
+            if let Some(Value::String(t)) = b.get("__type__")
+                && crate::unicode::utf16_to_utf8(t) == "ArrayBuffer"
+            {
+                let new_len = match args.first() {
+                    Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => *n as usize,
+                    _ => 0,
+                };
+                b.insert("byteLength".to_string(), Value::Number(new_len as f64));
+                if let Some(Value::VmArray(bytes)) = b.get("__buffer_bytes__") {
+                    let mut bytes_mut = bytes.borrow_mut();
+                    bytes_mut.elements.resize(new_len, Value::Number(0.0));
+                }
+                return Value::Undefined;
+            }
         }
 
         // Date instance methods
@@ -2260,6 +2847,45 @@ impl<'gc> VM<'gc> {
                             return Value::Number(mins);
                         }
                         return Value::Number(f64::NAN);
+                    }
+                    BUILTIN_DATE_TODATESTRING => {
+                        if let Some(dt) = to_local() {
+                            let s = dt.format("%a %b %d %Y").to_string();
+                            return Value::String(crate::unicode::utf8_to_utf16(&s));
+                        }
+                        return Value::String(crate::unicode::utf8_to_utf16("Invalid Date"));
+                    }
+                    BUILTIN_DATE_SETTIME => {
+                        let mut new_ms = f64::NAN;
+                        if let Some(Value::Number(n)) = args.first() {
+                            new_ms = *n;
+                        }
+                        obj.borrow_mut().insert("__date_ms__".to_string(), Value::Number(new_ms));
+                        return Value::Number(new_ms);
+                    }
+                    BUILTIN_DATE_SETFULLYEAR => {
+                        let mut new_ms = f64::NAN;
+                        if let Some(Value::Number(y)) = args.first()
+                            && let Some(dt) = to_local()
+                            && let Some(new_dt) = dt.with_year(*y as i32)
+                        {
+                            new_ms = new_dt.timestamp_millis() as f64;
+                        }
+                        obj.borrow_mut().insert("__date_ms__".to_string(), Value::Number(new_ms));
+                        return Value::Number(new_ms);
+                    }
+                    BUILTIN_DATE_SETDATE => {
+                        let mut new_ms = f64::NAN;
+                        if let Some(Value::Number(d)) = args.first()
+                            && let Some(dt) = to_local()
+                        {
+                            let current_day = dt.day() as i64;
+                            let target_day = *d as i64;
+                            let diff_sec = (target_day - current_day) * 86400;
+                            new_ms = dt.timestamp_millis() as f64 + (diff_sec * 1000) as f64;
+                        }
+                        obj.borrow_mut().insert("__date_ms__".to_string(), Value::Number(new_ms));
+                        return Value::Number(new_ms);
                     }
                     _ => {}
                 }
@@ -6307,13 +6933,21 @@ impl<'gc> VM<'gc> {
                                 let borrow = map.borrow();
                                 if let Some(Value::Number(n)) = borrow.get("__native_id__") {
                                     match *n as u8 {
+                                        BUILTIN_CTOR_DATE => "Date",
                                         BUILTIN_CTOR_FUNCTION => "Function",
+                                        BUILTIN_CTOR_NUMBER => "Number",
+                                        BUILTIN_CTOR_STRING => "String",
+                                        BUILTIN_CTOR_BOOLEAN => "Boolean",
                                         BUILTIN_CTOR_OBJECT => "Object",
                                         BUILTIN_CTOR_ERROR => "Error",
                                         BUILTIN_CTOR_TYPEERROR => "TypeError",
                                         BUILTIN_CTOR_SYNTAXERROR => "SyntaxError",
                                         BUILTIN_CTOR_RANGEERROR => "RangeError",
                                         BUILTIN_CTOR_REFERENCEERROR => "ReferenceError",
+                                        BUILTIN_CTOR_WEAKREF => "WeakRef",
+                                        BUILTIN_CTOR_WEAKMAP => "WeakMap",
+                                        BUILTIN_CTOR_WEAKSET => "WeakSet",
+                                        BUILTIN_CTOR_FR => "FinalizationRegistry",
                                         _ => "",
                                     }
                                 } else {
@@ -6800,10 +7434,41 @@ impl<'gc> VM<'gc> {
                                         m.insert("getTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETTIME));
                                         m.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_DATE_VALUEOF));
                                         m.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOSTRING));
+                                        m.insert("toDateString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TODATESTRING));
+                                        m.insert("setTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETTIME));
                                         m.insert(
                                             "toLocaleDateString".to_string(),
                                             Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING),
                                         );
+                                        m.insert(
+                                            "toLocaleTimeString".to_string(),
+                                            Value::VmNativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING),
+                                        );
+                                        m.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOLOCALESTRING));
+                                        m.insert("toISOString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOISOSTRING));
+                                        m.insert("getFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETFULLYEAR));
+                                        m.insert("getMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMONTH));
+                                        m.insert("getDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDATE));
+                                        m.insert("getDay".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDAY));
+                                        m.insert("getHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETHOURS));
+                                        m.insert("getMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMINUTES));
+                                        m.insert("getSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETSECONDS));
+                                        m.insert("getMilliseconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS));
+                                        m.insert("setFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETFULLYEAR));
+                                        m.insert("setMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMONTH));
+                                        m.insert("setDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETDATE));
+                                        m.insert("setHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETHOURS));
+                                        m.insert("setMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMINUTES));
+                                        m.insert(
+                                            "getTimezoneOffset".to_string(),
+                                            Value::VmNativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET),
+                                        );
+                                        m.insert("getUTCFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCFULLYEAR));
+                                        m.insert("getUTCMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMONTH));
+                                        m.insert("getUTCDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCDATE));
+                                        m.insert("getUTCHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS));
+                                        m.insert("getUTCMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES));
+                                        m.insert("getUTCSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS));
                                         self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
                                         continue;
                                     }

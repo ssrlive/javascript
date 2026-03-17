@@ -1200,8 +1200,8 @@ pub enum Value<'gc> {
     Null,
     Object(JSObjectDataPtr<'gc>),
     Function(String),
-    VmFunction(usize, u8),                     // (ip, arg_count)
-    VmClosure(usize, u8, Rc<Vec<Value<'gc>>>), // (ip, arg_count, captured upvalues)
+    VmFunction(usize, u8),                                  // (ip, arg_count)
+    VmClosure(usize, u8, Rc<Vec<Rc<RefCell<Value<'gc>>>>>), // (ip, arg_count, captured upvalue cells)
     VmArray(Rc<RefCell<VmArrayData<'gc>>>),
     VmObject(Rc<RefCell<IndexMap<String, Value<'gc>>>>),
     VmNativeFunction(u8), // builtin ID

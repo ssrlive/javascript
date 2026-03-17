@@ -825,8 +825,21 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::DefineGlobal);
                 self.chunk.write_u16(name_idx);
             }
-            StatementKind::ForOf(_decl_kind, var_name, iterable_expr, body) => {
+            StatementKind::ForOf(decl_kind, var_name, iterable_expr, body) => {
                 // Desugar: arr = iterable; for (idx=0; idx<arr.length; idx++) { var_name = arr[idx]; body }
+
+                // For let/const at top level, bump scope_depth so loop variable becomes a local
+                // (enables per-iteration binding for closures)
+                let forced_local = self.scope_depth == 0
+                    && matches!(
+                        decl_kind,
+                        Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
+                    );
+                if forced_local {
+                    self.scope_depth = 1;
+                }
+                let saved_locals = self.locals.len();
+
                 self.compile_expr(iterable_expr)?;
                 // Store iterable as __forofArr__
                 if self.scope_depth > 0 {
@@ -914,6 +927,12 @@ impl<'gc> Compiler<'gc> {
                 // Clean up synthetic locals
                 if self.scope_depth > 0 {
                     self.locals.retain(|l| l != "__forofArr__" && l != "__forofIdx__");
+                }
+
+                // Restore scope_depth and clean up forced-local stack slots
+                if forced_local {
+                    self.end_block_scope(saved_locals);
+                    self.scope_depth = 0;
                 }
 
                 if is_last {
@@ -1683,6 +1702,9 @@ impl<'gc> Compiler<'gc> {
                     }
                 } else {
                     // Regular function call
+                    // Detect direct eval: callee is bare `eval` identifier
+                    let is_direct_eval = matches!(&**callee, Expr::Var(name, ..) if name == "eval");
+                    let eval_flag: u8 = if is_direct_eval { 0x40 } else { 0 };
                     self.compile_expr(callee)?;
                     if has_spread {
                         self.chunk.write_opcode(Opcode::NewArray);
@@ -1697,13 +1719,13 @@ impl<'gc> Compiler<'gc> {
                             }
                         }
                         self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(0x00); // regular call
+                        self.chunk.write_byte(eval_flag); // regular call + possible eval flag
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
                         self.chunk.write_opcode(Opcode::Call);
-                        self.chunk.write_byte(args.len() as u8);
+                        self.chunk.write_byte(args.len() as u8 | eval_flag);
                     }
                 }
             }
@@ -1852,8 +1874,9 @@ impl<'gc> Compiler<'gc> {
             // Array literal: [a, b, c] or [a, ...b, c]
             Expr::Array(elements) => {
                 let has_spread = elements.iter().any(|e| matches!(e, Some(Expr::Spread(_))));
-                if has_spread {
-                    // Build array incrementally: NewArray(0), then ArrayPush/ArraySpread
+                let has_hole = elements.iter().any(|e| e.is_none());
+                if has_spread || has_hole {
+                    // Build array incrementally: NewArray(0), then ArrayPush/ArraySpread/ArrayHole
                     self.chunk.write_opcode(Opcode::NewArray);
                     self.chunk.write_byte(0);
                     for elem in elements {
@@ -1864,10 +1887,8 @@ impl<'gc> Compiler<'gc> {
                             self.compile_expr(e)?;
                             self.chunk.write_opcode(Opcode::ArrayPush);
                         } else {
-                            let idx = self.chunk.add_constant(Value::Undefined);
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(idx);
-                            self.chunk.write_opcode(Opcode::ArrayPush);
+                            // Hole element — push an empty slot
+                            self.chunk.write_opcode(Opcode::ArrayHole);
                         }
                     }
                 } else {

@@ -187,13 +187,14 @@ const BUILTIN_MATH_IMUL: u8 = 182;
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
     pub return_ip: usize,
-    pub bp: usize,                           // Base pointer
-    pub is_method: bool,                     // Pop this_stack on return
-    pub arg_count: usize,                    // Actual number of arguments passed
-    pub func_ip: usize,                      // instruction pointer of the called function
-    pub arguments_obj: Option<Value<'gc>>,   // cached arguments object
-    pub upvalues: Vec<Value<'gc>>,           // captured upvalues (empty for non-closures)
-    pub saved_args: Option<Vec<Value<'gc>>>, // saved full arg list when arg_count > arity
+    pub bp: usize,                                            // Base pointer
+    pub is_method: bool,                                      // Pop this_stack on return
+    pub arg_count: usize,                                     // Actual number of arguments passed
+    pub func_ip: usize,                                       // instruction pointer of the called function
+    pub arguments_obj: Option<Value<'gc>>,                    // cached arguments object
+    pub upvalues: Vec<Rc<RefCell<Value<'gc>>>>,               // captured upvalue cells (shared mutable)
+    pub saved_args: Option<Vec<Value<'gc>>>,                  // saved full arg list when arg_count > arity
+    pub local_cells: HashMap<usize, Rc<RefCell<Value<'gc>>>>, // locals captured as upvalue cells
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +263,7 @@ pub struct VM<'gc> {
     symbol_counter: u64,
     symbol_registry: HashMap<String, Value<'gc>>, // Symbol.for() registry
     pending_throw: Option<Value<'gc>>,            // deferred throw from call_builtin
+    direct_eval: bool,                            // true when current eval is a direct call
 }
 
 impl<'gc> VM<'gc> {
@@ -281,6 +283,7 @@ impl<'gc> VM<'gc> {
             symbol_counter: 0,
             symbol_registry: HashMap::new(),
             pending_throw: None,
+            direct_eval: false,
         };
         vm.register_builtins();
         vm
@@ -404,9 +407,16 @@ impl<'gc> VM<'gc> {
                     let mut a = arr.borrow_mut();
                     let cur_len = a.elements.len();
                     if new_len > cur_len {
-                        a.elements.resize(new_len, Value::Undefined);
+                        for i in cur_len..new_len {
+                            a.elements.push(Value::Undefined);
+                            a.props.insert(format!("__deleted_{}", i), Value::Boolean(true));
+                        }
                     } else if new_len < cur_len {
                         a.elements.truncate(new_len);
+                        // Remove hole markers for truncated indices
+                        for i in new_len..cur_len {
+                            a.props.shift_remove(&format!("__deleted_{}", i));
+                        }
                     }
                 }
             } else {
@@ -1247,17 +1257,93 @@ impl<'gc> VM<'gc> {
                             }));
                         }
                     }
+                    // Detect strict mode: code begins with "use strict" directive, or enclosing context is strict (direct eval only)
+                    let enclosing_strict = if self.direct_eval {
+                        self.frames
+                            .last()
+                            .map(|f| self.chunk.fn_strictness.get(&f.func_ip).copied().unwrap_or(false))
+                            .unwrap_or(false)
+                    } else {
+                        false // indirect eval never inherits caller strict mode
+                    };
+                    let is_strict =
+                        enclosing_strict || code.trim().starts_with("\"use strict\"") || code.trim().starts_with("'use strict'");
                     let compiler = crate::core::Compiler::new();
                     let chunk = compiler.compile(&statements)?;
+                    // Non-configurable global names (can't be redefined by eval)
+                    let non_configurable: [&str; 3] = ["NaN", "Infinity", "undefined"];
+                    // Pre-check: scan chunk for DefineGlobal opcodes that would define functions overriding non-configurable globals
+                    {
+                        let code = &chunk.code;
+                        let constants = &chunk.constants;
+                        let mut pc = 0;
+                        while pc < code.len() {
+                            let op = code[pc];
+                            pc += 1;
+                            if op == Opcode::DefineGlobal as u8 && pc + 1 < code.len() {
+                                let idx = (code[pc] as u16 | (code[pc + 1] as u16) << 8) as usize;
+                                if idx < constants.len()
+                                    && let Value::String(s) = &constants[idx]
+                                {
+                                    let name = crate::unicode::utf16_to_utf8(s);
+                                    if non_configurable.contains(&name.as_str()) {
+                                        return Err(crate::raise_type_error!(format!("Cannot redefine property: {}", name)));
+                                    }
+                                }
+                                pc += 2;
+                            } else {
+                                // Skip operands based on opcode
+                                match Opcode::try_from(op) {
+                                    Ok(
+                                        Opcode::Constant
+                                        | Opcode::DefineGlobal
+                                        | Opcode::GetGlobal
+                                        | Opcode::SetGlobal
+                                        | Opcode::GetProperty
+                                        | Opcode::SetProperty
+                                        | Opcode::SetSuperProperty
+                                        | Opcode::GetSuperProperty
+                                        | Opcode::GetMethod
+                                        | Opcode::NewError
+                                        | Opcode::TypeOfGlobal
+                                        | Opcode::DeleteGlobal,
+                                    ) => pc += 2,
+                                    Ok(Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::SetupTry) => pc += 2,
+                                    Ok(Opcode::Call | Opcode::NewCall) => pc += 1,
+                                    Ok(
+                                        Opcode::GetLocal
+                                        | Opcode::SetLocal
+                                        | Opcode::NewArray
+                                        | Opcode::NewObject
+                                        | Opcode::GetUpvalue
+                                        | Opcode::SetUpvalue
+                                        | Opcode::CollectRest
+                                        | Opcode::GetArguments,
+                                    ) => pc += 1,
+                                    Ok(Opcode::MakeClosure) => {
+                                        pc += 2; // const idx
+                                        if pc < code.len() {
+                                            let count = code[pc] as usize;
+                                            pc += 1 + count * 2;
+                                        }
+                                    }
+                                    _ => {} // 0-operand opcodes
+                                }
+                            }
+                        }
+                    }
                     let mut eval_vm: VM<'gc> = VM::new(chunk);
                     // Copy caller's globals into eval VM
+                    let _caller_keys: std::collections::HashSet<String> = self.globals.keys().cloned().collect();
                     for (k, v) in &self.globals {
                         eval_vm.globals.insert(k.clone(), v.clone());
                     }
                     let result = eval_vm.run()?;
-                    // Copy any new/modified globals back to the caller
-                    for (k, v) in eval_vm.globals {
-                        self.globals.insert(k, v);
+                    // Copy globals back — strict mode keeps eval's own scope isolated
+                    if !is_strict {
+                        for (k, v) in &eval_vm.globals {
+                            self.globals.insert(k.clone(), v.clone());
+                        }
                     }
                     Ok(result)
                 })();
@@ -1270,8 +1356,19 @@ impl<'gc> VM<'gc> {
                             || msg_lower.contains("syntax error")
                             || msg_lower.contains("illegal return")
                             || msg_lower.contains("continue outside")
-                            || msg_lower.contains("break outside");
-                        let type_name = if is_syntax { "SyntaxError" } else { "Error" };
+                            || msg_lower.contains("break outside")
+                            || msg_lower.contains("parsing failed")
+                            || msg_lower.contains("parse error")
+                            || msg_lower.contains("unexpected token")
+                            || msg_lower.contains("unexpected end");
+                        let is_type_error = msg_lower.contains("typeerror") || msg_lower.contains("type error");
+                        let type_name = if is_syntax {
+                            "SyntaxError"
+                        } else if is_type_error {
+                            "TypeError"
+                        } else {
+                            "Error"
+                        };
                         let mut err_map = IndexMap::new();
                         err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(type_name)));
                         err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
@@ -1342,16 +1439,17 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_CTOR_ARRAY => {
                 // Array(a, b, c) → creates array from args
-                // Array(n) where n is a number → creates array with n empty slots
+                // Array(n) where n is a number → creates array with n empty slots (holes)
                 if args.len() == 1
                     && let Value::Number(n) = &args[0]
                 {
                     let len = *n as usize;
-                    let mut elems = Vec::with_capacity(len);
-                    for _ in 0..len {
-                        elems.push(Value::Undefined);
+                    let mut data = VmArrayData::new(Vec::new());
+                    for i in 0..len {
+                        data.elements.push(Value::Undefined);
+                        data.props.insert(format!("__deleted_{}", i), Value::Boolean(true));
                     }
-                    return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(elems))));
+                    return Value::VmArray(Rc::new(RefCell::new(data)));
                 }
                 Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(args))))
             }
@@ -1402,6 +1500,13 @@ impl<'gc> VM<'gc> {
                         .keys()
                         .filter(|k| !k.starts_with("__"))
                         .map(|k| Value::String(crate::unicode::utf8_to_utf16(k)))
+                        .collect();
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(keys))))
+                } else if let Some(Value::VmArray(arr)) = args.first() {
+                    let borrow = arr.borrow();
+                    let keys: Vec<Value<'gc>> = (0..borrow.elements.len())
+                        .filter(|i| !borrow.props.contains_key(&format!("__deleted_{}", i)))
+                        .map(|i| Value::String(crate::unicode::utf8_to_utf16(&i.to_string())))
                         .collect();
                     Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(keys))))
                 } else {
@@ -1907,8 +2012,16 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_INDEXOF => {
                     let needle = args.first().cloned().unwrap_or(Value::Undefined);
+                    let from_index = match args.get(1) {
+                        Some(Value::Number(n)) => {
+                            let i = *n as i64;
+                            let len = arr.borrow().elements.len() as i64;
+                            if i < 0 { (len + i).max(0) as usize } else { i as usize }
+                        }
+                        _ => 0,
+                    };
                     let a = arr.borrow();
-                    for (i, v) in a.iter().enumerate() {
+                    for (i, v) in a.iter().enumerate().skip(from_index) {
                         if self.values_equal(v, &needle) {
                             return Value::Number(i as f64);
                         }
@@ -1953,13 +2066,25 @@ impl<'gc> VM<'gc> {
                         } else {
                             Vec::new()
                         };
-                        let elements = arr.borrow().elements.clone();
-                        let mut result = Vec::new();
+                        let borrow = arr.borrow();
+                        let elements = borrow.elements.clone();
+                        let holes: std::collections::HashSet<usize> = borrow
+                            .props
+                            .keys()
+                            .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
+                            .collect();
+                        drop(borrow);
+                        let mut result_data = VmArrayData::new(Vec::new());
                         for (i, elem) in elements.iter().enumerate() {
-                            let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
-                            result.push(r);
+                            if holes.contains(&i) {
+                                result_data.elements.push(Value::Undefined);
+                                result_data.props.insert(format!("__deleted_{}", i), Value::Boolean(true));
+                            } else {
+                                let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
+                                result_data.elements.push(r);
+                            }
                         }
-                        return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
+                        return Value::VmArray(Rc::new(RefCell::new(result_data)));
                     }
                     return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(Vec::new()))));
                 }
@@ -1970,9 +2095,19 @@ impl<'gc> VM<'gc> {
                         } else {
                             Vec::new()
                         };
-                        let elements = arr.borrow().elements.clone();
+                        let borrow = arr.borrow();
+                        let elements = borrow.elements.clone();
+                        let holes: std::collections::HashSet<usize> = borrow
+                            .props
+                            .keys()
+                            .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
+                            .collect();
+                        drop(borrow);
                         let mut result = Vec::new();
                         for (i, elem) in elements.iter().enumerate() {
+                            if holes.contains(&i) {
+                                continue;
+                            }
                             let r = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if r.to_truthy() {
                                 result.push(elem.clone());
@@ -1993,8 +2128,18 @@ impl<'gc> VM<'gc> {
                         } else {
                             Vec::new()
                         };
-                        let elements = arr.borrow().elements.clone();
+                        let borrow = arr.borrow();
+                        let elements = borrow.elements.clone();
+                        let holes: std::collections::HashSet<usize> = borrow
+                            .props
+                            .keys()
+                            .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
+                            .collect();
+                        drop(borrow);
                         for (i, elem) in elements.iter().enumerate() {
+                            if holes.contains(&i) {
+                                continue;
+                            }
                             self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                         }
                     }
@@ -2062,11 +2207,54 @@ impl<'gc> VM<'gc> {
                     let delete_count = delete_count.min((len - start as i64).max(0) as usize);
                     let insert_items: Vec<Value<'gc>> = args.into_iter().skip(2).collect();
                     let mut a = arr.borrow_mut();
+
+                    // Collect holes info for the removed region
+                    let mut removed_holes = std::collections::HashSet::new();
+                    for i in start..start + delete_count {
+                        if a.props.contains_key(&format!("__deleted_{}", i)) {
+                            removed_holes.insert(i - start);
+                        }
+                    }
+
+                    // Collect holes info for elements after the removed region
+                    let mut after_holes = std::collections::HashSet::new();
+                    for i in (start + delete_count)..(len as usize) {
+                        if a.props.contains_key(&format!("__deleted_{}", i)) {
+                            after_holes.insert(i);
+                        }
+                    }
+
+                    // Remove old hole markers
+                    let keys_to_remove: Vec<String> = a.props.keys().filter(|k| k.starts_with("__deleted_")).cloned().collect();
+                    for k in keys_to_remove {
+                        a.props.shift_remove(&k);
+                    }
+
                     let removed: Vec<Value<'gc>> = a.elements.drain(start..start + delete_count).collect();
                     for (i, item) in insert_items.into_iter().enumerate() {
                         a.elements.insert(start + i, item);
                     }
-                    return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(removed))));
+
+                    // Re-apply holes for elements that shifted
+                    let item_count = a.elements.len();
+                    let _shift = delete_count as i64
+                        - (item_count as i64
+                            - (len - delete_count as i64 - start as i64 + (item_count as i64 - (len as usize - delete_count) as i64)));
+                    // Simpler: elements after `start + delete_count` shifted to `start + insert_count`
+                    let insert_count = a.elements.len() - (len as usize - delete_count);
+                    for old_idx in after_holes {
+                        let new_idx = old_idx - delete_count + insert_count;
+                        if new_idx < a.elements.len() {
+                            a.props.insert(format!("__deleted_{}", new_idx), Value::Boolean(true));
+                        }
+                    }
+
+                    // Build removed array with holes preserved
+                    let mut removed_data = VmArrayData::new(removed);
+                    for hole_idx in removed_holes {
+                        removed_data.props.insert(format!("__deleted_{}", hole_idx), Value::Boolean(true));
+                    }
+                    return Value::VmArray(Rc::new(RefCell::new(removed_data)));
                 }
                 BUILTIN_ARRAY_REVERSE => {
                     arr.borrow_mut().elements.reverse();
@@ -2083,7 +2271,7 @@ impl<'gc> VM<'gc> {
                         };
                         let ip = *ip;
                         elems.sort_by(|a, b| {
-                            let result = self.call_vm_function(ip, &[a.clone(), b.clone()], &[]);
+                            let result = self.call_vm_function(ip, &[a.clone(), b.clone()], &__cb_uv);
                             if let Value::Number(n) = result {
                                 n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
                             } else {
@@ -2252,8 +2440,18 @@ impl<'gc> VM<'gc> {
                         } else {
                             Vec::new()
                         };
-                        let elements = arr.borrow().elements.clone();
+                        let borrow = arr.borrow();
+                        let elements = borrow.elements.clone();
+                        let holes: std::collections::HashSet<usize> = borrow
+                            .props
+                            .keys()
+                            .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
+                            .collect();
+                        drop(borrow);
                         for (i, elem) in elements.iter().enumerate() {
+                            if holes.contains(&i) {
+                                continue;
+                            }
                             let result = self.call_vm_function(*ip, &[elem.clone(), Value::Number(i as f64)], &__cb_uv);
                             if result.to_truthy() {
                                 return Value::Boolean(true);
@@ -3019,7 +3217,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Call a VM function inline (used by map/filter/forEach/reduce)
-    fn call_vm_function(&mut self, ip: usize, args: &[Value<'gc>], upvalues: &[Value<'gc>]) -> Value<'gc> {
+    fn call_vm_function(&mut self, ip: usize, args: &[Value<'gc>], upvalues: &[Rc<RefCell<Value<'gc>>>]) -> Value<'gc> {
         // Push a dummy callee so Return's truncate(bp-1) removes it
         self.stack.push(Value::Undefined);
         let bp = self.stack.len();
@@ -3038,6 +3236,7 @@ impl<'gc> VM<'gc> {
             arguments_obj: None,
             upvalues: upvalues.to_vec(),
             saved_args: None,
+            local_cells: HashMap::new(),
         });
         self.ip = ip;
         let result = self.run_inner(target_depth + 1);
@@ -3136,16 +3335,28 @@ impl<'gc> VM<'gc> {
             Value::Boolean(b) => b.to_string(),
             Value::Null | Value::Undefined => "null".to_string(),
             Value::VmArray(arr) => {
-                let parts: Vec<String> = arr.borrow().iter().map(|v| self.json_stringify(v)).collect();
+                let borrow = arr.borrow();
+                let parts: Vec<String> = borrow
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        if borrow.props.contains_key(&format!("__deleted_{}", i)) {
+                            "null".to_string()
+                        } else {
+                            self.json_stringify(v)
+                        }
+                    })
+                    .collect();
                 format!("[{}]", parts.join(","))
             }
             Value::VmObject(map) => {
                 let m = map.borrow();
-                let mut parts: Vec<String> = m
+                let parts: Vec<String> = m
                     .iter()
+                    .filter(|(k, _)| !k.starts_with("__"))
                     .map(|(k, v)| format!("\"{}\":{}", k.replace('\\', "\\\\").replace('"', "\\\""), self.json_stringify(v)))
                     .collect();
-                parts.sort(); // deterministic output
                 format!("{{{}}}", parts.join(","))
             }
             _ => "null".to_string(),
@@ -3264,19 +3475,37 @@ impl<'gc> VM<'gc> {
                 Opcode::GetLocal => {
                     let index = self.read_byte() as usize;
                     let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
-                    let val = self.stack[bp + index].clone();
+                    // Check if this local has been captured as an upvalue cell
+                    let val = if let Some(frame) = self.frames.last() {
+                        if let Some(cell) = frame.local_cells.get(&index) {
+                            cell.borrow().clone()
+                        } else {
+                            self.stack[bp + index].clone()
+                        }
+                    } else {
+                        self.stack[bp + index].clone()
+                    };
                     self.stack.push(val);
                 }
                 Opcode::SetLocal => {
                     let index = self.read_byte() as usize;
                     let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
                     let val = self.stack.last().expect("VM Stack underflow").clone();
-                    self.stack[bp + index] = val;
+                    // Check if this local has been captured as an upvalue cell
+                    let has_cell = self.frames.last().map(|f| f.local_cells.contains_key(&index)).unwrap_or(false);
+                    if has_cell {
+                        let cell = self.frames.last().unwrap().local_cells.get(&index).unwrap().clone();
+                        *cell.borrow_mut() = val;
+                    } else {
+                        self.stack[bp + index] = val;
+                    }
                 }
                 Opcode::Call => {
                     let raw_arg_byte = self.read_byte();
                     let is_method = (raw_arg_byte & 0x80) != 0;
-                    let arg_count = (raw_arg_byte & 0x7f) as usize;
+                    let is_direct_eval = (raw_arg_byte & 0x40) != 0;
+                    let arg_count = (raw_arg_byte & 0x3f) as usize;
+                    self.direct_eval = is_direct_eval;
                     // Stack for method call: [..., receiver, callee, arg0, arg1, ...]
                     // Stack for regular call: [..., callee, arg0, arg1, ...]
                     let callee_idx = self.stack.len() - arg_count - 1;
@@ -3315,6 +3544,7 @@ impl<'gc> VM<'gc> {
                                     arguments_obj: None,
                                     upvalues: Vec::new(),
                                     saved_args,
+                                    local_cells: HashMap::new(),
                                 };
                                 self.frames.push(frame);
                             } else {
@@ -3327,6 +3557,7 @@ impl<'gc> VM<'gc> {
                                     arguments_obj: None,
                                     upvalues: Vec::new(),
                                     saved_args,
+                                    local_cells: HashMap::new(),
                                 };
                                 self.frames.push(frame);
                             }
@@ -3363,6 +3594,7 @@ impl<'gc> VM<'gc> {
                                     arguments_obj: None,
                                     upvalues: closure_upvalues,
                                     saved_args,
+                                    local_cells: HashMap::new(),
                                 };
                                 self.frames.push(frame);
                             } else {
@@ -3375,6 +3607,7 @@ impl<'gc> VM<'gc> {
                                     arguments_obj: None,
                                     upvalues: closure_upvalues,
                                     saved_args,
+                                    local_cells: HashMap::new(),
                                 };
                                 self.frames.push(frame);
                             }
@@ -3707,22 +3940,22 @@ impl<'gc> VM<'gc> {
                 Opcode::LessThan => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Boolean(a_num < b_num));
-                        }
-                        _ => self.stack.push(Value::Boolean(false)), // Simplified for demo
-                    }
+                    let result = match (&a, &b) {
+                        (Value::String(a_s), Value::String(b_s)) => a_s < b_s,
+                        (Value::Number(a_num), Value::Number(b_num)) => a_num < b_num,
+                        _ => to_number(&a) < to_number(&b),
+                    };
+                    self.stack.push(Value::Boolean(result));
                 }
                 Opcode::GreaterThan => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Boolean(a_num > b_num));
-                        }
-                        _ => self.stack.push(Value::Boolean(false)),
-                    }
+                    let result = match (&a, &b) {
+                        (Value::String(a_s), Value::String(b_s)) => a_s > b_s,
+                        (Value::Number(a_num), Value::Number(b_num)) => a_num > b_num,
+                        _ => to_number(&a) > to_number(&b),
+                    };
+                    self.stack.push(Value::Boolean(result));
                 }
                 Opcode::Equal => {
                     let b = self.stack.pop().expect("VM Stack underflow");
@@ -3777,22 +4010,22 @@ impl<'gc> VM<'gc> {
                 Opcode::LessEqual => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Boolean(a_num <= b_num));
-                        }
-                        _ => self.stack.push(Value::Boolean(false)),
-                    }
+                    let result = match (&a, &b) {
+                        (Value::String(a_s), Value::String(b_s)) => a_s <= b_s,
+                        (Value::Number(a_num), Value::Number(b_num)) => a_num <= b_num,
+                        _ => to_number(&a) <= to_number(&b),
+                    };
+                    self.stack.push(Value::Boolean(result));
                 }
                 Opcode::GreaterEqual => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
-                    match (a, b) {
-                        (Value::Number(a_num), Value::Number(b_num)) => {
-                            self.stack.push(Value::Boolean(a_num >= b_num));
-                        }
-                        _ => self.stack.push(Value::Boolean(false)),
-                    }
+                    let result = match (&a, &b) {
+                        (Value::String(a_s), Value::String(b_s)) => a_s >= b_s,
+                        (Value::Number(a_num), Value::Number(b_num)) => a_num >= b_num,
+                        _ => to_number(&a) >= to_number(&b),
+                    };
+                    self.stack.push(Value::Boolean(result));
                 }
                 Opcode::Mod => {
                     let b = self.stack.pop().expect("VM Stack underflow");
@@ -3850,6 +4083,16 @@ impl<'gc> VM<'gc> {
                     let arr = self.stack.last().expect("VM Stack underflow on ArrayPush (array)");
                     if let Value::VmArray(arr_data) = arr {
                         arr_data.borrow_mut().elements.push(value);
+                    }
+                }
+                Opcode::ArrayHole => {
+                    // Stack: [..., array] → [..., array] (with hole/empty slot appended)
+                    let arr = self.stack.last().expect("VM Stack underflow on ArrayHole (array)");
+                    if let Value::VmArray(arr_data) = arr {
+                        let mut borrow = arr_data.borrow_mut();
+                        let idx = borrow.elements.len();
+                        borrow.elements.push(Value::Undefined);
+                        borrow.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
                     }
                 }
                 Opcode::ArraySpread => {
@@ -3938,6 +4181,7 @@ impl<'gc> VM<'gc> {
                                     arguments_obj: None,
                                     upvalues: Vec::new(),
                                     saved_args,
+                                    local_cells: HashMap::new(),
                                 });
                             } else {
                                 self.frames.push(CallFrame {
@@ -3949,6 +4193,7 @@ impl<'gc> VM<'gc> {
                                     arguments_obj: None,
                                     upvalues: Vec::new(),
                                     saved_args,
+                                    local_cells: HashMap::new(),
                                 });
                             }
                             self.ip = target_ip;
@@ -3983,6 +4228,7 @@ impl<'gc> VM<'gc> {
                                     arguments_obj: None,
                                     upvalues: closure_upvalues,
                                     saved_args,
+                                    local_cells: HashMap::new(),
                                 });
                             } else {
                                 self.frames.push(CallFrame {
@@ -3994,6 +4240,7 @@ impl<'gc> VM<'gc> {
                                     arguments_obj: None,
                                     upvalues: closure_upvalues,
                                     saved_args,
+                                    local_cells: HashMap::new(),
                                 });
                             }
                             self.ip = target_ip;
@@ -4087,6 +4334,7 @@ impl<'gc> VM<'gc> {
                                 arguments_obj: None,
                                 upvalues: closure_uv,
                                 saved_args: None,
+                                local_cells: HashMap::new(),
                             };
                             self.frames.push(frame);
                             self.ip = target_ip;
@@ -4129,7 +4377,9 @@ impl<'gc> VM<'gc> {
                             Value::VmArray(src_arr) => {
                                 let src = src_arr.borrow();
                                 for (i, v) in src.elements.iter().enumerate() {
-                                    target_map.borrow_mut().insert(i.to_string(), v.clone());
+                                    if !src.props.contains_key(&format!("__deleted_{}", i)) {
+                                        target_map.borrow_mut().insert(i.to_string(), v.clone());
+                                    }
                                 }
                             }
                             _ => {}
@@ -4139,7 +4389,11 @@ impl<'gc> VM<'gc> {
                 Opcode::GetUpvalue => {
                     let idx = self.read_byte() as usize;
                     let val = if let Some(frame) = self.frames.last() {
-                        frame.upvalues.get(idx).cloned().unwrap_or(Value::Undefined)
+                        frame
+                            .upvalues
+                            .get(idx)
+                            .map(|cell| cell.borrow().clone())
+                            .unwrap_or(Value::Undefined)
                     } else {
                         Value::Undefined
                     };
@@ -4151,7 +4405,7 @@ impl<'gc> VM<'gc> {
                     if let Some(frame) = self.frames.last_mut()
                         && idx < frame.upvalues.len()
                     {
-                        frame.upvalues[idx] = val;
+                        *frame.upvalues[idx].borrow_mut() = val;
                     }
                 }
                 Opcode::MakeClosure => {
@@ -4170,26 +4424,47 @@ impl<'gc> VM<'gc> {
                         }
                     };
                     let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
-                    let mut captures = Vec::with_capacity(capture_count);
+                    let mut captures: Vec<Rc<RefCell<Value<'gc>>>> = Vec::with_capacity(capture_count);
                     for _ in 0..capture_count {
                         let is_local = self.read_byte() != 0;
                         let index = self.read_byte() as usize;
                         if is_local {
-                            // Capture from current frame's locals (stack)
-                            let val = if bp + index < self.stack.len() {
-                                self.stack[bp + index].clone()
+                            // Capture from current frame's locals (stack) — use shared cell
+                            let existing_cell = self.frames.last().and_then(|f| f.local_cells.get(&index).cloned());
+                            if let Some(cell) = existing_cell {
+                                // Already captured: share existing cell
+                                captures.push(cell);
+                            } else if self.frames.last().is_some() {
+                                // First capture: create cell from stack value
+                                let val = if bp + index < self.stack.len() {
+                                    self.stack[bp + index].clone()
+                                } else {
+                                    Value::Undefined
+                                };
+                                let cell = Rc::new(RefCell::new(val));
+                                captures.push(cell.clone());
+                                self.frames.last_mut().unwrap().local_cells.insert(index, cell);
                             } else {
-                                Value::Undefined
-                            };
-                            captures.push(val);
+                                // Top-level (no frame): capture by value
+                                let val = if bp + index < self.stack.len() {
+                                    self.stack[bp + index].clone()
+                                } else {
+                                    Value::Undefined
+                                };
+                                captures.push(Rc::new(RefCell::new(val)));
+                            }
                         } else {
-                            // Capture from current frame's upvalues
-                            let val = if let Some(frame) = self.frames.last() {
-                                frame.upvalues.get(index).cloned().unwrap_or(Value::Undefined)
+                            // Capture from current frame's upvalues — share the cell
+                            let cell = if let Some(frame) = self.frames.last() {
+                                frame
+                                    .upvalues
+                                    .get(index)
+                                    .cloned()
+                                    .unwrap_or_else(|| Rc::new(RefCell::new(Value::Undefined)))
                             } else {
-                                Value::Undefined
+                                Rc::new(RefCell::new(Value::Undefined))
                             };
-                            captures.push(val);
+                            captures.push(cell);
                         }
                     }
                     self.stack.push(Value::VmClosure(ip, arity, Rc::new(captures)));
@@ -4283,8 +4558,8 @@ impl<'gc> VM<'gc> {
                             let getter_key = format!("__get_{}", key);
                             if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = borrow.get(&getter_key) {
                                 let ip = *ip;
-                                let upvals: Vec<Value<'gc>> = if let Some(Value::VmClosure(_, _, ups)) = borrow.get(&getter_key) {
-                                    ups.as_ref().clone()
+                                let upvals = if let Some(Value::VmClosure(_, _, ups)) = borrow.get(&getter_key) {
+                                    (**ups).clone()
                                 } else {
                                     Vec::new()
                                 };
@@ -4593,6 +4868,29 @@ impl<'gc> VM<'gc> {
                             let val = map.borrow().get(&key).cloned().unwrap_or(Value::Undefined);
                             self.stack.push(val);
                         }
+                        Value::String(s) => {
+                            if let Value::Number(n) = &index {
+                                let i = *n as usize;
+                                if *n >= 0.0 && *n == (i as f64) && i < s.len() {
+                                    self.stack.push(Value::String(vec![s[i]]));
+                                } else {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            } else {
+                                let key = value_to_string(&index);
+                                if key == "length" {
+                                    self.stack.push(Value::Number(s.len() as f64));
+                                } else if let Ok(i) = key.parse::<usize>() {
+                                    if i < s.len() {
+                                        self.stack.push(Value::String(vec![s[i]]));
+                                    } else {
+                                        self.stack.push(Value::Undefined);
+                                    }
+                                } else {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            }
+                        }
                         _ => {
                             log::warn!("GetIndex on non-indexable: {}", value_to_string(&obj));
                             self.stack.push(Value::Undefined);
@@ -4609,11 +4907,16 @@ impl<'gc> VM<'gc> {
                                 let i = *n as usize;
                                 if *n >= 0.0 && *n == (i as f64) {
                                     let mut a = arr.borrow_mut();
-                                    // Grow array if needed
-                                    while a.len() <= i {
-                                        a.push(Value::Undefined);
+                                    // Grow array if needed, marking new slots as holes
+                                    let _old_len = a.elements.len();
+                                    while a.elements.len() <= i {
+                                        let hole_idx = a.elements.len();
+                                        a.elements.push(Value::Undefined);
+                                        a.props.insert(format!("__deleted_{}", hole_idx), Value::Boolean(true));
                                     }
-                                    a[i] = val.clone();
+                                    a.elements[i] = val.clone();
+                                    // Clear hole marker for this index
+                                    a.props.shift_remove(&format!("__deleted_{}", i));
                                 } else {
                                     // Non-integer index → store as property
                                     let key = value_to_string(&index);
@@ -4705,10 +5008,13 @@ impl<'gc> VM<'gc> {
                         Value::VmArray(arr) => {
                             let a = arr.borrow();
                             let mut k: Vec<Value<'gc>> = (0..a.elements.len())
+                                .filter(|i| !a.props.contains_key(&format!("__deleted_{}", i)))
                                 .map(|i| Value::String(crate::unicode::utf8_to_utf16(&i.to_string())))
                                 .collect();
                             for prop_key in a.props.keys() {
-                                k.push(Value::String(crate::unicode::utf8_to_utf16(prop_key)));
+                                if !prop_key.starts_with("__") {
+                                    k.push(Value::String(crate::unicode::utf8_to_utf16(prop_key)));
+                                }
                             }
                             k
                         }
@@ -5124,6 +5430,7 @@ impl<'gc> VM<'gc> {
                                 arguments_obj: None,
                                 upvalues: closure_uv,
                                 saved_args: None,
+                                local_cells: HashMap::new(),
                             };
                             self.frames.push(frame);
                             self.ip = target_ip;

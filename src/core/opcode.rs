@@ -75,6 +75,7 @@ pub enum Opcode {
     GetUpvalue = 69,  // operand: u8 upvalue index — read captured variable
     SetUpvalue = 70,  // operand: u8 upvalue index — write captured variable
     MakeClosure = 71, // operand: u16 const_idx, u8 capture_count, then capture_count × (u8 is_local, u8 index)
+    ArrayHole = 72,   // push an empty/hole slot onto TOS array (sparse array support)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -154,6 +155,7 @@ impl TryFrom<u8> for Opcode {
             69 => Opcode::GetUpvalue,
             70 => Opcode::SetUpvalue,
             71 => Opcode::MakeClosure,
+            72 => Opcode::ArrayHole,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

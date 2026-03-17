@@ -57,9 +57,9 @@ jobs:
         for f in "${examples[@]}"; do
           printf '\n🔧 Running %s\n' "$f"
           if [[ "$f" == *.mjs ]] || [[ "$f" == *es6_module*.js ]]; then
-            cargo run --all-features --package js -- --module "$f"
+            cargo run --all-features --package js -- --use-vm --module "$f"
           else
-            cargo run --all-features --package js -- "$f"
+            cargo run --all-features --package js -- --use-vm "$f"
           fi
         done
 

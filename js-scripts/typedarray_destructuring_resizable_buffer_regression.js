@@ -29,20 +29,20 @@
 
     // Shrink so fixed-length views go out of bounds
     rab.resize(3 * ctor.BYTES_PER_ELEMENT);
-    // fixedLength must throw
-    let threw = false;
-    try { let [a,b,c] = fixedLength; } catch (e) { if (!(e instanceof TypeError)) throw e; threw = true; }
-    if (!threw) throw new Error('fixedLength did not throw after shrink to 3 for ' + ctor.name);
+    // fixedLength views must throw once the backing buffer is shrunk out of bounds
+    let fixedLengthThrew = false;
+    try { let [a,b,c] = fixedLength; } catch (e) { if (!(e instanceof TypeError)) throw e; fixedLengthThrew = true; }
+    if (!fixedLengthThrew) throw new Error('fixedLength did not throw after shrink to 3 for ' + ctor.name);
 
-    threw = false;
-    try { let [a,b,c] = fixedLengthWithOffset; } catch (e) { if (!(e instanceof TypeError)) throw e; threw = true; }
-    if (!threw) throw new Error('fixedLengthWithOffset did not throw after shrink to 3 for ' + ctor.name);
+    let fixedLengthOffsetThrew = false;
+    try { let [a,b,c] = fixedLengthWithOffset; } catch (e) { if (!(e instanceof TypeError)) throw e; fixedLengthOffsetThrew = true; }
+    if (!fixedLengthOffsetThrew) throw new Error('fixedLengthWithOffset did not throw after shrink to 3 for ' + ctor.name);
 
     // Shrink so views with offset go out of bounds
     rab.resize(1 * ctor.BYTES_PER_ELEMENT);
-    threw = false;
-    try { let [a,b,c] = lengthTrackingWithOffset; } catch (e) { if (!(e instanceof TypeError)) throw e; threw = true; }
-    if (!threw) throw new Error('lengthTrackingWithOffset did not throw after shrink to 1 for ' + ctor.name);
+    let lengthTrackingOffsetThrew = false;
+    try { let [a,b,c] = lengthTrackingWithOffset; } catch (e) { if (!(e instanceof TypeError)) throw e; lengthTrackingOffsetThrew = true; }
+    if (!lengthTrackingOffsetThrew) throw new Error('lengthTrackingWithOffset did not throw after shrink to 1 for ' + ctor.name);
 
     // lengthTracking (no offset) should still be readable for available elements
     {

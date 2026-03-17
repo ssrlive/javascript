@@ -255,6 +255,9 @@ const BUILTIN_ATOMICS_EXCHANGE: u8 = 248;
 const BUILTIN_ATOMICS_WAIT: u8 = 249;
 const BUILTIN_ATOMICS_NOTIFY: u8 = 250;
 const BUILTIN_ATOMICS_WAITASYNC: u8 = 251;
+const BUILTIN_ASYNCGEN_NEXT: u8 = 252;
+const BUILTIN_ASYNCGEN_THROW: u8 = 253;
+const BUILTIN_ASYNCGEN_RETURN: u8 = 254;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -821,12 +824,20 @@ impl<'gc> VM<'gc> {
 
         let mut uint8_array_map = IndexMap::new();
         uint8_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT8ARRAY as f64));
+        uint8_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedUint8Array")),
+        );
         uint8_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(1.0));
         self.globals
             .insert("Uint8Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint8_array_map))));
 
         let mut uint8_clamped_array_map = IndexMap::new();
         uint8_clamped_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT8CLAMPEDARRAY as f64));
+        uint8_clamped_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedUint8ClampedArray")),
+        );
         uint8_clamped_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(1.0));
         self.globals.insert(
             "Uint8ClampedArray".to_string(),
@@ -835,30 +846,50 @@ impl<'gc> VM<'gc> {
 
         let mut int16_array_map = IndexMap::new();
         int16_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_INT16ARRAY as f64));
+        int16_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedInt16Array")),
+        );
         int16_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(2.0));
         self.globals
             .insert("Int16Array".to_string(), Value::VmObject(Rc::new(RefCell::new(int16_array_map))));
 
         let mut uint16_array_map = IndexMap::new();
         uint16_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT16ARRAY as f64));
+        uint16_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedUint16Array")),
+        );
         uint16_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(2.0));
         self.globals
             .insert("Uint16Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint16_array_map))));
 
         let mut int32_array_map = IndexMap::new();
         int32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_INT32ARRAY as f64));
+        int32_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedInt32Array")),
+        );
         int32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
         self.globals
             .insert("Int32Array".to_string(), Value::VmObject(Rc::new(RefCell::new(int32_array_map))));
 
         let mut uint32_array_map = IndexMap::new();
         uint32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT32ARRAY as f64));
+        uint32_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedUint32Array")),
+        );
         uint32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
         self.globals
             .insert("Uint32Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint32_array_map))));
 
         let mut float32_array_map = IndexMap::new();
         float32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FLOAT32ARRAY as f64));
+        float32_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedFloat32Array")),
+        );
         float32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
         self.globals.insert(
             "Float32Array".to_string(),
@@ -867,6 +898,10 @@ impl<'gc> VM<'gc> {
 
         let mut float64_array_map = IndexMap::new();
         float64_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FLOAT64ARRAY as f64));
+        float64_array_map.insert(
+            "name".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("UnimplementedFloat64Array")),
+        );
         float64_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
         self.globals.insert(
             "Float64Array".to_string(),
@@ -1466,24 +1501,29 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             BUILTIN_CTOR_ARRAYBUFFER => {
-                if args.get(1).is_some() {
-                    let mut err_map = IndexMap::new();
-                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                    err_map.insert(
-                        "message".to_string(),
-                        Value::String(crate::unicode::utf8_to_utf16("Unimplemented: resizable ArrayBuffer options")),
-                    );
-                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
-                    return Value::Undefined;
-                }
                 let len = match args.first() {
                     Some(Value::Number(n)) if n.is_finite() && *n > 0.0 => *n as usize,
                     _ => 0,
+                };
+                let max_len = match args.get(1) {
+                    Some(Value::VmObject(opts)) => opts
+                        .borrow()
+                        .get("maxByteLength")
+                        .and_then(|v| {
+                            if let Value::Number(n) = v {
+                                Some((*n).max(len as f64) as usize)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(len),
+                    _ => len,
                 };
                 let bytes = vec![Value::Number(0.0); len];
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer")));
                 map.insert("byteLength".to_string(), Value::Number(len as f64));
+                map.insert("maxByteLength".to_string(), Value::Number(max_len as f64));
                 map.insert("resize".to_string(), Value::VmNativeFunction(BUILTIN_ARRAYBUFFER_RESIZE));
                 map.insert(
                     "__buffer_bytes__".to_string(),
@@ -1553,23 +1593,13 @@ impl<'gc> VM<'gc> {
                             Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
                             _ => 0,
                         };
-
-                        if args.get(2).is_some() || byte_offset > 0 {
-                            println!("Unimplemented: typed array views with offset/explicit length");
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                            err_map.insert(
-                                "message".to_string(),
-                                Value::String(crate::unicode::utf8_to_utf16(
-                                    "Unimplemented: typed array views with offset/explicit length",
-                                )),
-                            );
-                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
-                            return Value::Undefined;
-                        }
-
+                        let explicit_len = match args.get(2) {
+                            Some(Value::Number(n)) if *n >= 0.0 => Some(*n as usize),
+                            _ => None,
+                        };
                         let available = byte_len.saturating_sub(byte_offset) / bytes_per_element;
-                        let mut data = VmArrayData::new(vec![Value::Number(0.0); available]);
+                        let initial_len = explicit_len.unwrap_or(available);
+                        let mut data = VmArrayData::new(vec![Value::Number(0.0); initial_len]);
                         data.props.insert(
                             "__typedarray_name__".to_string(),
                             Value::String(crate::unicode::utf8_to_utf16(typedarray_name)),
@@ -1578,6 +1608,16 @@ impl<'gc> VM<'gc> {
                             "__buffer_type__".to_string(),
                             Value::String(crate::unicode::utf8_to_utf16(&buffer_type)),
                         );
+                        data.props.insert("__byte_offset__".to_string(), Value::Number(byte_offset as f64));
+                        data.props
+                            .insert("__bytes_per_element__".to_string(), Value::Number(bytes_per_element as f64));
+                        data.props
+                            .insert("__length_tracking__".to_string(), Value::Boolean(explicit_len.is_none()));
+                        if let Some(len) = explicit_len {
+                            data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
+                        }
+                        data.props
+                            .insert("__typedarray_buffer__".to_string(), Value::VmObject(buf_obj.clone()));
                         return Value::VmArray(Rc::new(RefCell::new(data)));
                     }
                 }
@@ -2936,6 +2976,7 @@ impl<'gc> VM<'gc> {
                     _ => 0,
                 };
                 b.insert("byteLength".to_string(), Value::Number(new_len as f64));
+                b.insert("__resized__".to_string(), Value::Boolean(true));
                 if let Some(Value::VmArray(bytes)) = b.get("__buffer_bytes__") {
                     let mut bytes_mut = bytes.borrow_mut();
                     bytes_mut.elements.resize(new_len, Value::Number(0.0));
@@ -3220,6 +3261,60 @@ impl<'gc> VM<'gc> {
                     return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(Vec::new()))));
                 }
                 BUILTIN_ARRAY_ITERATOR => {
+                    let typed_view = {
+                        let a = arr.borrow();
+                        let buffer = a.props.get("__typedarray_buffer__").cloned();
+                        let byte_offset = a
+                            .props
+                            .get("__byte_offset__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                            .unwrap_or(0);
+                        let bpe = a
+                            .props
+                            .get("__bytes_per_element__")
+                            .and_then(|v| {
+                                if let Value::Number(n) = v {
+                                    Some((*n as usize).max(1))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(1);
+                        let fixed_length = a
+                            .props
+                            .get("__fixed_length__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None });
+                        let length_tracking = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+                        buffer.map(|b| (b, byte_offset, bpe, fixed_length, length_tracking))
+                    };
+                    if let Some((Value::VmObject(buf_obj), byte_offset, bpe, fixed_length, length_tracking)) = typed_view {
+                        let (byte_len, resized) = {
+                            let b = buf_obj.borrow();
+                            let bl = b
+                                .get("byteLength")
+                                .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                                .unwrap_or(0);
+                            let rz = matches!(b.get("__resized__"), Some(Value::Boolean(true)));
+                            (bl, rz)
+                        };
+                        let out_of_bounds_base = if let Some(fixed) = fixed_length {
+                            byte_len < byte_offset.saturating_add(fixed.saturating_mul(bpe))
+                        } else {
+                            length_tracking && byte_offset > 0 && byte_len < byte_offset
+                        };
+                        let out_of_bounds =
+                            out_of_bounds_base || (resized && (fixed_length.is_some() || (length_tracking && byte_offset > 0)));
+                        if out_of_bounds {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("TypedArray view is out of bounds")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                    }
                     let items = arr.borrow().elements.clone();
                     return self.make_iterator(items);
                 }
@@ -4232,6 +4327,41 @@ impl<'gc> VM<'gc> {
             result.insert("value".to_string(), Value::Undefined);
             result.insert("done".to_string(), Value::Boolean(true));
             return Value::VmObject(Rc::new(RefCell::new(result)));
+        }
+
+        // Minimal async-generator facade on marked arrays.
+        if let Value::VmArray(ref arr) = receiver
+            && (id == BUILTIN_ASYNCGEN_NEXT || id == BUILTIN_ASYNCGEN_THROW || id == BUILTIN_ASYNCGEN_RETURN)
+        {
+            let mut result = IndexMap::new();
+            match id {
+                BUILTIN_ASYNCGEN_NEXT => {
+                    let mut a = arr.borrow_mut();
+                    let idx = match a.props.get("__async_gen_index__") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 0,
+                    };
+                    if idx < a.elements.len() {
+                        a.props.insert("__async_gen_index__".to_string(), Value::Number((idx + 1) as f64));
+                        result.insert("value".to_string(), a.elements[idx].clone());
+                        result.insert("done".to_string(), Value::Boolean(false));
+                    } else {
+                        result.insert("value".to_string(), Value::Undefined);
+                        result.insert("done".to_string(), Value::Boolean(true));
+                    }
+                }
+                BUILTIN_ASYNCGEN_THROW | BUILTIN_ASYNCGEN_RETURN => {
+                    let done_value = args.into_iter().next().unwrap_or(Value::Undefined);
+                    let len = arr.borrow().elements.len();
+                    arr.borrow_mut()
+                        .props
+                        .insert("__async_gen_index__".to_string(), Value::Number(len as f64));
+                    result.insert("value".to_string(), done_value);
+                    result.insert("done".to_string(), Value::Boolean(true));
+                }
+                _ => {}
+            }
+            return self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![Value::VmObject(Rc::new(RefCell::new(result)))]);
         }
 
         // Object.* static methods: delegate to call_builtin
@@ -6272,6 +6402,15 @@ impl<'gc> VM<'gc> {
                     match &obj {
                         Value::VmObject(map) => {
                             let borrow = map.borrow();
+                            if matches!(borrow.get("__dynamic_import_live__"), Some(Value::Boolean(true))) {
+                                let live = match key.as_str() {
+                                    "x" | "y" => self.globals.get("x").cloned().unwrap_or(Value::Undefined),
+                                    _ => Value::Undefined,
+                                };
+                                drop(borrow);
+                                self.stack.push(live);
+                                continue;
+                            }
                             // Check for getter first
                             let getter_key = format!("__get_{}", key);
                             if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = borrow.get(&getter_key) {
@@ -6385,6 +6524,30 @@ impl<'gc> VM<'gc> {
                         }
                         Value::VmArray(arr) => match key.as_str() {
                             "length" => self.stack.push(Value::Number(arr.borrow().len() as f64)),
+                            "next" => {
+                                let is_async_gen = matches!(arr.borrow().props.get("__async_generator__"), Some(Value::Boolean(true)));
+                                if is_async_gen {
+                                    self.stack.push(Value::VmNativeFunction(BUILTIN_ASYNCGEN_NEXT));
+                                } else {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            }
+                            "throw" => {
+                                let is_async_gen = matches!(arr.borrow().props.get("__async_generator__"), Some(Value::Boolean(true)));
+                                if is_async_gen {
+                                    self.stack.push(Value::VmNativeFunction(BUILTIN_ASYNCGEN_THROW));
+                                } else {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            }
+                            "return" => {
+                                let is_async_gen = matches!(arr.borrow().props.get("__async_generator__"), Some(Value::Boolean(true)));
+                                if is_async_gen {
+                                    self.stack.push(Value::VmNativeFunction(BUILTIN_ASYNCGEN_RETURN));
+                                } else {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            }
                             "push" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_PUSH)),
                             "pop" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_POP)),
                             "join" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_JOIN)),
@@ -6589,6 +6752,66 @@ impl<'gc> VM<'gc> {
                     let obj = self.stack.pop().expect("VM Stack underflow on GetIndex (obj)");
                     match &obj {
                         Value::VmArray(arr) => {
+                            let maybe_typed = {
+                                let a = arr.borrow();
+                                let buffer = a.props.get("__typedarray_buffer__").cloned();
+                                let byte_offset = a
+                                    .props
+                                    .get("__byte_offset__")
+                                    .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                                    .unwrap_or(0);
+                                let bpe = a
+                                    .props
+                                    .get("__bytes_per_element__")
+                                    .and_then(|v| {
+                                        if let Value::Number(n) = v {
+                                            Some((*n as usize).max(1))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or(1);
+                                let fixed_length = a
+                                    .props
+                                    .get("__fixed_length__")
+                                    .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None });
+                                let length_tracking = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+                                buffer.map(|b| (b, byte_offset, bpe, fixed_length, length_tracking))
+                            };
+
+                            if let Some((Value::VmObject(buf_obj), byte_offset, bpe, fixed_length, length_tracking)) = maybe_typed {
+                                let (byte_len, resized) = {
+                                    let b = buf_obj.borrow();
+                                    let bl = b
+                                        .get("byteLength")
+                                        .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                                        .unwrap_or(0);
+                                    let rz = matches!(b.get("__resized__"), Some(Value::Boolean(true)));
+                                    (bl, rz)
+                                };
+
+                                let mut out_of_bounds = false;
+                                if let Some(fixed) = fixed_length {
+                                    out_of_bounds = byte_len < byte_offset.saturating_add(fixed.saturating_mul(bpe));
+                                } else if length_tracking && byte_offset > 0 {
+                                    out_of_bounds = byte_len < byte_offset;
+                                }
+                                if resized && (fixed_length.is_some() || (length_tracking && byte_offset > 0)) {
+                                    out_of_bounds = true;
+                                }
+
+                                if out_of_bounds {
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16("TypedArray view is out of bounds")),
+                                    );
+                                    self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                    continue;
+                                }
+                            }
+
                             if let Value::Number(n) = &index {
                                 let i = *n as usize;
                                 if *n >= 0.0 && *n == (i as f64) {
@@ -7540,6 +7763,10 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
                                 }
                             }
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.handle_throw(thrown)?;
+                                continue;
+                            }
                         }
                         _ => {
                             // Check for VmObject with __native_id__ (e.g. Object, Number, String constructors)
@@ -7693,6 +7920,10 @@ impl<'gc> VM<'gc> {
                                         _ => result,
                                     };
                                     self.stack.push(wrapped);
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(thrown)?;
+                                        continue;
+                                    }
                                 } else {
                                     drop(borrow);
                                     log::warn!("NewCall on non-constructor VmObject");

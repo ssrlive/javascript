@@ -453,6 +453,200 @@ impl<'gc> VM<'gc> {
                 let s = args.first().map(value_to_string).unwrap_or_default();
                 Value::String(crate::unicode::utf8_to_utf16(&s.replace("%20", " ")))
             }
+            "global.__forOfValues" => {
+                let source = args.first().cloned().unwrap_or(Value::Undefined);
+                match source {
+                    Value::VmArray(arr) => Value::VmArray(arr),
+                    Value::VmMap(map) => {
+                        let items = map
+                            .borrow()
+                            .entries
+                            .iter()
+                            .map(|(k, v)| Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![k.clone(), v.clone()])))))
+                            .collect::<Vec<_>>();
+                        Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(items))))
+                    }
+                    Value::VmSet(set) => {
+                        let items = set.borrow().values.clone();
+                        Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(items))))
+                    }
+                    Value::String(s) => {
+                        let text = crate::unicode::utf16_to_utf8(&s);
+                        let values = text
+                            .chars()
+                            .map(|ch| Value::String(crate::unicode::utf8_to_utf16(&ch.to_string())))
+                            .collect::<Vec<_>>();
+                        Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(values))))
+                    }
+                    Value::VmObject(obj) => {
+                        let iterable = Value::VmObject(obj.clone());
+                        let iter_fn = self.read_named_property(iterable.clone(), "iterator");
+                        let iterator = match iter_fn {
+                            Value::VmFunction(ip, _) => {
+                                self.this_stack.push(iterable.clone());
+                                let call = self.call_vm_function_result(ip, &[], &[]);
+                                self.this_stack.pop();
+                                match call {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        let mut err_map = IndexMap::new();
+                                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                        err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&err.message())));
+                                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            Value::VmClosure(ip, _, upv) => {
+                                self.this_stack.push(iterable.clone());
+                                let uv = (*upv).clone();
+                                let call = self.call_vm_function_result(ip, &[], &uv);
+                                self.this_stack.pop();
+                                match call {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        let mut err_map = IndexMap::new();
+                                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                        err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&err.message())));
+                                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            Value::VmNativeFunction(id) => self.call_method_builtin(id, iterable.clone(), vec![]),
+                            Value::Undefined => {
+                                let next_candidate = self.read_named_property(iterable.clone(), "next");
+                                if matches!(
+                                    next_candidate,
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                                ) {
+                                    iterable.clone()
+                                } else {
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16("iterator missing")),
+                                    );
+                                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                    return Value::Undefined;
+                                }
+                            }
+                            _ => {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("iterator missing")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
+                        };
+
+                        let iter_obj = match iterator {
+                            Value::VmObject(_) => iterator,
+                            _ => {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("iterator is not an object")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
+                        };
+
+                        let next_fn = self.read_named_property(iter_obj.clone(), "next");
+                        let mut out = Vec::new();
+                        for _ in 0..10000 {
+                            let next_result = match &next_fn {
+                                Value::VmFunction(ip, _) => {
+                                    self.this_stack.push(iter_obj.clone());
+                                    let call = self.call_vm_function_result(*ip, &[], &[]);
+                                    self.this_stack.pop();
+                                    match call {
+                                        Ok(v) => v,
+                                        Err(err) => {
+                                            let mut err_map = IndexMap::new();
+                                            err_map
+                                                .insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                            err_map.insert(
+                                                "message".to_string(),
+                                                Value::String(crate::unicode::utf8_to_utf16(&err.message())),
+                                            );
+                                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                                Value::VmClosure(ip, _, upv) => {
+                                    self.this_stack.push(iter_obj.clone());
+                                    let uv = (*upv).clone();
+                                    let call = self.call_vm_function_result(*ip, &[], &uv);
+                                    self.this_stack.pop();
+                                    match call {
+                                        Ok(v) => v,
+                                        Err(err) => {
+                                            let mut err_map = IndexMap::new();
+                                            err_map
+                                                .insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                            err_map.insert(
+                                                "message".to_string(),
+                                                Value::String(crate::unicode::utf8_to_utf16(&err.message())),
+                                            );
+                                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                                Value::VmNativeFunction(id) => self.call_method_builtin(*id, iter_obj.clone(), vec![]),
+                                _ => {
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16("iterator.next is not callable")),
+                                    );
+                                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                    return Value::Undefined;
+                                }
+                            };
+
+                            if let Value::VmObject(res_obj) = next_result {
+                                let rb = res_obj.borrow();
+                                let done = rb.get("done").map(|v| v.to_truthy()).unwrap_or(false);
+                                if done {
+                                    break;
+                                }
+                                out.push(rb.get("value").cloned().unwrap_or(Value::Undefined));
+                            } else {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("iterator.next() must return an object")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
+                        }
+
+                        Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(out))))
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("iterator missing")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
             "os.getcwd" | "os.getpid" | "os.getppid" | "os.path.basename" | "os.path.dirname" | "os.path.join" => {
                 self.call_named_host_function(name, args)
             }
@@ -1200,6 +1394,8 @@ impl<'gc> VM<'gc> {
             .insert("encodeURIComponent".to_string(), Self::make_host_fn("global.encodeURIComponent"));
         self.globals
             .insert("decodeURIComponent".to_string(), Self::make_host_fn("global.decodeURIComponent"));
+        self.globals
+            .insert("__forOfValues".to_string(), Self::make_host_fn("global.__forOfValues"));
         // Minimal Symbol object — callable via __native_id__, with well-known symbol properties
         let mut sym_obj = IndexMap::new();
         sym_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_SYMBOL as f64));
@@ -6570,6 +6766,10 @@ impl<'gc> VM<'gc> {
                                     };
                                     let result = self.call_host_fn(&host_name, recv, args_collected);
                                     self.stack.push(result);
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(thrown)?;
+                                        continue;
+                                    }
                                 } else if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
                                     let bound_this = borrow.get("__bound_this__").cloned().unwrap_or(Value::Undefined);
                                     let mut final_args: Vec<Value<'gc>> = match borrow.get("__bound_args__") {

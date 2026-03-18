@@ -1116,7 +1116,15 @@ impl<'gc> Compiler<'gc> {
                     self.locals.push(var_name.clone());
                 }
 
-                self.compile_expr(iterable_expr)?;
+                let is_for_await = matches!(*stmt.kind, StatementKind::ForAwaitOf(..));
+                if is_for_await {
+                    self.compile_expr(iterable_expr)?;
+                } else {
+                    self.compile_expr(&Expr::Call(
+                        Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+                        vec![iterable_expr.clone()],
+                    ))?;
+                }
                 // Store iterable as __forofArr__
                 if self.scope_depth > 0 {
                     self.locals.push("__forofArr__".to_string());
@@ -1271,7 +1279,10 @@ impl<'gc> Compiler<'gc> {
                 if is_last {
                     self.setup_completion_var();
                 }
-                self.compile_expr(iterable_expr)?;
+                self.compile_expr(&Expr::Call(
+                    Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+                    vec![iterable_expr.clone()],
+                ))?;
                 if self.scope_depth > 0 {
                     self.locals.push("__forofArr__".to_string());
                 } else {
@@ -3186,7 +3197,10 @@ impl<'gc> Compiler<'gc> {
         let idx_name = format!("__forofdi_{}__", self.forin_counter);
         self.forin_counter += 1;
 
-        self.compile_expr(iterable_expr)?;
+        self.compile_expr(&Expr::Call(
+            Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+            vec![iterable_expr.clone()],
+        ))?;
         self.emit_define_var(&arr_name);
 
         let zero = self.chunk.add_constant(Value::Number(0.0));
@@ -3266,7 +3280,10 @@ impl<'gc> Compiler<'gc> {
         let idx_name = format!("__forofdi_{}__", self.forin_counter);
         self.forin_counter += 1;
 
-        self.compile_expr(iterable_expr)?;
+        self.compile_expr(&Expr::Call(
+            Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+            vec![iterable_expr.clone()],
+        ))?;
         self.emit_define_var(&arr_name);
 
         let zero = self.chunk.add_constant(Value::Number(0.0));
@@ -3476,6 +3493,11 @@ impl<'gc> Compiler<'gc> {
         self.allow_super_call = false;
 
         self.scope_depth = 1;
+
+        // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
+        for (idx, name) in self.parent_locals.clone().iter().enumerate() {
+            self.add_upvalue(name, idx as u8, true);
+        }
 
         // Count non-rest params and check for rest
         let mut non_rest_count = 0u8;
@@ -3706,7 +3728,10 @@ impl<'gc> Compiler<'gc> {
         // Store RHS into a synthetic temp
         let temp = format!("__destr_arr_{}__", self.forin_counter);
         self.forin_counter += 1;
-        self.emit_define_var(&temp);
+        let temp_name = crate::unicode::utf8_to_utf16(&temp);
+        let temp_name_idx = self.chunk.add_constant(Value::String(temp_name));
+        self.chunk.write_opcode(Opcode::DefineGlobal);
+        self.chunk.write_u16(temp_name_idx);
 
         // runtime check: ensure iterator exists on the object (via prototype)
         self.emit_helper_get(&temp); // push arr
@@ -3727,8 +3752,6 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::NewError);
         self.chunk.write_opcode(Opcode::Throw);
         self.patch_jump(ok_jump);
-        // push arr again for further work
-        self.emit_helper_get(&temp);
 
         for (i, elem) in elements.iter().enumerate() {
             match elem {
@@ -3795,10 +3818,8 @@ impl<'gc> Compiler<'gc> {
             }
         }
 
-        // Clean up synthetic temp
-        if self.scope_depth > 0 {
-            self.locals.retain(|l| l != &temp);
-        }
+        // Synthetic temp is stored as a global helper slot to avoid stack leaks
+        // when destructuring throws and is handled by surrounding catch blocks.
         Ok(())
     }
 

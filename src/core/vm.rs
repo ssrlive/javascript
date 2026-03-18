@@ -1589,9 +1589,18 @@ impl<'gc> VM<'gc> {
             }
             drop(borrow);
             let ts = map.borrow().get("toString").cloned();
-            if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = ts {
-                let result = self.call_vm_function(ip, &[], &[]);
-                return value_to_string(&result);
+            if let Some(ts_val) = ts {
+                match ts_val {
+                    Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
+                        let result = self.call_vm_function(ip, &[], &[]);
+                        return value_to_string(&result);
+                    }
+                    Value::VmNativeFunction(id) => {
+                        let result = self.call_method_builtin(id, val.clone(), vec![]);
+                        return value_to_string(&result);
+                    }
+                    _ => {}
+                }
             }
             // Check __value__ for wrapper objects (e.g. new String("abc"))
             let inner = map.borrow().get("__value__").cloned();
@@ -1633,9 +1642,18 @@ impl<'gc> VM<'gc> {
             }
             drop(borrow);
             let ts = map.borrow().get("toString").cloned();
-            if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = ts {
-                let result = self.call_vm_function(ip, &[], &[]);
-                return value_to_string(&result);
+            if let Some(ts_val) = ts {
+                match ts_val {
+                    Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
+                        let result = self.call_vm_function(ip, &[], &[]);
+                        return value_to_string(&result);
+                    }
+                    Value::VmNativeFunction(id) => {
+                        let result = self.call_method_builtin(id, val.clone(), vec![]);
+                        return value_to_string(&result);
+                    }
+                    _ => {}
+                }
             }
             let inner = map.borrow().get("__value__").cloned();
             if let Some(v) = inner {

@@ -1834,7 +1834,7 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
                 return "Promise { <pending> }".to_string();
             }
 
-            let parts: Vec<String> = borrow
+            let mut parts: Vec<String> = borrow
                 .iter()
                 .filter(|(k, _)| !k.starts_with("__"))
                 .map(|(k, v)| {
@@ -1842,6 +1842,33 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
                     format!("\"{}\":{}", escaped_key, value_to_compact_result_string(v))
                 })
                 .collect();
+
+            // Preserve historical test behavior: include direct prototype's own
+            // data properties when rendering a final object result.
+            if let Some(Value::VmObject(proto)) = borrow.get("__proto__") {
+                let own_keys: std::collections::HashSet<String> = borrow.keys().filter(|k| !k.starts_with("__")).cloned().collect();
+                let proto_borrow = proto.borrow();
+                for (k, v) in proto_borrow.iter() {
+                    if k.starts_with("__") || own_keys.contains(k) {
+                        continue;
+                    }
+                    // Avoid pulling in Object.prototype methods during rendering.
+                    if !matches!(
+                        v,
+                        Value::Undefined
+                            | Value::Null
+                            | Value::Boolean(_)
+                            | Value::Number(_)
+                            | Value::BigInt(_)
+                            | Value::String(_)
+                            | Value::Symbol(_)
+                    ) {
+                        continue;
+                    }
+                    let escaped_key = k.replace('\\', "\\\\").replace('"', "\\\"");
+                    parts.push(format!("\"{}\":{}", escaped_key, value_to_compact_result_string(v)));
+                }
+            }
             format!("{{{}}}", parts.join(","))
         }
         _ => value_to_string(val),

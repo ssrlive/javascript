@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 #[test]
 fn test_prototype_assignment() {
@@ -9,7 +9,7 @@ fn test_prototype_assignment() {
         obj.__proto__ = proto;
         obj
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "{\"ownProp\":\"own value\",\"inheritedProp\":\"inherited value\"}");
 }
 
@@ -22,7 +22,7 @@ fn test_prototype_chain_lookup() {
         obj.__proto__ = proto;
         [obj.ownProp, obj.inheritedProp]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[\"own value\",\"inherited value\"]");
 }
 
@@ -37,7 +37,7 @@ fn test_multi_level_prototype_chain() {
         child.__proto__ = parent;
         [child.childProp, child.parentProp, child.grandparentProp]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[\"child value\",\"parent value\",\"grandparent value\"]");
 }
 
@@ -51,7 +51,7 @@ fn test_has_own_property_symbol_and_inherited() {
         obj[s] = 42;
         [ obj.hasOwnProperty('own'), obj.hasOwnProperty('inherited'), obj.hasOwnProperty(s) ]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[true,false,true]");
 }
 
@@ -63,7 +63,7 @@ fn test_is_prototype_of_and_property_is_enumerable() {
         obj.q = 2;
         [ proto.isPrototypeOf(obj), obj.isPrototypeOf(proto), obj.propertyIsEnumerable('q'), obj.propertyIsEnumerable('p') ]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[true,false,true,false]");
 }
 
@@ -78,7 +78,7 @@ fn test_override_has_own_property() {
         var descs = Object.getOwnPropertyDescriptors(obj);
         [obj.hasOwnProperty === obj.__proto__.hasOwnProperty, keys, descs.hasOwnProperty ? 'own' : 'none', obj.hasOwnProperty('own')]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[false,[\"own\",\"hasOwnProperty\"],\"own\",\"override-own\"]");
 }
 
@@ -91,7 +91,7 @@ fn test_to_string_default_and_tag() {
         o2[tag] = 'Custom';
         [ o1.toString(), o2.toString() ]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[\"[object Object]\",\"[object Custom]\"]");
 }
 
@@ -106,7 +106,7 @@ fn test_to_locale_string_defaults_and_override() {
         o3.toLocaleString = function() { return 'my-locale'; };
         [ o1.toLocaleString(), o2.toLocaleString(), o3.toLocaleString() ]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[\"[object Object]\",\"[object Custom]\",\"my-locale\"]");
 }
 
@@ -120,7 +120,7 @@ fn test_to_string_override_and_valueof() {
         var v = o.valueOf();
         [ o.toString(), proto.toString(), o === v ]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[\"my-toString\",\"[object Object]\",true]");
 }
 
@@ -130,6 +130,6 @@ fn test_class_instance_to_string_inherits_object_prototype() {
         class C {}
         [ (new C()).toString(), Object.prototype.toString.call(new C()) ]
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[\"[object Object]\",\"[object Object]\"]");
 }

@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 #[test]
 fn for_of_destructuring_var_object() {
@@ -8,6 +8,6 @@ fn for_of_destructuring_var_object() {
         x;
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "2");
 }

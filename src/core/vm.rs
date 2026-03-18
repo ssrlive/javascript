@@ -260,6 +260,7 @@ const BUILTIN_ATOMICS_WAITASYNC: u8 = 251;
 const BUILTIN_ASYNCGEN_NEXT: u8 = 252;
 const BUILTIN_ASYNCGEN_THROW: u8 = 253;
 const BUILTIN_ASYNCGEN_RETURN: u8 = 254;
+const BUILTIN_REFLECT_APPLY: u8 = 255;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -935,6 +936,7 @@ impl<'gc> VM<'gc> {
                 let mut err_map = IndexMap::new();
                 err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
                 err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                err_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
                 let err = Value::VmObject(Rc::new(RefCell::new(err_map)));
                 self.handle_throw(err)?;
             } else {
@@ -1238,6 +1240,12 @@ impl<'gc> VM<'gc> {
         json_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_JSON_PARSE));
         self.globals
             .insert("JSON".to_string(), Value::VmObject(Rc::new(RefCell::new(json_map))));
+
+        // Reflect object
+        let mut reflect_map = IndexMap::new();
+        reflect_map.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_REFLECT_APPLY));
+        self.globals
+            .insert("Reflect".to_string(), Value::VmObject(Rc::new(RefCell::new(reflect_map))));
 
         // Array.isArray and prototype
         let mut array_obj = IndexMap::new();
@@ -1572,6 +1580,8 @@ impl<'gc> VM<'gc> {
         let mut function_map = IndexMap::new();
         function_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
         function_map.insert("prototype".to_string(), fn_proto_val);
+        function_map.insert("length".to_string(), Value::Number(1.0));
+        function_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
         self.globals
             .insert("Function".to_string(), Value::VmObject(Rc::new(RefCell::new(function_map))));
     }
@@ -2054,6 +2064,12 @@ impl<'gc> VM<'gc> {
                 Value::String(crate::unicode::utf8_to_utf16("not-equal"))
             }
             BUILTIN_ATOMICS_NOTIFY => Value::Number(0.0),
+            BUILTIN_REFLECT_APPLY => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let arg_array = args.get(2).cloned().unwrap_or(Value::Undefined);
+                self.call_method_builtin(BUILTIN_FN_APPLY, target, vec![this_arg, arg_array])
+            }
             BUILTIN_ATOMICS_WAITASYNC => {
                 if let Some(Value::VmArray(arr)) = args.first() {
                     let arr_borrow = arr.borrow();
@@ -3213,6 +3229,7 @@ impl<'gc> VM<'gc> {
                 let mut map = IndexMap::new();
                 map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(type_name)));
+                map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16(type_name)));
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
             // Object.keys(obj) → array of own enumerable string keys
@@ -3775,7 +3792,8 @@ impl<'gc> VM<'gc> {
             | BUILTIN_ATOMICS_WAITASYNC
             | BUILTIN_PROMISE_RESOLVE
             | BUILTIN_PROMISE_ALL
-            | BUILTIN_CTOR_DATE => {
+            | BUILTIN_CTOR_DATE
+            | BUILTIN_REFLECT_APPLY => {
                 return self.call_builtin(id, args);
             }
             _ => {}
@@ -6653,6 +6671,24 @@ impl<'gc> VM<'gc> {
                         let name_str = crate::unicode::utf16_to_utf8(s);
                         if let Some(val) = self.globals.get(&name_str).cloned() {
                             self.stack.push(val);
+                        } else if let Some(frame) = self.frames.last()
+                            && self.chunk.fn_names.get(&frame.func_ip).is_some_and(|fn_name| fn_name == &name_str)
+                        {
+                            let arity = self
+                                .chunk
+                                .constants
+                                .iter()
+                                .find_map(|c| match c {
+                                    Value::VmFunction(ip, a) if *ip == frame.func_ip => Some(*a),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            if frame.upvalues.is_empty() {
+                                self.stack.push(Value::VmFunction(frame.func_ip, arity));
+                            } else {
+                                self.stack
+                                    .push(Value::VmClosure(frame.func_ip, arity, Rc::new(frame.upvalues.clone())));
+                            }
                         } else {
                             // unresolvable reference
                             let mut err_map = IndexMap::new();

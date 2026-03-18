@@ -102,11 +102,16 @@ impl<'gc> Compiler<'gc> {
                 self.compile_statement(stmt, false)?;
             }
         }
-        for (i, stmt) in statements.iter().enumerate() {
+        let mut remaining_non_function = statements
+            .iter()
+            .filter(|stmt| !matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)))
+            .count();
+        for stmt in statements.iter() {
             if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) {
                 continue;
             }
-            let is_last = i == statements.len() - 1;
+            remaining_non_function = remaining_non_function.saturating_sub(1);
+            let is_last = remaining_non_function == 0;
             self.compile_statement(stmt, is_last)?;
         }
 
@@ -1021,6 +1026,8 @@ impl<'gc> Compiler<'gc> {
                         }
                     }
                 }
+
+                self.emit_parameter_default_initializers(params)?;
 
                 for (i, s) in body.iter().enumerate() {
                     self.compile_statement(s, i == body.len() - 1)?;
@@ -2425,13 +2432,13 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             // Anonymous function expression: function(params) { body }
-            Expr::Function(_name, params, body) => {
-                self.compile_function_body(params, body)?;
+            Expr::Function(name, params, body) => {
+                self.compile_function_body(name.as_deref(), params, body)?;
             }
             // Minimal async function expression support in VM path.
             // The body is compiled like a normal function for now.
-            Expr::AsyncFunction(_name, params, body) => {
-                let func_ip = self.compile_function_body(params, body)?;
+            Expr::AsyncFunction(name, params, body) => {
+                let func_ip = self.compile_function_body(name.as_deref(), params, body)?;
                 self.chunk.async_function_ips.insert(func_ip);
             }
             // Minimal async generator support in VM path.
@@ -3442,7 +3449,12 @@ impl<'gc> Compiler<'gc> {
         Ok(())
     }
 
-    fn compile_function_body(&mut self, params: &[DestructuringElement], body: &[Statement]) -> Result<usize, JSError> {
+    fn compile_function_body(
+        &mut self,
+        function_name: Option<&str>,
+        params: &[DestructuringElement],
+        body: &[Statement],
+    ) -> Result<usize, JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
         let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
@@ -3485,6 +3497,10 @@ impl<'gc> Compiler<'gc> {
             }
         }
 
+        self.emit_parameter_default_initializers(params)?;
+
+        self.emit_parameter_default_initializers(params)?;
+
         for (i, s) in body.iter().enumerate() {
             self.compile_statement(s, i == body.len() - 1)?;
         }
@@ -3498,6 +3514,11 @@ impl<'gc> Compiler<'gc> {
 
         // Save local variable names for direct eval support
         self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+        if let Some(name) = function_name
+            && !name.is_empty()
+        {
+            self.chunk.fn_names.insert(func_ip, name.to_string());
+        }
 
         // Collect upvalues before restoring
         let fn_upvalues = std::mem::take(&mut self.upvalues);
@@ -3529,6 +3550,37 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_byte(uv.index);
         }
         Ok(func_ip)
+    }
+
+    fn emit_parameter_default_initializers(&mut self, params: &[DestructuringElement]) -> Result<(), JSError> {
+        let mut local_slot: u8 = 0;
+        for param in params {
+            match param {
+                DestructuringElement::Variable(_, Some(default_expr)) => {
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(local_slot);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let skip_default = self.emit_jump(Opcode::JumpIfFalse);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    self.compile_expr(default_expr)?;
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(local_slot);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    self.patch_jump(skip_default);
+                }
+                DestructuringElement::Variable(_, None) => {}
+                _ => {}
+            }
+
+            if matches!(param, DestructuringElement::Variable(..) | DestructuringElement::Rest(..)) {
+                local_slot = local_slot.saturating_add(1);
+            }
+        }
+        Ok(())
     }
 
     fn compile_async_generator_function_body(&mut self, params: &[DestructuringElement], body: &[Statement]) -> Result<(), JSError> {

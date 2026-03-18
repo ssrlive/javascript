@@ -173,6 +173,8 @@ pub struct Chunk<'gc> {
     pub class_constructor_ips: std::collections::HashSet<usize>,
     /// Recorded strictness flag for functions by their starting IP
     pub fn_strictness: std::collections::HashMap<usize, bool>,
+    /// Function IPs that correspond to async functions and should return Promise values.
+    pub async_function_ips: std::collections::HashSet<usize>,
     /// Map from function IP to local variable names (for direct eval)
     pub fn_local_names: std::collections::HashMap<usize, Vec<String>>,
 }
@@ -185,6 +187,7 @@ impl<'gc> Chunk<'gc> {
             fn_names: std::collections::HashMap::new(),
             class_constructor_ips: std::collections::HashSet::new(),
             fn_strictness: std::collections::HashMap::new(),
+            async_function_ips: std::collections::HashSet::new(),
             fn_local_names: std::collections::HashMap::new(),
         }
     }

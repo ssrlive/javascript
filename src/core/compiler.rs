@@ -1,6 +1,7 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::statement::{
-    BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ObjectDestructuringElement, Statement, StatementKind,
+    BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ImportSpecifier, ObjectDestructuringElement, Statement,
+    StatementKind,
 };
 use crate::core::value::VmArrayData;
 use crate::core::{JSError, Value};
@@ -955,6 +956,9 @@ impl<'gc> Compiler<'gc> {
                 // Jump over the function body in the main bytecode stream
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
+                if *is_async {
+                    self.chunk.async_function_ips.insert(func_ip);
+                }
                 let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
 
                 // Save and reset locals/scope for function scope
@@ -1549,18 +1553,9 @@ impl<'gc> Compiler<'gc> {
                     this.compile_expr(&expr)
                 };
 
-                let emit_console_log_value = |this: &mut Self| {
-                    let console_name = this.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("console")));
-                    this.chunk.write_opcode(Opcode::GetGlobal);
-                    this.chunk.write_u16(console_name);
-                    let log_key = this.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("log")));
-                    this.chunk.write_opcode(Opcode::GetProperty);
-                    this.chunk.write_u16(log_key);
-                };
-
                 for spec in specifiers {
                     match (source.as_str(), spec) {
-                        ("math", crate::core::statement::ImportSpecifier::Named(name, alias)) => {
+                        ("math", ImportSpecifier::Named(name, alias)) => {
                             let local = alias.as_deref().unwrap_or(name);
                             match name.as_str() {
                                 "PI" => {
@@ -1581,11 +1576,11 @@ impl<'gc> Compiler<'gc> {
                             }
                             define_binding(self, local);
                         }
-                        ("math", crate::core::statement::ImportSpecifier::Default(local)) => {
+                        ("math", ImportSpecifier::Default(local)) => {
                             emit_identity_fn(self)?;
                             define_binding(self, local);
                         }
-                        ("console", crate::core::statement::ImportSpecifier::Named(name, alias)) => {
+                        ("console", ImportSpecifier::Named(name, alias)) => {
                             let local = alias.as_deref().unwrap_or(name);
                             let console_name = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("console")));
                             self.chunk.write_opcode(Opcode::GetGlobal);
@@ -1595,52 +1590,13 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_u16(key_idx);
                             define_binding(self, local);
                         }
-                        ("os", crate::core::statement::ImportSpecifier::Namespace(local)) => {
-                            // Build `path` object with callable placeholders.
-                            let k_basename = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("basename")));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(k_basename);
-                            emit_console_log_value(self);
-
-                            let k_dirname = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("dirname")));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(k_dirname);
-                            emit_console_log_value(self);
-
-                            let k_join = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("join")));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(k_join);
-                            emit_console_log_value(self);
-
-                            self.chunk.write_opcode(Opcode::NewObject);
-                            self.chunk.write_byte(3);
-
-                            // Build `os` namespace object.
-                            let k_getcwd = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("getcwd")));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(k_getcwd);
-                            emit_console_log_value(self);
-
-                            let k_getpid = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("getpid")));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(k_getpid);
-                            emit_console_log_value(self);
-
-                            let k_getppid = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("getppid")));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(k_getppid);
-                            emit_console_log_value(self);
-
-                            let k_path = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("path")));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(k_path);
-                            // `path` object value is already on stack.
-
-                            self.chunk.write_opcode(Opcode::NewObject);
-                            self.chunk.write_byte(4);
+                        ("os", ImportSpecifier::Namespace(local)) => {
+                            let os_name = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("os")));
+                            self.chunk.write_opcode(Opcode::GetGlobal);
+                            self.chunk.write_u16(os_name);
                             define_binding(self, local);
                         }
-                        ("./es6_module_export.js", crate::core::statement::ImportSpecifier::Named(name, alias)) => {
+                        ("./es6_module_export.js", ImportSpecifier::Named(name, alias)) => {
                             let local = alias.as_deref().unwrap_or(name);
                             match name.as_str() {
                                 "PI" => {
@@ -1662,24 +1618,23 @@ impl<'gc> Compiler<'gc> {
                             }
                             define_binding(self, local);
                         }
-                        ("./es6_module_export.js", crate::core::statement::ImportSpecifier::Default(local)) => {
+                        ("./es6_module_export.js", ImportSpecifier::Default(local)) => {
                             emit_add_or_mul_fn(self, BinaryOp::Mul)?;
                             define_binding(self, local);
                         }
-                        (_, crate::core::statement::ImportSpecifier::Namespace(local)) => {
+                        (_, ImportSpecifier::Namespace(local)) => {
                             // Fallback empty namespace
                             self.chunk.write_opcode(Opcode::NewObject);
                             self.chunk.write_byte(0);
                             define_binding(self, local);
                         }
-                        (_, crate::core::statement::ImportSpecifier::Default(local))
-                        | (_, crate::core::statement::ImportSpecifier::Named(local, None)) => {
+                        (_, ImportSpecifier::Default(local)) | (_, ImportSpecifier::Named(local, None)) => {
                             let idx = self.chunk.add_constant(Value::Undefined);
                             self.chunk.write_opcode(Opcode::Constant);
                             self.chunk.write_u16(idx);
                             define_binding(self, local);
                         }
-                        (_, crate::core::statement::ImportSpecifier::Named(_name, Some(alias))) => {
+                        (_, ImportSpecifier::Named(_name, Some(alias))) => {
                             let idx = self.chunk.add_constant(Value::Undefined);
                             self.chunk.write_opcode(Opcode::Constant);
                             self.chunk.write_u16(idx);
@@ -2451,7 +2406,8 @@ impl<'gc> Compiler<'gc> {
             // Minimal async function expression support in VM path.
             // The body is compiled like a normal function for now.
             Expr::AsyncFunction(_name, params, body) => {
-                self.compile_function_body(params, body)?;
+                let func_ip = self.compile_function_body(params, body)?;
+                self.chunk.async_function_ips.insert(func_ip);
             }
             // Minimal async generator support in VM path.
             // The body is executed eagerly and each yield/yield* appends to an internal array.
@@ -3440,7 +3396,7 @@ impl<'gc> Compiler<'gc> {
         Ok(())
     }
 
-    fn compile_function_body(&mut self, params: &[DestructuringElement], body: &[Statement]) -> Result<(), JSError> {
+    fn compile_function_body(&mut self, params: &[DestructuringElement], body: &[Statement]) -> Result<usize, JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
         let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
@@ -3526,7 +3482,7 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_byte(if uv.is_local { 1 } else { 0 });
             self.chunk.write_byte(uv.index);
         }
-        Ok(())
+        Ok(func_ip)
     }
 
     fn compile_async_generator_function_body(&mut self, params: &[DestructuringElement], body: &[Statement]) -> Result<(), JSError> {

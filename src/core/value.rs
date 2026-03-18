@@ -1819,6 +1819,21 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
         }
         Value::VmObject(obj) => {
             let borrow = obj.borrow();
+
+            // Render Promise objects in a JS-like shape rather than exposing
+            // internal fields directly.
+            if let Some(Value::String(t)) = borrow.get("__type__")
+                && utf16_to_utf8(t) == "Promise"
+            {
+                if let Some(v) = borrow.get("__promise_value__") {
+                    if matches!(borrow.get("__promise_rejected__"), Some(Value::Boolean(true))) {
+                        return format!("Promise {{ <rejected>: {} }}", value_to_compact_result_string(v));
+                    }
+                    return format!("Promise {{ <fulfilled>: {} }}", value_to_compact_result_string(v));
+                }
+                return "Promise { <pending> }".to_string();
+            }
+
             let parts: Vec<String> = borrow
                 .iter()
                 .filter(|(k, _)| !k.starts_with("__"))

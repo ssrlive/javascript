@@ -1166,7 +1166,43 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
     let _ = run_as_module; // For now we ignore the module/script distinction in the VM, but we may want to use it for different scoping or error messages later.
 
     let mut vm = VM::new(chunk);
-    let v = vm.run()?;
+    let mut v = vm.run()?;
+
+    // VM helper behavior: if top-level result is a settled Promise, expose its
+    // resolved/rejected payload so tests can assert final values directly.
+    for _ in 0..8 {
+        let step = if let Value::VmObject(obj) = &v {
+            let b = obj.borrow();
+            let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+            if is_promise {
+                let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                let next = b.get("__promise_value__").cloned();
+                Some((rejected, next))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let Some((rejected, next)) = step else {
+            break;
+        };
+        let Some(next) = next else {
+            break;
+        };
+
+        if rejected && let Value::VmObject(obj) = &next {
+            let b = obj.borrow();
+            if let Some(Value::String(t)) = b.get("__type__") {
+                let tn = crate::unicode::utf16_to_utf8(t);
+                if tn == "Error" || tn.ends_with("Error") {
+                    return Err(raise_eval_error!(value_to_string(&next)));
+                }
+            }
+        }
+        v = next;
+    }
 
     match v {
         Value::String(s) => {

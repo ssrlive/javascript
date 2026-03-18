@@ -5,7 +5,20 @@ use crate::js_regexp::get_or_compile_regex;
 use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
+use std::sync::{LazyLock, Mutex};
+
+static VM_OS_FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static VM_NEXT_OS_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
+
+fn vm_next_os_file_id() -> u64 {
+    let mut id = VM_NEXT_OS_FILE_ID.lock().unwrap();
+    let current = *id;
+    *id += 1;
+    current
+}
 
 // Builtin function IDs
 const BUILTIN_CONSOLE_LOG: u8 = 0;
@@ -673,9 +686,8 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
-            "os.getcwd" | "os.getpid" | "os.getppid" | "os.path.basename" | "os.path.dirname" | "os.path.join" => {
-                self.call_named_host_function(name, args)
-            }
+            "os.getcwd" | "os.getpid" | "os.getppid" | "os.open" | "os.write" | "os.read" | "os.seek" | "os.close" | "os.path.basename"
+            | "os.path.dirname" | "os.path.join" | "os.path.extname" => self.call_named_host_function(name, args),
             "date.UTC" => {
                 use chrono::{TimeZone, Utc};
                 let year = args.first().map(to_number).unwrap_or(0.0) as i32;
@@ -974,6 +986,232 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
+            "promise.__resolve" => {
+                if let Some(Value::VmObject(promise_obj)) = receiver {
+                    let mut b = promise_obj.borrow_mut();
+                    b.insert("__promise_value__".to_string(), args.first().cloned().unwrap_or(Value::Undefined));
+                    b.shift_remove("__promise_rejected__");
+                }
+                Value::Undefined
+            }
+            "promise.__reject" => {
+                if let Some(Value::VmObject(promise_obj)) = receiver {
+                    let mut b = promise_obj.borrow_mut();
+                    b.insert("__promise_value__".to_string(), args.first().cloned().unwrap_or(Value::Undefined));
+                    b.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                }
+                Value::Undefined
+            }
+            "promise.await" => {
+                let mut current = args.first().cloned().unwrap_or(Value::Undefined);
+
+                let normalize_reason = |msg: &str| -> Value<'gc> {
+                    let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(msg);
+                    if let Ok(n) = payload.parse::<f64>() {
+                        Value::Number(n)
+                    } else {
+                        Value::String(crate::unicode::utf8_to_utf16(payload))
+                    }
+                };
+
+                for _ in 0..8 {
+                    let Value::VmObject(obj) = &current else {
+                        return current;
+                    };
+
+                    let (is_promise, rejected, settled, then_prop) = {
+                        let b = obj.borrow();
+                        (
+                            matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise"),
+                            matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true))),
+                            b.get("__promise_value__").cloned(),
+                            b.get("then").cloned(),
+                        )
+                    };
+
+                    if is_promise {
+                        if rejected {
+                            self.pending_throw = Some(settled.unwrap_or(Value::Undefined));
+                            return Value::Undefined;
+                        }
+                        let Some(next) = settled else {
+                            return Value::Undefined;
+                        };
+                        current = next;
+                        continue;
+                    }
+
+                    let Some(then_val) = then_prop else {
+                        return current;
+                    };
+
+                    let then_is_callable = match &then_val {
+                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..) => true,
+                        Value::VmObject(map) => {
+                            let b = map.borrow();
+                            b.contains_key("__host_fn__") || b.contains_key("__bound_target__")
+                        }
+                        _ => false,
+                    };
+
+                    if !then_is_callable {
+                        return current;
+                    }
+
+                    let mut temp = IndexMap::new();
+                    temp.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                    temp.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                    if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                        && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+                    {
+                        temp.insert("__proto__".to_string(), proto);
+                    }
+                    let temp_promise = Value::VmObject(Rc::new(RefCell::new(temp)));
+
+                    let mut resolve_map = IndexMap::new();
+                    resolve_map.insert(
+                        "__host_fn__".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("promise.__resolve")),
+                    );
+                    resolve_map.insert("__host_this__".to_string(), temp_promise.clone());
+                    let resolve = Value::VmObject(Rc::new(RefCell::new(resolve_map)));
+
+                    let mut reject_map = IndexMap::new();
+                    reject_map.insert(
+                        "__host_fn__".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("promise.__reject")),
+                    );
+                    reject_map.insert("__host_this__".to_string(), temp_promise.clone());
+                    let reject = Value::VmObject(Rc::new(RefCell::new(reject_map)));
+
+                    let this_arg = current.clone();
+                    let invoke_then_error = match then_val {
+                        Value::VmFunction(ip, _) => {
+                            self.this_stack.push(this_arg.clone());
+                            let saved_try_stack = std::mem::take(&mut self.try_stack);
+                            let result = self.call_vm_function_result(ip, &[resolve.clone(), reject.clone()], &[]);
+                            self.try_stack = saved_try_stack;
+                            self.this_stack.pop();
+                            result.err()
+                        }
+                        Value::VmClosure(ip, _, upv) => {
+                            let uv = (*upv).clone();
+                            self.this_stack.push(this_arg.clone());
+                            let saved_try_stack = std::mem::take(&mut self.try_stack);
+                            let result = self.call_vm_function_result(ip, &[resolve.clone(), reject.clone()], &uv);
+                            self.try_stack = saved_try_stack;
+                            self.this_stack.pop();
+                            result.err()
+                        }
+                        Value::VmNativeFunction(native_id) => {
+                            let _ = self.call_method_builtin(native_id, this_arg.clone(), vec![resolve.clone(), reject.clone()]);
+                            None
+                        }
+                        Value::VmObject(map) => {
+                            let borrow = map.borrow();
+                            if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                                let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                                drop(borrow);
+                                let _ = self.call_host_fn(&host_name, Some(this_arg.clone()), vec![resolve.clone(), reject.clone()]);
+                                None
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(err) = invoke_then_error
+                        && let Value::VmObject(p) = &temp_promise
+                    {
+                        let mut pb = p.borrow_mut();
+                        if !pb.contains_key("__promise_value__") {
+                            pb.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                            pb.insert("__promise_value__".to_string(), normalize_reason(&err.message()));
+                        }
+                    }
+
+                    if let Some(thrown) = self.pending_throw.take()
+                        && let Value::VmObject(p) = &temp_promise
+                    {
+                        let mut pb = p.borrow_mut();
+                        if !pb.contains_key("__promise_value__") {
+                            pb.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                            pb.insert("__promise_value__".to_string(), thrown);
+                        }
+                    }
+
+                    let (temp_rejected, temp_settled) = if let Value::VmObject(p) = &temp_promise {
+                        let b = p.borrow();
+                        (
+                            matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true))),
+                            b.get("__promise_value__").cloned(),
+                        )
+                    } else {
+                        (false, None)
+                    };
+
+                    if temp_rejected {
+                        self.pending_throw = Some(temp_settled.unwrap_or(Value::Undefined));
+                        return Value::Undefined;
+                    }
+
+                    let Some(next) = temp_settled else {
+                        return Value::Undefined;
+                    };
+                    current = next;
+                }
+
+                current
+            }
+            "promise.allSettled" => {
+                let mut settled = Vec::new();
+                if let Some(Value::VmArray(items)) = args.first() {
+                    for item in items.borrow().iter() {
+                        let mut entry = IndexMap::new();
+                        match item {
+                            Value::VmObject(obj) => {
+                                let b = obj.borrow();
+                                let is_promise =
+                                    matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                                if is_promise {
+                                    let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                                    let pv = b.get("__promise_value__").cloned().unwrap_or(Value::Undefined);
+                                    if rejected {
+                                        entry.insert("status".to_string(), Value::String(crate::unicode::utf8_to_utf16("rejected")));
+                                        entry.insert("reason".to_string(), pv);
+                                    } else {
+                                        entry.insert("status".to_string(), Value::String(crate::unicode::utf8_to_utf16("fulfilled")));
+                                        entry.insert("value".to_string(), pv);
+                                    }
+                                } else {
+                                    entry.insert("status".to_string(), Value::String(crate::unicode::utf8_to_utf16("fulfilled")));
+                                    entry.insert("value".to_string(), item.clone());
+                                }
+                            }
+                            _ => {
+                                entry.insert("status".to_string(), Value::String(crate::unicode::utf8_to_utf16("fulfilled")));
+                                entry.insert("value".to_string(), item.clone());
+                            }
+                        }
+                        settled.push(Value::VmObject(Rc::new(RefCell::new(entry))));
+                    }
+                }
+
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                map.insert(
+                    "__promise_value__".to_string(),
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(settled)))),
+                );
+                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                    && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+                {
+                    map.insert("__proto__".to_string(), proto);
+                }
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
             "promise.finally" => {
                 if let Some(cb) = args.first() {
                     match cb {
@@ -1007,6 +1245,92 @@ impl<'gc> VM<'gc> {
             }
             "os.getpid" => Value::Number(std::process::id() as f64),
             "os.getppid" => Value::Number(std::process::id() as f64),
+            "os.open" => {
+                let filename = args.first().map(value_to_string).unwrap_or_default();
+                let flags = args.get(1).map(to_number).unwrap_or(0.0) as i32;
+
+                let mut options = std::fs::OpenOptions::new();
+                if flags & 2 != 0 {
+                    options.read(true).write(true);
+                } else if flags & 1 != 0 {
+                    options.write(true);
+                } else {
+                    options.read(true);
+                }
+                if flags & 64 != 0 {
+                    options.create(true);
+                }
+                if flags & 512 != 0 {
+                    options.truncate(true);
+                }
+
+                match options.open(&filename) {
+                    Ok(file) => {
+                        let fd = vm_next_os_file_id();
+                        VM_OS_FILE_STORE.lock().unwrap().insert(fd, file);
+                        Value::Number(fd as f64)
+                    }
+                    Err(_) => Value::Number(-1.0),
+                }
+            }
+            "os.close" => {
+                let fd = args.first().map(to_number).unwrap_or(-1.0) as u64;
+                if VM_OS_FILE_STORE.lock().unwrap().remove(&fd).is_some() {
+                    Value::Number(0.0)
+                } else {
+                    Value::Number(-1.0)
+                }
+            }
+            "os.write" => {
+                let fd = args.first().map(to_number).unwrap_or(-1.0) as u64;
+                let data = args.get(1).map(value_to_string).unwrap_or_default();
+                let mut store = VM_OS_FILE_STORE.lock().unwrap();
+                if let Some(file) = store.get_mut(&fd) {
+                    match file.write(data.as_bytes()) {
+                        Ok(n) => Value::Number(n as f64),
+                        Err(_) => Value::Number(-1.0),
+                    }
+                } else {
+                    Value::Number(-1.0)
+                }
+            }
+            "os.read" => {
+                let fd = args.first().map(to_number).unwrap_or(-1.0) as u64;
+                let count = args.get(1).map(to_number).unwrap_or(0.0).max(0.0) as usize;
+                let mut store = VM_OS_FILE_STORE.lock().unwrap();
+                if let Some(file) = store.get_mut(&fd) {
+                    let mut buf = vec![0u8; count];
+                    match file.read(&mut buf) {
+                        Ok(n) => {
+                            buf.truncate(n);
+                            Value::String(crate::unicode::utf8_to_utf16(&String::from_utf8_lossy(&buf)))
+                        }
+                        Err(_) => Value::String(crate::unicode::utf8_to_utf16("")),
+                    }
+                } else {
+                    Value::String(crate::unicode::utf8_to_utf16(""))
+                }
+            }
+            "os.seek" => {
+                let fd = args.first().map(to_number).unwrap_or(-1.0) as u64;
+                let offset = args.get(1).map(to_number).unwrap_or(0.0) as i64;
+                let whence = args.get(2).map(to_number).unwrap_or(0.0) as i32;
+                let mut store = VM_OS_FILE_STORE.lock().unwrap();
+                if let Some(file) = store.get_mut(&fd) {
+                    let seek_from = match whence {
+                        0 => SeekFrom::Start(offset.max(0) as u64),
+                        1 => SeekFrom::Current(offset),
+                        2 => SeekFrom::End(offset),
+                        _ => SeekFrom::Start(offset.max(0) as u64),
+                    };
+                    match file.seek(seek_from) {
+                        Ok(pos) => Value::Number(pos as f64),
+                        Err(_) => Value::Number(-1.0),
+                    }
+                } else {
+                    Value::Number(-1.0)
+                }
+            }
             "os.path.basename" => {
                 let p = args.first().map(value_to_string).unwrap_or_default();
                 let base = std::path::Path::new(&p)
@@ -1029,6 +1353,14 @@ impl<'gc> VM<'gc> {
                     pb.push(value_to_string(a));
                 }
                 Value::String(crate::unicode::utf8_to_utf16(&pb.to_string_lossy()))
+            }
+            "os.path.extname" => {
+                let p = args.first().map(value_to_string).unwrap_or_default();
+                let ext = std::path::Path::new(&p)
+                    .extension()
+                    .map(|s| format!(".{}", s.to_string_lossy()))
+                    .unwrap_or_default();
+                Value::String(crate::unicode::utf8_to_utf16(&ext))
             }
             _ => Value::Undefined,
         }
@@ -1650,10 +1982,12 @@ impl<'gc> VM<'gc> {
         promise_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROMISE as f64));
         promise_map.insert("resolve".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_RESOLVE));
         promise_map.insert("all".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_ALL));
+        promise_map.insert("allSettled".to_string(), Self::make_host_fn("promise.allSettled"));
         promise_map.insert("reject".to_string(), Self::make_host_fn("promise.reject"));
         promise_map.insert("prototype".to_string(), promise_proto_obj);
         self.globals
             .insert("Promise".to_string(), Value::VmObject(Rc::new(RefCell::new(promise_map))));
+        self.globals.insert("__await__".to_string(), Self::make_host_fn("promise.await"));
 
         let mut proxy_map = IndexMap::new();
         proxy_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROXY as f64));
@@ -1858,11 +2192,17 @@ impl<'gc> VM<'gc> {
         os_path_map.insert("basename".to_string(), Self::make_host_fn("os.path.basename"));
         os_path_map.insert("dirname".to_string(), Self::make_host_fn("os.path.dirname"));
         os_path_map.insert("join".to_string(), Self::make_host_fn("os.path.join"));
+        os_path_map.insert("extname".to_string(), Self::make_host_fn("os.path.extname"));
 
         let mut os_map = IndexMap::new();
         os_map.insert("getcwd".to_string(), Self::make_host_fn("os.getcwd"));
         os_map.insert("getpid".to_string(), Self::make_host_fn("os.getpid"));
         os_map.insert("getppid".to_string(), Self::make_host_fn("os.getppid"));
+        os_map.insert("open".to_string(), Self::make_host_fn("os.open"));
+        os_map.insert("write".to_string(), Self::make_host_fn("os.write"));
+        os_map.insert("read".to_string(), Self::make_host_fn("os.read"));
+        os_map.insert("seek".to_string(), Self::make_host_fn("os.seek"));
+        os_map.insert("close".to_string(), Self::make_host_fn("os.close"));
         os_map.insert("path".to_string(), Value::VmObject(Rc::new(RefCell::new(os_path_map))));
         self.globals
             .insert("os".to_string(), Value::VmObject(Rc::new(RefCell::new(os_map))));
@@ -2216,24 +2556,6 @@ impl<'gc> VM<'gc> {
             BUILTIN_CLEARTIMEOUT | BUILTIN_CLEARINTERVAL => Value::Undefined,
             BUILTIN_PROMISE_NOOP => Value::Undefined,
             BUILTIN_CTOR_PROMISE => {
-                if let Some(executor) = args.first() {
-                    let resolve = Value::VmNativeFunction(BUILTIN_PROMISE_NOOP);
-                    let reject = Value::VmNativeFunction(BUILTIN_PROMISE_NOOP);
-                    match executor {
-                        Value::VmFunction(ip, _) => {
-                            let _ = self.call_vm_function(*ip, &[resolve.clone(), reject.clone()], &[]);
-                        }
-                        Value::VmClosure(ip, _, upv) => {
-                            let uv = (**upv).clone();
-                            let _ = self.call_vm_function(*ip, &[resolve.clone(), reject.clone()], &uv);
-                        }
-                        Value::VmNativeFunction(native_id) => {
-                            let _ = self.call_builtin(*native_id, vec![resolve.clone(), reject.clone()]);
-                        }
-                        _ => {}
-                    }
-                }
-
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
                 map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
@@ -2242,7 +2564,77 @@ impl<'gc> VM<'gc> {
                 {
                     map.insert("__proto__".to_string(), proto);
                 }
-                Value::VmObject(Rc::new(RefCell::new(map)))
+                let promise_obj = Value::VmObject(Rc::new(RefCell::new(map)));
+
+                if let Some(executor) = args.first() {
+                    let mut resolve_map = IndexMap::new();
+                    resolve_map.insert(
+                        "__host_fn__".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("promise.__resolve")),
+                    );
+                    resolve_map.insert("__host_this__".to_string(), promise_obj.clone());
+                    let resolve = Value::VmObject(Rc::new(RefCell::new(resolve_map)));
+
+                    let mut reject_map = IndexMap::new();
+                    reject_map.insert(
+                        "__host_fn__".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("promise.__reject")),
+                    );
+                    reject_map.insert("__host_this__".to_string(), promise_obj.clone());
+                    let reject = Value::VmObject(Rc::new(RefCell::new(reject_map)));
+
+                    match executor {
+                        Value::VmFunction(ip, _) => {
+                            let saved_try_stack = std::mem::take(&mut self.try_stack);
+                            let call_result = self.call_vm_function_result(*ip, &[resolve.clone(), reject.clone()], &[]);
+                            self.try_stack = saved_try_stack;
+                            if let Err(err) = call_result {
+                                let msg = err.message();
+                                let uncaught_payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
+                                if let Value::VmObject(p) = &promise_obj {
+                                    let mut pb = p.borrow_mut();
+                                    pb.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                                    if let Ok(n) = uncaught_payload.parse::<f64>() {
+                                        pb.insert("__promise_value__".to_string(), Value::Number(n));
+                                    } else {
+                                        pb.insert(
+                                            "__promise_value__".to_string(),
+                                            Value::String(crate::unicode::utf8_to_utf16(uncaught_payload)),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Value::VmClosure(ip, _, upv) => {
+                            let uv = (**upv).clone();
+                            let saved_try_stack = std::mem::take(&mut self.try_stack);
+                            let call_result = self.call_vm_function_result(*ip, &[resolve.clone(), reject.clone()], &uv);
+                            self.try_stack = saved_try_stack;
+                            if let Err(err) = call_result {
+                                let msg = err.message();
+                                let uncaught_payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
+                                if let Value::VmObject(p) = &promise_obj {
+                                    let mut pb = p.borrow_mut();
+                                    pb.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                                    if let Ok(n) = uncaught_payload.parse::<f64>() {
+                                        pb.insert("__promise_value__".to_string(), Value::Number(n));
+                                    } else {
+                                        pb.insert(
+                                            "__promise_value__".to_string(),
+                                            Value::String(crate::unicode::utf8_to_utf16(uncaught_payload)),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Value::VmNativeFunction(native_id) => {
+                            let _ = self.call_builtin(*native_id, vec![resolve.clone(), reject.clone()]);
+                        }
+                        _ => {}
+                    }
+                }
+
+                promise_obj
             }
             BUILTIN_PROMISE_RESOLVE | BUILTIN_PROMISE_ALL => {
                 let mut map = IndexMap::new();
@@ -6538,14 +6930,28 @@ impl<'gc> VM<'gc> {
                                 };
                                 let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                                 self.stack.truncate(base);
+                                let saved_try_stack = std::mem::take(&mut self.try_stack);
                                 if is_method {
                                     self.this_stack.push(receiver);
                                 }
-                                let result = self.call_vm_function(target_ip, &args_vec, &[]);
+                                let result = self.call_vm_function_result(target_ip, &args_vec, &[]);
                                 if is_method {
                                     self.this_stack.pop();
                                 }
-                                let promise = self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![result]);
+                                self.try_stack = saved_try_stack;
+                                let promise = match result {
+                                    Ok(value) => self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![value]),
+                                    Err(err) => {
+                                        let msg = err.message();
+                                        let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
+                                        let reason = if let Ok(n) = payload.parse::<f64>() {
+                                            Value::Number(n)
+                                        } else {
+                                            Value::String(crate::unicode::utf8_to_utf16(payload))
+                                        };
+                                        self.call_host_fn("promise.reject", None, vec![reason])
+                                    }
+                                };
                                 self.stack.push(promise);
                                 continue;
                             }
@@ -6654,14 +7060,28 @@ impl<'gc> VM<'gc> {
                                 };
                                 let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                                 self.stack.truncate(base);
+                                let saved_try_stack = std::mem::take(&mut self.try_stack);
                                 if is_method {
                                     self.this_stack.push(receiver);
                                 }
-                                let result = self.call_vm_function(target_ip, &args_vec, upvals);
+                                let result = self.call_vm_function_result(target_ip, &args_vec, upvals);
                                 if is_method {
                                     self.this_stack.pop();
                                 }
-                                let promise = self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![result]);
+                                self.try_stack = saved_try_stack;
+                                let promise = match result {
+                                    Ok(value) => self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![value]),
+                                    Err(err) => {
+                                        let msg = err.message();
+                                        let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
+                                        let reason = if let Ok(n) = payload.parse::<f64>() {
+                                            Value::Number(n)
+                                        } else {
+                                            Value::String(crate::unicode::utf8_to_utf16(payload))
+                                        };
+                                        self.call_host_fn("promise.reject", None, vec![reason])
+                                    }
+                                };
                                 self.stack.push(promise);
                                 continue;
                             }
@@ -6888,16 +7308,58 @@ impl<'gc> VM<'gc> {
 
                                     let result = match bound_target {
                                         Value::VmFunction(ip, _) => {
-                                            self.this_stack.push(bound_this.clone());
-                                            let r = self.call_vm_function(ip, &final_args, &[]);
-                                            self.this_stack.pop();
-                                            r
+                                            if self.chunk.async_function_ips.contains(&ip) {
+                                                self.this_stack.push(bound_this.clone());
+                                                let saved_try_stack = std::mem::take(&mut self.try_stack);
+                                                let call_result = self.call_vm_function_result(ip, &final_args, &[]);
+                                                self.try_stack = saved_try_stack;
+                                                self.this_stack.pop();
+                                                match call_result {
+                                                    Ok(value) => self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![value]),
+                                                    Err(err) => {
+                                                        let msg = err.message();
+                                                        let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
+                                                        let reason = if let Ok(n) = payload.parse::<f64>() {
+                                                            Value::Number(n)
+                                                        } else {
+                                                            Value::String(crate::unicode::utf8_to_utf16(payload))
+                                                        };
+                                                        self.call_host_fn("promise.reject", None, vec![reason])
+                                                    }
+                                                }
+                                            } else {
+                                                self.this_stack.push(bound_this.clone());
+                                                let r = self.call_vm_function(ip, &final_args, &[]);
+                                                self.this_stack.pop();
+                                                r
+                                            }
                                         }
                                         Value::VmClosure(ip, _, ups) => {
-                                            self.this_stack.push(bound_this.clone());
-                                            let r = self.call_vm_function(ip, &final_args, &ups);
-                                            self.this_stack.pop();
-                                            r
+                                            if self.chunk.async_function_ips.contains(&ip) {
+                                                self.this_stack.push(bound_this.clone());
+                                                let saved_try_stack = std::mem::take(&mut self.try_stack);
+                                                let call_result = self.call_vm_function_result(ip, &final_args, &ups);
+                                                self.try_stack = saved_try_stack;
+                                                self.this_stack.pop();
+                                                match call_result {
+                                                    Ok(value) => self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![value]),
+                                                    Err(err) => {
+                                                        let msg = err.message();
+                                                        let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
+                                                        let reason = if let Ok(n) = payload.parse::<f64>() {
+                                                            Value::Number(n)
+                                                        } else {
+                                                            Value::String(crate::unicode::utf8_to_utf16(payload))
+                                                        };
+                                                        self.call_host_fn("promise.reject", None, vec![reason])
+                                                    }
+                                                }
+                                            } else {
+                                                self.this_stack.push(bound_this.clone());
+                                                let r = self.call_vm_function(ip, &final_args, &ups);
+                                                self.this_stack.pop();
+                                                r
+                                            }
                                         }
                                         Value::VmNativeFunction(id) => {
                                             self.this_stack.push(bound_this.clone());

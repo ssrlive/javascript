@@ -8,21 +8,21 @@ fn __init_test_logger() {
 #[test]
 fn multiple_var_declarations_without_initializers() {
     let script = "var a, b; a = 1; b = 2; a + b";
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "3");
 }
 
 #[test]
 fn skip_empty_semicolons_and_let() {
     let script = ";; let x = 5; ; x";
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "5");
 }
 
 #[test]
 fn single_line_and_block_comments_ignored() {
     let script = "// leading comment\n/* block comment */ let x = 7; x";
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "7");
 }
 
@@ -59,18 +59,18 @@ fn trailing_comma_and_newline_before_rbrace_is_allowed() {
 #[test]
 fn exponentiation_and_numeric_separators_supported() {
     // Exponentiation for numbers
-    let res = evaluate_script("2 ** 3;", None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm("2 ** 3;", false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "8");
 
-    let res2 = evaluate_script("2 ** 3 ** 2;", None::<&std::path::Path>).unwrap();
+    let res2 = evaluate_script_with_vm("2 ** 3 ** 2;", false, None::<&std::path::Path>).unwrap();
     assert_eq!(res2, "512");
 
     // Numeric separators
-    let res3 = evaluate_script("1_000_000 + 2000;", None::<&std::path::Path>).unwrap();
+    let res3 = evaluate_script_with_vm("1_000_000 + 2000;", false, None::<&std::path::Path>).unwrap();
     assert_eq!(res3, "1002000");
 
     // BigInt with separators and exponentiation
-    let res4 = evaluate_script("1_000n ** 2n;", None::<&std::path::Path>).unwrap();
+    let res4 = evaluate_script_with_vm("1_000n ** 2n;", false, None::<&std::path::Path>).unwrap();
     assert_eq!(res4, "1000000");
 }
 
@@ -106,7 +106,7 @@ fn eval_throws_at_runtime_and_is_catchable() {
         }
     }
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     assert!(
         res.is_ok(),
         "Expected script to run and catch SyntaxError at runtime, got: {:?}",
@@ -173,7 +173,7 @@ fn parse_inner_object_plus_function_expr_alone() {
 #[test]
 fn bigint_in_object_and_class_and_destructuring() {
     // Object literal method using BigInt property name
-    let res_obj = evaluate_script("let o = { 1n() { return 'bar'; } }; o['1']();", None::<&std::path::Path>).unwrap();
+    let res_obj = evaluate_script_with_vm("let o = { 1n() { return 'bar'; } }; o['1']();", false, None::<&std::path::Path>).unwrap();
     // evaluate_script returns JS values using JS's string representation (with quotes)
     assert_eq!(res_obj, "\"bar\"");
 

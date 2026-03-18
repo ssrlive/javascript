@@ -8,7 +8,7 @@ fn duplicate_private_identifier_is_syntax_error() {
         #firstName;
     }
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     assert!(res.is_err(), "Expected script to fail with a syntax error");
     let err = res.unwrap_err();
     let msg = err.message();
@@ -33,7 +33,7 @@ fn delete_private_field_is_syntax_error() {
         }
     }
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     assert!(res.is_err(), "Expected script to fail with a syntax error");
     let err = res.unwrap_err();
     let msg = err.message();
@@ -57,7 +57,7 @@ fn private_field_access_within_class_succeeds() {
     let tmp = new Color(1,2,3);
     tmp.log();
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     assert!(res.is_ok(), "Expected script to run without a syntax error");
 }
 
@@ -70,7 +70,7 @@ fn private_field_access_outside_class_reports_location() {
     // Accessing a private field outside the declaring class must be a SyntaxError
     console.log((new Color()).#values);
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     assert!(
         res.is_err(),
         "Expected script to fail with a syntax error when accessing private field outside class"
@@ -96,6 +96,6 @@ fn eval_produces_throwable_syntax_error_instanceof() {
         }
     }
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "undefined");
 }

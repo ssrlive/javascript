@@ -1208,7 +1208,7 @@ impl<'gc> Compiler<'gc> {
             }
             StatementKind::FunctionDeclaration(name, params, body, is_gen, is_async) => {
                 if *is_gen && *is_async {
-                    self.compile_async_generator_function_body(params, body)?;
+                    self.compile_async_generator_function_body(Some(name.as_str()), params, body)?;
                     if let Some(func_ip) = self.peek_func_ip(&Expr::AsyncGeneratorFunction(None, params.clone(), body.clone())) {
                         self.chunk.fn_names.insert(func_ip, name.clone());
                     }
@@ -2563,6 +2563,9 @@ impl<'gc> Compiler<'gc> {
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
                 self.chunk.arrow_function_ips.insert(func_ip);
+                if is_async_arrow {
+                    self.chunk.async_function_ips.insert(func_ip);
+                }
                 let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
 
                 let old_locals = std::mem::take(&mut self.locals);
@@ -2717,15 +2720,21 @@ impl<'gc> Compiler<'gc> {
                 let func_ip = self.compile_function_body(name.as_deref(), params, body)?;
                 self.chunk.async_function_ips.insert(func_ip);
             }
+            Expr::GeneratorFunction(name, params, body) => {
+                self.compile_async_generator_function_body(name.as_deref(), params, body)?;
+            }
             // Minimal async generator support in VM path.
             // The body is executed eagerly and each yield/yield* appends to an internal array.
-            Expr::AsyncGeneratorFunction(_name, params, body) => {
-                self.compile_async_generator_function_body(params, body)?;
+            Expr::AsyncGeneratorFunction(name, params, body) => {
+                self.compile_async_generator_function_body(name.as_deref(), params, body)?;
             }
-            // Minimal await support in VM path: evaluate awaited expression directly.
-            // Promise assimilation is not implemented yet, but this unblocks simple async pass-cases.
+            // VM await lowering: pass awaited value through __await__ helper so
+            // settled Promises unwrap and rejected Promises throw into catch.
             Expr::Await(inner) => {
+                self.emit_helper_get("__await__");
                 self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::Call);
+                self.chunk.write_byte(1);
             }
             Expr::Yield(inner_opt) => {
                 if let Some(items_name) = self.async_generator_items_stack.last().cloned() {
@@ -4050,7 +4059,12 @@ impl<'gc> Compiler<'gc> {
         Ok(())
     }
 
-    fn compile_async_generator_function_body(&mut self, params: &[DestructuringElement], body: &[Statement]) -> Result<(), JSError> {
+    fn compile_async_generator_function_body(
+        &mut self,
+        function_name: Option<&str>,
+        params: &[DestructuringElement],
+        body: &[Statement],
+    ) -> Result<(), JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
         let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
@@ -4123,6 +4137,11 @@ impl<'gc> Compiler<'gc> {
         self.patch_jump(jump_over);
 
         self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+        if let Some(name) = function_name
+            && !name.is_empty()
+        {
+            self.chunk.fn_names.insert(func_ip, name.to_string());
+        }
 
         let fn_upvalues = std::mem::take(&mut self.upvalues);
 

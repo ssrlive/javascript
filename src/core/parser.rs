@@ -4127,11 +4127,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             // Otherwise, only parse an await expression if we are currently inside an async context and
             // the following token can start an expression; otherwise treat as an identifier reference.
             if *index < tokens.len() {
-                if matches!(tokens[*index].token, Token::Assign) {
-                    Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
-                } else if in_await_context() {
-                    match &tokens[*index].token {
-                        Token::Number(_)
+                let next_can_start_expr = matches!(
+                    tokens[*index].token,
+                    Token::Number(_)
                         | Token::BigInt(_)
                         | Token::StringLit(_)
                         | Token::True
@@ -4158,14 +4156,26 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         | Token::Super
                         | Token::Import
                         | Token::TemplateString(_)
-                        | Token::Regex(_, _) => {
-                            let inner = parse_primary(tokens, index, true)?;
-                            Expr::Await(Box::new(inner))
-                        }
-                        _ => Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column)),
+                        | Token::Regex(_, _)
+                );
+                if matches!(tokens[*index].token, Token::Assign) {
+                    Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
+                } else if in_await_context() {
+                    if next_can_start_expr {
+                        let inner = parse_primary(tokens, index, true)?;
+                        Expr::Await(Box::new(inner))
+                    } else {
+                        Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
                     }
                 } else {
-                    Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
+                    // Relaxed VM parse mode: allow `await <expr>` in non-async contexts,
+                    // but keep `await(...)` available as an identifier call-site.
+                    if next_can_start_expr && !matches!(tokens[*index].token, Token::LParen) {
+                        let inner = parse_primary(tokens, index, true)?;
+                        Expr::Await(Box::new(inner))
+                    } else {
+                        Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
+                    }
                 }
             } else {
                 Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))

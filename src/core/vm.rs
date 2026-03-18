@@ -8646,8 +8646,18 @@ impl<'gc> VM<'gc> {
                     let method = match obj {
                         Value::VmObject(map) => {
                             let borrow = map.borrow();
-                            if let Some(v) = borrow.get(&key).cloned() {
-                                v
+                            let getter_key = format!("__get_{}", key);
+                            if let Some(getter_fn) = borrow.get(&getter_key).cloned() {
+                                drop(borrow);
+                                self.invoke_getter_with_receiver(getter_fn, obj.clone())
+                            } else if let Some(v) = borrow.get(&key).cloned() {
+                                match v {
+                                    Value::Property { getter: Some(g), .. } => {
+                                        drop(borrow);
+                                        self.invoke_getter_with_receiver((*g).clone(), obj.clone())
+                                    }
+                                    other => other,
+                                }
                             } else {
                                 // Check WeakRef
                                 let is_weakref = borrow.contains_key("__weakref__");

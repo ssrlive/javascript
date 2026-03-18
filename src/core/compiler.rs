@@ -2075,6 +2075,60 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_opcode(Opcode::Call);
                         self.chunk.write_byte(args.len() as u8 | 0x80);
                     }
+                } else if let Expr::OptionalProperty(obj, method_name) = &**callee {
+                    // Method call through optional property reference: (obj?.method)(...)
+                    // Preserve `this` when obj is present; short-circuit when receiver is nullish.
+                    self.compile_expr(obj)?;
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let is_undef = self.emit_jump(Opcode::JumpIfTrue);
+
+                    let key_u16 = crate::unicode::utf8_to_utf16(method_name);
+                    let name_idx = self.chunk.add_constant(Value::String(key_u16));
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(name_idx);
+
+                    if has_spread {
+                        self.chunk.write_opcode(Opcode::NewArray);
+                        self.chunk.write_byte(0);
+                        for arg in args {
+                            if let Expr::Spread(inner) = arg {
+                                self.compile_expr(inner)?;
+                                self.chunk.write_opcode(Opcode::ArraySpread);
+                            } else {
+                                self.compile_expr(arg)?;
+                                self.chunk.write_opcode(Opcode::ArrayPush);
+                            }
+                        }
+                        self.chunk.write_opcode(Opcode::CallSpread);
+                        self.chunk.write_byte(0x80);
+                    } else {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.chunk.write_opcode(Opcode::Call);
+                        self.chunk.write_byte(args.len() as u8 | 0x80);
+                    }
+                    let end_jump = self.emit_jump(Opcode::Jump);
+
+                    self.patch_jump(is_null);
+                    self.patch_jump(is_undef);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let undef_callee_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_callee_idx);
+
+                    self.patch_jump(end_jump);
                 } else if let Expr::PrivateMember(obj, prop) | Expr::OptionalPrivateMember(obj, prop) = &**callee {
                     // Private method call: obj.#method(args)
                     self.compile_expr(obj)?;
@@ -3111,32 +3165,132 @@ impl<'gc> Compiler<'gc> {
             }
             // Optional call: fn?.()
             Expr::OptionalCall(callee, args) => {
-                self.compile_expr(callee)?;
-                self.chunk.write_opcode(Opcode::Dup);
-                let null_idx = self.chunk.add_constant(Value::Null);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(null_idx);
-                self.chunk.write_opcode(Opcode::Equal);
-                let is_null = self.emit_jump(Opcode::JumpIfTrue);
-                self.chunk.write_opcode(Opcode::Dup);
-                let undef_idx = self.chunk.add_constant(Value::Undefined);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(undef_idx);
-                self.chunk.write_opcode(Opcode::Equal);
-                let is_undef = self.emit_jump(Opcode::JumpIfTrue);
-                for arg in args {
-                    self.compile_expr(arg)?;
+                // Optional method call with non-optional property callee: obj?.method(...)
+                // Short-circuit when receiver is nullish before property access.
+                if let Expr::Property(obj, method_name) = &**callee {
+                    self.compile_expr(obj)?;
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let recv_is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let recv_is_undef = self.emit_jump(Opcode::JumpIfTrue);
+
+                    let key_u16 = crate::unicode::utf8_to_utf16(method_name);
+                    let name_idx = self.chunk.add_constant(Value::String(key_u16));
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(name_idx);
+
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.chunk.write_opcode(Opcode::Call);
+                    self.chunk.write_byte(args.len() as u8 | 0x80);
+                    let end_jump = self.emit_jump(Opcode::Jump);
+
+                    self.patch_jump(recv_is_null);
+                    self.patch_jump(recv_is_undef);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    self.patch_jump(end_jump);
+                } else if let Expr::OptionalProperty(obj, method_name) = &**callee {
+                    // Optional method call with optional property callee: obj?.method?.(...)
+                    // Short-circuit on nullish receiver or nullish method value.
+                    self.compile_expr(obj)?;
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let recv_is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let recv_is_undef = self.emit_jump(Opcode::JumpIfTrue);
+
+                    let key_u16 = crate::unicode::utf8_to_utf16(method_name);
+                    let name_idx = self.chunk.add_constant(Value::String(key_u16));
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(name_idx);
+
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let callee_null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(callee_null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let callee_is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let callee_undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(callee_undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let callee_is_undef = self.emit_jump(Opcode::JumpIfTrue);
+
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.chunk.write_opcode(Opcode::Call);
+                    self.chunk.write_byte(args.len() as u8 | 0x80);
+                    let end_jump = self.emit_jump(Opcode::Jump);
+
+                    self.patch_jump(callee_is_null);
+                    self.patch_jump(callee_is_undef);
+                    self.chunk.write_opcode(Opcode::Pop); // pop callee
+                    self.chunk.write_opcode(Opcode::Pop); // pop receiver
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    let after_callee_short = self.emit_jump(Opcode::Jump);
+
+                    self.patch_jump(recv_is_null);
+                    self.patch_jump(recv_is_undef);
+                    self.chunk.write_opcode(Opcode::Pop); // pop receiver
+                    let recv_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(recv_idx);
+
+                    self.patch_jump(after_callee_short);
+                    self.patch_jump(end_jump);
+                } else {
+                    self.compile_expr(callee)?;
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let is_undef = self.emit_jump(Opcode::JumpIfTrue);
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.chunk.write_opcode(Opcode::Call);
+                    self.chunk.write_byte(args.len() as u8);
+                    let end_jump = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(is_null);
+                    self.patch_jump(is_undef);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    self.patch_jump(end_jump);
                 }
-                self.chunk.write_opcode(Opcode::Call);
-                self.chunk.write_byte(args.len() as u8);
-                let end_jump = self.emit_jump(Opcode::Jump);
-                self.patch_jump(is_null);
-                self.patch_jump(is_undef);
-                self.chunk.write_opcode(Opcode::Pop);
-                let idx = self.chunk.add_constant(Value::Undefined);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(idx);
-                self.patch_jump(end_jump);
             }
             // Getter/Setter in object literal: compile as the inner function
             Expr::Getter(inner) | Expr::Setter(inner) => {

@@ -20,7 +20,7 @@ mod index_nullish_tests {
             base[prop];
         "#;
 
-        let res = evaluate_script(src, None::<&std::path::Path>);
+        let res = evaluate_script_with_vm(src, None::<&std::path::Path>);
         assert!(res.is_err(), "Expected an error when accessing property on null");
         let err = res.unwrap_err();
         assert!(err.message().contains("TypeError: Cannot read properties of null or undefined"));
@@ -35,9 +35,13 @@ mod index_nullish_tests {
             base[prop];
         "#;
 
-        let res = evaluate_script(src, None::<&std::path::Path>);
-        assert!(res.is_err(), "Expected an error when key.toString throws");
-        let err = res.unwrap_err();
-        assert!(err.message().contains("Error: key-evaluated"));
+        let res = evaluate_script_with_vm(src, None::<&std::path::Path>);
+        match res {
+            Err(err) => assert!(
+                err.message().contains("Error: key-evaluated"),
+                "Expected error from key.toString, got {err:?}"
+            ),
+            Ok(_) => panic!("Expected an error when key.toString throws"),
+        }
     }
 }

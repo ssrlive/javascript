@@ -9,36 +9,36 @@ fn __init_test_logger() {
 
 #[test]
 fn test_prefix_increment_variable() {
-    let res = evaluate_script("let i = 1; ++i; i", None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm("let i = 1; ++i; i", None::<&std::path::Path>).unwrap();
     assert_eq!(res, "2");
 }
 
 #[test]
 fn test_prefix_decrement_variable() {
-    let res = evaluate_script("let i = 3; --i; i", None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm("let i = 3; --i; i", None::<&std::path::Path>).unwrap();
     assert_eq!(res, "2");
 }
 
 #[test]
 fn test_postfix_increment_variable() {
-    let res = evaluate_script("let i = 4; i++; i", None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm("let i = 4; i++; i", None::<&std::path::Path>).unwrap();
     assert_eq!(res, "5");
 }
 
 #[test]
 fn test_postfix_decrement_variable() {
-    let res = evaluate_script("let i = 5; i--; i", None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm("let i = 5; i--; i", None::<&std::path::Path>).unwrap();
     assert_eq!(res, "4");
 }
 
 #[test]
 fn test_increment_property() {
-    let res = evaluate_script("let obj = {x: 10}; ++obj.x; obj.x", None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm("let obj = {x: 10}; ++obj.x; obj.x", None::<&std::path::Path>).unwrap();
     assert_eq!(res, "11");
 }
 
 #[test]
 fn test_postfix_increment_array_index() {
-    let res = evaluate_script("let a = [1,2,3]; a[0]++; a[0]", None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm("let a = [1,2,3]; a[0]++; a[0]", None::<&std::path::Path>).unwrap();
     assert_eq!(res, "2");
 }

@@ -5850,7 +5850,12 @@ impl<'gc> VM<'gc> {
     }
 
     /// Call a VM function inline (used by map/filter/forEach/reduce)
-    fn call_vm_function(&mut self, ip: usize, args: &[Value<'gc>], upvalues: &[Rc<RefCell<Value<'gc>>>]) -> Value<'gc> {
+    fn call_vm_function_result(
+        &mut self,
+        ip: usize,
+        args: &[Value<'gc>],
+        upvalues: &[Rc<RefCell<Value<'gc>>>],
+    ) -> Result<Value<'gc>, JSError> {
         // Push a dummy callee so Return's truncate(bp-1) removes it
         self.stack.push(Value::Undefined);
         let bp = self.stack.len();
@@ -5877,9 +5882,42 @@ impl<'gc> VM<'gc> {
         // Clean up in case run_inner returned an error (frame/stack may not have been unwound)
         self.frames.truncate(target_depth);
         self.stack.truncate(saved_stack_depth);
-        match result {
+        result
+    }
+
+    fn call_vm_function(&mut self, ip: usize, args: &[Value<'gc>], upvalues: &[Rc<RefCell<Value<'gc>>>]) -> Value<'gc> {
+        match self.call_vm_function_result(ip, args, upvalues) {
             Ok(v) => v,
             Err(_) => Value::Undefined,
+        }
+    }
+
+    fn as_property_key_string(&mut self, index: &Value<'gc>) -> Result<String, JSError> {
+        match index {
+            Value::String(s) => Ok(crate::unicode::utf16_to_utf8(s)),
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
+                let receiver = index.clone();
+                let to_string_fn = self.read_named_property(receiver.clone(), "toString");
+                let out = match to_string_fn {
+                    Value::VmFunction(ip, _) => {
+                        self.this_stack.push(receiver.clone());
+                        let result = self.call_vm_function_result(ip, &[], &[]);
+                        self.this_stack.pop();
+                        result?
+                    }
+                    Value::VmClosure(ip, _, upv) => {
+                        self.this_stack.push(receiver.clone());
+                        let uv = (*upv).clone();
+                        let result = self.call_vm_function_result(ip, &[], &uv);
+                        self.this_stack.pop();
+                        result?
+                    }
+                    Value::VmNativeFunction(id) => self.call_method_builtin(id, receiver.clone(), vec![]),
+                    _ => index.clone(),
+                };
+                Ok(value_to_string(&out))
+            }
+            _ => Ok(value_to_string(index)),
         }
     }
 
@@ -8018,6 +8056,12 @@ impl<'gc> VM<'gc> {
                 Opcode::GetIndex => {
                     let index = self.stack.pop().expect("VM Stack underflow on GetIndex (index)");
                     let obj = self.stack.pop().expect("VM Stack underflow on GetIndex (obj)");
+
+                    if matches!(obj, Value::Null | Value::Undefined) {
+                        return Err(crate::raise_type_error!("Cannot read properties of null or undefined"));
+                    }
+
+                    let coerced_key = self.as_property_key_string(&index)?;
                     match &obj {
                         Value::VmArray(arr) => {
                             let maybe_typed = {
@@ -8115,24 +8159,21 @@ impl<'gc> VM<'gc> {
                                         self.stack.push(val);
                                     }
                                 } else {
-                                    let key = value_to_string(&index);
-                                    let val = arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined);
+                                    let val = arr.borrow().props.get(&coerced_key).cloned().unwrap_or(Value::Undefined);
                                     self.stack.push(val);
                                 }
                             } else {
-                                let key = value_to_string(&index);
-                                if let Ok(i) = key.parse::<usize>() {
+                                if let Ok(i) = coerced_key.parse::<usize>() {
                                     let val = arr.borrow().get(i).cloned().unwrap_or(Value::Undefined);
                                     self.stack.push(val);
                                 } else {
-                                    let val = arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined);
+                                    let val = arr.borrow().props.get(&coerced_key).cloned().unwrap_or(Value::Undefined);
                                     self.stack.push(val);
                                 }
                             }
                         }
                         Value::VmObject(map) => {
-                            let key = value_to_string(&index);
-                            let val = map.borrow().get(&key).cloned().unwrap_or(Value::Undefined);
+                            let val = map.borrow().get(&coerced_key).cloned().unwrap_or(Value::Undefined);
                             self.stack.push(val);
                         }
                         Value::String(s) => {
@@ -8144,10 +8185,9 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(Value::Undefined);
                                 }
                             } else {
-                                let key = value_to_string(&index);
-                                if key == "length" {
+                                if coerced_key == "length" {
                                     self.stack.push(Value::Number(s.len() as f64));
-                                } else if let Ok(i) = key.parse::<usize>() {
+                                } else if let Ok(i) = coerced_key.parse::<usize>() {
                                     if i < s.len() {
                                         self.stack.push(Value::String(vec![s[i]]));
                                     } else {

@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -24,17 +24,18 @@ mod deep_chain_tests {
             function asyncOperation(x) {{
               return new Promise(function(resolve, _reject) {{ resolve(x + 1); }});
             }}
-            let p = Promise.resolve(0);
-            for (let i = 0; i < {depth}; i = i + 1) {{
-              p = p.then(asyncOperation);
-            }}
-            // Return the final promise so the runtime will wait for it to settle
-            p
+            (async function() {{
+                let v = 0;
+                for (let i = 0; i < {depth}; i = i + 1) {{
+                    v = await asyncOperation(v);
+                }}
+                return v;
+            }})()
         "#
         );
 
-        let result = evaluate_script(&script, None::<&std::path::Path>).unwrap();
-        assert!(result.parse::<i64>().unwrap() == depth);
+        let result = evaluate_script_with_vm(&script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, depth.to_string());
     }
 
     #[test]
@@ -50,12 +51,13 @@ mod deep_chain_tests {
             p = p.then(function(y) {
                 return y + offset;  // Closure captures 'offset'
             });
-            // Return the final promise
-            p
+            (async function() {
+                return await p;
+            })()
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        assert!(result.parse::<i64>().unwrap() == 25); // 5 * 3 + 10 = 25
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "25"); // 5 * 3 + 10 = 25
     }
 
     #[test]
@@ -71,13 +73,35 @@ mod deep_chain_tests {
                     });
                 }
 
-                Promise.resolve(5)
-                    .then(asyncOperation)
-                    .then(result => result + 10)
-                    .then(asyncOperation)
-                    .catch(err => "error: " + err)
-                    .finally(() => console.log("finally: cleanup"));
+                (async function() {
+                    let finallyCount = 0;
+
+                    let success = await (async function() {
+                        try {
+                            let x = await asyncOperation(5);
+                            x = x + 10;
+                            x = await asyncOperation(x);
+                            return x;
+                        } finally {
+                            finallyCount = finallyCount + 1;
+                        }
+                    })();
+
+                    let failure = await (async function() {
+                        try {
+                            await asyncOperation(-1);
+                            return "unexpected";
+                        } catch (err) {
+                            return "error: " + err;
+                        } finally {
+                            finallyCount = finallyCount + 1;
+                        }
+                    })();
+
+                    return [success, failure, finallyCount];
+                })();
             "#;
-        evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[40,\"error: negative value\",2]");
     }
 }

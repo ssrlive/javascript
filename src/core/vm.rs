@@ -946,30 +946,8 @@ impl<'gc> VM<'gc> {
             }
             "promise.catch" => {
                 let recv = receiver.unwrap_or(Value::Undefined);
-                let is_rejected = if let Value::VmObject(obj) = &recv {
-                    matches!(obj.borrow().get("__promise_rejected__"), Some(Value::Boolean(true)))
-                } else {
-                    false
-                };
-                if is_rejected && let Some(cb) = args.first() {
-                    match cb {
-                        Value::VmFunction(ip, _) => {
-                            if let Value::VmObject(obj) = &recv {
-                                let pv = obj.borrow().get("__promise_value__").cloned().unwrap_or(Value::Undefined);
-                                let _ = self.call_vm_function(*ip, &[pv], &[]);
-                            }
-                        }
-                        Value::VmClosure(ip, _, upv) => {
-                            if let Value::VmObject(obj) = &recv {
-                                let pv = obj.borrow().get("__promise_value__").cloned().unwrap_or(Value::Undefined);
-                                let uv = (**upv).clone();
-                                let _ = self.call_vm_function(*ip, &[pv], &uv);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                recv
+                let on_rejected = args.first().cloned().unwrap_or(Value::Undefined);
+                self.call_method_builtin(BUILTIN_PROMISE_THEN, recv, vec![Value::Undefined, on_rejected])
             }
             "promise.reject" => {
                 let mut map = IndexMap::new();
@@ -985,6 +963,272 @@ impl<'gc> VM<'gc> {
                     map.insert("__proto__".to_string(), proto);
                 }
                 Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+            "promise.any" => {
+                let make_promise = |vm: &VM<'gc>, rejected: Option<Value<'gc>>, value: Option<Value<'gc>>| {
+                    let mut map = IndexMap::new();
+                    map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                    map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                    if let Some(v) = value {
+                        map.insert("__promise_value__".to_string(), v);
+                    }
+                    if let Some(r) = rejected {
+                        map.insert("__promise_value__".to_string(), r);
+                        map.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                    }
+                    if let Some(Value::VmObject(promise_ctor)) = vm.globals.get("Promise")
+                        && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+                    {
+                        map.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmObject(Rc::new(RefCell::new(map)))
+                };
+
+                let make_aggregate_error = |errors: Vec<Value<'gc>>| {
+                    let mut err = IndexMap::new();
+                    err.insert(
+                        "__type__".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("AggregateError")),
+                    );
+                    err.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("AggregateError")));
+                    err.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("All promises were rejected")),
+                    );
+                    err.insert(
+                        "errors".to_string(),
+                        Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(errors)))),
+                    );
+                    Value::VmObject(Rc::new(RefCell::new(err)))
+                };
+
+                let is_callable = |v: &Value<'gc>| -> bool {
+                    match v {
+                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..) => true,
+                        Value::VmObject(map) => {
+                            let b = map.borrow();
+                            b.contains_key("__host_fn__") || b.contains_key("__bound_target__")
+                        }
+                        _ => false,
+                    }
+                };
+
+                let normalize_reason = |msg: &str| -> Value<'gc> {
+                    let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(msg);
+                    if let Ok(n) = payload.parse::<f64>() {
+                        Value::Number(n)
+                    } else {
+                        Value::String(crate::unicode::utf8_to_utf16(payload))
+                    }
+                };
+
+                if let Some(Value::VmArray(items)) = args.first() {
+                    let mut rejection_reasons: Vec<Value<'gc>> = Vec::new();
+                    let mut saw_pending = false;
+
+                    for item in items.borrow().iter() {
+                        match item {
+                            Value::VmObject(obj) => {
+                                let (is_promise, rejected, settled) = {
+                                    let b = obj.borrow();
+                                    (
+                                        matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise"),
+                                        matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true))),
+                                        b.get("__promise_value__").cloned(),
+                                    )
+                                };
+
+                                if is_promise {
+                                    if let Some(v) = settled {
+                                        if rejected {
+                                            rejection_reasons.push(v);
+                                        } else {
+                                            return make_promise(self, None, Some(v));
+                                        }
+                                    } else {
+                                        saw_pending = true;
+                                    }
+                                    continue;
+                                }
+
+                                let then_val = self.read_named_property(item.clone(), "then");
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    rejection_reasons.push(thrown);
+                                    continue;
+                                }
+
+                                if matches!(then_val, Value::Undefined) {
+                                    return make_promise(self, None, Some(item.clone()));
+                                }
+
+                                if !is_callable(&then_val) {
+                                    return make_promise(self, None, Some(item.clone()));
+                                }
+
+                                let mut temp = IndexMap::new();
+                                temp.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                                temp.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                                    && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+                                {
+                                    temp.insert("__proto__".to_string(), proto);
+                                }
+                                let temp_promise = Value::VmObject(Rc::new(RefCell::new(temp)));
+
+                                let mut resolve_map = IndexMap::new();
+                                resolve_map.insert(
+                                    "__host_fn__".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("promise.__resolve")),
+                                );
+                                resolve_map.insert("__host_this__".to_string(), temp_promise.clone());
+                                let resolve = Value::VmObject(Rc::new(RefCell::new(resolve_map)));
+
+                                let mut reject_map = IndexMap::new();
+                                reject_map.insert(
+                                    "__host_fn__".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("promise.__reject")),
+                                );
+                                reject_map.insert("__host_this__".to_string(), temp_promise.clone());
+                                let reject_cb = Value::VmObject(Rc::new(RefCell::new(reject_map)));
+
+                                let this_arg = item.clone();
+                                let invoke_then_error = match then_val {
+                                    Value::VmFunction(ip, _) => {
+                                        self.this_stack.push(this_arg.clone());
+                                        let saved_try_stack = std::mem::take(&mut self.try_stack);
+                                        let result = self.call_vm_function_result(ip, &[resolve.clone(), reject_cb.clone()], &[]);
+                                        self.try_stack = saved_try_stack;
+                                        self.this_stack.pop();
+                                        result.err()
+                                    }
+                                    Value::VmClosure(ip, _, upv) => {
+                                        let uv = (*upv).clone();
+                                        self.this_stack.push(this_arg.clone());
+                                        let saved_try_stack = std::mem::take(&mut self.try_stack);
+                                        let result = self.call_vm_function_result(ip, &[resolve.clone(), reject_cb.clone()], &uv);
+                                        self.try_stack = saved_try_stack;
+                                        self.this_stack.pop();
+                                        result.err()
+                                    }
+                                    Value::VmNativeFunction(native_id) => {
+                                        let _ =
+                                            self.call_method_builtin(native_id, this_arg.clone(), vec![resolve.clone(), reject_cb.clone()]);
+                                        None
+                                    }
+                                    Value::VmObject(map) => {
+                                        let borrow = map.borrow();
+                                        if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                                            let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                                            drop(borrow);
+                                            let _ = self.call_host_fn(
+                                                &host_name,
+                                                Some(this_arg.clone()),
+                                                vec![resolve.clone(), reject_cb.clone()],
+                                            );
+                                            None
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                };
+
+                                if let Some(err) = invoke_then_error
+                                    && let Value::VmObject(p) = &temp_promise
+                                {
+                                    let mut pb = p.borrow_mut();
+                                    if !pb.contains_key("__promise_value__") {
+                                        pb.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                                        pb.insert("__promise_value__".to_string(), normalize_reason(&err.message()));
+                                    }
+                                }
+
+                                if let Some(thrown) = self.pending_throw.take()
+                                    && let Value::VmObject(p) = &temp_promise
+                                {
+                                    let mut pb = p.borrow_mut();
+                                    if !pb.contains_key("__promise_value__") {
+                                        pb.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                                        pb.insert("__promise_value__".to_string(), thrown);
+                                    }
+                                }
+
+                                if let Value::VmObject(p) = &temp_promise {
+                                    let b = p.borrow();
+                                    let temp_rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                                    let temp_settled = b.get("__promise_value__").cloned();
+
+                                    if let Some(v) = temp_settled {
+                                        if temp_rejected {
+                                            rejection_reasons.push(v);
+                                        } else {
+                                            return make_promise(self, None, Some(v));
+                                        }
+                                    } else {
+                                        saw_pending = true;
+                                    }
+                                } else {
+                                    saw_pending = true;
+                                }
+                            }
+                            _ => {
+                                return make_promise(self, None, Some(item.clone()));
+                            }
+                        }
+                    }
+
+                    if !saw_pending && !rejection_reasons.is_empty() {
+                        return make_promise(self, Some(make_aggregate_error(rejection_reasons)), None);
+                    }
+                }
+
+                make_promise(self, None, None)
+            }
+            "promise.race" => {
+                let make_promise = |vm: &VM<'gc>, rejected: Option<Value<'gc>>, value: Option<Value<'gc>>| {
+                    let mut map = IndexMap::new();
+                    map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                    map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                    if let Some(v) = value {
+                        map.insert("__promise_value__".to_string(), v);
+                    }
+                    if let Some(r) = rejected {
+                        map.insert("__promise_value__".to_string(), r);
+                        map.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                    }
+                    if let Some(Value::VmObject(promise_ctor)) = vm.globals.get("Promise")
+                        && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+                    {
+                        map.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmObject(Rc::new(RefCell::new(map)))
+                };
+
+                if let Some(Value::VmArray(items)) = args.first() {
+                    for item in items.borrow().iter() {
+                        match item {
+                            Value::VmObject(obj) => {
+                                let b = obj.borrow();
+                                let is_promise =
+                                    matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                                if is_promise {
+                                    let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                                    if let Some(v) = b.get("__promise_value__").cloned() {
+                                        if rejected {
+                                            return make_promise(self, Some(v), None);
+                                        }
+                                        return make_promise(self, None, Some(v));
+                                    }
+                                    return make_promise(self, None, None);
+                                }
+                            }
+                            _ => {
+                                return make_promise(self, None, Some(item.clone()));
+                            }
+                        }
+                    }
+                }
+                make_promise(self, None, None)
             }
             "promise.__resolve" => {
                 if let Some(Value::VmObject(promise_obj)) = receiver {
@@ -1226,6 +1470,23 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 receiver.unwrap_or(Value::Undefined)
+            }
+            "error.aggregate" => {
+                let errors = match args.first() {
+                    Some(Value::VmArray(arr)) => Value::VmArray(arr.clone()),
+                    Some(v) => Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![v.clone()])))),
+                    None => Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![])))),
+                };
+                let msg = args.get(1).map(value_to_string).unwrap_or_default();
+                let mut err = IndexMap::new();
+                err.insert(
+                    "__type__".to_string(),
+                    Value::String(crate::unicode::utf8_to_utf16("AggregateError")),
+                );
+                err.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("AggregateError")));
+                err.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
+                err.insert("errors".to_string(), errors);
+                Value::VmObject(Rc::new(RefCell::new(err)))
             }
             _ => Value::Undefined,
         }
@@ -1637,18 +1898,39 @@ impl<'gc> VM<'gc> {
     }
 
     fn invoke_getter_with_receiver(&mut self, getter: Value<'gc>, receiver: Value<'gc>) -> Value<'gc> {
+        let normalize_reason = |msg: &str| -> Value<'gc> {
+            let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(msg);
+            if let Ok(n) = payload.parse::<f64>() {
+                Value::Number(n)
+            } else {
+                Value::String(crate::unicode::utf8_to_utf16(payload))
+            }
+        };
+
         match getter {
             Value::VmFunction(ip, _) => {
                 self.this_stack.push(receiver);
-                let result = self.call_vm_function(ip, &[], &[]);
+                let result = self.call_vm_function_result(ip, &[], &[]);
                 self.this_stack.pop();
-                result
+                match result {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.pending_throw = Some(normalize_reason(&err.message()));
+                        Value::Undefined
+                    }
+                }
             }
             Value::VmClosure(ip, _, ups) => {
                 self.this_stack.push(receiver);
-                let result = self.call_vm_function(ip, &[], &ups);
+                let result = self.call_vm_function_result(ip, &[], &ups);
                 self.this_stack.pop();
-                result
+                match result {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.pending_throw = Some(normalize_reason(&err.message()));
+                        Value::Undefined
+                    }
+                }
             }
             _ => Value::Undefined,
         }
@@ -1982,11 +2264,15 @@ impl<'gc> VM<'gc> {
         promise_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROMISE as f64));
         promise_map.insert("resolve".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_RESOLVE));
         promise_map.insert("all".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_ALL));
+        promise_map.insert("any".to_string(), Self::make_host_fn("promise.any"));
+        promise_map.insert("race".to_string(), Self::make_host_fn("promise.race"));
         promise_map.insert("allSettled".to_string(), Self::make_host_fn("promise.allSettled"));
         promise_map.insert("reject".to_string(), Self::make_host_fn("promise.reject"));
         promise_map.insert("prototype".to_string(), promise_proto_obj);
         self.globals
             .insert("Promise".to_string(), Value::VmObject(Rc::new(RefCell::new(promise_map))));
+        self.globals
+            .insert("AggregateError".to_string(), Self::make_host_fn("error.aggregate"));
         self.globals.insert("__await__".to_string(), Self::make_host_fn("promise.await"));
 
         let mut proxy_map = IndexMap::new();
@@ -2636,12 +2922,66 @@ impl<'gc> VM<'gc> {
 
                 promise_obj
             }
-            BUILTIN_PROMISE_RESOLVE | BUILTIN_PROMISE_ALL => {
+            BUILTIN_PROMISE_RESOLVE => {
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
                 map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
-                if let Some(v) = args.first() {
+                if let Some(v @ Value::VmObject(obj)) = args.first() {
+                    let b = obj.borrow();
+                    let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                    if is_promise {
+                        return v.clone();
+                    }
                     map.insert("__promise_value__".to_string(), v.clone());
+                } else if let Some(v) = args.first() {
+                    map.insert("__promise_value__".to_string(), v.clone());
+                }
+                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                    && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+                {
+                    map.insert("__proto__".to_string(), proto);
+                }
+                Value::VmObject(Rc::new(RefCell::new(map)))
+            }
+            BUILTIN_PROMISE_ALL => {
+                let mut settled_values: Vec<Value<'gc>> = Vec::new();
+                let mut rejection: Option<Value<'gc>> = None;
+
+                if let Some(Value::VmArray(items)) = args.first() {
+                    for item in items.borrow().iter() {
+                        match item {
+                            Value::VmObject(obj) => {
+                                let b = obj.borrow();
+                                let is_promise =
+                                    matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                                if is_promise {
+                                    let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                                    let pv = b.get("__promise_value__").cloned().unwrap_or(Value::Undefined);
+                                    if rejected {
+                                        rejection = Some(pv);
+                                        break;
+                                    }
+                                    settled_values.push(pv);
+                                } else {
+                                    settled_values.push(item.clone());
+                                }
+                            }
+                            _ => settled_values.push(item.clone()),
+                        }
+                    }
+                }
+
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+                map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+                if let Some(reason) = rejection {
+                    map.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                    map.insert("__promise_value__".to_string(), reason);
+                } else {
+                    map.insert(
+                        "__promise_value__".to_string(),
+                        Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(settled_values)))),
+                    );
                 }
                 if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
                     && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
@@ -4497,28 +4837,101 @@ impl<'gc> VM<'gc> {
             } else {
                 (Value::Undefined, false)
             };
-            let callback = if is_rejected {
-                args.get(1).cloned().unwrap_or(Value::Undefined)
-            } else {
-                args.first().cloned().unwrap_or(Value::Undefined)
+            let callback = if is_rejected { args.get(1).cloned() } else { args.first().cloned() };
+
+            let is_callable = |v: &Value<'gc>| -> bool {
+                match v {
+                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..) => true,
+                    Value::VmObject(map) => {
+                        let b = map.borrow();
+                        b.contains_key("__host_fn__") || b.contains_key("__bound_target__")
+                    }
+                    _ => false,
+                }
             };
+
+            let normalize_reason = |msg: &str| -> Value<'gc> {
+                let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(msg);
+                if let Ok(n) = payload.parse::<f64>() {
+                    Value::Number(n)
+                } else {
+                    Value::String(crate::unicode::utf8_to_utf16(payload))
+                }
+            };
+
             let mut propagated_rejected = is_rejected;
-            let callback_result = match callback {
-                Value::VmFunction(ip, _) => {
-                    propagated_rejected = false;
-                    self.call_vm_function(ip, std::slice::from_ref(&receiver_value), &[])
+            let mut callback_result = receiver_value.clone();
+
+            if let Some(cb) = callback
+                && is_callable(&cb)
+            {
+                match cb {
+                    Value::VmFunction(ip, _) => {
+                        let saved_try_stack = std::mem::take(&mut self.try_stack);
+                        let out = self.call_vm_function_result(ip, std::slice::from_ref(&receiver_value), &[]);
+                        self.try_stack = saved_try_stack;
+                        match out {
+                            Ok(v) => {
+                                callback_result = v;
+                                propagated_rejected = false;
+                            }
+                            Err(err) => {
+                                callback_result = normalize_reason(&err.message());
+                                propagated_rejected = true;
+                            }
+                        }
+                    }
+                    Value::VmClosure(ip, _, upv) => {
+                        let uv = (*upv).clone();
+                        let saved_try_stack = std::mem::take(&mut self.try_stack);
+                        let out = self.call_vm_function_result(ip, std::slice::from_ref(&receiver_value), &uv);
+                        self.try_stack = saved_try_stack;
+                        match out {
+                            Ok(v) => {
+                                callback_result = v;
+                                propagated_rejected = false;
+                            }
+                            Err(err) => {
+                                callback_result = normalize_reason(&err.message());
+                                propagated_rejected = true;
+                            }
+                        }
+                    }
+                    Value::VmNativeFunction(native_id) => {
+                        callback_result = self.call_builtin(native_id, vec![receiver_value.clone()]);
+                        propagated_rejected = false;
+                    }
+                    Value::VmObject(map) => {
+                        let borrow = map.borrow();
+                        if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                            let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                            drop(borrow);
+                            callback_result = self.call_host_fn(&host_name, None, vec![receiver_value.clone()]);
+                            propagated_rejected = false;
+                        }
+                    }
+                    _ => {}
                 }
-                Value::VmClosure(ip, _, upv) => {
-                    propagated_rejected = false;
-                    let uv = (*upv).clone();
-                    self.call_vm_function(ip, std::slice::from_ref(&receiver_value), &uv)
+            }
+
+            let assimilated = if let Value::VmObject(obj) = &callback_result {
+                let b = obj.borrow();
+                let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                if is_promise {
+                    Some((
+                        matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true))),
+                        b.get("__promise_value__").cloned().unwrap_or(Value::Undefined),
+                    ))
+                } else {
+                    None
                 }
-                Value::VmNativeFunction(native_id) => {
-                    propagated_rejected = false;
-                    self.call_builtin(native_id, vec![receiver_value.clone()])
-                }
-                _ => receiver_value,
+            } else {
+                None
             };
+            if let Some((is_rej, value)) = assimilated {
+                propagated_rejected = is_rej;
+                callback_result = value;
+            }
 
             let mut map = IndexMap::new();
             map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));

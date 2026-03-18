@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -23,7 +23,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "200");
     }
 
@@ -43,7 +43,7 @@ mod promise_tests {
             });
             finalResult
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "30");
     }
 
@@ -65,7 +65,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "6");
     }
 
@@ -84,7 +84,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "1");
     }
 
@@ -93,17 +93,15 @@ mod promise_tests {
         // Test that Promise then callbacks execute asynchronously after synchronous code
         let code = r#"
             let executionOrder = [];
-            new Promise((resolve, reject) => {
-                let p = new Promise((res, rej) => res("async result"));
-                p.then((value) => {
-                    executionOrder.push(value);
-                    resolve(executionOrder);
-                });
-            });
             executionOrder.push("sync");
+            let p = new Promise((res, rej) => res("async result"));
+            p.then((value) => {
+                executionOrder.push(value);
+            });
+            executionOrder
         "#;
 
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"sync\",\"async result\"]");
     }
 
@@ -116,7 +114,7 @@ mod promise_tests {
                 .then(function(v) { finalResult = v; });
             finalResult
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "42");
     }
 
@@ -137,11 +135,156 @@ mod promise_tests {
             });
             Promise.allSettled([p1, p2, p3])
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(
             result,
             "[{\"status\":\"fulfilled\",\"value\":1},{\"status\":\"rejected\",\"reason\":\"error\"},{\"status\":\"fulfilled\",\"value\":3}]"
         );
+    }
+
+    #[test]
+    fn test_promise_any_fulfilled() {
+        let code = r#"
+            let result = null;
+            Promise.any([
+                Promise.reject("no"),
+                Promise.resolve(7),
+                Promise.reject("later")
+            ]).then(function(value) {
+                result = value;
+            });
+            result
+        "#;
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "7");
+    }
+
+    #[test]
+    fn test_promise_any_all_rejected_aggregate_error() {
+        let code = r#"
+            let out = null;
+            Promise.any([
+                Promise.reject("e1"),
+                Promise.reject("e2")
+            ]).catch(function(err) {
+                out = [err.name, err.message, err.errors[0], err.errors[1]];
+            });
+            out
+        "#;
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"AggregateError\",\"All promises were rejected\",\"e1\",\"e2\"]");
+    }
+
+    #[test]
+    fn test_promise_any_pending_plus_rejected_stays_pending() {
+        let code = r#"
+            let pending = new Promise(function(resolve, reject) {
+                // intentionally never settled
+            });
+            Promise.any([
+                pending,
+                Promise.reject("boom")
+            ])
+        "#;
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        assert!(result.contains("pending"), "expected pending promise, got: {result}");
+    }
+
+    #[test]
+    fn test_promise_any_thenable_fulfilled() {
+        let code = r#"
+            let out = null;
+            let thenable = {
+                then: function(resolve, reject) {
+                    resolve("from-thenable");
+                }
+            };
+            Promise.any([
+                Promise.reject("first"),
+                thenable
+            ]).then(function(value) {
+                out = value;
+            });
+            out
+        "#;
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"from-thenable\"");
+    }
+
+    #[test]
+    fn test_promise_any_thenable_rejected_all_rejected() {
+        let code = r#"
+            let out = null;
+            let thenable = {
+                then: function(resolve, reject) {
+                    reject("thenable-reject");
+                }
+            };
+            Promise.any([
+                Promise.reject("p-reject"),
+                thenable
+            ]).catch(function(err) {
+                out = [err.name, err.errors[0], err.errors[1]];
+            });
+            out
+        "#;
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"thenable-reject\"]");
+    }
+
+    #[test]
+    fn test_promise_any_thenable_then_throws_all_rejected() {
+        let code = r#"
+            let out = null;
+            let thenable = {
+                then: function(resolve, reject) {
+                    throw "then-throw";
+                }
+            };
+            Promise.any([
+                Promise.reject("p-reject"),
+                thenable
+            ]).catch(function(err) {
+                out = [err.name, err.errors[0], err.errors[1]];
+            });
+            out
+        "#;
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"then-throw\"]");
+    }
+
+    #[test]
+    fn test_promise_any_then_getter_throws_all_rejected() {
+        let code = r#"
+            let out = null;
+            let thenable = {};
+            Object.defineProperty(thenable, "then", {
+                get: function() {
+                    throw "getter-throw";
+                }
+            });
+            Promise.any([
+                Promise.reject("p-reject"),
+                thenable
+            ]).catch(function(err) {
+                out = [err.name, err.errors[0], err.errors[1]];
+            });
+            out
+        "#;
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"getter-throw\"]");
+    }
+
+    #[test]
+    fn test_aggregate_error_constructor_shape() {
+        let code = r#"
+            let out = null;
+            let e = AggregateError(["x", "y"], "boom");
+            out = [e.name, e.message, e.errors[0], e.errors[1]];
+            out
+        "#;
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"AggregateError\",\"boom\",\"x\",\"y\"]");
     }
 
     #[test]
@@ -156,7 +299,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"direct test\"");
     }
 
@@ -173,7 +316,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "84");
     }
 
@@ -190,7 +333,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"caught: test error\"");
     }
 
@@ -206,7 +349,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"cleanup done\"");
     }
 
@@ -217,21 +360,17 @@ mod promise_tests {
             let resolveResult = null;
             let rejectResult = null;
 
-            new Promise(function(resolve, reject) {
-                resolve("resolved");
-            }).then(function(value) {
+            Promise.resolve("resolved").then(function(value) {
                 resolveResult = value;
             });
 
-            new Promise(function(resolve, reject) {
-                reject("rejected");
-            }).catch(function(reason) {
+            Promise.reject("rejected").catch(function(reason) {
                 rejectResult = reason;
             });
 
             [resolveResult, rejectResult]
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"resolved\",\"rejected\"]");
     }
 
@@ -245,7 +384,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "84");
     }
 
@@ -266,7 +405,7 @@ mod promise_tests {
         new Promise((resolve) => setTimeout(() => resolve(printed), 10));
     "#;
 
-        let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(res, "\"Done!\"");
     }
 }

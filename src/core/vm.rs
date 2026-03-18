@@ -308,6 +308,20 @@ fn to_number<'gc>(val: &Value<'gc>) -> f64 {
     }
 }
 
+// JS ToUint32 (ECMAScript 7.1.7) used by bitwise/shift operators.
+fn to_uint32(n: f64) -> u32 {
+    if n.is_nan() || n == 0.0 || !n.is_finite() {
+        return 0;
+    }
+    let two32 = 4_294_967_296.0;
+    n.trunc().rem_euclid(two32) as u32
+}
+
+// JS ToInt32 derived from ToUint32.
+fn to_int32(n: f64) -> i32 {
+    to_uint32(n) as i32
+}
+
 fn bigint_from_integral_number(n: f64) -> Option<num_bigint::BigInt> {
     if !n.is_finite() || n != n.trunc() {
         return None;
@@ -398,6 +412,8 @@ pub struct VM<'gc> {
     output: Vec<String>,         // captured output for console.log etc.
     // Property storage for VmFunction values, keyed by function IP
     fn_props: HashMap<usize, Rc<RefCell<IndexMap<String, Value<'gc>>>>>,
+    // Method home objects keyed by function IP, used to resolve `super` correctly.
+    fn_home_objects: HashMap<usize, Value<'gc>>,
     // Global this object — top-level `this` refers to this; SetProperty on it writes to globals
     global_this: Rc<RefCell<IndexMap<String, Value<'gc>>>>,
     symbol_counter: u64,
@@ -420,6 +436,7 @@ impl<'gc> VM<'gc> {
             this_stack: vec![Value::VmObject(global_this.clone())],
             output: Vec::new(),
             fn_props: HashMap::new(),
+            fn_home_objects: HashMap::new(),
             global_this,
             symbol_counter: 0,
             symbol_registry: HashMap::new(),
@@ -1079,6 +1096,11 @@ impl<'gc> VM<'gc> {
     }
 
     fn assign_named_property(&mut self, obj: Value<'gc>, key: String, val: Value<'gc>) -> Result<Value<'gc>, JSError> {
+        if let Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) = &val {
+            // Record [[HomeObject]]-like information for functions assigned as methods.
+            self.fn_home_objects.insert(*ip, obj.clone());
+        }
+
         if let Value::VmObject(map) = &obj {
             let borrow = map.borrow();
             let is_frozen = matches!(borrow.get("__frozen__"), Some(Value::Boolean(true)));
@@ -1183,6 +1205,30 @@ impl<'gc> VM<'gc> {
     }
 
     fn resolve_super_base(&mut self, receiver: &Value<'gc>) -> Option<Value<'gc>> {
+        let active_func_ips: Vec<usize> = self.frames.iter().rev().map(|f| f.func_ip).collect();
+        for func_ip in active_func_ips {
+            if let Some(home_obj) = self.fn_home_objects.get(&func_ip).cloned() {
+                match home_obj {
+                    Value::VmObject(map) => {
+                        let base = map.borrow().get("__proto__").cloned().unwrap_or(Value::Null);
+                        match base {
+                            Value::Null | Value::Undefined => {}
+                            proto => return Some(proto),
+                        }
+                    }
+                    Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                        let props = self.get_fn_props(ip, arity);
+                        let base = props.borrow().get("__proto__").cloned().unwrap_or(Value::Null);
+                        match base {
+                            Value::Null | Value::Undefined => {}
+                            proto => return Some(proto),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         match receiver {
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 let props = self.get_fn_props(*ip, *arity);
@@ -1192,7 +1238,11 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmObject(map) => {
-                let immediate_proto = map.borrow().get("__proto__").cloned().unwrap_or(Value::Null);
+                let borrow = map.borrow();
+                let has_own_proto = borrow.contains_key("__proto__");
+                let immediate_proto = borrow.get("__proto__").cloned().unwrap_or(Value::Null);
+                drop(borrow);
+
                 match immediate_proto {
                     Value::VmObject(proto_obj) => {
                         let borrow = proto_obj.borrow();
@@ -1207,10 +1257,50 @@ impl<'gc> VM<'gc> {
                             proto => Some(proto),
                         }
                     }
+                    Value::Null | Value::Undefined if !has_own_proto => {
+                        if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
+                            obj_global.borrow().get("prototype").cloned()
+                        } else {
+                            None
+                        }
+                    }
                     _ => None,
                 }
             }
             _ => None,
+        }
+    }
+
+    fn infer_name_from_property_key(key: &str) -> String {
+        if let Some(sym_desc) = key.strip_prefix("Symbol(").and_then(|s| s.strip_suffix(')')) {
+            if sym_desc.is_empty() {
+                String::new()
+            } else {
+                format!("[{}]", sym_desc)
+            }
+        } else if let Some(sym_desc) = key.strip_prefix("{ description: ").and_then(|s| s.strip_suffix(" }")) {
+            if sym_desc == "undefined" || sym_desc.is_empty() {
+                String::new()
+            } else {
+                format!("[{}]", sym_desc)
+            }
+        } else {
+            key.to_string()
+        }
+    }
+
+    fn maybe_infer_function_name_from_key(&mut self, key: &str, val: &Value<'gc>) {
+        let ip = match val {
+            Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => *ip,
+            _ => return,
+        };
+
+        let inferred = Self::infer_name_from_property_key(key);
+        match self.chunk.fn_names.get(&ip) {
+            Some(existing) if !existing.is_empty() => {}
+            _ => {
+                self.chunk.fn_names.insert(ip, inferred);
+            }
         }
     }
 
@@ -1449,6 +1539,7 @@ impl<'gc> VM<'gc> {
         // Reflect object
         let mut reflect_map = IndexMap::new();
         reflect_map.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_REFLECT_APPLY));
+        reflect_map.insert("setPrototypeOf".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_SETPROTOTYPEOF));
         self.globals
             .insert("Reflect".to_string(), Value::VmObject(Rc::new(RefCell::new(reflect_map))));
 
@@ -6533,7 +6624,8 @@ impl<'gc> VM<'gc> {
                             } else {
                                 // In strict mode, non-method calls get `this = undefined`
                                 let fn_strict = self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false);
-                                let push_this = fn_strict;
+                                let is_arrow = self.chunk.arrow_function_ips.contains(&target_ip);
+                                let push_this = fn_strict && !is_arrow;
                                 if push_this {
                                     self.this_stack.push(Value::Undefined);
                                 }
@@ -6645,7 +6737,8 @@ impl<'gc> VM<'gc> {
                                 self.frames.push(frame);
                             } else {
                                 let fn_strict = self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false);
-                                let push_this = fn_strict;
+                                let is_arrow = self.chunk.arrow_function_ips.contains(&target_ip);
+                                let push_this = fn_strict && !is_arrow;
                                 if push_this {
                                     self.this_stack.push(Value::Undefined);
                                 }
@@ -7311,9 +7404,11 @@ impl<'gc> VM<'gc> {
                         (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                             return Err(crate::raise_type_error!("Cannot mix BigInt and other types in &"));
                         }
-                        _ => self
-                            .stack
-                            .push(Value::Number(((to_number(&a) as i32) & (to_number(&b) as i32)) as f64)),
+                        _ => {
+                            let lhs = to_int32(to_number(&a));
+                            let rhs = to_int32(to_number(&b));
+                            self.stack.push(Value::Number((lhs & rhs) as f64));
+                        }
                     }
                 }
                 Opcode::BitwiseOr => {
@@ -7326,9 +7421,11 @@ impl<'gc> VM<'gc> {
                         (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                             return Err(crate::raise_type_error!("Cannot mix BigInt and other types in |"));
                         }
-                        _ => self
-                            .stack
-                            .push(Value::Number(((to_number(&a) as i32) | (to_number(&b) as i32)) as f64)),
+                        _ => {
+                            let lhs = to_int32(to_number(&a));
+                            let rhs = to_int32(to_number(&b));
+                            self.stack.push(Value::Number((lhs | rhs) as f64));
+                        }
                     }
                 }
                 Opcode::BitwiseXor => {
@@ -7341,9 +7438,11 @@ impl<'gc> VM<'gc> {
                         (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                             return Err(crate::raise_type_error!("Cannot mix BigInt and other types in ^"));
                         }
-                        _ => self
-                            .stack
-                            .push(Value::Number(((to_number(&a) as i32) ^ (to_number(&b) as i32)) as f64)),
+                        _ => {
+                            let lhs = to_int32(to_number(&a));
+                            let rhs = to_int32(to_number(&b));
+                            self.stack.push(Value::Number((lhs ^ rhs) as f64));
+                        }
                     }
                 }
                 Opcode::ShiftLeft => {
@@ -7351,25 +7450,22 @@ impl<'gc> VM<'gc> {
                     let a = self.stack.pop().expect("VM Stack underflow");
                     match (&a, &b) {
                         (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
-                            let shift_i64: i64 = match (**b_bi).clone().try_into() {
+                            let shift: usize = match (**b_bi).clone().try_into() {
                                 Ok(v) => v,
                                 Err(_) => {
-                                    return Err(crate::raise_range_error!("BigInt shift count is out of range"));
+                                    return Err(crate::raise_eval_error!("invalid bigint shift"));
                                 }
                             };
-                            let result = if shift_i64 >= 0 {
-                                (**a_bi).clone() << (shift_i64 as usize)
-                            } else {
-                                (**a_bi).clone() >> ((-shift_i64) as usize)
-                            };
+                            let result = (**a_bi).clone() << shift;
                             self.stack.push(Value::BigInt(Box::new(result)));
                         }
                         (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                             return Err(crate::raise_type_error!("Cannot mix BigInt and other types in <<"));
                         }
                         _ => {
-                            self.stack
-                                .push(Value::Number(((to_number(&a) as i32) << ((to_number(&b) as u32) & 0x1f)) as f64));
+                            let lhs = to_int32(to_number(&a));
+                            let shift = to_uint32(to_number(&b)) & 0x1f;
+                            self.stack.push(Value::Number((lhs << shift) as f64));
                         }
                     }
                 }
@@ -7378,25 +7474,22 @@ impl<'gc> VM<'gc> {
                     let a = self.stack.pop().expect("VM Stack underflow");
                     match (&a, &b) {
                         (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
-                            let shift_i64: i64 = match (**b_bi).clone().try_into() {
+                            let shift: usize = match (**b_bi).clone().try_into() {
                                 Ok(v) => v,
                                 Err(_) => {
-                                    return Err(crate::raise_range_error!("BigInt shift count is out of range"));
+                                    return Err(crate::raise_eval_error!("invalid bigint shift"));
                                 }
                             };
-                            let result = if shift_i64 >= 0 {
-                                (**a_bi).clone() >> (shift_i64 as usize)
-                            } else {
-                                (**a_bi).clone() << ((-shift_i64) as usize)
-                            };
+                            let result = (**a_bi).clone() >> shift;
                             self.stack.push(Value::BigInt(Box::new(result)));
                         }
                         (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                             return Err(crate::raise_type_error!("Cannot mix BigInt and other types in >>"));
                         }
                         _ => {
-                            self.stack
-                                .push(Value::Number(((to_number(&a) as i32) >> ((to_number(&b) as u32) & 0x1f)) as f64));
+                            let lhs = to_int32(to_number(&a));
+                            let shift = to_uint32(to_number(&b)) & 0x1f;
+                            self.stack.push(Value::Number((lhs >> shift) as f64));
                         }
                     }
                 }
@@ -7405,11 +7498,12 @@ impl<'gc> VM<'gc> {
                     let a = self.stack.pop().expect("VM Stack underflow");
                     match (&a, &b) {
                         (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                            return Err(crate::raise_type_error!("BigInt has no unsigned right shift"));
+                            return Err(crate::raise_type_error!("Unsigned right shift is not allowed for BigInt"));
                         }
                         _ => {
-                            self.stack
-                                .push(Value::Number(((to_number(&a) as u32) >> ((to_number(&b) as u32) & 0x1f)) as f64));
+                            let lhs = to_uint32(to_number(&a));
+                            let shift = to_uint32(to_number(&b)) & 0x1f;
+                            self.stack.push(Value::Number((lhs >> shift) as f64));
                         }
                     }
                 }
@@ -7917,9 +8011,9 @@ impl<'gc> VM<'gc> {
                                 drop(borrow);
                                 // Push the object as `this` for the getter
                                 self.this_stack.push(obj.clone());
-                                let result = self.call_vm_function(ip, &[], &upvals);
+                                let result = self.call_vm_function_result(ip, &[], &upvals);
                                 self.this_stack.pop();
-                                self.stack.push(result);
+                                self.stack.push(result?);
                             } else {
                                 let val = borrow.get(&key).cloned();
                                 if let Some(v) = val {
@@ -8002,15 +8096,15 @@ impl<'gc> VM<'gc> {
                                             match getter_fn {
                                                 Value::VmFunction(ip, _) => {
                                                     self.this_stack.push(obj.clone());
-                                                    let result = self.call_vm_function(ip, &[], &[]);
+                                                    let result = self.call_vm_function_result(ip, &[], &[]);
                                                     self.this_stack.pop();
-                                                    self.stack.push(result);
+                                                    self.stack.push(result?);
                                                 }
                                                 Value::VmClosure(ip, _, ups) => {
                                                     self.this_stack.push(obj.clone());
-                                                    let result = self.call_vm_function(ip, &[], &ups);
+                                                    let result = self.call_vm_function_result(ip, &[], &ups);
                                                     self.this_stack.pop();
-                                                    self.stack.push(result);
+                                                    self.stack.push(result?);
                                                 }
                                                 _ => self.stack.push(Value::Undefined),
                                             }
@@ -8445,6 +8539,7 @@ impl<'gc> VM<'gc> {
                         }
                         Value::VmObject(map) => {
                             let key = value_to_string(&index);
+                            self.maybe_infer_function_name_from_key(&key, &val);
                             map.borrow_mut().insert(key, val.clone());
                         }
                         _ => {

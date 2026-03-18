@@ -2203,29 +2203,16 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             Expr::SuperMethod(method_name, args) => {
-                // super.method(args) → get method from parent prototype, call with current this
-                if let Some(ref pname) = self.current_class_parent {
-                    // Stack after: [this (receiver), method (callee), args...]
-                    self.chunk.write_opcode(Opcode::GetThis);
-                    let par_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(pname)));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(par_idx);
-                    let proto_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
-                    self.chunk.write_opcode(Opcode::GetProperty);
-                    self.chunk.write_u16(proto_k);
-                    let mk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(method_name)));
-                    self.chunk.write_opcode(Opcode::GetProperty);
-                    self.chunk.write_u16(mk);
-                    for arg in args {
-                        self.compile_expr(arg)?;
-                    }
-                    self.chunk.write_opcode(Opcode::Call);
-                    self.chunk.write_byte(args.len() as u8 | 0x80);
-                } else {
-                    self.chunk.write_opcode(Opcode::Constant);
-                    let undef_idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_u16(undef_idx);
+                // Stack before call: [this (receiver), method (callee), args...]
+                self.chunk.write_opcode(Opcode::GetThis);
+                let mk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(method_name)));
+                self.chunk.write_opcode(Opcode::GetSuperProperty);
+                self.chunk.write_u16(mk);
+                for arg in args {
+                    self.compile_expr(arg)?;
                 }
+                self.chunk.write_opcode(Opcode::Call);
+                self.chunk.write_byte(args.len() as u8 | 0x80);
             }
             Expr::SuperProperty(prop_name) => {
                 let pk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop_name)));
@@ -2340,88 +2327,74 @@ impl<'gc> Compiler<'gc> {
             }
             // Object literal: { key: val, ... }
             Expr::Object(props) => {
-                // Check if any property is a spread element
-                let has_spread = props.iter().any(|(_, val, _, _)| matches!(val, Expr::Spread(_)));
-                if has_spread {
-                    // Build object incrementally using NewObject(0) + SetProperty/ObjectSpread
-                    self.chunk.write_opcode(Opcode::NewObject);
-                    self.chunk.write_byte(0);
-                    for (key, val, _computed, _shorthand) in props {
-                        if let Expr::Spread(inner) = val {
-                            // {...obj} — copy all properties from inner
-                            self.compile_expr(inner)?;
-                            self.chunk.write_opcode(Opcode::ObjectSpread);
-                        } else {
-                            // regular property: dup object, push key string, push val, SetProperty
-                            self.chunk.write_opcode(Opcode::Dup);
-                            let key_str = match key {
-                                Expr::StringLit(s) => crate::unicode::utf16_to_utf8(s),
-                                _ => {
-                                    // computed key — compile key expr then stringify at runtime
-                                    // For now just skip
-                                    self.compile_expr(key)?;
-                                    self.compile_expr(val)?;
-                                    // fallback: pop key, val, dup (already pushed)
-                                    // This is not correct but won't crash
-                                    continue;
-                                }
-                            };
-                            let key_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&key_str)));
+                // Build object incrementally so property semantics are handled
+                // uniformly (including computed keys and spread entries).
+                self.chunk.write_opcode(Opcode::NewObject);
+                self.chunk.write_byte(0);
+
+                for (key, val, is_computed, _has_colon) in props {
+                    if let Expr::Spread(inner) = val {
+                        self.compile_expr(inner)?;
+                        self.chunk.write_opcode(Opcode::ObjectSpread);
+                        continue;
+                    }
+
+                    // Keep the object alive across each assignment.
+                    self.chunk.write_opcode(Opcode::Dup);
+
+                    match val {
+                        Expr::Getter(_) => {
+                            if !*is_computed && let Expr::StringLit(s) = key {
+                                let prefixed = format!("__get_{}", crate::unicode::utf16_to_utf8(s));
+                                self.compile_expr(val)?;
+                                let idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&prefixed)));
+                                self.chunk.write_opcode(Opcode::SetProperty);
+                                self.chunk.write_u16(idx);
+                                self.chunk.write_opcode(Opcode::Pop);
+                                continue;
+                            }
+                            // Fallback for computed accessors: install as a data property.
+                            self.compile_expr(key)?;
                             self.compile_expr(val)?;
-                            self.chunk.write_opcode(Opcode::SetProperty);
-                            self.chunk.write_u16(key_idx);
+                            self.chunk.write_opcode(Opcode::SetIndex);
+                            self.chunk.write_opcode(Opcode::Pop);
+                        }
+                        Expr::Setter(_) => {
+                            if !*is_computed && let Expr::StringLit(s) = key {
+                                let prefixed = format!("__set_{}", crate::unicode::utf16_to_utf8(s));
+                                self.compile_expr(val)?;
+                                let idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&prefixed)));
+                                self.chunk.write_opcode(Opcode::SetProperty);
+                                self.chunk.write_u16(idx);
+                                self.chunk.write_opcode(Opcode::Pop);
+                                continue;
+                            }
+                            // Fallback for computed accessors: install as a data property.
+                            self.compile_expr(key)?;
+                            self.compile_expr(val)?;
+                            self.chunk.write_opcode(Opcode::SetIndex);
+                            self.chunk.write_opcode(Opcode::Pop);
+                        }
+                        _ => {
+                            if !*is_computed && let Expr::StringLit(s) = key {
+                                if let Some(ip) = self.peek_func_ip(val) {
+                                    self.chunk.fn_names.entry(ip).or_insert_with(|| crate::unicode::utf16_to_utf8(s));
+                                }
+                                self.compile_expr(val)?;
+                                let idx = self.chunk.add_constant(Value::String(s.clone()));
+                                self.chunk.write_opcode(Opcode::SetProperty);
+                                self.chunk.write_u16(idx);
+                                self.chunk.write_opcode(Opcode::Pop);
+                                continue;
+                            }
+
+                            // Computed property or non-string key fallback.
+                            self.compile_expr(key)?;
+                            self.compile_expr(val)?;
+                            self.chunk.write_opcode(Opcode::SetIndex);
                             self.chunk.write_opcode(Opcode::Pop);
                         }
                     }
-                } else {
-                    let mut count = 0u8;
-                    for (key, val, _computed, _shorthand) in props {
-                        // For getters/setters, prefix the key so the VM can detect them
-                        match val {
-                            Expr::Getter(_) => {
-                                // Emit "__get_<key>" as the property name
-                                let key_str = match key {
-                                    Expr::StringLit(s) => crate::unicode::utf16_to_utf8(s),
-                                    _ => {
-                                        self.compile_expr(key)?;
-                                        self.compile_expr(val)?;
-                                        count += 1;
-                                        continue;
-                                    }
-                                };
-                                let prefixed = format!("__get_{}", key_str);
-                                let idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&prefixed)));
-                                self.chunk.write_opcode(Opcode::Constant);
-                                self.chunk.write_u16(idx);
-                                self.compile_expr(val)?;
-                                count += 1;
-                            }
-                            Expr::Setter(_) => {
-                                let key_str = match key {
-                                    Expr::StringLit(s) => crate::unicode::utf16_to_utf8(s),
-                                    _ => {
-                                        self.compile_expr(key)?;
-                                        self.compile_expr(val)?;
-                                        count += 1;
-                                        continue;
-                                    }
-                                };
-                                let prefixed = format!("__set_{}", key_str);
-                                let idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&prefixed)));
-                                self.chunk.write_opcode(Opcode::Constant);
-                                self.chunk.write_u16(idx);
-                                self.compile_expr(val)?;
-                                count += 1;
-                            }
-                            _ => {
-                                self.compile_expr(key)?;
-                                self.compile_expr(val)?;
-                                count += 1;
-                            }
-                        }
-                    }
-                    self.chunk.write_opcode(Opcode::NewObject);
-                    self.chunk.write_byte(count);
                 }
             }
             // Property access: obj.key
@@ -2535,6 +2508,7 @@ impl<'gc> Compiler<'gc> {
                 let is_async_arrow = matches!(expr, Expr::AsyncArrowFunction(_, _));
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
+                self.chunk.arrow_function_ips.insert(func_ip);
                 let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
 
                 let old_locals = std::mem::take(&mut self.locals);
@@ -2890,6 +2864,42 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(lhs)?;
                 self.compile_expr(rhs)?;
                 self.chunk.write_opcode(Opcode::Mod);
+                self.compile_store(lhs)?;
+            }
+            Expr::BitXorAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.compile_expr(rhs)?;
+                self.chunk.write_opcode(Opcode::BitwiseXor);
+                self.compile_store(lhs)?;
+            }
+            Expr::BitAndAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.compile_expr(rhs)?;
+                self.chunk.write_opcode(Opcode::BitwiseAnd);
+                self.compile_store(lhs)?;
+            }
+            Expr::BitOrAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.compile_expr(rhs)?;
+                self.chunk.write_opcode(Opcode::BitwiseOr);
+                self.compile_store(lhs)?;
+            }
+            Expr::LeftShiftAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.compile_expr(rhs)?;
+                self.chunk.write_opcode(Opcode::ShiftLeft);
+                self.compile_store(lhs)?;
+            }
+            Expr::RightShiftAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.compile_expr(rhs)?;
+                self.chunk.write_opcode(Opcode::ShiftRight);
+                self.compile_store(lhs)?;
+            }
+            Expr::UnsignedRightShiftAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.compile_expr(rhs)?;
+                self.chunk.write_opcode(Opcode::UnsignedShiftRight);
                 self.compile_store(lhs)?;
             }
             Expr::PowAssign(lhs, rhs) => {
@@ -3414,6 +3424,7 @@ impl<'gc> Compiler<'gc> {
                 // Jump opcode (1) + u16 operand (2) = 3 bytes before func body
                 Some(self.chunk.code.len() + 3)
             }
+            Expr::Class(class_def) if class_def.name.is_empty() => Some(self.chunk.code.len() + 3),
             Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..) => Some(self.chunk.code.len() + 3),
             _ => None,
         }
@@ -4554,7 +4565,9 @@ impl<'gc> Compiler<'gc> {
 
         self.patch_jump(jump_over);
         // Register constructor name
-        self.chunk.fn_names.insert(fn_start, name.clone());
+        if !name.is_empty() {
+            self.chunk.fn_names.insert(fn_start, name.clone());
+        }
         self.chunk.class_constructor_ips.insert(fn_start);
 
         // Define constructor as constant, push onto stack

@@ -16,7 +16,7 @@ mod error_to_string_tests {
         let script = r#"
             try { nonExistent(); } catch(e) { String(e) }
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"ReferenceError: nonExistent is not defined\"");
     }
 }

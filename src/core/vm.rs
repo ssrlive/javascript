@@ -1577,6 +1577,40 @@ impl<'gc> VM<'gc> {
     }
 
     /// Convert a value to string, calling toString() on VmObjects if available
+    fn is_error_type_name(name: &str) -> bool {
+        matches!(name, "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError")
+    }
+
+    fn format_error_name_message(name: &str, message: &str) -> String {
+        if message.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}: {}", name, message)
+        }
+    }
+
+    fn format_vm_error_object(borrow: &IndexMap<String, Value<'gc>>) -> Option<String> {
+        if let Some(Value::String(t)) = borrow.get("__type__") {
+            let name = crate::unicode::utf16_to_utf8(t);
+            if Self::is_error_type_name(&name) {
+                let message = borrow.get("message").map(value_to_string).unwrap_or_default();
+                return Some(Self::format_error_name_message(&name, &message));
+            }
+        }
+        None
+    }
+
+    fn error_type_name_from_builtin(id: u8) -> Option<&'static str> {
+        match id {
+            BUILTIN_CTOR_ERROR => Some("Error"),
+            BUILTIN_CTOR_TYPEERROR => Some("TypeError"),
+            BUILTIN_CTOR_SYNTAXERROR => Some("SyntaxError"),
+            BUILTIN_CTOR_RANGEERROR => Some("RangeError"),
+            BUILTIN_CTOR_REFERENCEERROR => Some("ReferenceError"),
+            _ => None,
+        }
+    }
+
     fn vm_to_string(&mut self, val: &Value<'gc>) -> String {
         if let Value::VmObject(map) = val {
             let borrow = map.borrow();
@@ -1586,6 +1620,10 @@ impl<'gc> VM<'gc> {
                     Some(Value::String(d)) => format!("Symbol({})", crate::unicode::utf16_to_utf8(d)),
                     _ => "Symbol()".to_string(),
                 };
+            }
+            // Error object stringification: "Name: message"
+            if let Some(formatted) = Self::format_vm_error_object(&borrow) {
+                return formatted;
             }
             drop(borrow);
             let ts = map.borrow().get("toString").cloned();
@@ -1633,6 +1671,9 @@ impl<'gc> VM<'gc> {
                     Some(Value::String(d)) => format!("Symbol({})", crate::unicode::utf16_to_utf8(d)),
                     _ => "Symbol()".to_string(),
                 };
+            }
+            if let Some(formatted) = Self::format_vm_error_object(&borrow) {
+                return formatted;
             }
             // RegExp display: /pattern/flags
             if borrow.get("__type__").map(value_to_string) == Some("RegExp".to_string()) {
@@ -3167,13 +3208,7 @@ impl<'gc> VM<'gc> {
             | BUILTIN_CTOR_SYNTAXERROR
             | BUILTIN_CTOR_RANGEERROR
             | BUILTIN_CTOR_REFERENCEERROR => {
-                let type_name = match id {
-                    BUILTIN_CTOR_TYPEERROR => "TypeError",
-                    BUILTIN_CTOR_SYNTAXERROR => "SyntaxError",
-                    BUILTIN_CTOR_RANGEERROR => "RangeError",
-                    BUILTIN_CTOR_REFERENCEERROR => "ReferenceError",
-                    _ => "Error",
-                };
+                let type_name = Self::error_type_name_from_builtin(id).unwrap_or("Error");
                 let msg = args.first().map(|v| self.vm_to_string(v)).unwrap_or_default();
                 let mut map = IndexMap::new();
                 map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));

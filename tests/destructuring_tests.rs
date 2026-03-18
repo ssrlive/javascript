@@ -16,35 +16,35 @@ mod destructuring_tests {
     #[test]
     fn test_basic_array_destructuring() {
         let script = "let [a, b] = [1, 2]; a + b";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "3");
     }
 
     #[test]
     fn test_array_destructuring_with_rest() {
         let script = "let [a, ...rest] = [1, 2, 3, 4]; rest[0] + rest[1]";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "5");
     }
 
     #[test]
     fn test_basic_object_destructuring() {
         let script = "let {a, b} = {a: 1, b: 2}; a + b";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "3");
     }
 
     #[test]
     fn test_object_destructuring_with_rest() {
         let script = "let {a, ...rest} = {a: 1, b: 2, c: 3}; rest.b + rest.c";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "5");
     }
 
     #[test]
     fn test_nested_destructuring() {
         let script = "let [a, {b}] = [1, {b: 2, c: 3}]; a + b";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "3");
     }
 
@@ -55,7 +55,7 @@ mod destructuring_tests {
             let { seconds = 0, milliseconds = 0 } = duration;
         "#;
 
-        let res = evaluate_script(script, None::<&std::path::Path>);
+        let res = evaluate_script_with_vm(script, None::<&std::path::Path>);
         match res {
             Err(err) => match err.kind() {
                 JSErrorKind::TypeError { message, .. } => {
@@ -75,7 +75,7 @@ mod destructuring_tests {
             seconds;
         "#;
 
-        let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
         assert_eq!(res, "0");
     }
 }

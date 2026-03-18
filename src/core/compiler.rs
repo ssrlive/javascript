@@ -810,6 +810,11 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::TryCatch(tc) => {
+                let saved_cv = self.completion_var.clone();
+                if is_last {
+                    self.setup_completion_var();
+                }
+
                 // Determine catch binding name constant index (or 0xffff for none)
                 let binding_idx: u16 = if let Some(_catch_body) = &tc.catch_body {
                     if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
@@ -955,9 +960,9 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    self.emit_load_completion();
+                } else {
+                    self.completion_var = saved_cv;
                 }
             }
             StatementKind::FunctionDeclaration(name, params, body, is_gen, is_async) => {
@@ -3751,6 +3756,54 @@ impl<'gc> Compiler<'gc> {
         let temp = format!("__destr_obj_{}__", self.forin_counter);
         self.forin_counter += 1;
         self.emit_define_var(&temp);
+
+        // Runtime guard: object destructuring from undefined/null must throw.
+        let first_prop = elements.iter().find_map(|e| match e {
+            ObjectDestructuringElement::Property { key, .. } => Some(key.clone()),
+            _ => None,
+        });
+
+        self.emit_helper_get(&temp);
+        let undef_idx = self.chunk.add_constant(Value::Undefined);
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(undef_idx);
+        self.chunk.write_opcode(Opcode::Equal);
+        let undefined_ok = self.emit_jump(Opcode::JumpIfFalse);
+        let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(type_idx);
+        let msg = if let Some(k) = &first_prop {
+            format!("Cannot destructure property '{}' of undefined", k)
+        } else {
+            "Cannot destructure undefined".to_string()
+        };
+        let msg_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&msg)));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(msg_idx);
+        self.chunk.write_opcode(Opcode::NewError);
+        self.chunk.write_opcode(Opcode::Throw);
+        self.patch_jump(undefined_ok);
+
+        self.emit_helper_get(&temp);
+        let null_idx = self.chunk.add_constant(Value::Null);
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(null_idx);
+        self.chunk.write_opcode(Opcode::Equal);
+        let null_ok = self.emit_jump(Opcode::JumpIfFalse);
+        let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(type_idx);
+        let msg = if let Some(k) = &first_prop {
+            format!("Cannot destructure property '{}' of null", k)
+        } else {
+            "Cannot destructure null".to_string()
+        };
+        let msg_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&msg)));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(msg_idx);
+        self.chunk.write_opcode(Opcode::NewError);
+        self.chunk.write_opcode(Opcode::Throw);
+        self.patch_jump(null_ok);
 
         // Collect statically-known extracted keys for rest computation
         let mut extracted_keys: Vec<String> = Vec::new();

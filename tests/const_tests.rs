@@ -16,14 +16,14 @@ mod const_tests {
     #[test]
     fn test_const_declaration() {
         let script = "const x = 42; x";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "42");
     }
 
     #[test]
     fn test_const_reassignment_error() {
         let script = "const x = 42; x = 24";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         assert!(result.is_err());
         match result {
             Err(err) => match err.kind() {
@@ -40,12 +40,12 @@ mod const_tests {
     fn test_const_vs_let() {
         // let should allow reassignment
         let script1 = "let x = 42; x = 24; x";
-        let result = evaluate_script_with_vm(script1, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script1, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "24");
 
         // const should not allow reassignment
         let script2 = "const y = 42; y = 24";
-        let result2 = evaluate_script_with_vm(script2, None::<&std::path::Path>);
+        let result2 = evaluate_script_with_vm(script2, false, None::<&std::path::Path>);
         assert!(result2.is_err());
     }
 }

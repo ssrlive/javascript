@@ -13,7 +13,7 @@ fn test_object_destructuring_with_defaults() {
         let { a = 3, b = 4 } = d;
         a + b
     "#;
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "7");
 }
 
@@ -24,7 +24,7 @@ fn test_array_destructuring_with_defaults() {
         let [ a = 2, b = 5 ] = d;
         a * b
     "#;
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "10");
 }
 

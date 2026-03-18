@@ -16,7 +16,7 @@ fn mock_intl_constructor_with_string() {
         });
         result
     "#;
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "en-GB");
 }
 
@@ -31,7 +31,7 @@ fn mock_intl_constructor_with_array() {
         });
         result
     "#;
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "fr-FR");
 }
 
@@ -45,7 +45,7 @@ fn mock_intl_constructor_invalid_locale_throws_string() {
         });
         result
     "#;
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "Invalid locale");
 }
 
@@ -60,7 +60,7 @@ fn mock_intl_constructor_default_locale() {
         });
         result
     "#;
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "en-US");
     assert_eq!(result, "undefined"); // --- IGNORE ---
 }

@@ -79,7 +79,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
 
     let result = if cli.use_vm {
         // Experimental VM evaluation
-        evaluate_script_with_vm(&script_content, script_path.as_ref())
+        evaluate_script_with_vm(&script_content, run_as_module, script_path.as_ref())
     } else if run_as_module {
         evaluate_module(&script_content, script_path.as_ref())
     } else {

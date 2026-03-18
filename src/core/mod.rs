@@ -1145,7 +1145,11 @@ pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JS
         .map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))
 }
 
-pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(script: T, script_path: Option<P>) -> Result<String, JSError> {
+pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
+    script: T,
+    run_as_module: bool,
+    script_path: Option<P>,
+) -> Result<String, JSError> {
     let _ = script_path; // For now we ignore the path in the VM, but we may want to use it for better error messages later.
     let script_str = script.as_ref();
     let tokens = tokenize(script_str)?;
@@ -1159,6 +1163,7 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(script:
     // but we can compile and run to get a primitive value string.
     let compiler = Compiler::new();
     let chunk = compiler.compile(&statements)?;
+    let _ = run_as_module; // For now we ignore the module/script distinction in the VM, but we may want to use it for different scoping or error messages later.
 
     let mut vm = VM::new(chunk);
     let v = vm.run()?;

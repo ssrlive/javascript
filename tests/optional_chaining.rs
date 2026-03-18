@@ -14,49 +14,49 @@ mod optional_chaining_tests {
     #[test]
     fn test_optional_property_access_valid_object() {
         let script = "let obj = {prop: 'value'}; obj?.prop";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"value\"");
     }
 
     #[test]
     fn test_optional_property_access_null_object() {
         let script = "let obj = null; obj?.prop";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "undefined");
     }
 
     #[test]
     fn test_optional_method_call_valid_object() {
         let script = "let obj = {method: function() { return 'called'; }}; obj?.method()";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"called\"");
     }
 
     #[test]
     fn test_optional_method_call_null_object() {
         let script = "let obj = null; obj?.method()";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "undefined");
     }
 
     #[test]
     fn test_chained_optional_operations() {
         let script = "let obj = {nested: {method: function() { return 'nested called'; }}}; obj?.nested?.method()";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"nested called\"");
     }
 
     #[test]
     fn test_optional_computed_property_access() {
         let script = "let obj = {a: 'value'}; obj?.['a']";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"value\"");
     }
 
     #[test]
     fn test_optional_computed_property_null_object() {
         let script = "let obj = null; obj?.['a']";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "undefined");
     }
 
@@ -64,7 +64,7 @@ mod optional_chaining_tests {
     fn test_optional_chaining_assignment_lhs_errors() {
         // Using optional chaining on LHS for direct assignment should be invalid / parse error
         let code1 = "let o = {}; o?.prop = 5";
-        let res1 = evaluate_script_with_vm(code1, None::<&std::path::Path>);
+        let res1 = evaluate_script_with_vm(code1, false, None::<&std::path::Path>);
         assert!(
             res1.is_err(),
             "expected parse error for optional chaining on LHS assignment: {:?}",
@@ -72,7 +72,7 @@ mod optional_chaining_tests {
         );
 
         let code2 = "let o = {}; o?.['a'] = 3";
-        let res2 = evaluate_script_with_vm(code2, None::<&std::path::Path>);
+        let res2 = evaluate_script_with_vm(code2, false, None::<&std::path::Path>);
         assert!(
             res2.is_err(),
             "expected parse error for optional computed LHS assignment: {:?}",
@@ -81,7 +81,7 @@ mod optional_chaining_tests {
 
         // Using optional chaining with nullish assignment should be invalid too
         let code3 = "let o = {}; o?.['a'] ??= 7";
-        let res3 = evaluate_script_with_vm(code3, None::<&std::path::Path>);
+        let res3 = evaluate_script_with_vm(code3, false, None::<&std::path::Path>);
         assert!(
             res3.is_err(),
             "expected parse error for optional computed LHS nullish-assignment: {:?}",
@@ -93,11 +93,11 @@ mod optional_chaining_tests {
     fn test_nullish_assign_on_property_and_index() {
         // non-optional property/index should work with ??=
         let code1 = "let o = {}; o.x ??= 9; o.x";
-        let res1 = evaluate_script_with_vm(code1, None::<&std::path::Path>).unwrap();
+        let res1 = evaluate_script_with_vm(code1, false, None::<&std::path::Path>).unwrap();
         assert_eq!(res1, "9");
 
         let code2 = "let o = {}; o['x'] ??= 11; o['x']";
-        let res2 = evaluate_script_with_vm(code2, None::<&std::path::Path>).unwrap();
+        let res2 = evaluate_script_with_vm(code2, false, None::<&std::path::Path>).unwrap();
         assert_eq!(res2, "11");
     }
 
@@ -117,7 +117,7 @@ mod optional_chaining_tests {
             }
             count + ',' + touched
         "#;
-        let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(res, "\"1,0\"");
     }
 
@@ -137,7 +137,7 @@ mod optional_chaining_tests {
                 (a?.b)?.().c
             ].join(',')
         "#;
-        let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(res, "\"42,42,42,42,42,42\"");
     }
 
@@ -163,7 +163,7 @@ mod optional_chaining_tests {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+                let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
                 println!("debug: {}", res);
                 // ensure none returned an error
                 assert!(!res.contains("ERR:"));
@@ -180,7 +180,7 @@ mod optional_chaining_tests {
                 r#"const a = {{ b() {{ return this._b; }}, _b: {{ c: 42 }} }}; (function() {{ try {{ return String({}); }} catch(e) {{ return 'ERR:'+String(e && e.message); }} }})()"#,
                 v
             );
-            let res = evaluate_script_with_vm(&script, None::<&std::path::Path>);
+            let res = evaluate_script_with_vm(&script, false, None::<&std::path::Path>);
             match res {
                 Ok(s) => outputs.push(s),
                 Err(e) => outputs.push(format!("ERR:{}", e)),
@@ -207,7 +207,7 @@ mod optional_chaining_tests {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+                let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
                 assert_eq!(res, "\"true,true\"");
             })
             .expect("failed to spawn thread");
@@ -226,7 +226,7 @@ mod optional_chaining_tests {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+                let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
                 assert_eq!(res, "\"true,true\"");
             })
             .expect("failed to spawn thread");
@@ -249,7 +249,7 @@ mod optional_chaining_tests {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+                let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
                 assert_eq!(res, "1");
             })
             .expect("failed to spawn thread");

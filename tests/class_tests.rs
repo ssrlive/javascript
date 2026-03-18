@@ -18,7 +18,7 @@ mod class_tests {
             }
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         if let Err(e) = &result {
             println!("Error: {:?}", e);
         }
@@ -36,7 +36,7 @@ mod class_tests {
             let person = new Person();
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -56,7 +56,7 @@ mod class_tests {
             let person = new Person("Alice");
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -81,7 +81,7 @@ mod class_tests {
             let greeting = person.greet();
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -102,7 +102,7 @@ mod class_tests {
             let obj = {};
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         assert!(result.is_ok(), "Script should execute successfully");
 
         // Note: We can't easily test is_class_instance from here since it's internal
@@ -139,7 +139,7 @@ mod class_tests {
             "is_obj_person: " + is_obj_person;
         "#;
 
-        let s = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let s = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
 
         let s_inner = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
             s[1..s.len() - 1].to_string()
@@ -184,7 +184,7 @@ mod class_tests {
             let dog = new Dog("Buddy", "Golden Retriever");
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         assert!(result.is_ok(), "Class inheritance should work");
     }
 
@@ -208,7 +208,7 @@ mod class_tests {
             child.value + " " + child.extra;
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -236,7 +236,7 @@ mod class_tests {
             calc.add(3, 4);
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -262,7 +262,7 @@ mod class_tests {
             staticProp + ", " + staticResult + ", " + instanceName;
         "#;
 
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -277,7 +277,7 @@ mod class_tests {
             let d = Object.getOwnPropertyDescriptor(C, 'name');
             d.value === 'C' && d.writable === false && d.enumerable === false && d.configurable === true
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -291,7 +291,7 @@ mod class_tests {
             let c = new C();
             c.m();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         assert!(result.is_err(), "Calling missing super method should throw an error");
     }
 
@@ -304,7 +304,7 @@ mod class_tests {
             let c = new C();
             c.m();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         assert!(result.is_err(), "Calling a non-function super property should throw a TypeError");
     }
 
@@ -315,7 +315,7 @@ mod class_tests {
             class C extends P { m() { return super.value; } }
             new C().m();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"parent\"", "Expected super getter property to return correct value");
     }
 
@@ -327,7 +327,7 @@ mod class_tests {
             class C extends P { }
             Object.getOwnPropertyDescriptor(P.prototype, 'value')
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         // Print descriptor to stderr for inspection when running with --nocapture
         eprintln!("DESCRIPTOR: {}", result);
         // Expect descriptor to be { get: [Getter], set: undefined, enumerable: false, configurable: true }
@@ -342,7 +342,7 @@ mod class_tests {
             let x = new C();
             x.toString();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"C B A\"", "Expected super calls through deep inheritance chain to work");
     }
 
@@ -353,7 +353,7 @@ mod class_tests {
             class C extends P { m() { let f = () => super.m(); return f(); } }
             new C().m();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"P\"", "Expected super call in arrow function to work");
     }
 }

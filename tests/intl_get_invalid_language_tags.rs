@@ -43,6 +43,6 @@ fn test_get_invalid_language_tags_array_parsing() {
         getInvalidLanguageTags.length
     "#;
 
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "13");
 }

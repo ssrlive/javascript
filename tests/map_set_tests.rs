@@ -9,7 +9,7 @@ fn __init_test_logger() {
 
 #[test]
 fn test_map_constructor() {
-    let result = evaluate_script_with_vm("Object.prototype.toString.call(new Map())", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("Object.prototype.toString.call(new Map())", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"[object Map]\"");
 }
 
@@ -22,6 +22,7 @@ fn test_map_set_and_get() {
         map.set("key2", "value2");
         map.get("key1")
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -36,6 +37,7 @@ fn test_map_has() {
         map.set("key", "value");
         map.has("key")
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -51,6 +53,7 @@ fn test_map_size() {
         map.set("b", 2);
         map.size
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -68,6 +71,7 @@ fn test_map_delete() {
         console.log(JSON.stringify([deleted, has]));
         [deleted, has]
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -85,6 +89,7 @@ fn test_map_clear() {
         map.clear();
         map.size
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -93,7 +98,7 @@ fn test_map_clear() {
 
 #[test]
 fn test_set_constructor() {
-    let result = evaluate_script_with_vm("Object.prototype.toString.call(new Set())", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("Object.prototype.toString.call(new Set())", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"[object Set]\"");
 }
 
@@ -106,6 +111,7 @@ fn test_set_add_and_has() {
         set.add("item2");
         set.has("item1")
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -122,6 +128,7 @@ fn test_set_size() {
         set.add(2); // duplicate
         set.size
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -138,6 +145,7 @@ fn test_set_delete() {
         let has = set.has("item");
         JSON.stringify([deleted, has])
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -155,6 +163,7 @@ fn test_set_clear() {
         set.clear();
         set.size
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -173,6 +182,7 @@ fn test_map_keys_values_entries() {
         let e = []; for (let x of map.entries()) e.push(x);
         JSON.stringify([k.length, v.length, e.length])
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -191,6 +201,7 @@ fn test_set_values() {
         for (let x of set.values()) vals.push(x);
         JSON.stringify(vals.length)
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();

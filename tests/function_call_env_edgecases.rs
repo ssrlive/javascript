@@ -16,7 +16,7 @@ fn arrow_function_lexical_this() {
         o.f();
     "#;
 
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "42");
 }
 
@@ -28,7 +28,7 @@ fn normal_function_this_binding_with_call() {
         foo.call(o);
     "#;
 
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "99");
 }
 
@@ -38,7 +38,7 @@ fn object_prototype_to_string_with_primitive_receiver() {
         Object.prototype.toString.call("x");
     "#;
 
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"[object String]\"");
 }
 
@@ -50,6 +50,6 @@ fn reflect_apply_binds_this_for_closures() {
         Reflect.apply(f, o, [2, 3]);
     "#;
 
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "6");
 }

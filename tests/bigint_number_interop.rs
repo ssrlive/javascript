@@ -3,50 +3,50 @@ use javascript::evaluate_script_with_vm;
 #[test]
 fn bigint_arithmetic_and_mixing_should_behave_per_spec() {
     // BigInt + BigInt -> BigInt
-    let r1 = evaluate_script_with_vm("1n + 2n", None::<&std::path::Path>);
+    let r1 = evaluate_script_with_vm("1n + 2n", false, None::<&std::path::Path>);
     match r1 {
         Ok(h) => assert!(h == "3"),
         _ => panic!("expected BigInt result for 1n + 2n, got {:?}", r1),
     }
 
     // Mixing BigInt with Number in arithmetic must throw (TypeError)
-    let r2 = evaluate_script_with_vm("1n + 1", None::<&std::path::Path>);
+    let r2 = evaluate_script_with_vm("1n + 1", false, None::<&std::path::Path>);
     assert!(r2.is_err(), "Expected TypeError when mixing BigInt and Number");
 
     // Subtraction / other arithmetic also should throw on mixing
-    let r3 = evaluate_script_with_vm("5n - 2", None::<&std::path::Path>);
+    let r3 = evaluate_script_with_vm("5n - 2", false, None::<&std::path::Path>);
     assert!(r3.is_err(), "Expected TypeError for 5n - 2");
 
     // Loose equality: 1n == 1 should be true
-    let r4 = evaluate_script_with_vm("1n == 1", None::<&std::path::Path>);
+    let r4 = evaluate_script_with_vm("1n == 1", false, None::<&std::path::Path>);
     match r4 {
         Ok(b) => assert_eq!(b, "true"),
         other => panic!("unexpected result for 1n == 1: {:?}", other),
     }
 
     // Strict equality: 1n === 1 should be false
-    let r5 = evaluate_script_with_vm("1n === 1", None::<&std::path::Path>);
+    let r5 = evaluate_script_with_vm("1n === 1", false, None::<&std::path::Path>);
     match r5 {
         Ok(b) => assert_eq!(b, "false"),
         other => panic!("unexpected result for 1n === 1: {:?}", other),
     }
 
     // Relational comparison: 2n > 1 should be true
-    let r6 = evaluate_script_with_vm("2n > 1", None::<&std::path::Path>);
+    let r6 = evaluate_script_with_vm("2n > 1", false, None::<&std::path::Path>);
     match r6 {
         Ok(b) => assert_eq!(b, "true"),
         other => panic!("unexpected result for 2n > 1: {:?}", other),
     }
 
     // Relational comparison: 1n < 1.5 should be true (1 < 1.5)
-    let r7 = evaluate_script_with_vm("1n < 1.5", None::<&std::path::Path>);
+    let r7 = evaluate_script_with_vm("1n < 1.5", false, None::<&std::path::Path>);
     match r7 {
         Ok(b) => assert_eq!(b, "true"),
         other => panic!("unexpected result for 1n < 1.5: {:?}", other),
     }
 
     // String concatenation with BigInt: "x" + 1n -> "x1"
-    let r8 = evaluate_script_with_vm("'x' + 1n", None::<&std::path::Path>);
+    let r8 = evaluate_script_with_vm("'x' + 1n", false, None::<&std::path::Path>);
     match r8 {
         Ok(s) => assert_eq!(s, "\"x1\""),
         other => panic!("expected string 'x1', got {:?}", other),

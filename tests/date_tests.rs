@@ -11,7 +11,7 @@ mod date_tests {
 
     #[test]
     fn test_date_constructor_no_args() {
-        let str_val = evaluate_script_with_vm("new Date().toString()", None::<&std::path::Path>).unwrap();
+        let str_val = evaluate_script_with_vm("new Date().toString()", false, None::<&std::path::Path>).unwrap();
         println!("Date string: {}", str_val);
         // Should be a properly formatted date string, not starting with "Date: "
         assert!(!str_val.starts_with("\"Date: "));
@@ -20,56 +20,82 @@ mod date_tests {
 
     #[test]
     fn test_date_constructor_with_timestamp() {
-        let value = evaluate_script_with_vm("new Date(1234567890000).getTime()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm("new Date(1234567890000).getTime()", false, None::<&std::path::Path>).unwrap();
         println!("Timestamp: {:?}", value);
         assert_eq!(value, "1234567890000");
     }
 
     #[test]
     fn test_date_value_of() {
-        let value = evaluate_script_with_vm("new Date(1234567890000).valueOf()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm("new Date(1234567890000).valueOf()", false, None::<&std::path::Path>).unwrap();
         assert_eq!(value, "1234567890000");
     }
 
     #[test]
     fn test_date_to_string() {
-        let value = evaluate_script_with_vm("new Date(1234567890000).toString()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm("new Date(1234567890000).toString()", false, None::<&std::path::Path>).unwrap();
         // Should be a properly formatted date string
         assert!(value.contains("2009") || value.contains("Invalid Date"));
     }
 
     #[test]
     fn test_date_constructor_with_iso_string() {
-        let result = evaluate_script_with_vm("new Date('2023-12-25T10:30:00Z').getTime()", None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm("new Date('2023-12-25T10:30:00Z').getTime()", false, None::<&std::path::Path>).unwrap();
         // Should be a valid timestamp
         assert_eq!(result, "1703500200000");
     }
 
     #[test]
     fn test_date_constructor_with_components() {
-        let value = evaluate_script_with_vm("new Date(2023, 11, 25, 10, 30, 0, 0).getFullYear()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm(
+            "new Date(2023, 11, 25, 10, 30, 0, 0).getFullYear()",
+            false,
+            None::<&std::path::Path>,
+        )
+        .unwrap();
         assert_eq!(value, "2023");
     }
 
     #[test]
     fn test_date_get_methods() {
-        let value = evaluate_script_with_vm("new Date(2023, 11, 25, 10, 30, 45, 123).getMonth()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm(
+            "new Date(2023, 11, 25, 10, 30, 45, 123).getMonth()",
+            false,
+            None::<&std::path::Path>,
+        )
+        .unwrap();
         assert_eq!(value, "11"); // December (0-based)
 
-        let value = evaluate_script_with_vm("new Date(2023, 11, 25, 10, 30, 45, 123).getDate()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm("new Date(2023, 11, 25, 10, 30, 45, 123).getDate()", false, None::<&std::path::Path>).unwrap();
         assert_eq!(value, "25");
 
-        let value = evaluate_script_with_vm("new Date(2023, 11, 25, 10, 30, 45, 123).getHours()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm(
+            "new Date(2023, 11, 25, 10, 30, 45, 123).getHours()",
+            false,
+            None::<&std::path::Path>,
+        )
+        .unwrap();
         assert_eq!(value, "10");
 
-        let value = evaluate_script_with_vm("new Date(2023, 11, 25, 10, 30, 45, 123).getMinutes()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm(
+            "new Date(2023, 11, 25, 10, 30, 45, 123).getMinutes()",
+            false,
+            None::<&std::path::Path>,
+        )
+        .unwrap();
         assert_eq!(value, "30");
 
-        let value = evaluate_script_with_vm("new Date(2023, 11, 25, 10, 30, 45, 123).getSeconds()", None::<&std::path::Path>).unwrap();
+        let value = evaluate_script_with_vm(
+            "new Date(2023, 11, 25, 10, 30, 45, 123).getSeconds()",
+            false,
+            None::<&std::path::Path>,
+        )
+        .unwrap();
         assert_eq!(value, "45");
 
         let value = evaluate_script_with_vm(
             "new Date(2023, 11, 25, 10, 30, 45, 123).getMilliseconds()",
+            false,
             None::<&std::path::Path>,
         )
         .unwrap();
@@ -79,8 +105,8 @@ mod date_tests {
     #[test]
     fn test_date_to_primitive_string_hint_in_addition() {
         // Ensure Date objects use ToPrimitive with hint "string" when used in addition
-        let left = evaluate_script_with_vm("new Date(0) + new Date(0)", None::<&std::path::Path>).unwrap();
-        let right = evaluate_script_with_vm("new Date(0).toString() + new Date(0).toString()", None::<&std::path::Path>).unwrap();
+        let left = evaluate_script_with_vm("new Date(0) + new Date(0)", false, None::<&std::path::Path>).unwrap();
+        let right = evaluate_script_with_vm("new Date(0).toString() + new Date(0).toString()", false, None::<&std::path::Path>).unwrap();
         assert_eq!(left, right);
     }
 }

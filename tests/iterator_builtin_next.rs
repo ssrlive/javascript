@@ -24,6 +24,6 @@ fn builtin_next_function_iterator() {
     "#;
 
     // Return a JSON string so we can assert easily from Rust test harness
-    let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "\"[1,2,3]\"");
 }

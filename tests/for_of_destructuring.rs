@@ -8,6 +8,6 @@ fn for_of_destructuring_var_object() {
         x;
     "#;
 
-    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "2");
 }

@@ -14,35 +14,35 @@ mod object_literal_tests {
     #[test]
     fn test_basic_object_literal() {
         let script = "let obj = {a: 1, b: 2}; obj.a + obj.b";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "3");
     }
 
     #[test]
     fn test_object_property_access() {
         let script = "let obj = {name: 'hello', value: 42}; obj.name";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"hello\"");
     }
 
     #[test]
     fn test_empty_object() {
         let script = "let empty = {}; empty";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "{}");
     }
 
     #[test]
     fn test_nested_object() {
         let script = "let nested = {a: {b: 1}}; nested.a.b";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "1");
     }
 
     #[test]
     fn test_object_with_string_keys() {
         let script = "let obj = {'key': 123}; obj.key";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "123");
     }
 
@@ -51,14 +51,14 @@ mod object_literal_tests {
         // This test verifies that console.log works with objects
         // We can't easily capture stdout in tests, so we just ensure it doesn't crash
         let script = "let obj = {test: 'value'}; console.log(obj.test); obj.test";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"value\"");
     }
 
     #[test]
     fn test_intentionally_failing_object() {
         let script = "let obj = {a: 1, b: 2}; obj.a + obj.b";
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "3");
     }
 
@@ -73,7 +73,7 @@ mod object_literal_tests {
             obj.value = 5;
             obj.value
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "10");
     }
 
@@ -88,7 +88,7 @@ mod object_literal_tests {
             obj.data = 3;
             obj.data.processed
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "30");
     }
 
@@ -98,7 +98,7 @@ mod object_literal_tests {
             let obj = { foo() { return 7; } };
             obj.foo();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "7");
     }
 
@@ -109,7 +109,7 @@ mod object_literal_tests {
             let obj = { get [Symbol.toPrimitive]() { return 42; } };
             42
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "42");
     }
 
@@ -119,7 +119,7 @@ mod object_literal_tests {
             let obj = {a: 1, b: 2};
             obj.toString();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"[object Object]\"");
     }
 
@@ -135,7 +135,7 @@ mod object_literal_tests {
             let obj = new Derived();
             obj.toString();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"Base toString\"");
     }
 
@@ -155,7 +155,7 @@ mod object_literal_tests {
             let obj = new B();
             obj.toString();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"B A toString\"");
     }
 
@@ -165,7 +165,7 @@ mod object_literal_tests {
             var obj = { toString() { return 'obj -> ' + super.toString(); } };
             return obj.toString();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"obj -> [object Object]\"");
     }
 
@@ -188,7 +188,7 @@ mod object_literal_tests {
 
             return obj.toString();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"obj -> proto\"");
     }
 
@@ -211,7 +211,7 @@ mod object_literal_tests {
 
             return obj.toString();
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"obj -> [object Object]\"");
     }
 
@@ -223,7 +223,7 @@ mod object_literal_tests {
             };
             obj.value;
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match result {
             Err(e) => {
                 let err_msg = format!("{:?}", e);
@@ -242,7 +242,7 @@ mod object_literal_tests {
             };
             console.log(obj);
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>);
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match result {
             Err(e) => {
                 let err_msg = format!("{:?}", e);
@@ -259,7 +259,7 @@ mod object_literal_tests {
             let d = Object.getOwnPropertyDescriptor(o.id, 'name');
             d.value === 'id' && d.enumerable === false && d.writable === false && d.configurable === true
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
     #[test]
@@ -289,7 +289,7 @@ mod object_literal_tests {
 
             true
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
     #[test]
@@ -299,7 +299,7 @@ mod object_literal_tests {
             let d = Object.getOwnPropertyDescriptor(o.id, 'name');
             d.value === 'id' && d.enumerable === false && d.writable === false && d.configurable === true
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -310,7 +310,7 @@ mod object_literal_tests {
             let d = Object.getOwnPropertyDescriptor(c, 'name');
             d.value === 'c' && d.enumerable === false && d.writable === false && d.configurable === true
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -343,7 +343,7 @@ mod object_literal_tests {
 
             true
         "#;
-        let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 }

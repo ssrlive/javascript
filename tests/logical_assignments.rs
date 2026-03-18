@@ -12,36 +12,36 @@ fn __init_test_logger() {
 fn test_logical_assignments() {
     // Test logical AND assignment (&&=)
     let code1 = "let a = 5; a &&= 10; a";
-    let result1 = evaluate_script_with_vm(code1, None::<&std::path::Path>).unwrap();
+    let result1 = evaluate_script_with_vm(code1, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result1, "10");
 
     let code2 = "let b = 0; b &&= 10; b";
-    let result2 = evaluate_script_with_vm(code2, None::<&std::path::Path>).unwrap();
+    let result2 = evaluate_script_with_vm(code2, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result2, "0");
 
     // Test logical OR assignment (||=)
     let code3 = "let c = 5; c ||= 10; c";
-    let result3 = evaluate_script_with_vm(code3, None::<&std::path::Path>).unwrap();
+    let result3 = evaluate_script_with_vm(code3, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result3, "5");
 
     let code4 = "let d = 0; d ||= 10; d";
-    let result4 = evaluate_script_with_vm(code4, None::<&std::path::Path>).unwrap();
+    let result4 = evaluate_script_with_vm(code4, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result4, "10");
 
     // Test nullish coalescing assignment (??=)
     let code5 = "let e = 5; e ??= 10; e";
-    let result5 = evaluate_script_with_vm(code5, None::<&std::path::Path>).unwrap();
+    let result5 = evaluate_script_with_vm(code5, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result5, "5");
 
     let code6 = "let f; f ??= 10; f";
-    let result6 = evaluate_script_with_vm(code6, None::<&std::path::Path>).unwrap();
+    let result6 = evaluate_script_with_vm(code6, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result6, "10");
 }
 
 #[test]
 fn eval_debug_logical_or_assign() {
     let code = "let c = 5; c ||= 10; c";
-    let res = evaluate_script_with_vm(code, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(code, false, None::<&std::path::Path>);
     println!("evaluate_script result: {:?}", res);
 }
 

@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
 // Init logger for tests
 #[ctor::ctor]
@@ -26,7 +26,7 @@ fn test_nested_if_else_associativity() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"both,a_not_b,not_a\"");
         })
         .unwrap()
@@ -50,7 +50,7 @@ fn test_nested_for_single_statement_bodies() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"0,1,2,3\"");
         })
         .unwrap()
@@ -78,7 +78,7 @@ fn test_do_while_with_inner_if_single_statement() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"0,-1,2,-3\"");
         })
         .unwrap()
@@ -107,7 +107,7 @@ fn test_pathological_if_do_for_combo() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"E0-0,E0-1,O1-0,O1-1,E2-0,E2-1\"");
         })
         .unwrap()
@@ -136,7 +136,7 @@ fn test_pathological_for_do_if_combo() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"F0,T1\"");
         })
         .unwrap()
@@ -167,7 +167,7 @@ fn test_complex_nested_chain() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"0-0:1X:1-0:2X\"");
         })
         .unwrap()
@@ -190,7 +190,7 @@ fn test_try_catch_finally_single_statement_bodies_no_throw() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"T1,F1\"");
         })
         .unwrap()
@@ -214,7 +214,7 @@ fn test_try_catch_finally_single_statement_bodies_with_throw() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"caught,done\"");
         })
         .unwrap()
@@ -242,7 +242,7 @@ fn test_try_in_for_with_single_statement_bodies() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"E0,C1,E2\"");
         })
         .unwrap()
@@ -266,7 +266,7 @@ fn test_try_catch_nested_in_catch_finally_single_statement() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"inner,innerfin,outerfin\"");
         })
         .unwrap()
@@ -298,7 +298,7 @@ fn test_deep_try_for_do_while_combo() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"N0|ONE|N2|FIN\"");
         })
         .unwrap()
@@ -326,7 +326,7 @@ fn test_for_with_try_while_inner_do() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"V0-0,V0-1,V1-0,V1-1\"");
         })
         .unwrap()
@@ -354,7 +354,7 @@ fn test_nested_try_do_for_try_deep_chain() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"P0;Q1;P2;END\"");
         })
         .unwrap()
@@ -382,7 +382,7 @@ fn test_switch_try_in_case_no_throw() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"X\"");
         })
         .unwrap()
@@ -411,7 +411,7 @@ fn test_switch_try_in_case_throw_and_fallthrough() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"C,D\"");
         })
         .unwrap()
@@ -437,7 +437,7 @@ fn test_switch_case_try_with_for_inner_single_statement() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"F0,F1\"");
         })
         .unwrap()
@@ -463,7 +463,7 @@ fn test_switch_try_inside_for_and_back_to_switch() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"A0,F0,B1,G1\"");
         })
         .unwrap()
@@ -487,7 +487,7 @@ fn test_labeled_try_break_outer() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"I0,F0,F1\"");
         })
         .unwrap()
@@ -511,7 +511,7 @@ fn test_labeled_try_continue_outer() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"F0|I1|F1|I2|F2\"");
         })
         .unwrap()
@@ -539,7 +539,7 @@ fn test_switch_try_finally_fallthrough_no_break() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"A,F,B\"");
         })
         .unwrap()
@@ -571,7 +571,7 @@ fn test_labeled_try_in_switch_with_outer_label_break() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"X,F,AFTER\"");
         })
         .unwrap()
@@ -601,7 +601,7 @@ fn test_labeled_nested_block_break_and_finally() {
         .name("named_function_expression".into())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"FIN,AFTER_OUTER\"");
         })
         .unwrap()
@@ -621,7 +621,7 @@ fn test_try_return_finally_override_and_side_effects() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"FIN|TRY|SIDE\"");
         })
         .unwrap()
@@ -652,7 +652,7 @@ fn test_switch_try_fallthrough_array_nextline_asi() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"A,F,B,X0\"");
         })
         .unwrap()
@@ -677,7 +677,7 @@ fn test_labeled_switch_try_return_finally_sideeffect() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"R|FIN\"");
         })
         .unwrap()
@@ -702,7 +702,7 @@ fn test_labeled_block_parenthesis_after_block_asi() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"B|F|PAREN\"");
         })
         .unwrap()

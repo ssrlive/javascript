@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
 fn fix_rust_escapes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -38,7 +38,7 @@ fn fix_rust_escapes(s: &str) -> String {
 }
 
 fn parse_js_json_result(s: &str) -> serde_json::Value {
-    // evaluate_script returns a Debug-formatted string of the JS result.
+    // evaluate_script_with_vm returns a Debug-formatted string of the JS result.
     // E.g. JS returns '["a"]', Rust receives "\"[\"a\"]\""
     // We first decode the outer string to get the inner JS string content.
     let inner_json: String =
@@ -59,7 +59,7 @@ fn string_iterator_simple() {
         for (let ch of "abc") { out.push(ch); }
         JSON.stringify(out)
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "\"[\\\"a\\\",\\\"b\\\",\\\"c\\\"]\"");
 }
 
@@ -74,7 +74,7 @@ fn string_iterator_unicode() {
         for (let ch of s) { out.push(ch); }
         JSON.stringify(out)
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     println!("DEBUG: string_iterator_unicode result: {}", res);
     assert_eq!(res, "\"[4,97,55362,57271,98,\\\"a\\\",\\\"𠮷\\\",\\\"b\\\"]\"");
 }
@@ -87,7 +87,7 @@ fn string_char_codes_direct() {
             return JSON.stringify([s.length, s.charCodeAt(0), s.charCodeAt(1), s.charCodeAt(2), s.charCodeAt(3)]);
         })()
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     let v = parse_js_json_result(&res);
     let arr = v.as_array().expect("expected array");
     assert_eq!(arr[0].as_i64().unwrap(), 4);
@@ -105,7 +105,7 @@ fn string_charcode_single() {
             return s.charCodeAt(1);
         })()
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "55362");
 }
 
@@ -117,7 +117,7 @@ fn string_iterator_combining_mark() {
         for (let ch of s) { out.push(ch); }
         JSON.stringify(out)
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "\"[\\\"y\\\",\\\"\u{306}\\\"]\"");
 }
 
@@ -129,7 +129,7 @@ fn string_iterator_flag_regional_indicators() {
         for (let ch of s) { out.push(ch.length); out.push(ch.charCodeAt(0)); out.push(ch.charCodeAt(1)); }
         JSON.stringify(out)
     "#;
-    let s = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let s = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     let s = s.trim_start_matches('"').trim_end_matches('"');
     let v = parse_js_json_result(s);
     let arr = v.as_array().expect("expected array");
@@ -156,7 +156,7 @@ fn string_iterator_zwj_sequence() {
         for (let ch of s) { out.push(ch); }
         JSON.stringify(out)
     "#;
-    let s = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let s = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     println!("DEBUG: string_iterator_zwj_sequence result: {}", s);
     let s = s.trim_start_matches('"').trim_end_matches('"');
     let v = parse_js_json_result(s);
@@ -177,7 +177,7 @@ fn string_object_iterator_behaves_same() {
         for (let ch of s) { out.push(ch); }
         JSON.stringify(out)
     "#;
-    let s = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let s = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     let s = s.trim_start_matches('"').trim_end_matches('"');
     let v = parse_js_json_result(s);
     let arr = v.as_array().expect("expected array");

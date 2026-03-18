@@ -1793,6 +1793,46 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
     res
 }
 
+pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
+    match val {
+        Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) | Value::VmFunction(..) | Value::VmClosure(..) => value_to_string(val),
+        Value::String(s) => {
+            let rust_str = utf16_to_utf8(s);
+            format!("\"{}\"", rust_str.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+        Value::Undefined | Value::Null => "null".to_string(),
+        Value::VmArray(arr) => {
+            let borrow = arr.borrow();
+            let parts: Vec<String> = borrow
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    if borrow.props.contains_key(&format!("__deleted_{}", i)) {
+                        "null".to_string()
+                    } else {
+                        value_to_compact_result_string(v)
+                    }
+                })
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        Value::VmObject(obj) => {
+            let borrow = obj.borrow();
+            let parts: Vec<String> = borrow
+                .iter()
+                .filter(|(k, _)| !k.starts_with("__"))
+                .map(|(k, v)| {
+                    let escaped_key = k.replace('\\', "\\\\").replace('"', "\\\"");
+                    format!("\"{}\":{}", escaped_key, value_to_compact_result_string(v))
+                })
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        _ => value_to_string(val),
+    }
+}
+
 pub fn format_js_number(n: f64) -> String {
     log::debug!(
         "DBG format_js_number: n={} is_zero={} sign_neg={}",

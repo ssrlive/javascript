@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
 #[test]
 fn nested_object_defaults() {
@@ -7,7 +7,7 @@ fn nested_object_defaults() {
         let {a: {b: {c = 42}}} = {a: {b: {}}};
         c
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "42");
 }
 
@@ -17,7 +17,7 @@ fn nested_array_defaults() {
         let [[a = 7]] = [[undefined]];
         a
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "7");
 }
 
@@ -28,6 +28,6 @@ fn combined_nested_defaults() {
         let {p: [a = 1, b = 2]} = {p: [undefined]};
         a + b
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "3");
 }

@@ -1171,6 +1171,7 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(script:
                 Err(_) => Ok(format!("\"{}\"", s_utf8)),
             }
         }
+        Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
         _ => Ok(value_to_string(&v)),
     }
 }

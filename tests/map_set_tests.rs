@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -9,13 +9,13 @@ fn __init_test_logger() {
 
 #[test]
 fn test_map_constructor() {
-    let result = evaluate_script("Object.prototype.toString.call(new Map())", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("Object.prototype.toString.call(new Map())", None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"[object Map]\"");
 }
 
 #[test]
 fn test_map_set_and_get() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let map = new Map();
         map.set("key1", "value1");
@@ -30,7 +30,7 @@ fn test_map_set_and_get() {
 
 #[test]
 fn test_map_has() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let map = new Map();
         map.set("key", "value");
@@ -44,7 +44,7 @@ fn test_map_has() {
 
 #[test]
 fn test_map_size() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let map = new Map();
         map.set("a", 1);
@@ -59,7 +59,7 @@ fn test_map_size() {
 
 #[test]
 fn test_map_delete() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let map = new Map();
         map.set("key", "value");
@@ -77,7 +77,7 @@ fn test_map_delete() {
 
 #[test]
 fn test_map_clear() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let map = new Map();
         map.set("a", 1);
@@ -93,13 +93,13 @@ fn test_map_clear() {
 
 #[test]
 fn test_set_constructor() {
-    let result = evaluate_script("Object.prototype.toString.call(new Set())", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("Object.prototype.toString.call(new Set())", None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"[object Set]\"");
 }
 
 #[test]
 fn test_set_add_and_has() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let set = new Set();
         set.add("item1");
@@ -114,7 +114,7 @@ fn test_set_add_and_has() {
 
 #[test]
 fn test_set_size() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let set = new Set();
         set.add(1);
@@ -130,7 +130,7 @@ fn test_set_size() {
 
 #[test]
 fn test_set_delete() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let set = new Set();
         set.add("item");
@@ -147,7 +147,7 @@ fn test_set_delete() {
 
 #[test]
 fn test_set_clear() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let set = new Set();
         set.add(1);
@@ -163,7 +163,7 @@ fn test_set_clear() {
 
 #[test]
 fn test_map_keys_values_entries() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let map = new Map();
         map.set("a", 1);
@@ -182,7 +182,7 @@ fn test_map_keys_values_entries() {
 
 #[test]
 fn test_set_values() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let set = new Set();
         set.add(1);

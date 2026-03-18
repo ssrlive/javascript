@@ -52,9 +52,25 @@ struct LoopContext {
 
 #[derive(Debug, Clone)]
 struct TryFinallyContext {
-    break_flag_var: String,           // synthetic variable name for pending-break flag
+    action_id_var: String,            // synthetic variable name for pending control-flow action id
+    return_value_var: String,         // synthetic variable name for pending return value
     saved_cv_var: Option<String>,     // synthetic variable to save completion value before finally
     finally_jump_patches: Vec<usize>, // Jump addresses to patch to finally body start
+    pending_actions: Vec<PendingFinallyAction>,
+}
+
+#[derive(Debug, Clone)]
+enum PendingFinallyActionKind {
+    Break,
+    Continue,
+    Return,
+}
+
+#[derive(Debug, Clone)]
+struct PendingFinallyAction {
+    id: u32,
+    kind: PendingFinallyActionKind,
+    label: Option<String>,
 }
 
 impl<'gc> Compiler<'gc> {
@@ -165,6 +181,104 @@ impl<'gc> Compiler<'gc> {
         let is_strict = self.function_is_strict(body, force_strict);
         self.chunk.fn_strictness.insert(func_ip, is_strict);
         is_strict
+    }
+
+    fn collect_function_var_names_from_statement(stmt: &Statement, out: &mut Vec<String>) {
+        match &*stmt.kind {
+            StatementKind::Var(decls) => {
+                for (name, _) in decls {
+                    if !out.iter().any(|existing| existing == name) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+            StatementKind::Block(stmts)
+            | StatementKind::ForOf(_, _, _, stmts)
+            | StatementKind::ForAwaitOf(_, _, _, stmts)
+            | StatementKind::ForIn(_, _, _, stmts)
+            | StatementKind::ForOfExpr(_, _, stmts)
+            | StatementKind::ForInExpr(_, _, stmts)
+            | StatementKind::ForOfDestructuringArray(_, _, _, stmts)
+            | StatementKind::ForOfDestructuringObject(_, _, _, stmts)
+            | StatementKind::ForInDestructuringArray(_, _, _, stmts)
+            | StatementKind::ForInDestructuringObject(_, _, _, stmts)
+            | StatementKind::With(_, stmts) => {
+                for nested in stmts {
+                    Self::collect_function_var_names_from_statement(nested, out);
+                }
+            }
+            StatementKind::If(if_stmt) => {
+                for nested in &if_stmt.then_body {
+                    Self::collect_function_var_names_from_statement(nested, out);
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    for nested in else_body {
+                        Self::collect_function_var_names_from_statement(nested, out);
+                    }
+                }
+            }
+            StatementKind::DoWhile(body, _) | StatementKind::While(_, body) => {
+                for nested in body {
+                    Self::collect_function_var_names_from_statement(nested, out);
+                }
+            }
+            StatementKind::For(for_stmt) => {
+                if let Some(init) = &for_stmt.init {
+                    Self::collect_function_var_names_from_statement(init, out);
+                }
+                for nested in &for_stmt.body {
+                    Self::collect_function_var_names_from_statement(nested, out);
+                }
+            }
+            StatementKind::TryCatch(tc) => {
+                for nested in &tc.try_body {
+                    Self::collect_function_var_names_from_statement(nested, out);
+                }
+                if let Some(catch_body) = &tc.catch_body {
+                    for nested in catch_body {
+                        Self::collect_function_var_names_from_statement(nested, out);
+                    }
+                }
+                if let Some(finally_body) = &tc.finally_body {
+                    for nested in finally_body {
+                        Self::collect_function_var_names_from_statement(nested, out);
+                    }
+                }
+            }
+            StatementKind::Label(_, inner) => {
+                Self::collect_function_var_names_from_statement(inner, out);
+            }
+            StatementKind::Switch(sw) => {
+                for case in &sw.cases {
+                    let body = match case {
+                        crate::core::statement::SwitchCase::Case(_, body) => body,
+                        crate::core::statement::SwitchCase::Default(body) => body,
+                    };
+                    for nested in body {
+                        Self::collect_function_var_names_from_statement(nested, out);
+                    }
+                }
+            }
+            StatementKind::FunctionDeclaration(..) | StatementKind::Class(..) => {}
+            _ => {}
+        }
+    }
+
+    fn emit_hoisted_var_slots(&mut self, body: &[Statement]) {
+        let mut hoisted = Vec::new();
+        for stmt in body {
+            Self::collect_function_var_names_from_statement(stmt, &mut hoisted);
+        }
+
+        for name in hoisted {
+            if self.locals.iter().any(|existing| existing == &name) {
+                continue;
+            }
+            let undef_idx = self.chunk.add_constant(Value::Undefined);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(undef_idx);
+            self.locals.push(name);
+        }
     }
 
     /// Create a LoopContext, consuming any pending label
@@ -503,14 +617,53 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Return(expr_opt) => {
-                if let Some(expr) = expr_opt {
+                if !self.try_finally_stack.is_empty() {
+                    let action_id = self.try_finally_counter;
+                    self.try_finally_counter += 1;
+                    let (return_value_var, action_id_var) = {
+                        let tfc = self.try_finally_stack.last().unwrap();
+                        (tfc.return_value_var.clone(), tfc.action_id_var.clone())
+                    };
+
+                    if let Some(expr) = expr_opt {
+                        self.compile_expr(expr)?;
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
+                    self.emit_helper_set(&return_value_var);
+                    self.chunk.write_opcode(Opcode::Pop);
+
+                    let action_idx = self.chunk.add_constant(Value::Number(action_id as f64));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(action_idx);
+                    self.emit_helper_set(&action_id_var);
+                    self.chunk.write_opcode(Opcode::Pop);
+
+                    self.try_finally_stack
+                        .last_mut()
+                        .unwrap()
+                        .pending_actions
+                        .push(PendingFinallyAction {
+                            id: action_id,
+                            kind: PendingFinallyActionKind::Return,
+                            label: None,
+                        });
+
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    let patch = self.emit_jump(Opcode::Jump);
+                    self.try_finally_stack.last_mut().unwrap().finally_jump_patches.push(patch);
+                } else if let Some(expr) = expr_opt {
                     self.compile_expr(expr)?;
                 } else {
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(idx);
                 }
-                self.chunk.write_opcode(Opcode::Return);
+                if self.try_finally_stack.is_empty() {
+                    self.chunk.write_opcode(Opcode::Return);
+                }
             }
             StatementKind::Throw(expr) => {
                 self.compile_expr(expr)?;
@@ -518,17 +671,17 @@ impl<'gc> Compiler<'gc> {
             }
             StatementKind::Break(label_opt) => {
                 if !self.try_finally_stack.is_empty() {
-                    // Inside try-finally: set break flag, save cv, teardown try, jump to finally
-                    let tfc = self.try_finally_stack.last().unwrap();
-                    let flag_name = tfc.break_flag_var.clone();
-                    let saved_cv_name = tfc.saved_cv_var.clone();
-                    // Set break flag to 1 (true)
-                    let one_idx = self.chunk.add_constant(Value::Number(1.0));
+                    let action_id = self.try_finally_counter;
+                    self.try_finally_counter += 1;
+                    let (action_id_var, saved_cv_name) = {
+                        let tfc = self.try_finally_stack.last().unwrap();
+                        (tfc.action_id_var.clone(), tfc.saved_cv_var.clone())
+                    };
+                    let action_idx = self.chunk.add_constant(Value::Number(action_id as f64));
                     self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(one_idx);
-                    self.emit_helper_set(&flag_name);
+                    self.chunk.write_u16(action_idx);
+                    self.emit_helper_set(&action_id_var);
                     self.chunk.write_opcode(Opcode::Pop);
-                    // Save current completion value before entering finally
                     if let (Some(cv), Some(sv)) = (&self.completion_var, &saved_cv_name) {
                         let cv = cv.clone();
                         let sv = sv.clone();
@@ -536,9 +689,16 @@ impl<'gc> Compiler<'gc> {
                         self.emit_helper_set(&sv);
                         self.chunk.write_opcode(Opcode::Pop);
                     }
-                    // Teardown try handler
+                    self.try_finally_stack
+                        .last_mut()
+                        .unwrap()
+                        .pending_actions
+                        .push(PendingFinallyAction {
+                            id: action_id,
+                            kind: PendingFinallyActionKind::Break,
+                            label: label_opt.clone(),
+                        });
                     self.chunk.write_opcode(Opcode::TeardownTry);
-                    // Jump to finally body (will be patched later)
                     let patch = self.emit_jump(Opcode::Jump);
                     self.try_finally_stack.last_mut().unwrap().finally_jump_patches.push(patch);
                 } else {
@@ -557,17 +717,50 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Continue(label_opt) => {
-                let patch = self.emit_jump(Opcode::Jump);
-                if let Some(label) = label_opt {
-                    if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
-                        ctx.continue_patches.push(patch);
-                    } else {
-                        return Err(crate::raise_syntax_error!(format!("label '{}' not found for continue", label)));
+                if !self.try_finally_stack.is_empty() {
+                    let action_id = self.try_finally_counter;
+                    self.try_finally_counter += 1;
+                    let (action_id_var, saved_cv_name) = {
+                        let tfc = self.try_finally_stack.last().unwrap();
+                        (tfc.action_id_var.clone(), tfc.saved_cv_var.clone())
+                    };
+                    let action_idx = self.chunk.add_constant(Value::Number(action_id as f64));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(action_idx);
+                    self.emit_helper_set(&action_id_var);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    if let (Some(cv), Some(sv)) = (&self.completion_var, &saved_cv_name) {
+                        let cv = cv.clone();
+                        let sv = sv.clone();
+                        self.emit_helper_get(&cv);
+                        self.emit_helper_set(&sv);
+                        self.chunk.write_opcode(Opcode::Pop);
                     }
-                } else if self.loop_stack.last().is_some() {
-                    self.loop_stack.last_mut().unwrap().continue_patches.push(patch);
+                    self.try_finally_stack
+                        .last_mut()
+                        .unwrap()
+                        .pending_actions
+                        .push(PendingFinallyAction {
+                            id: action_id,
+                            kind: PendingFinallyActionKind::Continue,
+                            label: label_opt.clone(),
+                        });
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    let patch = self.emit_jump(Opcode::Jump);
+                    self.try_finally_stack.last_mut().unwrap().finally_jump_patches.push(patch);
                 } else {
-                    return Err(crate::raise_syntax_error!("continue statement not in loop"));
+                    let patch = self.emit_jump(Opcode::Jump);
+                    if let Some(label) = label_opt {
+                        if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
+                            ctx.continue_patches.push(patch);
+                        } else {
+                            return Err(crate::raise_syntax_error!(format!("label '{}' not found for continue", label)));
+                        }
+                    } else if self.loop_stack.last().is_some() {
+                        self.loop_stack.last_mut().unwrap().continue_patches.push(patch);
+                    } else {
+                        return Err(crate::raise_syntax_error!("continue statement not in loop"));
+                    }
                 }
             }
             StatementKind::Label(label, inner) => {
@@ -834,26 +1027,37 @@ impl<'gc> Compiler<'gc> {
 
                 // If there's a finally block, set up break-through-finally tracking
                 let has_finally = tc.finally_body.is_some();
-                let break_flag_var = if has_finally {
+                let _finally_dispatch = if has_finally {
                     let id = self.try_finally_counter;
                     self.try_finally_counter += 1;
-                    let flag_name = format!("__tf_brk_{}__", id);
-                    // Initialize break flag to 0
+                    let action_name = format!("__tf_act_{}__", id);
                     let zero = self.chunk.add_constant(Value::Number(0.0));
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(zero);
                     if self.scope_depth > 0 {
-                        self.locals.push(flag_name.clone());
+                        self.locals.push(action_name.clone());
                     } else {
-                        let n = crate::unicode::utf8_to_utf16(&flag_name);
+                        let n = crate::unicode::utf8_to_utf16(&action_name);
                         let ni = self.chunk.add_constant(Value::String(n));
                         self.chunk.write_opcode(Opcode::DefineGlobal);
                         self.chunk.write_u16(ni);
                     }
-                    // Also create a variable to save the completion value before finally
+
+                    let ret_name = format!("__tf_ret_{}__", id);
+                    let undef = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef);
+                    if self.scope_depth > 0 {
+                        self.locals.push(ret_name.clone());
+                    } else {
+                        let n = crate::unicode::utf8_to_utf16(&ret_name);
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(ni);
+                    }
+
                     let saved_cv_name = if self.completion_var.is_some() {
                         let sv_name = format!("__tf_cv_{}__", id);
-                        let undef = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(undef);
                         if self.scope_depth > 0 {
@@ -869,11 +1073,13 @@ impl<'gc> Compiler<'gc> {
                         None
                     };
                     self.try_finally_stack.push(TryFinallyContext {
-                        break_flag_var: flag_name.clone(),
+                        action_id_var: action_name.clone(),
+                        return_value_var: ret_name.clone(),
                         saved_cv_var: saved_cv_name,
                         finally_jump_patches: Vec::new(),
+                        pending_actions: Vec::new(),
                     });
-                    Some(flag_name)
+                    Some((action_name, ret_name))
                 } else {
                     None
                 };
@@ -912,12 +1118,12 @@ impl<'gc> Compiler<'gc> {
                 self.patch_jump(jump_over_catch);
 
                 // Patch break-through-finally jumps to here (the finally body start)
-                let saved_cv_var_for_restore = if has_finally {
+                let finally_context = if has_finally {
                     let tfc = self.try_finally_stack.pop().unwrap();
                     for jp in &tfc.finally_jump_patches {
                         self.patch_jump(*jp);
                     }
-                    tfc.saved_cv_var.clone()
+                    Some(tfc)
                 } else {
                     None
                 };
@@ -932,34 +1138,64 @@ impl<'gc> Compiler<'gc> {
                 self.end_block_scope(saved_finally);
 
                 // After finally: check break flag and restore cv, then jump to break target
-                if let Some(ref flag_name) = break_flag_var {
-                    self.emit_helper_get(flag_name);
-                    let skip_break = self.emit_jump(Opcode::JumpIfFalse);
+                if let Some(tfc) = finally_context {
+                    for action in &tfc.pending_actions {
+                        self.emit_helper_get(&tfc.action_id_var);
+                        let id_idx = self.chunk.add_constant(Value::Number(action.id as f64));
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(id_idx);
+                        self.chunk.write_opcode(Opcode::Equal);
+                        let next_check = self.emit_jump(Opcode::JumpIfFalse);
 
-                    // Restore completion value from saved_cv before breaking
-                    if let (Some(sv), Some(cv)) = (&saved_cv_var_for_restore, &self.completion_var) {
-                        let sv = sv.clone();
-                        let cv = cv.clone();
-                        self.emit_helper_get(&sv);
-                        self.emit_helper_set(&cv);
-                        self.chunk.write_opcode(Opcode::Pop);
+                        match action.kind {
+                            PendingFinallyActionKind::Break => {
+                                if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
+                                    let sv = sv.clone();
+                                    let cv = cv.clone();
+                                    self.emit_helper_get(&sv);
+                                    self.emit_helper_set(&cv);
+                                    self.chunk.write_opcode(Opcode::Pop);
+                                }
+                                let break_jump = self.emit_jump(Opcode::Jump);
+                                if let Some(label) = &action.label {
+                                    if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
+                                        ctx.break_patches.push(break_jump);
+                                    } else {
+                                        return Err(crate::raise_syntax_error!(format!("label '{}' not found for break", label)));
+                                    }
+                                } else if let Some(ctx) = self.loop_stack.last_mut() {
+                                    ctx.break_patches.push(break_jump);
+                                } else {
+                                    return Err(crate::raise_syntax_error!("break statement not in loop or switch"));
+                                }
+                            }
+                            PendingFinallyActionKind::Continue => {
+                                let continue_jump = self.emit_jump(Opcode::Jump);
+                                if let Some(label) = &action.label {
+                                    if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
+                                        ctx.continue_patches.push(continue_jump);
+                                    } else {
+                                        return Err(crate::raise_syntax_error!(format!("label '{}' not found for continue", label)));
+                                    }
+                                } else if let Some(ctx) = self.loop_stack.last_mut() {
+                                    ctx.continue_patches.push(continue_jump);
+                                } else {
+                                    return Err(crate::raise_syntax_error!("continue statement not in loop"));
+                                }
+                            }
+                            PendingFinallyActionKind::Return => {
+                                self.emit_helper_get(&tfc.return_value_var);
+                                self.chunk.write_opcode(Opcode::Return);
+                            }
+                        }
+
+                        self.patch_jump(next_check);
                     }
 
-                    // Actual break jump (registered as break patch)
-                    let break_jump = self.emit_jump(Opcode::Jump);
-                    if let Some(ctx) = self.loop_stack.last_mut() {
-                        ctx.break_patches.push(break_jump);
-                    }
-
-                    self.patch_jump(skip_break);
-
-                    // Clean up synthetic variables
                     if self.scope_depth > 0 {
-                        let flag = flag_name.clone();
-                        self.locals.retain(|l| l != &flag);
-                        if let Some(ref sv) = saved_cv_var_for_restore {
-                            let sv = sv.clone();
-                            self.locals.retain(|l| l != &sv);
+                        self.locals.retain(|l| l != &tfc.action_id_var && l != &tfc.return_value_var);
+                        if let Some(sv) = &tfc.saved_cv_var {
+                            self.locals.retain(|l| l != sv);
                         }
                     }
                 }
@@ -1026,6 +1262,8 @@ impl<'gc> Compiler<'gc> {
                         }
                     }
                 }
+
+                self.emit_hoisted_var_slots(body);
 
                 self.emit_parameter_default_initializers(params)?;
 
@@ -1440,15 +1678,13 @@ impl<'gc> Compiler<'gc> {
                     self.setup_completion_var();
                 }
                 // Compile discriminant once, store in synthetic local/global
+                let switch_name = format!("__switch_{}__", self.forin_counter);
+                self.forin_counter += 1;
                 self.compile_expr(&sw.expr)?;
-                if self.scope_depth > 0 {
-                    self.locals.push("__switch__".to_string());
-                } else {
-                    let n = crate::unicode::utf8_to_utf16("__switch__");
-                    let ni = self.chunk.add_constant(Value::String(n));
-                    self.chunk.write_opcode(Opcode::DefineGlobal);
-                    self.chunk.write_u16(ni);
-                }
+                let n = crate::unicode::utf8_to_utf16(&switch_name);
+                let ni = self.chunk.add_constant(Value::String(n));
+                self.chunk.write_opcode(Opcode::DefineGlobal);
+                self.chunk.write_u16(ni);
 
                 // We need break patches
                 let ctx = LoopContext::default();
@@ -1462,7 +1698,7 @@ impl<'gc> Compiler<'gc> {
                     match case {
                         crate::core::statement::SwitchCase::Case(val_expr, _body) => {
                             // push __switch__, push case value, compare
-                            self.emit_helper_get("__switch__");
+                            self.emit_helper_get(&switch_name);
                             self.compile_expr(val_expr)?;
                             self.chunk.write_opcode(Opcode::Equal);
                             let body_jump = self.emit_jump(Opcode::JumpIfTrue);
@@ -1510,10 +1746,9 @@ impl<'gc> Compiler<'gc> {
                     self.patch_jump_to(bp, end_ip);
                 }
 
-                // Clean up synthetic local
-                if self.scope_depth > 0 {
-                    self.locals.retain(|l| l != "__switch__");
-                }
+                let delete_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&switch_name)));
+                self.chunk.write_opcode(Opcode::DeleteGlobal);
+                self.chunk.write_u16(delete_idx);
 
                 if is_last {
                     self.emit_load_completion();
@@ -2337,6 +2572,8 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
 
+                self.emit_hoisted_var_slots(body);
+
                 if body.len() == 1 {
                     if let StatementKind::Expr(expr) = &*body[0].kind {
                         // Single expression body: implicitly return the value.
@@ -2660,6 +2897,50 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(rhs)?;
                 self.chunk.write_opcode(Opcode::Pow);
                 self.compile_store(lhs)?;
+            }
+            Expr::LogicalAndAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.chunk.write_opcode(Opcode::Dup);
+                let end_jump = self.emit_jump(Opcode::JumpIfFalse);
+                self.chunk.write_opcode(Opcode::Pop);
+                self.compile_expr(rhs)?;
+                self.compile_store(lhs)?;
+                self.patch_jump(end_jump);
+            }
+            Expr::LogicalOrAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+                self.chunk.write_opcode(Opcode::Dup);
+                let assign_jump = self.emit_jump(Opcode::JumpIfFalse);
+                let end_jump = self.emit_jump(Opcode::Jump);
+                self.patch_jump(assign_jump);
+                self.chunk.write_opcode(Opcode::Pop);
+                self.compile_expr(rhs)?;
+                self.compile_store(lhs)?;
+                self.patch_jump(end_jump);
+            }
+            Expr::NullishAssign(lhs, rhs) => {
+                self.compile_expr(lhs)?;
+
+                self.chunk.write_opcode(Opcode::Dup);
+                let null_idx = self.chunk.add_constant(Value::Null);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(null_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let assign_if_null = self.emit_jump(Opcode::JumpIfTrue);
+
+                self.chunk.write_opcode(Opcode::Dup);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.chunk.write_opcode(Opcode::Equal);
+                let keep_current = self.emit_jump(Opcode::JumpIfFalse);
+
+                self.patch_jump(assign_if_null);
+                self.chunk.write_opcode(Opcode::Pop);
+                self.compile_expr(rhs)?;
+                self.compile_store(lhs)?;
+
+                self.patch_jump(keep_current);
             }
             // Ternary: cond ? a : b
             Expr::Conditional(cond, then_expr, else_expr) => {
@@ -3519,8 +3800,7 @@ impl<'gc> Compiler<'gc> {
             }
         }
 
-        self.emit_parameter_default_initializers(params)?;
-
+        self.emit_hoisted_var_slots(body);
         self.emit_parameter_default_initializers(params)?;
 
         for (i, s) in body.iter().enumerate() {
@@ -3643,6 +3923,8 @@ impl<'gc> Compiler<'gc> {
                 _ => {}
             }
         }
+
+        self.emit_hoisted_var_slots(body);
 
         // Collect yielded values into a synthetic local array.
         let items_name = format!("__async_gen_items_{}__", self.try_finally_counter);

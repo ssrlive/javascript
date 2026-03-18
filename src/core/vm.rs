@@ -479,6 +479,15 @@ impl<'gc> VM<'gc> {
                         Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(values))))
                     }
                     Value::VmObject(obj) => {
+                        if let Some(Value::String(s)) = obj.borrow().get("__value__").cloned() {
+                            let text = crate::unicode::utf16_to_utf8(&s);
+                            let values = text
+                                .chars()
+                                .map(|ch| Value::String(crate::unicode::utf8_to_utf16(&ch.to_string())))
+                                .collect::<Vec<_>>();
+                            return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(values))));
+                        }
+
                         let iterable = Value::VmObject(obj.clone());
                         let iter_fn = self.read_named_property(iterable.clone(), "iterator");
                         let iterator = match iter_fn {
@@ -5077,9 +5086,8 @@ impl<'gc> VM<'gc> {
                             _ => 0,
                         })
                         .unwrap_or(0);
-                    let chars: Vec<char> = rust_str.chars().collect();
-                    if idx < chars.len() {
-                        return Value::Number(chars[idx] as u32 as f64);
+                    if idx < s.len() {
+                        return Value::Number(s[idx] as f64);
                     }
                     return Value::Number(f64::NAN);
                 }

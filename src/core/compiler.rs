@@ -547,7 +547,7 @@ impl<'gc> Compiler<'gc> {
                     } else if let Some(ctx) = self.loop_stack.last_mut() {
                         ctx.break_patches.push(patch);
                     } else {
-                        return Err(crate::raise_syntax_error!("break outside of loop"));
+                        return Err(crate::raise_syntax_error!("break statement not in loop or switch"));
                     }
                 }
             }
@@ -562,7 +562,7 @@ impl<'gc> Compiler<'gc> {
                 } else if self.loop_stack.last().is_some() {
                     self.loop_stack.last_mut().unwrap().continue_patches.push(patch);
                 } else {
-                    return Err(crate::raise_syntax_error!("continue outside of loop"));
+                    return Err(crate::raise_syntax_error!("continue statement not in loop"));
                 }
             }
             StatementKind::Label(label, inner) => {

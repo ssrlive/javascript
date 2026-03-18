@@ -8032,8 +8032,13 @@ impl<'gc> VM<'gc> {
                                 }
                             } else {
                                 let key = value_to_string(&index);
-                                let val = arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined);
-                                self.stack.push(val);
+                                if let Ok(i) = key.parse::<usize>() {
+                                    let val = arr.borrow().get(i).cloned().unwrap_or(Value::Undefined);
+                                    self.stack.push(val);
+                                } else {
+                                    let val = arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined);
+                                    self.stack.push(val);
+                                }
                             }
                         }
                         Value::VmObject(map) => {

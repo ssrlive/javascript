@@ -390,6 +390,7 @@ pub struct VM<'gc> {
     ip: usize,
     stack: Vec<Value<'gc>>,
     globals: HashMap<String, Value<'gc>>,
+    const_globals: std::collections::HashSet<String>,
     frames: Vec<CallFrame<'gc>>,
     try_stack: Vec<TryFrame>,
     this_stack: Vec<Value<'gc>>, // this binding stack
@@ -412,6 +413,7 @@ impl<'gc> VM<'gc> {
             ip: 0,
             stack: Vec::with_capacity(256),
             globals: HashMap::new(),
+            const_globals: std::collections::HashSet::new(),
             frames: Vec::new(),
             try_stack: Vec::new(),
             this_stack: vec![Value::VmObject(global_this.clone())],
@@ -2721,7 +2723,7 @@ impl<'gc> VM<'gc> {
                         while pc < code.len() {
                             let op = code[pc];
                             pc += 1;
-                            if op == Opcode::DefineGlobal as u8 && pc + 1 < code.len() {
+                            if (op == Opcode::DefineGlobal as u8 || op == Opcode::DefineGlobalConst as u8) && pc + 1 < code.len() {
                                 let idx = (code[pc] as u16 | (code[pc + 1] as u16) << 8) as usize;
                                 if idx < constants.len()
                                     && let Value::String(s) = &constants[idx]
@@ -2738,6 +2740,7 @@ impl<'gc> VM<'gc> {
                                     Ok(
                                         Opcode::Constant
                                         | Opcode::DefineGlobal
+                                        | Opcode::DefineGlobalConst
                                         | Opcode::GetGlobal
                                         | Opcode::SetGlobal
                                         | Opcode::GetProperty
@@ -6580,6 +6583,16 @@ impl<'gc> VM<'gc> {
                         self.globals.insert(name_str, val);
                     }
                 }
+                Opcode::DefineGlobalConst => {
+                    let name_idx = self.read_u16() as usize;
+                    let name_val = &self.chunk.constants[name_idx];
+                    if let Value::String(s) = name_val {
+                        let name_str = crate::unicode::utf16_to_utf8(s);
+                        let val = self.stack.pop().unwrap_or(Value::Undefined);
+                        self.globals.insert(name_str.clone(), val);
+                        self.const_globals.insert(name_str);
+                    }
+                }
                 Opcode::GetGlobal => {
                     let name_idx = self.read_u16() as usize;
                     let name_val = &self.chunk.constants[name_idx];
@@ -6685,6 +6698,16 @@ impl<'gc> VM<'gc> {
                     let name_val = &self.chunk.constants[name_idx];
                     if let Value::String(s) = name_val {
                         let name_str = crate::unicode::utf16_to_utf8(s);
+                        if self.const_globals.contains(&name_str) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Assignment to constant variable")),
+                            );
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                            continue;
+                        }
                         // Assignment leaves the value on the stack, so just peek
                         let val = self.stack.last().cloned().unwrap_or(Value::Undefined);
                         // In strict JS, assigning to undefined global throws. Here we just set or define.
@@ -7490,6 +7513,7 @@ impl<'gc> VM<'gc> {
                         String::new()
                     };
                     self.globals.remove(&name);
+                    self.const_globals.remove(&name);
                 }
                 Opcode::JumpIfTrue => {
                     let offset = self.read_u16();
@@ -7743,7 +7767,7 @@ impl<'gc> VM<'gc> {
                             }
                         },
                         Value::Object(obj_ref) => {
-                            if let Some(v) = crate::core::object_get_key_value(&obj_ref, key.as_str()) {
+                            if let Some(v) = crate::core::object_get_key_value(obj_ref, key.as_str()) {
                                 self.stack.push((*v.borrow()).clone());
                             } else {
                                 self.stack.push(Value::Undefined);
@@ -8326,7 +8350,7 @@ impl<'gc> VM<'gc> {
                             _ => Value::Undefined,
                         },
                         Value::Object(obj_ref) => {
-                            if let Some(v) = crate::core::object_get_key_value(&obj_ref, key.as_str()) {
+                            if let Some(v) = crate::core::object_get_key_value(obj_ref, key.as_str()) {
                                 (*v.borrow()).clone()
                             } else {
                                 Value::Undefined

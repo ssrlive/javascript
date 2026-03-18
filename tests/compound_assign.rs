@@ -8,7 +8,7 @@ fn __init_test_logger() {
 }
 
 fn eval(script: &str) -> Result<String, JSError> {
-    evaluate_script(script, None::<&std::path::Path>)
+    evaluate_script_with_vm(script, None::<&std::path::Path>)
 }
 
 #[test]

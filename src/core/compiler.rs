@@ -267,7 +267,7 @@ impl<'gc> Compiler<'gc> {
                     } else {
                         let name_u16 = crate::unicode::utf8_to_utf16(name);
                         let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_opcode(Opcode::DefineGlobalConst);
                         self.chunk.write_u16(name_idx);
                     }
                 }
@@ -296,10 +296,24 @@ impl<'gc> Compiler<'gc> {
                 let saved_locals = self.locals.len();
                 // Collect function names declared in this block (for strict-mode block scoping)
                 let mut block_fn_names: Vec<String> = Vec::new();
+                let mut block_lexical_names: Vec<String> = Vec::new();
                 if self.scope_depth == 0 && self.current_strict {
                     for s in statements.iter() {
-                        if let StatementKind::FunctionDeclaration(name, ..) = &*s.kind {
-                            block_fn_names.push(name.clone());
+                        match &*s.kind {
+                            StatementKind::FunctionDeclaration(name, ..) => {
+                                block_fn_names.push(name.clone());
+                            }
+                            StatementKind::Let(decls) => {
+                                for (name, _) in decls {
+                                    block_lexical_names.push(name.clone());
+                                }
+                            }
+                            StatementKind::Const(decls) => {
+                                for (name, _) in decls {
+                                    block_lexical_names.push(name.clone());
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -326,6 +340,12 @@ impl<'gc> Compiler<'gc> {
                 // In strict mode at top level, remove block-scoped function declarations from globals
                 for fn_name in block_fn_names {
                     let name_u16 = crate::unicode::utf8_to_utf16(&fn_name);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::DeleteGlobal);
+                    self.chunk.write_u16(name_idx);
+                }
+                for name in block_lexical_names {
+                    let name_u16 = crate::unicode::utf8_to_utf16(&name);
                     let name_idx = self.chunk.add_constant(Value::String(name_u16));
                     self.chunk.write_opcode(Opcode::DeleteGlobal);
                     self.chunk.write_u16(name_idx);
@@ -2956,10 +2976,31 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(key_idx);
             }
-            Expr::Index(_obj, _idx) => {
-                // Index store needs 3-way rotate which is complex
-                // For now, fall through to error — handle inline in inc/dec if needed
-                return Err(crate::raise_syntax_error!("Index increment/decrement not yet supported in VM"));
+            Expr::Index(obj, idx_expr) => {
+                // Preserve computed RHS value, then evaluate target and emit SetIndex.
+                // Stack on entry: [..., new_val]
+                let temp = format!("__idx_store_{}__", self.completion_counter);
+                self.completion_counter += 1;
+                self.emit_define_var(&temp);
+
+                self.compile_expr(obj)?;
+                self.compile_expr(idx_expr)?;
+                self.emit_helper_get(&temp);
+                self.chunk.write_opcode(Opcode::SetIndex);
+
+                if self.scope_depth > 0 {
+                    // Local temp still sits under result value: [..., temp, result]
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    if let Some(pos) = self.locals.iter().rposition(|l| l == &temp) {
+                        self.locals.remove(pos);
+                    }
+                } else {
+                    let name_u16 = crate::unicode::utf8_to_utf16(&temp);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::DeleteGlobal);
+                    self.chunk.write_u16(name_idx);
+                }
             }
             _ => {
                 return Err(crate::raise_syntax_error!("Invalid increment/decrement target for VM"));

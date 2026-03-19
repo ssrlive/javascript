@@ -3321,6 +3321,10 @@ impl<'gc> Compiler<'gc> {
                 );
                 map.insert("__regex_flags__".to_string(), Value::String(crate::unicode::utf8_to_utf16(flags)));
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RegExp")));
+                map.insert(
+                    "__toStringTag__".to_string(),
+                    Value::String(crate::unicode::utf8_to_utf16("RegExp")),
+                );
                 map.insert("source".to_string(), Value::String(crate::unicode::utf8_to_utf16(pattern)));
                 map.insert("flags".to_string(), Value::String(crate::unicode::utf8_to_utf16(flags)));
                 map.insert("global".to_string(), Value::Boolean(flags.contains('g')));

@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 // Init logger for tests
 #[ctor::ctor]
@@ -16,7 +16,7 @@ fn test_for_single_statement_body() {
         }
         f();
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"0,1,2\"");
 }
 
@@ -31,7 +31,7 @@ fn test_while_single_statement_body() {
         }
         f();
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "6");
 }
 
@@ -46,7 +46,7 @@ fn test_do_while_single_statement_body() {
         }
         f();
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"0-1\"");
 }
 
@@ -60,6 +60,6 @@ fn test_if_single_statement_then_and_else() {
         }
         [f(true), f(false)].join(',');
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"1,2\"");
 }

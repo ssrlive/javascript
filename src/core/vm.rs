@@ -433,6 +433,8 @@ pub struct VM<'gc> {
     symbol_registry: HashMap<String, Value<'gc>>, // Symbol.for() registry
     pending_throw: Option<Value<'gc>>,            // deferred throw from call_builtin
     direct_eval: bool,                            // true when current eval is a direct call
+    script_source: Option<String>,
+    script_path: Option<String>,
 }
 
 impl<'gc> VM<'gc> {
@@ -455,10 +457,18 @@ impl<'gc> VM<'gc> {
             symbol_registry: HashMap::new(),
             pending_throw: None,
             direct_eval: false,
+            script_source: None,
+            script_path: None,
         };
         vm.register_builtins();
         vm
     }
+
+    pub fn set_source_context(&mut self, script_source: &str, script_path: Option<&std::path::Path>) {
+        self.script_source = Some(script_source.to_string());
+        self.script_path = script_path.map(|path| path.display().to_string());
+    }
+
     fn make_host_fn(name: &str) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__host_fn__".to_string(), Value::String(crate::unicode::utf8_to_utf16(name)));
@@ -1004,6 +1014,13 @@ impl<'gc> VM<'gc> {
                     Value::String(crate::unicode::utf8_to_utf16(&joined))
                 } else {
                     Value::String(crate::unicode::utf8_to_utf16(""))
+                }
+            }
+            "regexp.toString" => {
+                if let Some(Value::VmObject(re_obj)) = receiver {
+                    Value::String(crate::unicode::utf8_to_utf16(&self.regex_to_string(&re_obj)))
+                } else {
+                    Value::String(crate::unicode::utf8_to_utf16("/[object Object]/"))
                 }
             }
             "array.entries" => {
@@ -2936,6 +2953,325 @@ impl<'gc> VM<'gc> {
             }
         }
         value_to_string(val)
+    }
+
+    fn current_script_file(&self) -> &str {
+        self.script_path.as_deref().unwrap_or("<anonymous>")
+    }
+
+    fn source_lines(&self) -> Option<Vec<&str>> {
+        self.script_source.as_ref().map(|source| source.split('\n').collect())
+    }
+
+    fn current_frame_names(&self) -> Vec<String> {
+        self.frames
+            .iter()
+            .filter_map(|frame| self.chunk.fn_names.get(&frame.func_ip).cloned())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    fn find_function_declaration_line(lines: &[&str], function_name: &str) -> Option<usize> {
+        let patterns = [
+            format!("function {}(", function_name),
+            format!(".{} = function", function_name),
+            format!("{} = function", function_name),
+            format!("{}: function", function_name),
+        ];
+
+        lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| patterns.iter().any(|pattern| line.contains(pattern)))
+            .map(|(index, _)| index + 1)
+    }
+
+    fn find_line_and_column(lines: &[&str], needle: &str, start_line: usize, end_line: usize) -> Option<(usize, usize)> {
+        let start_index = start_line.saturating_sub(1);
+        let end_index = end_line.min(lines.len());
+        for (offset, line) in lines[start_index..end_index].iter().enumerate() {
+            if let Some(column) = line.find(needle) {
+                return Some((start_index + offset + 1, column + 1));
+            }
+        }
+        None
+    }
+
+    fn infer_throw_site(&self, current_function: Option<&str>) -> Option<(usize, usize)> {
+        let lines = self.source_lines()?;
+        if let Some(function_name) = current_function
+            && let Some(decl_line) = Self::find_function_declaration_line(&lines, function_name)
+            && let Some(found) = Self::find_line_and_column(&lines, "throw ", decl_line, lines.len())
+        {
+            return Some(found);
+        }
+        Self::find_line_and_column(&lines, "throw ", 1, lines.len())
+    }
+
+    fn infer_callsite(&self, function_name: &str, scope_function: Option<&str>) -> Option<(usize, usize)> {
+        let lines = self.source_lines()?;
+        let call_patterns = [format!("{}(", function_name), format!(".{}(", function_name)];
+
+        let (start_line, end_line) = if let Some(scope_name) = scope_function {
+            if let Some(decl_line) = Self::find_function_declaration_line(&lines, scope_name) {
+                (decl_line, lines.len())
+            } else {
+                (1, lines.len())
+            }
+        } else {
+            (1, lines.len())
+        };
+
+        for line_number in start_line..=end_line {
+            let line = lines.get(line_number.saturating_sub(1))?;
+            if line.contains(&format!("function {}(", function_name)) {
+                continue;
+            }
+            if let Some(column) = line.find(&call_patterns[1]) {
+                return Some((line_number, column + 2));
+            }
+            if let Some(column) = line.find(&call_patterns[0]) {
+                return Some((line_number, column + 1));
+            }
+        }
+
+        None
+    }
+
+    fn build_error_stack(&self, error_name: &str, message: &str) -> (Option<(usize, usize)>, Vec<String>) {
+        let mut lines = vec![Self::format_error_name_message(error_name, message)];
+        let frame_names = self.current_frame_names();
+
+        if frame_names.is_empty() {
+            if let Some((line, column)) = self.infer_throw_site(None) {
+                lines.push(format!("    at <anonymous> ({}:{}:{})", self.current_script_file(), line, column));
+                return (Some((line, column)), lines);
+            }
+            return (None, lines);
+        }
+
+        let current_function = frame_names.last().map(String::as_str);
+        let throw_site = self.infer_throw_site(current_function);
+        if let Some((line, column)) = throw_site {
+            let function_name = current_function.unwrap_or("<anonymous>");
+            lines.push(format!(
+                "    at {} ({}:{}:{})",
+                function_name,
+                self.current_script_file(),
+                line,
+                column
+            ));
+        }
+
+        for pair in frame_names.windows(2).rev() {
+            let caller_name = &pair[0];
+            let callee_name = &pair[1];
+            if let Some((line, column)) = self.infer_callsite(callee_name, Some(caller_name)) {
+                lines.push(format!(
+                    "    at {} ({}:{}:{})",
+                    caller_name,
+                    self.current_script_file(),
+                    line,
+                    column
+                ));
+            }
+        }
+
+        if let Some(outermost_name) = frame_names.first()
+            && let Some((line, column)) = self.infer_callsite(outermost_name, None)
+        {
+            lines.push(format!("    at <anonymous> ({}:{}:{})", self.current_script_file(), line, column));
+        }
+
+        (throw_site, lines)
+    }
+
+    fn annotate_error_object(&self, map: &Rc<RefCell<IndexMap<String, Value<'gc>>>>) {
+        let mut borrow = map.borrow_mut();
+        let type_name = borrow
+            .get("__type__")
+            .map(value_to_string)
+            .or_else(|| borrow.get("name").map(value_to_string))
+            .unwrap_or_else(|| "Error".to_string());
+        let message = borrow.get("message").map(value_to_string).unwrap_or_default();
+        borrow
+            .entry("name".to_string())
+            .or_insert_with(|| Value::String(crate::unicode::utf8_to_utf16(&type_name)));
+        let needs_stack = !matches!(borrow.get("stack"), Some(Value::String(stack)) if !stack.is_empty());
+        let needs_line = !matches!(borrow.get("__line__"), Some(Value::Number(_)));
+        let needs_column = !matches!(borrow.get("__column__"), Some(Value::Number(_)));
+        drop(borrow);
+
+        if !(needs_stack || needs_line || needs_column) {
+            return;
+        }
+
+        let (throw_site, stack_lines) = self.build_error_stack(&type_name, &message);
+        let mut borrow = map.borrow_mut();
+        if needs_stack {
+            borrow.insert(
+                "stack".to_string(),
+                Value::String(crate::unicode::utf8_to_utf16(&stack_lines.join("\n"))),
+            );
+        }
+        if let Some((line, column)) = throw_site {
+            if needs_line {
+                borrow.insert("__line__".to_string(), Value::Number(line as f64));
+            }
+            if needs_column {
+                borrow.insert("__column__".to_string(), Value::Number(column as f64));
+            }
+        }
+    }
+
+    fn error_kind_from_name(name: &str, message: String) -> crate::error::JSErrorKind {
+        match name {
+            "TypeError" => crate::error::JSErrorKind::TypeError { message },
+            "RangeError" => crate::error::JSErrorKind::RangeError { message },
+            "ReferenceError" => crate::error::JSErrorKind::ReferenceError { message },
+            "SyntaxError" => crate::error::JSErrorKind::SyntaxError { message },
+            "URIError" => crate::error::JSErrorKind::URIError { message },
+            _ => crate::error::JSErrorKind::Throw(message),
+        }
+    }
+
+    pub(crate) fn vm_error_to_js_error(&self, thrown: Value<'gc>) -> JSError {
+        if let Value::VmObject(map) = &thrown {
+            self.annotate_error_object(map);
+            let borrow = map.borrow();
+            let type_name = borrow
+                .get("__type__")
+                .map(value_to_string)
+                .or_else(|| borrow.get("name").map(value_to_string))
+                .unwrap_or_else(|| "Error".to_string());
+            let message = borrow
+                .get("message")
+                .map(value_to_string)
+                .unwrap_or_else(|| value_to_string(&thrown));
+            let error_text = if type_name == "Error" {
+                format!("Uncaught: Error: {}", message)
+            } else if type_name.is_empty() {
+                format!("Uncaught: {}", message)
+            } else {
+                format!("Uncaught: {}: {}", type_name, message)
+            };
+            let mut err = crate::make_js_error!(Self::error_kind_from_name(&type_name, error_text));
+            if let Some(Value::Number(line)) = borrow.get("__line__") {
+                let column = borrow
+                    .get("__column__")
+                    .and_then(|value| {
+                        if let Value::Number(column) = value {
+                            Some(*column as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                err.set_js_location(*line as usize, column);
+            }
+            if let Some(Value::String(stack)) = borrow.get("stack") {
+                let stack_lines = crate::unicode::utf16_to_utf8(stack)
+                    .lines()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| line.starts_with("at "))
+                    .collect();
+                err.set_stack(stack_lines);
+            }
+            return err;
+        }
+
+        crate::make_js_error!(crate::error::JSErrorKind::Throw(format!("Uncaught: {}", value_to_string(&thrown))))
+    }
+
+    fn vm_value_from_error(&self, err: &JSError) -> Value<'gc> {
+        let mut raw_message = err.message();
+        for prefix in ["SyntaxError: Uncaught: ", "Error: Uncaught: ", "Uncaught: "] {
+            if let Some(stripped) = raw_message.strip_prefix(prefix) {
+                raw_message = stripped.to_string();
+                break;
+            }
+        }
+
+        if matches!(err.kind(), crate::error::JSErrorKind::Throw(_)) && err.js_line().is_none() && err.stack().is_empty() {
+            if let Ok(number) = raw_message.parse::<f64>() {
+                return Value::Number(number);
+            }
+            return Value::String(crate::unicode::utf8_to_utf16(&raw_message));
+        }
+
+        let (name, message) = if let Some((name, message)) = raw_message.split_once(": ") {
+            (name.to_string(), message.to_string())
+        } else {
+            ("Error".to_string(), raw_message)
+        };
+
+        let mut map = IndexMap::new();
+        map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(&name)));
+        map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16(&name)));
+        map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&message)));
+        if let Some(line) = err.js_line() {
+            map.insert("__line__".to_string(), Value::Number(line as f64));
+        }
+        if let Some(column) = err.js_column() {
+            map.insert("__column__".to_string(), Value::Number(column as f64));
+        }
+        if !err.stack().is_empty() {
+            let header = Self::format_error_name_message(&name, &message);
+            let stack = std::iter::once(header)
+                .chain(err.stack().iter().map(|line| format!("    {}", line)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            map.insert("stack".to_string(), Value::String(crate::unicode::utf8_to_utf16(&stack)));
+        }
+        Value::VmObject(Rc::new(RefCell::new(map)))
+    }
+
+    fn regex_to_string(&self, re_obj: &Rc<RefCell<IndexMap<String, Value<'gc>>>>) -> String {
+        let borrow = re_obj.borrow();
+        let pattern = borrow
+            .get("source")
+            .map(value_to_string)
+            .unwrap_or_else(|| borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default());
+        let flags = borrow
+            .get("flags")
+            .map(value_to_string)
+            .unwrap_or_else(|| borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default());
+        format!("/{}/{}", pattern, flags)
+    }
+
+    fn regex_prepare_input(&self, input: &str, flags: &str) -> (Vec<u16>, bool) {
+        let input_u16: Vec<u16> = input.encode_utf16().collect();
+        if !flags.contains('R') {
+            return (input_u16, false);
+        }
+
+        let mut normalized = Vec::with_capacity(input_u16.len());
+        let mut index = 0usize;
+        while index < input_u16.len() {
+            if input_u16[index] == '\r' as u16 && index + 1 < input_u16.len() && input_u16[index + 1] == '\n' as u16 {
+                normalized.push('\n' as u16);
+                index += 2;
+            } else {
+                normalized.push(input_u16[index]);
+                index += 1;
+            }
+        }
+        (normalized, true)
+    }
+
+    fn regex_map_index_back(original: &[u16], normalized_index: usize) -> usize {
+        let mut original_index = 0usize;
+        let mut normalized_pos = 0usize;
+        while normalized_pos < normalized_index && original_index < original.len() {
+            if original[original_index] == '\r' as u16 && original_index + 1 < original.len() && original[original_index + 1] == '\n' as u16
+            {
+                original_index += 2;
+            } else {
+                original_index += 1;
+            }
+            normalized_pos += 1;
+        }
+        original_index
     }
 
     fn resolve_eval_binding(&self, name: &str) -> Option<Value<'gc>> {
@@ -5213,15 +5549,6 @@ impl<'gc> VM<'gc> {
                 }
             };
 
-            let normalize_reason = |msg: &str| -> Value<'gc> {
-                let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(msg);
-                if let Ok(n) = payload.parse::<f64>() {
-                    Value::Number(n)
-                } else {
-                    Value::String(crate::unicode::utf8_to_utf16(payload))
-                }
-            };
-
             let mut propagated_rejected = is_rejected;
             let mut callback_result = receiver_value.clone();
 
@@ -5239,7 +5566,7 @@ impl<'gc> VM<'gc> {
                                 propagated_rejected = false;
                             }
                             Err(err) => {
-                                callback_result = normalize_reason(&err.message());
+                                callback_result = self.vm_value_from_error(&err);
                                 propagated_rejected = true;
                             }
                         }
@@ -5255,7 +5582,7 @@ impl<'gc> VM<'gc> {
                                 propagated_rejected = false;
                             }
                             Err(err) => {
-                                callback_result = normalize_reason(&err.message());
+                                callback_result = self.vm_value_from_error(&err);
                                 propagated_rejected = true;
                             }
                         }
@@ -6940,21 +7267,31 @@ impl<'gc> VM<'gc> {
         drop(borrow);
 
         let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
-        let re = match get_or_compile_regex(&pattern_u16, &flags) {
+        let regress_flags: String = flags.chars().filter(|flag| "gimsuvy".contains(*flag)).collect();
+        let re = match get_or_compile_regex(&pattern_u16, &regress_flags) {
             Ok(r) => r,
             Err(_) => return Value::Null,
         };
 
         let input_u16: Vec<u16> = input.encode_utf16().collect();
+        let (working_input, mapped_input) = self.regex_prepare_input(input, &flags);
         let match_result = if flags.contains('u') || flags.contains('v') {
-            re.find_from_utf16(&input_u16, last_index).next()
+            re.find_from_utf16(&working_input, last_index).next()
         } else {
-            re.find_from_ucs2(&input_u16, last_index).next()
+            re.find_from_ucs2(&working_input, last_index).next()
         };
 
         match match_result {
             Some(m) => {
-                let matched_str = &input_u16[m.range.start..m.range.end];
+                let (match_start, match_end) = if mapped_input {
+                    (
+                        Self::regex_map_index_back(&input_u16, m.range.start),
+                        Self::regex_map_index_back(&input_u16, m.range.end),
+                    )
+                } else {
+                    (m.range.start, m.range.end)
+                };
+                let matched_str = &input_u16[match_start..match_end];
                 let matched = crate::unicode::utf16_to_utf8(matched_str);
 
                 let mut result_items: Vec<Value<'gc>> = vec![Value::String(crate::unicode::utf8_to_utf16(&matched))];
@@ -6962,7 +7299,15 @@ impl<'gc> VM<'gc> {
                 for cap in &m.captures {
                     match cap {
                         Some(r) => {
-                            let s = &input_u16[r.start..r.end];
+                            let (cap_start, cap_end) = if mapped_input {
+                                (
+                                    Self::regex_map_index_back(&input_u16, r.start),
+                                    Self::regex_map_index_back(&input_u16, r.end),
+                                )
+                            } else {
+                                (r.start, r.end)
+                            };
+                            let s = &input_u16[cap_start..cap_end];
                             result_items.push(Value::String(s.to_vec()));
                         }
                         None => result_items.push(Value::Undefined),
@@ -6970,7 +7315,7 @@ impl<'gc> VM<'gc> {
                 }
 
                 let mut arr_data = VmArrayData::new(result_items);
-                arr_data.props.insert("index".to_string(), Value::Number(m.range.start as f64));
+                arr_data.props.insert("index".to_string(), Value::Number(match_start as f64));
                 arr_data
                     .props
                     .insert("input".to_string(), Value::String(crate::unicode::utf8_to_utf16(input)));
@@ -6979,13 +7324,21 @@ impl<'gc> VM<'gc> {
                 if flags.contains('d') {
                     let mut indices_items: Vec<Value<'gc>> = Vec::new();
                     // Full match indices
-                    let pair = vec![Value::Number(m.range.start as f64), Value::Number(m.range.end as f64)];
+                    let pair = vec![Value::Number(match_start as f64), Value::Number(match_end as f64)];
                     indices_items.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(pair)))));
                     // Capturing group indices
                     for cap in &m.captures {
                         match cap {
                             Some(r) => {
-                                let pair = vec![Value::Number(r.start as f64), Value::Number(r.end as f64)];
+                                let (cap_start, cap_end) = if mapped_input {
+                                    (
+                                        Self::regex_map_index_back(&input_u16, r.start),
+                                        Self::regex_map_index_back(&input_u16, r.end),
+                                    )
+                                } else {
+                                    (r.start, r.end)
+                                };
+                                let pair = vec![Value::Number(cap_start as f64), Value::Number(cap_end as f64)];
                                 indices_items.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(pair)))));
                             }
                             None => indices_items.push(Value::Undefined),
@@ -7001,9 +7354,7 @@ impl<'gc> VM<'gc> {
 
                 // Update lastIndex for global/sticky
                 if is_global {
-                    re_obj
-                        .borrow_mut()
-                        .insert("lastIndex".to_string(), Value::Number(m.range.end as f64));
+                    re_obj.borrow_mut().insert("lastIndex".to_string(), Value::Number(match_end as f64));
                 }
 
                 arr
@@ -7766,6 +8117,9 @@ impl<'gc> VM<'gc> {
 
     /// Handle a thrown value: unwind to nearest try/catch or return error
     fn handle_throw(&mut self, thrown: Value<'gc>) -> Result<(), JSError> {
+        if let Value::VmObject(map) = &thrown {
+            self.annotate_error_object(map);
+        }
         if let Some(try_frame) = self.try_stack.pop() {
             // Unwind stack and call frames
             self.stack.truncate(try_frame.stack_depth);
@@ -7777,31 +8131,7 @@ impl<'gc> VM<'gc> {
             }
             Ok(())
         } else {
-            match &thrown {
-                Value::VmObject(map) => {
-                    let b = map.borrow();
-                    let type_name = b.get("__type__").map(|v| value_to_string(v)).unwrap_or_default();
-                    let message = b
-                        .get("message")
-                        .map(|v| value_to_string(v))
-                        .unwrap_or_else(|| value_to_string(&thrown));
-                    let uncaught_message = format!("Uncaught: {}", message);
-                    match type_name.as_str() {
-                        "TypeError" => Err(crate::raise_type_error!(uncaught_message)),
-                        "RangeError" => Err(crate::raise_range_error!(uncaught_message)),
-                        "ReferenceError" => Err(crate::raise_reference_error!(uncaught_message)),
-                        "SyntaxError" => Err(crate::raise_syntax_error!(uncaught_message)),
-                        _ => {
-                            if !type_name.is_empty() {
-                                Err(crate::raise_syntax_error!(format!("Uncaught: {}: {}", type_name, message)))
-                            } else {
-                                Err(crate::raise_syntax_error!(format!("Uncaught: {}", message)))
-                            }
-                        }
-                    }
-                }
-                _ => Err(crate::raise_syntax_error!(format!("Uncaught: {}", value_to_string(&thrown)))),
-            }
+            Err(self.vm_error_to_js_error(thrown))
         }
     }
 
@@ -7953,16 +8283,7 @@ impl<'gc> VM<'gc> {
                                 self.try_stack = saved_try_stack;
                                 let promise = match result {
                                     Ok(value) => self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![value]),
-                                    Err(err) => {
-                                        let msg = err.message();
-                                        let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
-                                        let reason = if let Ok(n) = payload.parse::<f64>() {
-                                            Value::Number(n)
-                                        } else {
-                                            Value::String(crate::unicode::utf8_to_utf16(payload))
-                                        };
-                                        self.call_host_fn("promise.reject", None, vec![reason])
-                                    }
+                                    Err(err) => self.call_host_fn("promise.reject", None, vec![self.vm_value_from_error(&err)]),
                                 };
                                 self.stack.push(promise);
                                 continue;
@@ -8083,16 +8404,7 @@ impl<'gc> VM<'gc> {
                                 self.try_stack = saved_try_stack;
                                 let promise = match result {
                                     Ok(value) => self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![value]),
-                                    Err(err) => {
-                                        let msg = err.message();
-                                        let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
-                                        let reason = if let Ok(n) = payload.parse::<f64>() {
-                                            Value::Number(n)
-                                        } else {
-                                            Value::String(crate::unicode::utf8_to_utf16(payload))
-                                        };
-                                        self.call_host_fn("promise.reject", None, vec![reason])
-                                    }
+                                    Err(err) => self.call_host_fn("promise.reject", None, vec![self.vm_value_from_error(&err)]),
                                 };
                                 self.stack.push(promise);
                                 continue;
@@ -8329,14 +8641,7 @@ impl<'gc> VM<'gc> {
                                                 match call_result {
                                                     Ok(value) => self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![value]),
                                                     Err(err) => {
-                                                        let msg = err.message();
-                                                        let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
-                                                        let reason = if let Ok(n) = payload.parse::<f64>() {
-                                                            Value::Number(n)
-                                                        } else {
-                                                            Value::String(crate::unicode::utf8_to_utf16(payload))
-                                                        };
-                                                        self.call_host_fn("promise.reject", None, vec![reason])
+                                                        self.call_host_fn("promise.reject", None, vec![self.vm_value_from_error(&err)])
                                                     }
                                                 }
                                             } else {
@@ -8356,14 +8661,7 @@ impl<'gc> VM<'gc> {
                                                 match call_result {
                                                     Ok(value) => self.call_builtin(BUILTIN_PROMISE_RESOLVE, vec![value]),
                                                     Err(err) => {
-                                                        let msg = err.message();
-                                                        let payload = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
-                                                        let reason = if let Ok(n) = payload.parse::<f64>() {
-                                                            Value::Number(n)
-                                                        } else {
-                                                            Value::String(crate::unicode::utf8_to_utf16(payload))
-                                                        };
-                                                        self.call_host_fn("promise.reject", None, vec![reason])
+                                                        self.call_host_fn("promise.reject", None, vec![self.vm_value_from_error(&err)])
                                                     }
                                                 }
                                             } else {
@@ -10170,6 +10468,7 @@ impl<'gc> VM<'gc> {
                                         Some("RegExp") => match key.as_str() {
                                             "exec" => Some(Value::VmNativeFunction(BUILTIN_REGEX_EXEC)),
                                             "test" => Some(Value::VmNativeFunction(BUILTIN_REGEX_TEST)),
+                                            "toString" => Some(Self::make_bound_host_fn("regexp.toString", obj.clone())),
                                             _ => None,
                                         },
                                         _ => None,
@@ -10324,6 +10623,7 @@ impl<'gc> VM<'gc> {
                     let mut map = IndexMap::new();
                     map.insert("message".to_string(), msg);
                     map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16(&type_name)));
+                    map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16(&type_name)));
                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
                 }
                 Opcode::Dup => {
@@ -10766,6 +11066,10 @@ impl<'gc> VM<'gc> {
                                     );
                                     map.insert("__regex_flags__".to_string(), Value::String(crate::unicode::utf8_to_utf16(&flags)));
                                     map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RegExp")));
+                                    map.insert(
+                                        "__toStringTag__".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16("RegExp")),
+                                    );
                                     map.insert("source".to_string(), Value::String(crate::unicode::utf8_to_utf16(&pattern)));
                                     map.insert("flags".to_string(), Value::String(crate::unicode::utf8_to_utf16(&flags)));
                                     map.insert("global".to_string(), Value::Boolean(flags.contains('g')));

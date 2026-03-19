@@ -236,5 +236,5 @@ fn test_executor_throw_non_error_not_immediate() {
 fn test_executor_throw_error_reported_immediately() {
     let script = r#"new Promise(function(resolve, reject) { throw new Error('boom'); })"#;
     let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"Error: boom\"");
+    assert!(result.contains("Error: boom"));
 }

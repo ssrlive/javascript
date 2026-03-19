@@ -1150,7 +1150,6 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
     run_as_module: bool,
     script_path: Option<P>,
 ) -> Result<String, JSError> {
-    let _ = script_path; // For now we ignore the path in the VM, but we may want to use it for better error messages later.
     let script_str = script.as_ref();
     let tokens = tokenize(script_str)?;
     let mut index = 0;
@@ -1166,6 +1165,7 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
     let _ = run_as_module; // For now we ignore the module/script distinction in the VM, but we may want to use it for different scoping or error messages later.
 
     let mut vm = VM::new(chunk);
+    vm.set_source_context(script_str, script_path.as_ref().map(|path| path.as_ref()));
     let mut v = vm.run()?;
 
     // VM helper behavior: if top-level result is a settled Promise, expose its
@@ -1197,7 +1197,8 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
             if let Some(Value::String(t)) = b.get("__type__") {
                 let tn = crate::unicode::utf16_to_utf8(t);
                 if tn == "Error" || tn.ends_with("Error") {
-                    return Err(raise_eval_error!(value_to_string(&next)));
+                    drop(b);
+                    return Err(vm.vm_error_to_js_error(next));
                 }
             }
         }
@@ -1226,6 +1227,7 @@ pub fn compile_and_run_vm_snippet(code: &str) -> Result<Value<'static>, JSError>
     let compiler = Compiler::new();
     let chunk = compiler.compile(&statements)?;
     let mut vm = VM::new(chunk);
+    vm.set_source_context(code, None);
     vm.run()
 }
 

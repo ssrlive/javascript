@@ -1757,9 +1757,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
                 if let Some(Value::String(tname)) = borrowed.get("__type__") {
                     let tname_str = crate::unicode::utf16_to_utf8(tname);
                     if tname_str == "RegExp" {
-                        let pattern = borrowed.get("__regex_pattern__").map(|v| value_to_string(v)).unwrap_or_default();
-                        let flags = borrowed.get("__regex_flags__").map(|v| value_to_string(v)).unwrap_or_default();
-                        return format!("/{}/{}", pattern, flags);
+                        return "[object RegExp]".to_string();
                     }
                     if tname_str.ends_with("Error") {
                         let msg = borrowed
@@ -1819,6 +1817,12 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
         }
         Value::VmObject(obj) => {
             let borrow = obj.borrow();
+
+            if let Some(Value::String(t)) = borrow.get("__type__")
+                && utf16_to_utf8(t) == "RegExp"
+            {
+                return "[object RegExp]".to_string();
+            }
 
             // Render Promise objects in a JS-like shape rather than exposing
             // internal fields directly.

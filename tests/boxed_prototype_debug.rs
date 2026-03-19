@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 #[test]
 fn debug_boxed_prototype_identity() {
@@ -12,6 +12,6 @@ fn debug_boxed_prototype_identity() {
         protoMarker + '|' + ctorMarker + '|' + (eq ? 'EQ' : 'NEQ');
     "#;
 
-    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "\"NUM_PROTO_MARKER|NUM_PROTO_MARKER|EQ\"");
 }

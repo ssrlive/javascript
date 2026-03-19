@@ -78,6 +78,7 @@ pub enum Opcode {
     ArrayHole = 72,         // push an empty/hole slot onto TOS array (sparse array support)
     DefineGlobalConst = 73, // define an immutable global binding
     GetNewTarget = 74,      // push current new.target value onto stack
+    Yield = 75,             // suspend generator: pop yielded value, save state, return {value, done: false}
 }
 
 impl TryFrom<u8> for Opcode {
@@ -160,6 +161,7 @@ impl TryFrom<u8> for Opcode {
             72 => Opcode::ArrayHole,
             73 => Opcode::DefineGlobalConst,
             74 => Opcode::GetNewTarget,
+            75 => Opcode::Yield,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -185,6 +187,8 @@ pub struct Chunk<'gc> {
     pub fn_local_names: std::collections::HashMap<usize, Vec<String>>,
     /// Map from Call instruction IP to callee variable name (for error messages)
     pub call_callee_names: std::collections::HashMap<usize, String>,
+    /// Function IPs that correspond to generator functions.
+    pub generator_function_ips: std::collections::HashSet<usize>,
 }
 
 impl<'gc> Chunk<'gc> {
@@ -199,6 +203,7 @@ impl<'gc> Chunk<'gc> {
             arrow_function_ips: std::collections::HashSet::new(),
             fn_local_names: std::collections::HashMap::new(),
             call_callee_names: std::collections::HashMap::new(),
+            generator_function_ips: std::collections::HashSet::new(),
         }
     }
 

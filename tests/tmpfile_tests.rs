@@ -12,7 +12,7 @@ fn __init_test_logger() {
 #[test]
 #[cfg(feature = "std")]
 fn test_tmpfile_puts_tell() {
-    // use evaluate_module to inspect Value-level results
+    // use evaluate_script_with_vm to inspect Value-level results
     let src = r#"
         import * as std from "std";
         let f = std.tmpfile();

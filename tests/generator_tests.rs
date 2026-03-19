@@ -1,9 +1,9 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 #[test]
 fn test_generator_function_syntax() {
     // Test basic generator function syntax parsing
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         function* gen() {
             yield 1;
@@ -12,6 +12,7 @@ fn test_generator_function_syntax() {
         }
         typeof gen;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -21,7 +22,7 @@ fn test_generator_function_syntax() {
 #[test]
 fn test_generator_function_call() {
     // Test calling a generator function returns a generator object
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         function* gen() {
             yield 42;
@@ -29,6 +30,7 @@ fn test_generator_function_call() {
         var g = gen();
         typeof g;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -38,7 +40,7 @@ fn test_generator_function_call() {
 #[test]
 fn test_generator_next() {
     // Test generator.next() method
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         function* gen() {
             yield 42;
@@ -47,6 +49,7 @@ fn test_generator_next() {
         var result = g.next();
         result.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -56,7 +59,7 @@ fn test_generator_next() {
 #[test]
 fn test_generator_done() {
     // Test generator completion
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         function* gen() {
             yield 42;
@@ -66,6 +69,7 @@ fn test_generator_done() {
         var result = g.next(); // second call should be done
         result.done;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -75,7 +79,7 @@ fn test_generator_done() {
 #[test]
 fn test_generator_next_with_value() {
     // Test sending a value back into a generator via next(value)
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         function* gen() {
             let x = yield 1;
@@ -86,6 +90,7 @@ fn test_generator_next_with_value() {
         var r = g.next(123);
         r.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -94,7 +99,7 @@ fn test_generator_next_with_value() {
 
 #[test]
 fn test_generator_throw_caught() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         function* gen() {
             try {
@@ -108,6 +113,7 @@ fn test_generator_throw_caught() {
         var r = g.throw(99);
         r.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -116,7 +122,7 @@ fn test_generator_throw_caught() {
 
 #[test]
 fn test_generator_throw_uncaught() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         function* gen() {
             yield 1;
@@ -125,6 +131,7 @@ fn test_generator_throw_uncaught() {
         g.next();
         g.throw(99);
     "#,
+        false,
         None::<&std::path::Path>,
     );
     assert!(result.is_err());
@@ -133,13 +140,14 @@ fn test_generator_throw_uncaught() {
 #[test]
 fn test_yield_without_generator() {
     // Test that yield outside generator throws error
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         function regular() {
             yield 42;
         }
         regular();
     "#,
+        false,
         None::<&std::path::Path>,
     );
     assert!(result.is_err());
@@ -149,12 +157,13 @@ fn test_yield_without_generator() {
 fn test_generator_method_prototype_links_to_intrinsic() {
     // Test that generator methods defined on object literals have a 'prototype'
     // object whose internal prototype points to the realm's Generator.prototype
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         var GeneratorPrototype = Object.getPrototypeOf(function* () {}).prototype;
         var method = { *method() {} }.method;
         Object.getPrototypeOf(method.prototype) === GeneratorPrototype;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -163,19 +172,20 @@ fn test_generator_method_prototype_links_to_intrinsic() {
 
 #[test]
 fn test_yield_as_expression_without_rhs_g1() {
-    let v = evaluate_script(
+    let v = evaluate_script_with_vm(
         r#"
         var obj = { *g1() { (yield) } };
         var iter = obj.g1();
         var result = iter.next();
         result.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(v, "undefined");
 
-    let d = evaluate_script(
+    let d = evaluate_script_with_vm(
         r#"
         var obj = { *g1() { (yield) } };
         var iter = obj.g1();
@@ -183,6 +193,7 @@ fn test_yield_as_expression_without_rhs_g1() {
         var result = iter.next();
         result.done;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -191,19 +202,20 @@ fn test_yield_as_expression_without_rhs_g1() {
 
 #[test]
 fn test_yield_as_expression_without_rhs_g2() {
-    let v = evaluate_script(
+    let v = evaluate_script_with_vm(
         r#"
         var obj = { *g2() { [yield] } };
         var iter = obj.g2();
         var result = iter.next();
         result.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(v, "undefined");
 
-    let d = evaluate_script(
+    let d = evaluate_script_with_vm(
         r#"
         var obj = { *g2() { [yield] } };
         var iter = obj.g2();
@@ -211,6 +223,7 @@ fn test_yield_as_expression_without_rhs_g2() {
         var result = iter.next();
         result.done;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -219,19 +232,20 @@ fn test_yield_as_expression_without_rhs_g2() {
 
 #[test]
 fn test_yield_as_expression_without_rhs_g3() {
-    let v = evaluate_script(
+    let v = evaluate_script_with_vm(
         r#"
         var obj = { *g3() { {yield} } };
         var iter = obj.g3();
         var result = iter.next();
         result.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(v, "undefined");
 
-    let d = evaluate_script(
+    let d = evaluate_script_with_vm(
         r#"
         var obj = { *g3() { {yield} } };
         var iter = obj.g3();
@@ -239,6 +253,7 @@ fn test_yield_as_expression_without_rhs_g3() {
         var result = iter.next();
         result.done;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -248,19 +263,20 @@ fn test_yield_as_expression_without_rhs_g3() {
 #[test]
 fn test_yield_as_expression_without_rhs_g4() {
     // comma expression: two yields before completion
-    let v1 = evaluate_script(
+    let v1 = evaluate_script_with_vm(
         r#"
         var obj = { *g4() { yield, yield; } };
         var iter = obj.g4();
         var result = iter.next();
         result.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(v1, "undefined");
 
-    let v2 = evaluate_script(
+    let v2 = evaluate_script_with_vm(
         r#"
         var obj = { *g4() { yield, yield; } };
         var iter = obj.g4();
@@ -268,12 +284,13 @@ fn test_yield_as_expression_without_rhs_g4() {
         var result = iter.next();
         result.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(v2, "undefined");
 
-    let d = evaluate_script(
+    let d = evaluate_script_with_vm(
         r#"
         var obj = { *g4() { yield, yield; } };
         var iter = obj.g4();
@@ -282,6 +299,7 @@ fn test_yield_as_expression_without_rhs_g4() {
         var result = iter.next();
         result.done;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -291,19 +309,20 @@ fn test_yield_as_expression_without_rhs_g4() {
 #[test]
 fn test_yield_as_expression_without_rhs_g5() {
     // conditional operator with bare yields
-    let v1 = evaluate_script(
+    let v1 = evaluate_script_with_vm(
         r#"
         var obj = { *g5() { (yield) ? yield : yield; } };
         var iter = obj.g5();
         var result = iter.next();
         result.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(v1, "undefined");
 
-    let v2 = evaluate_script(
+    let v2 = evaluate_script_with_vm(
         r#"
         var obj = { *g5() { (yield) ? yield : yield; } };
         var iter = obj.g5();
@@ -311,12 +330,13 @@ fn test_yield_as_expression_without_rhs_g5() {
         var result = iter.next();
         result.value;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(v2, "undefined");
 
-    let d = evaluate_script(
+    let d = evaluate_script_with_vm(
         r#"
         var obj = { *g5() { (yield) ? yield : yield; } };
         var iter = obj.g5();
@@ -325,6 +345,7 @@ fn test_yield_as_expression_without_rhs_g5() {
         var result = iter.next();
         result.done;
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();

@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for these integration tests so `RUST_LOG` is honored.
 #[ctor::ctor]
@@ -15,7 +15,7 @@ fn awaited_block_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -31,7 +31,7 @@ fn awaited_parenthesized_expr_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -47,7 +47,7 @@ fn awaited_let_initializer_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -63,7 +63,7 @@ fn awaited_return_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -79,7 +79,7 @@ fn awaited_ternary_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -95,7 +95,7 @@ fn awaited_if_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -111,7 +111,7 @@ fn awaited_try_catch_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -127,7 +127,7 @@ fn awaited_nested_blocks_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -143,7 +143,7 @@ fn awaited_arrow_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),
@@ -159,7 +159,7 @@ fn awaited_for_called_once() {
         f();
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 20));
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Ok(v) => assert_eq!(v, "1"),
         Err(e) => panic!("{e:?}"),

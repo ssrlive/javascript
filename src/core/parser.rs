@@ -3763,11 +3763,12 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                     *index += 1;
                 }
                 Token::Number(n) => {
-                    prop_expr_opt = Some(Expr::Number(*n));
+                    let s = crate::core::value_to_string(&crate::core::Value::Number(*n));
+                    prop_name_str = Some(s);
                     *index += 1;
                 }
                 Token::BigInt(s) => {
-                    prop_expr_opt = Some(Expr::BigInt(crate::unicode::utf8_to_utf16(s)));
+                    prop_name_str = Some(s.clone());
                     *index += 1;
                 }
                 Token::PrivateIdentifier(name) => {
@@ -3883,12 +3884,11 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 name_str_opt = Some(utf16_to_utf8(raw));
             }
             Token::Number(n) => {
-                computed_key_expr = Some(Expr::Number(*n));
-                *index += 1;
+                let s = crate::core::value_to_string(&crate::core::Value::Number(*n));
+                name_str_opt = Some(s);
             }
             Token::BigInt(s) => {
-                computed_key_expr = Some(Expr::BigInt(crate::unicode::utf8_to_utf16(s)));
-                *index += 1;
+                name_str_opt = Some(s.clone());
             }
             Token::LBracket => {
                 *index += 1; // consume [

@@ -199,7 +199,7 @@ fn test_allsettled_with_error_like_does_not_report_unhandled() {
     // NOTE: uses synchronous rejection; deferred rejection via
     // `Promise.resolve().then(...)` has a pre-existing microtask scheduling
     // limitation that prevents `allSettled.then` from running before
-    // `evaluate_script` captures the return value.
+    // `evaluate_script_with_vm` captures the return value.
     let script = r#"
         let result = null;
         Promise.allSettled([

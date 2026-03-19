@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 #[ctor::ctor]
 fn __init_test_logger() {
@@ -8,20 +8,20 @@ fn __init_test_logger() {
 #[test]
 fn ternary_basic_true() {
     let script = "true ? 'yes' : 'no'";
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"yes\"");
 }
 
 #[test]
 fn ternary_basic_false() {
     let script = "false ? 1 : 2";
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "2");
 }
 
 #[test]
 fn ternary_nested() {
     let script = "true ? (false ? 'a' : 'b') : 'c'";
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"b\"");
 }

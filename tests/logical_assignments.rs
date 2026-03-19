@@ -42,7 +42,7 @@ fn test_logical_assignments() {
 fn eval_debug_logical_or_assign() {
     let code = "let c = 5; c ||= 10; c";
     let res = evaluate_script_with_vm(code, false, None::<&std::path::Path>);
-    println!("evaluate_script result: {:?}", res);
+    println!("evaluate_script_with_vm result: {:?}", res);
 }
 
 #[test]

@@ -225,14 +225,14 @@ fn test_typedarray_destructuring_resizable_buffer_regression() {
     let path = std::path::Path::new("js-scripts/typedarray_destructuring_resizable_buffer_regression.js");
     let script = read_script_file(path).expect("failed to read regression script");
 
-    // Append a final expression so evaluate_script returns the script's return value as final result
+    // Append a final expression so evaluate_script_with_vm returns the script's return value as final result
     let _wrapped = format!("{}\nJSON.stringify(({}));", script, "(function(){return (function(){})();})()");
 
     // Evaluate and assert
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script_with_vm(&script, false, Some(path)).expect("evaluate_script failed");
+            let result = evaluate_script_with_vm(&script, false, Some(path)).expect("evaluate_script_with_vm failed");
             assert_eq!(result, "\"OK\"");
         })
         .expect("failed to spawn thread")

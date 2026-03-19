@@ -174,12 +174,13 @@ fn parse_inner_object_plus_function_expr_alone() {
 fn bigint_in_object_and_class_and_destructuring() {
     // Object literal method using BigInt property name
     let res_obj = evaluate_script_with_vm("let o = { 1n() { return 'bar'; } }; o['1']();", false, None::<&std::path::Path>).unwrap();
-    // evaluate_script returns JS values using JS's string representation (with quotes)
+    // evaluate_script_with_vm returns JS values using JS's string representation (with quotes)
     assert_eq!(res_obj, "\"bar\"");
 
     // Class method using BigInt property name
-    let res_class = evaluate_script(
+    let res_class = evaluate_script_with_vm(
         "class C { 1n() { return 'baz'; } } let c = new C(); c['1']();",
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();

@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use javascript::{Repl, evaluate_script};
+use javascript::*;
 use num_bigint::BigInt;
 use std::hint::black_box;
 
@@ -82,7 +82,7 @@ fn bench_engine_bigint_cached_2(c: &mut Criterion) {
     c.bench_function("engine_bigint_cached_2", |ben| {
         ben.iter(|| {
             // Call the already-bound function in the same persistent env.
-            black_box(evaluate_script(script, None::<&std::path::Path>).unwrap());
+            black_box(evaluate_script_with_vm(script, false, None::<&std::path::Path>)).unwrap();
         })
     });
 }

@@ -1,5 +1,4 @@
 use javascript::Repl;
-// use javascript::evaluate_script; // Commenting out unused import
 
 #[test]
 fn repl_persists_values_between_calls() {

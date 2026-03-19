@@ -1886,6 +1886,12 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_u16(os_name);
                             define_binding(self, local);
                         }
+                        ("std", ImportSpecifier::Namespace(local)) => {
+                            let std_name = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("std")));
+                            self.chunk.write_opcode(Opcode::GetGlobal);
+                            self.chunk.write_u16(std_name);
+                            define_binding(self, local);
+                        }
                         ("./es6_module_export.js", ImportSpecifier::Named(name, alias)) => {
                             let local = alias.as_deref().unwrap_or(name);
                             match name.as_str() {
@@ -3425,6 +3431,9 @@ impl<'gc> Compiler<'gc> {
                 let name_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&private_name)));
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(name_idx);
+            }
+            Expr::NewTarget => {
+                self.chunk.write_opcode(Opcode::GetNewTarget);
             }
             _ => return Err(raise_syntax_error!(format!("Unimplemented expression type for VM: {expr:?}"))),
         }

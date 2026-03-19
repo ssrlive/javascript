@@ -27,7 +27,7 @@ Line 2`);
         results.join('\n---\n')
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     let expected = r#""this string      is broken across multiple lines.\n---\nLine1\nLine2\n---\nTab\tTab\n---\nBackslash \\\n---\nQuote \"\n---\nSingle Quote '\n---\nUnknown escape z\n---\nTemplate\nLine 1 Line 2""#;
     assert_eq!(result, expected);
 }
@@ -44,7 +44,7 @@ lines.";
         results.join('\n---\n')
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>);
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match result {
         Err(err) => {
             let msg = err.user_message();

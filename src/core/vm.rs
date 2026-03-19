@@ -421,8 +421,9 @@ pub struct VM<'gc> {
     const_globals: std::collections::HashSet<String>,
     frames: Vec<CallFrame<'gc>>,
     try_stack: Vec<TryFrame>,
-    this_stack: Vec<Value<'gc>>, // this binding stack
-    output: Vec<String>,         // captured output for console.log etc.
+    this_stack: Vec<Value<'gc>>,       // this binding stack
+    new_target_stack: Vec<Value<'gc>>, // new.target binding stack
+    output: Vec<String>,               // captured output for console.log etc.
     // Property storage for VmFunction values, keyed by function IP
     fn_props: HashMap<usize, Rc<RefCell<IndexMap<String, Value<'gc>>>>>,
     // Method home objects keyed by function IP, used to resolve `super` correctly.
@@ -449,6 +450,7 @@ impl<'gc> VM<'gc> {
             frames: Vec::new(),
             try_stack: Vec::new(),
             this_stack: vec![Value::VmObject(global_this.clone())],
+            new_target_stack: Vec::new(),
             output: Vec::new(),
             fn_props: HashMap::new(),
             fn_home_objects: HashMap::new(),
@@ -1774,6 +1776,15 @@ impl<'gc> VM<'gc> {
                 err.insert("errors".to_string(), errors);
                 Value::VmObject(Rc::new(RefCell::new(err)))
             }
+            "std.sprintf" => match crate::js_std::sprintf::handle_sprintf_call(&args) {
+                Ok(v) => v,
+                Err(_) => Value::Undefined,
+            },
+            "std.tmpfile" => crate::js_std::tmpfile::vm_create_tmpfile(),
+            "std.gc" => Value::Undefined,
+            "tmp.puts" | "tmp.readAsString" | "tmp.seek" | "tmp.close" => {
+                crate::js_std::tmpfile::vm_dispatch_file_method(name, receiver, args)
+            }
             _ => Value::Undefined,
         }
     }
@@ -2815,6 +2826,14 @@ impl<'gc> VM<'gc> {
         os_map.insert("path".to_string(), Value::VmObject(Rc::new(RefCell::new(os_path_map))));
         self.globals
             .insert("os".to_string(), Value::VmObject(Rc::new(RefCell::new(os_map))));
+
+        // Minimal `std` namespace for VM module import interop
+        let mut std_map = IndexMap::new();
+        std_map.insert("sprintf".to_string(), Self::make_host_fn("std.sprintf"));
+        std_map.insert("tmpfile".to_string(), Self::make_host_fn("std.tmpfile"));
+        std_map.insert("gc".to_string(), Self::make_host_fn("std.gc"));
+        self.globals
+            .insert("std".to_string(), Value::VmObject(Rc::new(RefCell::new(std_map))));
 
         // Function constructor with prototype (call, apply, bind)
         let mut fn_proto = IndexMap::new();
@@ -9048,6 +9067,10 @@ impl<'gc> VM<'gc> {
                         self.const_globals.insert(name_str);
                     }
                 }
+                Opcode::GetNewTarget => {
+                    let val = self.new_target_stack.last().cloned().unwrap_or(Value::Undefined);
+                    self.stack.push(val);
+                }
                 Opcode::GetGlobal => {
                     let name_idx = self.read_u16() as usize;
                     let name_val = &self.chunk.constants[name_idx];
@@ -9799,6 +9822,7 @@ impl<'gc> VM<'gc> {
                             }
                             let this_val = Value::VmObject(new_obj.clone());
                             self.this_stack.push(this_val);
+                            self.new_target_stack.push(constructor.clone());
                             let closure_uv = if let Value::VmClosure(_, _, ref uv) = constructor {
                                 (**uv).clone()
                             } else {
@@ -9819,6 +9843,7 @@ impl<'gc> VM<'gc> {
                             self.ip = target_ip;
                             let result = self.run_inner(self.frames.len());
                             self.this_stack.pop();
+                            self.new_target_stack.pop();
                             match result {
                                 Ok(val) => match &val {
                                     Value::VmObject(_) => self.stack.push(val),
@@ -11179,6 +11204,8 @@ impl<'gc> VM<'gc> {
                             }
                             let this_val = Value::VmObject(new_obj.clone());
                             self.this_stack.push(this_val);
+                            // Push new.target = the constructor being invoked
+                            self.new_target_stack.push(callee.clone());
                             let closure_uv = if let Value::VmClosure(_, _, ref uv) = callee {
                                 (**uv).clone()
                             } else {
@@ -11201,6 +11228,7 @@ impl<'gc> VM<'gc> {
                             // Run the constructor
                             let result = self.run_inner(self.frames.len());
                             self.this_stack.pop();
+                            self.new_target_stack.pop();
                             // The constructor returns `this` (we compiled GetThis+Return)
                             // but result from run_inner is what was returned
                             match result {

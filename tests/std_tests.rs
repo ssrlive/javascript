@@ -17,7 +17,7 @@ mod std_tests {
     #[cfg(feature = "std")]
     fn test_sprintf() {
         let script = "import * as std from 'std'; std.sprintf('a=%d s=%s', 123, 'abc')";
-        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, true, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"a=123 s=abc\"");
     }
 
@@ -25,7 +25,7 @@ mod std_tests {
     #[cfg(feature = "std")]
     fn test_tmpfile_puts_read() {
         let script = "import * as std from 'std'; let f = std.tmpfile(); f.puts('hello'); f.readAsString();";
-        let result = evaluate_module(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, true, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"hello\"");
     }
 
@@ -35,7 +35,7 @@ mod std_tests {
         // Use `String(e)` so the test passes whether `e` is a string
         // (old behavior) or an `Error` object with a `message`/toString.
         let script = "try { nonExistent(); } catch(e) { String(e) }";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         println!("DEBUG eval result: {}", result);
         assert!(result.contains("nonExistent is not defined"));
     }
@@ -44,7 +44,7 @@ mod std_tests {
     #[cfg(feature = "std")]
     fn test_throw_statement() {
         let script = "try { throw 'custom error'; } catch(e) { e }";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert!(result.contains("custom error"));
     }
 
@@ -52,7 +52,7 @@ mod std_tests {
     #[cfg(feature = "std")]
     fn test_throw_number() {
         let script = "try { throw 42; } catch(e) { e }";
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "42");
     }
 }

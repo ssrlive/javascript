@@ -30,7 +30,8 @@ pub struct Compiler<'gc> {
     // Try-finally: allow break/continue to pass through finally blocks
     try_finally_stack: Vec<TryFinallyContext>,
     try_finally_counter: u32,
-    // Track async-generator compilation context for minimal yield collection.
+    // Track generator compilation contexts for minimal yield collection.
+    generator_items_stack: Vec<String>,
     async_generator_items_stack: Vec<String>,
 }
 
@@ -95,6 +96,7 @@ impl<'gc> Compiler<'gc> {
             completion_counter: 0,
             try_finally_stack: Vec::new(),
             try_finally_counter: 0,
+            generator_items_stack: Vec::new(),
             async_generator_items_stack: Vec::new(),
         }
     }
@@ -1207,6 +1209,16 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::FunctionDeclaration(name, params, body, is_gen, is_async) => {
+                if *is_gen && !*is_async {
+                    let func_ip = self.compile_generator_function_body(Some(name.as_str()), params, body)?;
+                    self.chunk.fn_names.insert(func_ip, name.clone());
+                    let name_u16 = crate::unicode::utf8_to_utf16(name);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(name_idx);
+                    return Ok(());
+                }
+
                 if *is_gen && *is_async {
                     self.compile_async_generator_function_body(Some(name.as_str()), params, body)?;
                     if let Some(func_ip) = self.peek_func_ip(&Expr::AsyncGeneratorFunction(None, params.clone(), body.clone())) {
@@ -2721,7 +2733,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.async_function_ips.insert(func_ip);
             }
             Expr::GeneratorFunction(name, params, body) => {
-                self.compile_async_generator_function_body(name.as_deref(), params, body)?;
+                self.compile_generator_function_body(name.as_deref(), params, body)?;
             }
             // Minimal async generator support in VM path.
             // The body is executed eagerly and each yield/yield* appends to an internal array.
@@ -2771,12 +2783,39 @@ impl<'gc> Compiler<'gc> {
                     let undef_idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(undef_idx);
+                } else if let Some(items_name) = self.generator_items_stack.last().cloned() {
+                    self.emit_helper_get(&items_name);
+
+                    match inner_opt {
+                        Some(inner) => self.compile_expr(inner)?,
+                        None => {
+                            let undef_idx = self.chunk.add_constant(Value::Undefined);
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(undef_idx);
+                        }
+                    }
+
+                    self.chunk.write_opcode(Opcode::ArrayPush);
+                    self.chunk.write_opcode(Opcode::Pop);
+
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
                 } else {
                     return Err(raise_syntax_error!(format!("Unimplemented expression type for VM: {expr:?}")));
                 }
             }
             Expr::YieldStar(inner) => {
                 if let Some(items_name) = self.async_generator_items_stack.last().cloned() {
+                    self.emit_helper_get(&items_name);
+                    self.compile_expr(inner)?;
+                    self.chunk.write_opcode(Opcode::ArraySpread);
+                    self.chunk.write_opcode(Opcode::Pop);
+
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                } else if let Some(items_name) = self.generator_items_stack.last().cloned() {
                     self.emit_helper_get(&items_name);
                     self.compile_expr(inner)?;
                     self.chunk.write_opcode(Opcode::ArraySpread);
@@ -4171,6 +4210,124 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_byte(uv.index);
         }
         Ok(())
+    }
+
+    fn compile_generator_function_body(
+        &mut self,
+        function_name: Option<&str>,
+        params: &[DestructuringElement],
+        body: &[Statement],
+    ) -> Result<usize, JSError> {
+        let jump_over = self.emit_jump(Opcode::Jump);
+        let func_ip = self.chunk.code.len();
+        let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
+        let old_ctx = self.current_strict;
+        self.current_strict = fn_is_strict;
+
+        let old_locals = std::mem::take(&mut self.locals);
+        let old_depth = self.scope_depth;
+        let old_loops = std::mem::take(&mut self.loop_stack);
+        let old_label = self.pending_label.take();
+        let old_parent_locals = std::mem::take(&mut self.parent_locals);
+        let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
+        let old_upvalues = std::mem::take(&mut self.upvalues);
+        let old_allow_super = self.allow_super_call;
+        self.parent_locals = old_locals.clone();
+        self.parent_upvalues = old_upvalues.clone();
+
+        self.allow_super_call = false;
+        self.scope_depth = 1;
+
+        let mut non_rest_count = 0u8;
+        let mut has_rest = false;
+        for param in params {
+            match param {
+                DestructuringElement::Variable(param_name, _) => {
+                    self.locals.push(param_name.clone());
+                    non_rest_count += 1;
+                }
+                DestructuringElement::Rest(param_name) => {
+                    has_rest = true;
+                    self.chunk.write_opcode(Opcode::CollectRest);
+                    self.chunk.write_byte(non_rest_count);
+                    self.locals.push(param_name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        self.emit_hoisted_var_slots(body);
+        self.emit_parameter_default_initializers(params)?;
+
+        let items_name = format!("__generator_items_{}__", self.try_finally_counter);
+        self.try_finally_counter += 1;
+        self.chunk.write_opcode(Opcode::NewArray);
+        self.chunk.write_byte(0);
+        self.locals.push(items_name.clone());
+        self.generator_items_stack.push(items_name.clone());
+
+        for (i, s) in body.iter().enumerate() {
+            self.compile_statement(s, i == body.len() - 1)?;
+        }
+
+        self.generator_items_stack.pop();
+
+        let items_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("__items__")));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(items_key);
+        self.emit_helper_get(&items_name);
+
+        let index_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("__index__")));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(index_key);
+        let zero_idx = self.chunk.add_constant(Value::Number(0.0));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(zero_idx);
+
+        let next_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("next")));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(next_key);
+        let next_fn = self.chunk.add_constant(Value::VmNativeFunction(101));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(next_fn);
+
+        self.chunk.write_opcode(Opcode::NewObject);
+        self.chunk.write_byte(3);
+        self.chunk.write_opcode(Opcode::Return);
+
+        self.patch_jump(jump_over);
+
+        self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+        if let Some(name) = function_name
+            && !name.is_empty()
+        {
+            self.chunk.fn_names.insert(func_ip, name.to_string());
+        }
+
+        let fn_upvalues = std::mem::take(&mut self.upvalues);
+
+        self.locals = old_locals;
+        self.scope_depth = old_depth;
+        self.loop_stack = old_loops;
+        self.pending_label = old_label;
+        self.parent_locals = old_parent_locals;
+        self.parent_upvalues = old_parent_upvalues;
+        self.upvalues = old_upvalues;
+        self.current_strict = old_ctx;
+        self.allow_super_call = old_allow_super;
+
+        let arity = if has_rest { non_rest_count } else { params.len() as u8 };
+        let func_val = Value::VmFunction(func_ip, arity);
+        let func_idx = self.chunk.add_constant(func_val);
+
+        self.chunk.write_opcode(Opcode::MakeClosure);
+        self.chunk.write_u16(func_idx);
+        self.chunk.write_byte(fn_upvalues.len() as u8);
+        for uv in &fn_upvalues {
+            self.chunk.write_byte(if uv.is_local { 1 } else { 0 });
+            self.chunk.write_byte(uv.index);
+        }
+        Ok(func_ip)
     }
 
     /// Define a new variable (local or global) from the value on top of stack.

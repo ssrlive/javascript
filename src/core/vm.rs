@@ -1975,6 +1975,10 @@ impl<'gc> VM<'gc> {
     }
 
     fn assign_named_property(&mut self, obj: Value<'gc>, key: String, val: Value<'gc>) -> Result<Value<'gc>, JSError> {
+        if let Some(result) = self.try_proxy_set(&obj, &key, val.clone())? {
+            return Ok(result);
+        }
+
         if let Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) = &val {
             // Record [[HomeObject]]-like information for functions assigned as methods.
             self.fn_home_objects.insert(*ip, obj.clone());
@@ -7070,6 +7074,27 @@ impl<'gc> VM<'gc> {
             return Value::VmObject(Rc::new(RefCell::new(result)));
         }
 
+        if let Value::VmArray(ref arr) = receiver
+            && id == BUILTIN_ITERATOR_NEXT
+            && matches!(arr.borrow().props.get("__generator__"), Some(Value::Boolean(true)))
+        {
+            let mut result = IndexMap::new();
+            let mut a = arr.borrow_mut();
+            let idx = match a.props.get("__generator_index__") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            };
+            if idx < a.elements.len() {
+                a.props.insert("__generator_index__".to_string(), Value::Number((idx + 1) as f64));
+                result.insert("value".to_string(), a.elements[idx].clone());
+                result.insert("done".to_string(), Value::Boolean(false));
+            } else {
+                result.insert("value".to_string(), Value::Undefined);
+                result.insert("done".to_string(), Value::Boolean(true));
+            }
+            return Value::VmObject(Rc::new(RefCell::new(result)));
+        }
+
         // Minimal async-generator facade on marked arrays.
         if let Value::VmArray(ref arr) = receiver
             && (id == BUILTIN_ASYNCGEN_NEXT || id == BUILTIN_ASYNCGEN_THROW || id == BUILTIN_ASYNCGEN_RETURN)
@@ -7225,6 +7250,16 @@ impl<'gc> VM<'gc> {
                 }
                 _ => Value::Undefined,
             };
+        }
+
+        if matches!(
+            id,
+            BUILTIN_ITERATOR_NEXT | BUILTIN_ASYNCGEN_NEXT | BUILTIN_ASYNCGEN_THROW | BUILTIN_ASYNCGEN_RETURN
+        ) {
+            self.this_stack.push(receiver);
+            let result = self.call_builtin(id, args);
+            self.this_stack.pop();
+            return result;
         }
 
         // RegExp.prototype.exec(string)
@@ -7901,6 +7936,244 @@ impl<'gc> VM<'gc> {
             _ => Value::Undefined,
         };
         Ok(Some(fallback))
+    }
+
+    fn try_proxy_set(&mut self, obj: &Value<'gc>, key: &str, value: Value<'gc>) -> Result<Option<Value<'gc>>, JSError> {
+        let Value::VmObject(proxy_obj) = obj else {
+            return Ok(None);
+        };
+
+        let (target, handler, revoked) = {
+            let borrow = proxy_obj.borrow();
+            let Some(target) = borrow.get("__proxy_target__").cloned() else {
+                return Ok(None);
+            };
+            (
+                target,
+                borrow.get("__proxy_handler__").cloned().unwrap_or(Value::Undefined),
+                matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))),
+            )
+        };
+
+        if revoked {
+            return Err(crate::raise_type_error!("Cannot perform 'set' on a revoked proxy"));
+        }
+
+        if let Value::VmObject(handler_obj) = &handler {
+            let trap = handler_obj.borrow().get("set").cloned();
+            if let Some(trap_fn) = trap {
+                let prop_val = Value::String(crate::unicode::utf8_to_utf16(key));
+                let out = match trap_fn {
+                    Value::VmFunction(ip, _) => {
+                        self.call_vm_function_result(ip, &[target.clone(), prop_val.clone(), value.clone(), obj.clone()], &[])?
+                    }
+                    Value::VmClosure(ip, _, upv) => {
+                        let uv = (*upv).clone();
+                        self.call_vm_function_result(ip, &[target.clone(), prop_val.clone(), value.clone(), obj.clone()], &uv)?
+                    }
+                    Value::VmNativeFunction(id) => self.call_method_builtin(
+                        id,
+                        handler.clone(),
+                        vec![target.clone(), prop_val.clone(), value.clone(), obj.clone()],
+                    ),
+                    Value::VmObject(map) => {
+                        let borrow = map.borrow();
+                        if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                            let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                            drop(borrow);
+                            self.call_host_fn(
+                                &host_name,
+                                Some(handler.clone()),
+                                vec![target.clone(), prop_val.clone(), value.clone(), obj.clone()],
+                            )
+                        } else {
+                            Value::Undefined
+                        }
+                    }
+                    _ => Value::Undefined,
+                };
+                if !out.to_truthy() && self.current_execution_is_strict() {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16(&format!(
+                            "'set' on proxy: trap returned falsish for property '{}'",
+                            key
+                        ))),
+                    );
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                }
+                return Ok(Some(value));
+            }
+        }
+
+        let _ = self.assign_named_property(target, key.to_string(), value.clone())?;
+        Ok(Some(value))
+    }
+
+    fn try_proxy_delete(&mut self, obj: &Value<'gc>, key: &str) -> Result<Option<bool>, JSError> {
+        let Value::VmObject(proxy_obj) = obj else {
+            return Ok(None);
+        };
+
+        let (target, handler, revoked) = {
+            let borrow = proxy_obj.borrow();
+            let Some(target) = borrow.get("__proxy_target__").cloned() else {
+                return Ok(None);
+            };
+            (
+                target,
+                borrow.get("__proxy_handler__").cloned().unwrap_or(Value::Undefined),
+                matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))),
+            )
+        };
+
+        if revoked {
+            return Err(crate::raise_type_error!("Cannot perform 'deleteProperty' on a revoked proxy"));
+        }
+
+        if let Value::VmObject(handler_obj) = &handler {
+            let trap = handler_obj.borrow().get("deleteProperty").cloned();
+            if let Some(trap_fn) = trap {
+                let prop_val = Value::String(crate::unicode::utf8_to_utf16(key));
+                let out = match trap_fn {
+                    Value::VmFunction(ip, _) => self.call_vm_function_result(ip, &[target.clone(), prop_val.clone()], &[])?,
+                    Value::VmClosure(ip, _, upv) => {
+                        let uv = (*upv).clone();
+                        self.call_vm_function_result(ip, &[target.clone(), prop_val.clone()], &uv)?
+                    }
+                    Value::VmNativeFunction(id) => self.call_method_builtin(id, handler.clone(), vec![target.clone(), prop_val.clone()]),
+                    Value::VmObject(map) => {
+                        let borrow = map.borrow();
+                        if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                            let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                            drop(borrow);
+                            self.call_host_fn(&host_name, Some(handler.clone()), vec![target.clone(), prop_val.clone()])
+                        } else {
+                            Value::Undefined
+                        }
+                    }
+                    _ => Value::Undefined,
+                };
+                let deleted = out.to_truthy();
+                if !deleted && self.current_execution_is_strict() {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16(&format!(
+                            "'deleteProperty' on proxy: trap returned falsish for property '{}'",
+                            key
+                        ))),
+                    );
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                }
+                return Ok(Some(deleted));
+            }
+        }
+
+        let deleted = match &target {
+            Value::VmObject(map) => {
+                map.borrow_mut().shift_remove(key);
+                true
+            }
+            Value::VmArray(arr) => {
+                arr.borrow_mut().props.shift_remove(key);
+                true
+            }
+            _ => false,
+        };
+        Ok(Some(deleted))
+    }
+
+    fn try_proxy_has(&mut self, obj: &Value<'gc>, key: &str) -> Result<Option<bool>, JSError> {
+        let Value::VmObject(proxy_obj) = obj else {
+            return Ok(None);
+        };
+
+        let (target, handler, revoked) = {
+            let borrow = proxy_obj.borrow();
+            let Some(target) = borrow.get("__proxy_target__").cloned() else {
+                return Ok(None);
+            };
+            (
+                target,
+                borrow.get("__proxy_handler__").cloned().unwrap_or(Value::Undefined),
+                matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))),
+            )
+        };
+
+        if revoked {
+            return Err(crate::raise_type_error!("Cannot perform 'has' on a revoked proxy"));
+        }
+
+        if let Value::VmObject(handler_obj) = &handler {
+            let trap = handler_obj.borrow().get("has").cloned();
+            if let Some(trap_fn) = trap {
+                let prop_val = Value::String(crate::unicode::utf8_to_utf16(key));
+                let out = match trap_fn {
+                    Value::VmFunction(ip, _) => self.call_vm_function_result(ip, &[target.clone(), prop_val.clone()], &[])?,
+                    Value::VmClosure(ip, _, upv) => {
+                        let uv = (*upv).clone();
+                        self.call_vm_function_result(ip, &[target.clone(), prop_val.clone()], &uv)?
+                    }
+                    Value::VmNativeFunction(id) => self.call_method_builtin(id, handler.clone(), vec![target.clone(), prop_val.clone()]),
+                    Value::VmObject(map) => {
+                        let borrow = map.borrow();
+                        if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                            let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                            drop(borrow);
+                            self.call_host_fn(&host_name, Some(handler.clone()), vec![target.clone(), prop_val.clone()])
+                        } else {
+                            Value::Undefined
+                        }
+                    }
+                    _ => Value::Undefined,
+                };
+                return Ok(Some(out.to_truthy()));
+            }
+        }
+
+        let fallback = match &target {
+            Value::VmObject(map) => {
+                let b = map.borrow();
+                if b.contains_key(key) {
+                    true
+                } else {
+                    let proto = b.get("__proto__").cloned();
+                    drop(b);
+                    self.lookup_proto_chain(&proto, key).is_some()
+                }
+            }
+            Value::VmArray(arr) => {
+                if let Ok(idx) = key.parse::<usize>() {
+                    let borrow = arr.borrow();
+                    idx < borrow.len() && !borrow.props.contains_key(&format!("__deleted_{}", idx))
+                } else if key == "length" {
+                    true
+                } else {
+                    arr.borrow().props.contains_key(key)
+                }
+            }
+            _ => false,
+        };
+        Ok(Some(fallback))
+    }
+
+    fn current_execution_is_strict(&self) -> bool {
+        if let Some(frame) = self.frames.last()
+            && self.chunk.fn_strictness.get(&frame.func_ip).copied().unwrap_or(false)
+        {
+            return true;
+        }
+
+        self.script_source.as_deref().is_some_and(|src| {
+            let trimmed = src.trim_start();
+            trimmed.starts_with("\"use strict\"") || trimmed.starts_with("'use strict'")
+        })
     }
 
     fn construct_value(
@@ -9900,8 +10173,13 @@ impl<'gc> VM<'gc> {
                         Value::VmArray(arr) => match key.as_str() {
                             "length" => self.stack.push(Value::Number(arr.borrow().len() as f64)),
                             "next" => {
-                                let is_async_gen = matches!(arr.borrow().props.get("__async_generator__"), Some(Value::Boolean(true)));
-                                if is_async_gen {
+                                let borrow = arr.borrow();
+                                let is_generator = matches!(borrow.props.get("__generator__"), Some(Value::Boolean(true)));
+                                let is_async_gen = matches!(borrow.props.get("__async_generator__"), Some(Value::Boolean(true)));
+                                drop(borrow);
+                                if is_generator {
+                                    self.stack.push(Value::VmNativeFunction(BUILTIN_ITERATOR_NEXT));
+                                } else if is_async_gen {
                                     self.stack.push(Value::VmNativeFunction(BUILTIN_ASYNCGEN_NEXT));
                                 } else {
                                     self.stack.push(Value::Undefined);
@@ -10671,6 +10949,10 @@ impl<'gc> VM<'gc> {
                     let obj = self.stack.pop().expect("VM Stack underflow on In (obj)");
                     let key_val = self.stack.pop().expect("VM Stack underflow on In (key)");
                     let key = value_to_string(&key_val);
+                    if let Some(result) = self.try_proxy_has(&obj, &key)? {
+                        self.stack.push(Value::Boolean(result));
+                        continue;
+                    }
                     let result = match &obj {
                         Value::VmObject(map) => {
                             let b = map.borrow();
@@ -10842,6 +11124,10 @@ impl<'gc> VM<'gc> {
                         value_to_string(name_val)
                     };
                     let obj = self.stack.pop().expect("VM Stack underflow on DeleteProperty");
+                    if let Some(result) = self.try_proxy_delete(&obj, &key)? {
+                        self.stack.push(Value::Boolean(result));
+                        continue;
+                    }
                     // Check if object is a built-in (non-deletable properties)
                     let is_builtin = if let Value::VmObject(ref map) = obj {
                         if let Some(Value::VmObject(math_ref)) = self.globals.get("Math") {

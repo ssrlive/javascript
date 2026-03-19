@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -22,7 +22,7 @@ mod timeout_tests {
                 }, 0);
             })
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"called\"");
     }
 
@@ -35,7 +35,7 @@ mod timeout_tests {
                 }, 0, 5, 10);
             })
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "15");
     }
 
@@ -45,7 +45,7 @@ mod timeout_tests {
             let id = setTimeout(() => {}, 0);
             typeof id === "number" && id >= 0
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -60,7 +60,7 @@ mod timeout_tests {
                 setTimeout(() => { resolve(result); }, 1);
             })
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"not called\"");
     }
 
@@ -77,7 +77,7 @@ mod timeout_tests {
                 }, 1);
             })
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -92,7 +92,7 @@ mod timeout_tests {
                 setTimeout(() => { resolve(result); }, 1);
             })
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "2");
     }
 
@@ -116,7 +116,7 @@ mod timeout_tests {
         .catch((e) => { throw new Error('serious error: ' + e.message); });
     "#;
 
-        let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(res, "\"done\"");
     }
 
@@ -130,7 +130,7 @@ mod timeout_tests {
         // Wait briefly to let microtasks / timers run
         new Promise((resolve)=>setTimeout(()=>resolve(cnt), 10));
     "#;
-        let res = evaluate_script(script, None::<&std::path::Path>);
+        let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         match res {
             Ok(value) => assert_eq!(value, "1"),
             Err(e) => panic!("Script evaluation failed: {e:?}"),
@@ -157,7 +157,7 @@ mod interval_tests {
                 }, 50);
             })
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert!(result.parse::<i32>().unwrap() > 0);
     }
 }

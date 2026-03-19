@@ -2203,8 +2203,13 @@ impl<'gc> Compiler<'gc> {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
+                        let call_ip = self.chunk.code.len();
                         self.chunk.write_opcode(Opcode::Call);
                         self.chunk.write_byte(args.len() as u8 | eval_flag);
+                        // Record callee name for error messages
+                        if let Expr::Var(name, ..) = &**callee {
+                            self.chunk.call_callee_names.insert(call_ip, name.clone());
+                        }
                     }
                 }
             }

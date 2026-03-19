@@ -3012,8 +3012,16 @@ pub(crate) fn handle_to_string_method<'gc>(
             "function native#{}() {{ [native code] }}",
             id
         )))),
-        Value::VmMap(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
-        Value::VmSet(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
+        Value::VmMap(m) => Ok(Value::String(utf8_to_utf16(if m.borrow().is_weak {
+            "[object WeakMap]"
+        } else {
+            "[object Map]"
+        }))),
+        Value::VmSet(s) => Ok(Value::String(utf8_to_utf16(if s.borrow().is_weak {
+            "[object WeakSet]"
+        } else {
+            "[object Set]"
+        }))),
     }
 }
 

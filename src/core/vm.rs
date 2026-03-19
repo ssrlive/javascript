@@ -412,6 +412,15 @@ fn js_exponential_format(s: &str) -> String {
     }
 }
 
+/// A queued timer callback (setTimeout / setInterval).
+struct PendingTimer<'gc> {
+    id: usize,
+    callback: Value<'gc>,
+    args: Vec<Value<'gc>>,
+    delay_ms: u64,
+    is_interval: bool,
+}
+
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
     chunk: Chunk<'gc>,
@@ -437,6 +446,10 @@ pub struct VM<'gc> {
     direct_eval: bool,                            // true when current eval is a direct call
     script_source: Option<String>,
     script_path: Option<String>,
+    // Timer queue for setTimeout / setInterval
+    pending_timers: Vec<PendingTimer<'gc>>,
+    next_timer_id: usize,
+    cleared_timers: std::collections::HashSet<usize>,
 }
 
 impl<'gc> VM<'gc> {
@@ -463,6 +476,9 @@ impl<'gc> VM<'gc> {
             direct_eval: false,
             script_source: None,
             script_path: None,
+            pending_timers: Vec::new(),
+            next_timer_id: 1,
+            cleared_timers: std::collections::HashSet::new(),
         };
         vm.register_builtins();
         vm
@@ -484,6 +500,124 @@ impl<'gc> VM<'gc> {
         map.insert("__host_fn__".to_string(), Value::String(crate::unicode::utf8_to_utf16(name)));
         map.insert("__host_this__".to_string(), receiver);
         Value::VmObject(Rc::new(RefCell::new(map)))
+    }
+
+    /// Create a pending promise (no __promise_value__ yet).
+    fn make_pending_promise(&self) -> Value<'gc> {
+        let mut map = IndexMap::new();
+        map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
+        map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
+        if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+            && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+        {
+            map.insert("__proto__".to_string(), proto);
+        }
+        Value::VmObject(Rc::new(RefCell::new(map)))
+    }
+
+    /// Settle a promise and flush its __then_queue__.
+    fn settle_promise(&mut self, promise: &Value<'gc>, value: Value<'gc>, rejected: bool) {
+        if let Value::VmObject(obj) = promise {
+            // Set the value
+            {
+                let mut b = obj.borrow_mut();
+                b.insert("__promise_value__".to_string(), value.clone());
+                if rejected {
+                    b.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                } else {
+                    b.shift_remove("__promise_rejected__");
+                }
+            }
+            // Flush __then_queue__
+            let queue = obj.borrow_mut().shift_remove("__then_queue__");
+            if let Some(Value::VmArray(arr)) = queue {
+                let entries: Vec<Value<'gc>> = arr.borrow().elements.clone();
+                for entry in entries {
+                    if let Value::VmObject(entry_map) = entry {
+                        let (on_fulfilled, on_rejected, child) = {
+                            let b = entry_map.borrow();
+                            (b.get("onFulfilled").cloned(), b.get("onRejected").cloned(), b.get("child").cloned())
+                        };
+                        let callback = if rejected { on_rejected } else { on_fulfilled };
+                        let child = child.unwrap_or(Value::Undefined);
+
+                        let is_callable = |v: &Value<'gc>| -> bool {
+                            matches!(v, Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..))
+                                || matches!(v, Value::VmObject(m) if m.borrow().contains_key("__host_fn__"))
+                        };
+
+                        let (cb_result, cb_rejected) = if let Some(ref cb) = callback
+                            && is_callable(cb)
+                        {
+                            match cb {
+                                Value::VmFunction(ip, _) => {
+                                    let saved = std::mem::take(&mut self.try_stack);
+                                    let out = self.call_vm_function_result(*ip, std::slice::from_ref(&value), &[]);
+                                    self.try_stack = saved;
+                                    match out {
+                                        Ok(v) => (v, false),
+                                        Err(e) => (self.vm_value_from_error(&e), true),
+                                    }
+                                }
+                                Value::VmClosure(ip, _, upv) => {
+                                    let uv = (**upv).clone();
+                                    let saved = std::mem::take(&mut self.try_stack);
+                                    let out = self.call_vm_function_result(*ip, std::slice::from_ref(&value), &uv);
+                                    self.try_stack = saved;
+                                    match out {
+                                        Ok(v) => (v, false),
+                                        Err(e) => (self.vm_value_from_error(&e), true),
+                                    }
+                                }
+                                Value::VmNativeFunction(native_id) => (self.call_builtin(*native_id, vec![value.clone()]), false),
+                                _ => (value.clone(), rejected),
+                            }
+                        } else {
+                            // No matching callback — propagate value/rejection
+                            (value.clone(), rejected)
+                        };
+
+                        // Assimilate inner promise if callback returned one
+                        let (final_val, final_rej) = if let Value::VmObject(inner) = &cb_result {
+                            let b = inner.borrow();
+                            let is_promise =
+                                matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                            if is_promise {
+                                let inner_has_value = b.contains_key("__promise_value__");
+                                let inner_rej = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                                let inner_val = b.get("__promise_value__").cloned().unwrap_or(Value::Undefined);
+                                drop(b);
+                                if inner_has_value {
+                                    (inner_val, inner_rej)
+                                } else {
+                                    // Inner promise is also pending — link child to it
+                                    if let Value::VmObject(inner_obj) = &cb_result {
+                                        let mut ib = inner_obj.borrow_mut();
+                                        let mut link_entry = IndexMap::new();
+                                        // No callbacks, just forward to child
+                                        link_entry.insert("child".to_string(), child.clone());
+                                        let link_val = Value::VmObject(Rc::new(RefCell::new(link_entry)));
+                                        if let Some(Value::VmArray(q)) = ib.get("__then_queue__").cloned() {
+                                            q.borrow_mut().push(link_val);
+                                        } else {
+                                            let q = VmArrayData::new(vec![link_val]);
+                                            ib.insert("__then_queue__".to_string(), Value::VmArray(Rc::new(RefCell::new(q))));
+                                        }
+                                    }
+                                    continue; // don't settle child yet
+                                }
+                            } else {
+                                (cb_result.clone(), cb_rejected)
+                            }
+                        } else {
+                            (cb_result, cb_rejected)
+                        };
+
+                        self.settle_promise(&child, final_val, final_rej);
+                    }
+                }
+            }
+        }
     }
 
     fn call_host_fn(&mut self, name: &str, receiver: Option<Value<'gc>>, args: Vec<Value<'gc>>) -> Value<'gc> {
@@ -1592,18 +1726,16 @@ impl<'gc> VM<'gc> {
                 make_promise(self, None, None)
             }
             "promise.__resolve" => {
-                if let Some(Value::VmObject(promise_obj)) = receiver {
-                    let mut b = promise_obj.borrow_mut();
-                    b.insert("__promise_value__".to_string(), args.first().cloned().unwrap_or(Value::Undefined));
-                    b.shift_remove("__promise_rejected__");
+                if let Some(receiver @ Value::VmObject(_)) = receiver {
+                    let val = args.first().cloned().unwrap_or(Value::Undefined);
+                    self.settle_promise(&receiver, val, false);
                 }
                 Value::Undefined
             }
             "promise.__reject" => {
-                if let Some(Value::VmObject(promise_obj)) = receiver {
-                    let mut b = promise_obj.borrow_mut();
-                    b.insert("__promise_value__".to_string(), args.first().cloned().unwrap_or(Value::Undefined));
-                    b.insert("__promise_rejected__".to_string(), Value::Boolean(true));
+                if let Some(receiver @ Value::VmObject(_)) = receiver {
+                    let val = args.first().cloned().unwrap_or(Value::Undefined);
+                    self.settle_promise(&receiver, val, true);
                 }
                 Value::Undefined
             }
@@ -1855,7 +1987,7 @@ impl<'gc> VM<'gc> {
             },
             "std.tmpfile" => crate::js_std::tmpfile::vm_create_tmpfile(),
             "std.gc" => Value::Undefined,
-            "tmp.puts" | "tmp.readAsString" | "tmp.seek" | "tmp.close" => {
+            "tmp.puts" | "tmp.readAsString" | "tmp.seek" | "tmp.close" | "tmp.getline" => {
                 crate::js_std::tmpfile::vm_dispatch_file_method(name, receiver, args)
             }
             _ => Value::Undefined,
@@ -3590,28 +3722,57 @@ impl<'gc> VM<'gc> {
         Ok(Some(out))
     }
 
+    /// Try to resolve a human-readable name for the callee at `callee_idx` on the stack.
+    fn resolve_callee_name(&self, callee_idx: usize) -> String {
+        // The Call instruction is 2 bytes (opcode + arg_byte). IP is now past it.
+        let call_ip = self.ip.saturating_sub(2);
+        if let Some(name) = self.chunk.call_callee_names.get(&call_ip) {
+            return name.clone();
+        }
+        // Fallback: check current frame's local names
+        if let Some(frame) = self.frames.last()
+            && callee_idx >= frame.bp
+        {
+            let slot = callee_idx - frame.bp;
+            if let Some(local_names) = self.chunk.fn_local_names.get(&frame.func_ip)
+                && let Some(name) = local_names.get(slot)
+                && !name.is_empty()
+            {
+                return name.clone();
+            }
+        }
+        "Value".to_string()
+    }
+
     /// Execute a native/built-in function
     fn call_builtin(&mut self, id: u8, args: Vec<Value<'gc>>) -> Value<'gc> {
         match id {
             BUILTIN_SETTIMEOUT | BUILTIN_SETINTERVAL => {
-                if let Some(callback) = args.first() {
-                    match callback {
-                        Value::VmFunction(ip, _) => {
-                            let _ = self.call_vm_function(*ip, &[], &[]);
-                        }
-                        Value::VmClosure(ip, _, upv) => {
-                            let uv = (**upv).clone();
-                            let _ = self.call_vm_function(*ip, &[], &uv);
-                        }
-                        Value::VmNativeFunction(native_id) => {
-                            let _ = self.call_builtin(*native_id, Vec::new());
-                        }
-                        _ => {}
-                    }
-                }
-                Value::Number(1.0)
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let delay = if let Some(Value::Number(n)) = args.get(1) {
+                    (*n).max(0.0) as u64
+                } else {
+                    0
+                };
+                let timer_args: Vec<Value<'gc>> = args.into_iter().skip(2).collect();
+                let timer_id = self.next_timer_id;
+                self.next_timer_id += 1;
+                self.pending_timers.push(PendingTimer {
+                    id: timer_id,
+                    callback,
+                    args: timer_args,
+                    delay_ms: delay,
+                    is_interval: id == BUILTIN_SETINTERVAL,
+                });
+                Value::Number(timer_id as f64)
             }
-            BUILTIN_CLEARTIMEOUT | BUILTIN_CLEARINTERVAL => Value::Undefined,
+            BUILTIN_CLEARTIMEOUT | BUILTIN_CLEARINTERVAL => {
+                if let Some(Value::Number(n)) = args.first() {
+                    self.cleared_timers.insert(*n as usize);
+                    self.pending_timers.retain(|t| t.id != *n as usize);
+                }
+                Value::Undefined
+            }
             BUILTIN_PROMISE_NOOP => Value::Undefined,
             BUILTIN_CTOR_PROMISE => {
                 let mut map = IndexMap::new();
@@ -3641,10 +3802,18 @@ impl<'gc> VM<'gc> {
                     reject_map.insert("__host_this__".to_string(), promise_obj.clone());
                     let reject = Value::VmObject(Rc::new(RefCell::new(reject_map)));
 
+                    // Build arg list trimmed to executor arity to avoid corrupting local slots
+                    let all_exec_args = [resolve.clone(), reject.clone()];
+                    let exec_arity = match executor {
+                        Value::VmFunction(_, a) | Value::VmClosure(_, a, _) => *a as usize,
+                        _ => all_exec_args.len(),
+                    };
+                    let exec_args = &all_exec_args[..exec_arity.min(all_exec_args.len())];
+
                     match executor {
                         Value::VmFunction(ip, _) => {
                             let saved_try_stack = std::mem::take(&mut self.try_stack);
-                            let call_result = self.call_vm_function_result(*ip, &[resolve.clone(), reject.clone()], &[]);
+                            let call_result = self.call_vm_function_result(*ip, exec_args, &[]);
                             self.try_stack = saved_try_stack;
                             if let Err(err) = call_result {
                                 let msg = err.message();
@@ -3666,7 +3835,7 @@ impl<'gc> VM<'gc> {
                         Value::VmClosure(ip, _, upv) => {
                             let uv = (**upv).clone();
                             let saved_try_stack = std::mem::take(&mut self.try_stack);
-                            let call_result = self.call_vm_function_result(*ip, &[resolve.clone(), reject.clone()], &uv);
+                            let call_result = self.call_vm_function_result(*ip, exec_args, &uv);
                             self.try_stack = saved_try_stack;
                             if let Err(err) = call_result {
                                 let msg = err.message();
@@ -5680,15 +5849,44 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_PROMISE_THEN {
-            let (receiver_value, is_rejected) = if let Value::VmObject(obj) = &receiver {
+            let (has_value, receiver_value, is_rejected) = if let Value::VmObject(obj) = &receiver {
                 let b = obj.borrow();
+                let has = b.contains_key("__promise_value__");
                 (
+                    has,
                     b.get("__promise_value__").cloned().unwrap_or(Value::Undefined),
                     matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true))),
                 )
             } else {
-                (Value::Undefined, false)
+                (false, Value::Undefined, false)
             };
+
+            // If the promise is still pending, store callbacks for later
+            if !has_value {
+                let child = self.make_pending_promise();
+                // Store {onFulfilled, onRejected, child} on the parent promise
+                if let Value::VmObject(obj) = &receiver {
+                    let mut entry = IndexMap::new();
+                    if let Some(cb) = args.first().cloned() {
+                        entry.insert("onFulfilled".to_string(), cb);
+                    }
+                    if let Some(cb) = args.get(1).cloned() {
+                        entry.insert("onRejected".to_string(), cb);
+                    }
+                    entry.insert("child".to_string(), child.clone());
+                    let entry_val = Value::VmObject(Rc::new(RefCell::new(entry)));
+
+                    let mut b = obj.borrow_mut();
+                    if let Some(Value::VmArray(arr)) = b.get("__then_queue__").cloned() {
+                        arr.borrow_mut().push(entry_val);
+                    } else {
+                        let arr = VmArrayData::new(vec![entry_val]);
+                        b.insert("__then_queue__".to_string(), Value::VmArray(Rc::new(RefCell::new(arr))));
+                    }
+                }
+                return child;
+            }
+
             let callback = if is_rejected { args.get(1).cloned() } else { args.first().cloned() };
 
             let is_callable = |v: &Value<'gc>| -> bool {
@@ -7001,6 +7199,18 @@ impl<'gc> VM<'gc> {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let val = args.get(1).cloned().unwrap_or(Value::Undefined);
                     let mut borrow = m.borrow_mut();
+                    // WeakMap requires object keys
+                    if borrow.is_weak && !matches!(key, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                        drop(borrow);
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Invalid value used as weak map key")),
+                        );
+                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map)))).ok();
+                        return Value::Undefined;
+                    }
                     // Update existing key or insert new
                     if let Some(entry) = borrow.entries.iter_mut().find(|(k, _)| self.values_equal(k, &key)) {
                         entry.1 = val;
@@ -7083,6 +7293,18 @@ impl<'gc> VM<'gc> {
                 BUILTIN_SET_ADD => {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
                     let mut borrow = s.borrow_mut();
+                    // WeakSet requires object values
+                    if borrow.is_weak && !matches!(val, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                        drop(borrow);
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Invalid value used in weak set")),
+                        );
+                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map)))).ok();
+                        return Value::Undefined;
+                    }
                     if !borrow.values.iter().any(|v| self.values_equal(v, &val)) {
                         borrow.values.push(val);
                     }
@@ -7319,8 +7541,20 @@ impl<'gc> VM<'gc> {
                 Value::Undefined => "Undefined",
                 Value::Null => "Null",
                 Value::VmArray(_) => "Array",
-                Value::VmMap(_) => "Map",
-                Value::VmSet(_) => "Set",
+                Value::VmMap(m) => {
+                    if m.borrow().is_weak {
+                        "WeakMap"
+                    } else {
+                        "Map"
+                    }
+                }
+                Value::VmSet(s) => {
+                    if s.borrow().is_weak {
+                        "WeakSet"
+                    } else {
+                        "Set"
+                    }
+                }
                 Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => "Function",
                 Value::Number(_) => "Number",
                 Value::String(_) => "String",
@@ -8674,7 +8908,63 @@ impl<'gc> VM<'gc> {
 
     /// Core execution loop of the VM (Fetch-Decode-Execute)
     pub fn run(&mut self) -> Result<Value<'gc>, JSError> {
-        self.run_inner(0)
+        let result = self.run_inner(0)?;
+        self.drain_timers()?;
+        Ok(result)
+    }
+
+    /// Execute all pending timers (setTimeout / setInterval callbacks).
+    /// Runs in a loop until no more timers remain, supporting chained timers.
+    fn drain_timers(&mut self) -> Result<(), JSError> {
+        // Sort by delay so shorter delays fire first
+        for _round in 0..1000 {
+            if self.pending_timers.is_empty() {
+                break;
+            }
+            // Take current batch, sorted by delay
+            let mut batch: Vec<PendingTimer<'gc>> = std::mem::take(&mut self.pending_timers);
+            batch.sort_by_key(|t| t.delay_ms);
+
+            for timer in batch {
+                if self.cleared_timers.contains(&timer.id) {
+                    continue;
+                }
+                let cb_args: Vec<Value<'gc>> = timer.args.clone();
+                match &timer.callback {
+                    Value::VmFunction(ip, _) => {
+                        let _ = self.call_vm_function(*ip, &cb_args, &[]);
+                    }
+                    Value::VmClosure(ip, _, upv) => {
+                        let uv = (**upv).clone();
+                        let _ = self.call_vm_function(*ip, &cb_args, &uv);
+                    }
+                    Value::VmNativeFunction(native_id) => {
+                        let _ = self.call_builtin(*native_id, cb_args);
+                    }
+                    Value::VmObject(obj) => {
+                        let borrow = obj.borrow();
+                        if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                            let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                            drop(borrow);
+                            self.call_host_fn(&host_name, None, cb_args);
+                        }
+                    }
+                    _ => {}
+                }
+                // Re-queue intervals
+                if timer.is_interval && !self.cleared_timers.contains(&timer.id) {
+                    self.pending_timers.push(PendingTimer {
+                        id: timer.id,
+                        callback: timer.callback,
+                        args: timer.args,
+                        delay_ms: timer.delay_ms,
+                        is_interval: true,
+                    });
+                }
+            }
+        }
+        self.cleared_timers.clear();
+        Ok(())
     }
 
     /// Execute VM until frames drop below `min_depth` or top-level returns
@@ -9243,12 +9533,11 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(result);
                                 } else {
                                     log::warn!("Attempted to call non-function object");
+                                    let callee_name = self.resolve_callee_name(callee_idx);
+                                    let msg = format!("{} is not a function", callee_name);
                                     let mut err_map = IndexMap::new();
                                     err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                                    err_map.insert(
-                                        "message".to_string(),
-                                        Value::String(crate::unicode::utf8_to_utf16("Value is not a function")),
-                                    );
+                                    err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
                                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                                     self.stack.truncate(base);
                                     self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
@@ -9256,12 +9545,11 @@ impl<'gc> VM<'gc> {
                                 }
                             } else {
                                 log::warn!("Attempted to call non-function: {}", value_to_string(&callee));
+                                let callee_name = self.resolve_callee_name(callee_idx);
+                                let msg = format!("{} is not a function", callee_name);
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                                err_map.insert(
-                                    "message".to_string(),
-                                    Value::String(crate::unicode::utf8_to_utf16("Value is not a function")),
-                                );
+                                err_map.insert("message".to_string(), Value::String(crate::unicode::utf8_to_utf16(&msg)));
                                 let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                                 self.stack.truncate(base);
                                 self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
@@ -11187,6 +11475,7 @@ impl<'gc> VM<'gc> {
                             "entries" => Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
                             "forEach" => Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
                             "clear" => Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
+                            "toString" => Value::VmNativeFunction(BUILTIN_OBJ_TOSTRING),
                             _ => Value::Undefined,
                         },
                         Value::VmSet(_) => match key.as_str() {
@@ -11197,6 +11486,7 @@ impl<'gc> VM<'gc> {
                             "entries" => Value::VmNativeFunction(BUILTIN_SET_ENTRIES),
                             "forEach" => Value::VmNativeFunction(BUILTIN_SET_FOREACH),
                             "clear" => Value::VmNativeFunction(BUILTIN_SET_CLEAR),
+                            "toString" => Value::VmNativeFunction(BUILTIN_OBJ_TOSTRING),
                             _ => Value::Undefined,
                         },
                         Value::Object(obj_ref) => {
@@ -11610,7 +11900,8 @@ impl<'gc> VM<'gc> {
                                             }
                                         }
                                     }
-                                    self.stack.push(Value::VmMap(Rc::new(RefCell::new(VmMapData { entries }))));
+                                    self.stack
+                                        .push(Value::VmMap(Rc::new(RefCell::new(VmMapData { entries, is_weak: false }))));
                                 }
                                 BUILTIN_CTOR_SET => {
                                     let mut values = Vec::new();
@@ -11622,17 +11913,22 @@ impl<'gc> VM<'gc> {
                                             }
                                         }
                                     }
-                                    self.stack.push(Value::VmSet(Rc::new(RefCell::new(VmSetData { values }))));
+                                    self.stack
+                                        .push(Value::VmSet(Rc::new(RefCell::new(VmSetData { values, is_weak: false }))));
                                 }
                                 BUILTIN_CTOR_WEAKMAP => {
                                     // WeakMap: implemented as regular Map (no GC)
-                                    self.stack
-                                        .push(Value::VmMap(Rc::new(RefCell::new(VmMapData { entries: Vec::new() }))));
+                                    self.stack.push(Value::VmMap(Rc::new(RefCell::new(VmMapData {
+                                        entries: Vec::new(),
+                                        is_weak: true,
+                                    }))));
                                 }
                                 BUILTIN_CTOR_WEAKSET => {
                                     // WeakSet: implemented as regular Set (no GC)
-                                    self.stack
-                                        .push(Value::VmSet(Rc::new(RefCell::new(VmSetData { values: Vec::new() }))));
+                                    self.stack.push(Value::VmSet(Rc::new(RefCell::new(VmSetData {
+                                        values: Vec::new(),
+                                        is_weak: true,
+                                    }))));
                                 }
                                 BUILTIN_CTOR_WEAKREF => {
                                     // WeakRef: target must be an object or unregistered symbol

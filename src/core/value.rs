@@ -18,12 +18,14 @@ use std::rc::Rc;
 #[derive(Clone)]
 pub struct VmMapData<'gc> {
     pub entries: Vec<(Value<'gc>, Value<'gc>)>,
+    pub is_weak: bool,
 }
 
 /// VM Set storage (simple Vec of values).
 #[derive(Clone)]
 pub struct VmSetData<'gc> {
     pub values: Vec<Value<'gc>>,
+    pub is_weak: bool,
 }
 
 /// Array storage with optional named properties (e.g. `arr.foo = "bar"`).
@@ -1784,8 +1786,20 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
             format!("{{ {} }}", parts.join(", "))
         }
         Value::VmNativeFunction(id) => format!("[NativeFunction#{}]", id),
-        Value::VmMap(_) => "[object Map]".to_string(),
-        Value::VmSet(_) => "[object Set]".to_string(),
+        Value::VmMap(m) => {
+            if m.borrow().is_weak {
+                "[object WeakMap]".to_string()
+            } else {
+                "[object Map]".to_string()
+            }
+        }
+        Value::VmSet(s) => {
+            if s.borrow().is_weak {
+                "[object WeakSet]".to_string()
+            } else {
+                "[object Set]".to_string()
+            }
+        }
     };
     VTOS_DEPTH.with(|d| d.set(d.get() - 1));
     res

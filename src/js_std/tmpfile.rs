@@ -314,6 +314,7 @@ pub fn vm_create_tmpfile<'gc>() -> Value<'gc> {
             }
             obj.insert("puts".to_string(), make_host_fn("tmp.puts"));
             obj.insert("readAsString".to_string(), make_host_fn("tmp.readAsString"));
+            obj.insert("getline".to_string(), make_host_fn("tmp.getline"));
             obj.insert("seek".to_string(), make_host_fn("tmp.seek"));
             obj.insert("close".to_string(), make_host_fn("tmp.close"));
             Value::VmObject(Rc::new(RefCell::new(obj)))
@@ -350,6 +351,37 @@ pub fn vm_dispatch_file_method<'gc>(name: &str, receiver: Option<Value<'gc>>, ar
                 _ => 0,
             };
             Value::Number(vm_file_seek(file_id, offset, whence) as f64)
+        }
+        "tmp.getline" => {
+            use std::io::Read;
+            let mut store = FILE_STORE.lock().unwrap();
+            if let Some(file) = store.get_mut(&file_id) {
+                let mut line = Vec::new();
+                let mut buf = [0u8; 1];
+                let mut read_any = false;
+                loop {
+                    match file.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            read_any = true;
+                            if buf[0] == b'\n' {
+                                break;
+                            }
+                            if buf[0] != b'\r' {
+                                line.push(buf[0]);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if !read_any {
+                    Value::Undefined
+                } else {
+                    Value::String(utf8_to_utf16(&String::from_utf8_lossy(&line)))
+                }
+            } else {
+                Value::Undefined
+            }
         }
         "tmp.close" => {
             vm_file_close(file_id);

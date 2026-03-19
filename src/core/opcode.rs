@@ -183,6 +183,8 @@ pub struct Chunk<'gc> {
     pub arrow_function_ips: std::collections::HashSet<usize>,
     /// Map from function IP to local variable names (for direct eval)
     pub fn_local_names: std::collections::HashMap<usize, Vec<String>>,
+    /// Map from Call instruction IP to callee variable name (for error messages)
+    pub call_callee_names: std::collections::HashMap<usize, String>,
 }
 
 impl<'gc> Chunk<'gc> {
@@ -196,6 +198,7 @@ impl<'gc> Chunk<'gc> {
             async_function_ips: std::collections::HashSet::new(),
             arrow_function_ips: std::collections::HashSet::new(),
             fn_local_names: std::collections::HashMap::new(),
+            call_callee_names: std::collections::HashMap::new(),
         }
     }
 

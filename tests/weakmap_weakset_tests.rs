@@ -9,40 +9,42 @@ fn __init_test_logger() {
 
 #[test]
 fn test_weakmap_constructor() {
-    let result = evaluate_script("new WeakMap()", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("new WeakMap()", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[object WeakMap]");
 
-    let result = evaluate_script("new WeakMap([])", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("new WeakMap([])", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[object WeakMap]");
 }
 
 #[test]
 fn test_weakmap_set_get_has_delete() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let wm = new WeakMap();
         let key = {};
         wm.set(key, 'value');
         wm.get(key)
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(result, "\"value\"");
 
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let wm = new WeakMap();
         let key = {};
         wm.set(key, 'value');
         wm.has(key)
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(result, "true");
 
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let wm = new WeakMap();
         let key = {};
@@ -51,6 +53,7 @@ fn test_weakmap_set_get_has_delete() {
         let hasAfter = wm.has(key);
         [deleted, hasAfter]
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -59,7 +62,7 @@ fn test_weakmap_set_get_has_delete() {
 
 #[test]
 fn test_weakmap_non_object_key() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let wm = new WeakMap();
         try {
@@ -69,6 +72,7 @@ fn test_weakmap_non_object_key() {
             'error'
         }
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -77,28 +81,29 @@ fn test_weakmap_non_object_key() {
 
 #[test]
 fn test_weakset_constructor() {
-    let result = evaluate_script("new WeakSet()", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("new WeakSet()", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[object WeakSet]");
 
-    let result = evaluate_script("new WeakSet([])", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("new WeakSet([])", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "[object WeakSet]");
 }
 
 #[test]
 fn test_weakset_add_has_delete() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let ws = new WeakSet();
         let obj = {};
         ws.add(obj);
         ws.has(obj)
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
     assert_eq!(result, "true");
 
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let ws = new WeakSet();
         let obj = {};
@@ -107,6 +112,7 @@ fn test_weakset_add_has_delete() {
         let hasAfter = ws.has(obj);
         [deleted, hasAfter]
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -116,7 +122,7 @@ fn test_weakset_add_has_delete() {
 
 #[test]
 fn test_weakset_non_object_value() {
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         let ws = new WeakSet();
         try {
@@ -126,6 +132,7 @@ fn test_weakset_non_object_value() {
             'error'
         }
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -135,9 +142,9 @@ fn test_weakset_non_object_value() {
 
 #[test]
 fn test_weakmap_weakset_to_string() {
-    let result = evaluate_script("new WeakMap().toString()", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("new WeakMap().toString()", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"[object WeakMap]\"");
 
-    let result = evaluate_script("new WeakSet().toString()", None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm("new WeakSet().toString()", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"[object WeakSet]\"");
 }

@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 #[ctor::ctor]
@@ -20,7 +20,7 @@ fn test_trailing_comma_in_array_initializer_with_following_statement() {
         f();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "3");
 
     let script = r#"
@@ -35,6 +35,6 @@ fn test_trailing_comma_in_array_initializer_with_following_statement() {
         f();
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "3");
 }

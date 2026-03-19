@@ -4371,7 +4371,7 @@ impl<'gc> Compiler<'gc> {
 
         // runtime check: ensure iterator exists on the object (via prototype)
         self.emit_helper_get(&temp); // push arr
-        let iter_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("iterator")));
+        let iter_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("@@sym:1")));
         self.chunk.write_opcode(Opcode::GetProperty); // will traverse prototype
         self.chunk.write_u16(iter_key);
         let ok_jump = self.emit_jump(Opcode::JumpIfTrue);

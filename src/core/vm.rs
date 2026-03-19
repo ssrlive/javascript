@@ -432,6 +432,7 @@ pub struct VM<'gc> {
     global_this: Rc<RefCell<IndexMap<String, Value<'gc>>>>,
     symbol_counter: u64,
     symbol_registry: HashMap<String, Value<'gc>>, // Symbol.for() registry
+    symbol_values: HashMap<u64, Value<'gc>>,      // symbol_id → Symbol VmObject (for getOwnPropertySymbols)
     pending_throw: Option<Value<'gc>>,            // deferred throw from call_builtin
     direct_eval: bool,                            // true when current eval is a direct call
     script_source: Option<String>,
@@ -457,6 +458,7 @@ impl<'gc> VM<'gc> {
             global_this,
             symbol_counter: 0,
             symbol_registry: HashMap::new(),
+            symbol_values: HashMap::new(),
             pending_throw: None,
             direct_eval: false,
             script_source: None,
@@ -531,7 +533,7 @@ impl<'gc> VM<'gc> {
                         }
 
                         let iterable = Value::VmObject(obj.clone());
-                        let iter_fn = self.read_named_property(iterable.clone(), "iterator");
+                        let iter_fn = self.read_named_property(iterable.clone(), "@@sym:1");
                         let iterator = match iter_fn {
                             Value::VmFunction(ip, _) => {
                                 self.this_stack.push(iterable.clone());
@@ -565,6 +567,23 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             Value::VmNativeFunction(id) => self.call_method_builtin(id, iterable.clone(), vec![]),
+                            Value::VmObject(ref host_obj) => {
+                                let borrow = host_obj.borrow();
+                                if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                                    let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                                    drop(borrow);
+                                    self.call_host_fn(&host_name, Some(iterable.clone()), vec![])
+                                } else {
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16("iterator missing")),
+                                    );
+                                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                    return Value::Undefined;
+                                }
+                            }
                             Value::Undefined => {
                                 let next_candidate = self.read_named_property(iterable.clone(), "next");
                                 if matches!(
@@ -973,6 +992,49 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
+            "object.getOwnPropertySymbols" => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let mut symbols = Vec::new();
+                if let Value::VmObject(obj) = &target {
+                    let borrow = obj.borrow();
+                    for k in borrow.keys() {
+                        if let Some(id_str) = k.strip_prefix("@@sym:")
+                            && let Ok(id) = id_str.parse::<u64>()
+                            && let Some(sym_val) = self.symbol_values.get(&id)
+                        {
+                            symbols.push(sym_val.clone());
+                        }
+                    }
+                }
+                Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(symbols))))
+            }
+            "array.symbolIterator" => {
+                if let Some(Value::VmArray(arr)) = receiver {
+                    let items = arr.borrow().elements.clone();
+                    self.make_iterator(items)
+                } else {
+                    Value::Undefined
+                }
+            }
+            "string.symbolIterator" => {
+                let s = match receiver {
+                    Some(Value::String(ref s)) => crate::unicode::utf16_to_utf8(s),
+                    Some(Value::VmObject(ref obj)) => {
+                        if let Some(Value::String(ref s)) = obj.borrow().get("__value__").cloned() {
+                            crate::unicode::utf16_to_utf8(s)
+                        } else {
+                            value_to_string(receiver.as_ref().unwrap())
+                        }
+                    }
+                    Some(ref v) => value_to_string(v),
+                    None => String::new(),
+                };
+                let chars: Vec<Value<'gc>> = s
+                    .chars()
+                    .map(|ch| Value::String(crate::unicode::utf8_to_utf16(&ch.to_string())))
+                    .collect();
+                self.make_iterator(chars)
+            }
             "object.getOwnPropertyDescriptors" => {
                 let Some(target) = args.first().cloned() else {
                     return Value::VmObject(Rc::new(RefCell::new(IndexMap::new())));
@@ -981,8 +1043,19 @@ impl<'gc> VM<'gc> {
                 let mut out = IndexMap::new();
                 match target {
                     Value::VmObject(obj) => {
-                        let keys: Vec<String> = obj.borrow().keys().filter(|k| !k.starts_with("__")).cloned().collect();
-                        for key in keys {
+                        let mut property_keys: Vec<String> = obj.borrow().keys().filter(|k| !k.starts_with("__")).cloned().collect();
+                        // Also collect accessor keys stored as __get_<name> / __set_<name>
+                        {
+                            let borrow = obj.borrow();
+                            for k in borrow.keys() {
+                                if let Some(name) = k.strip_prefix("__get_")
+                                    && !property_keys.contains(&name.to_string())
+                                {
+                                    property_keys.push(name.to_string());
+                                }
+                            }
+                        }
+                        for key in property_keys {
                             let desc = self.call_builtin(
                                 BUILTIN_OBJECT_GETOWNPROPDESC,
                                 vec![Value::VmObject(obj.clone()), Value::String(crate::unicode::utf8_to_utf16(&key))],
@@ -2181,6 +2254,9 @@ impl<'gc> VM<'gc> {
             } else {
                 format!("[{}]", sym_desc)
             }
+        } else if key.starts_with("@@sym:") {
+            // Handled by maybe_infer_function_name_from_key with symbol_values lookup
+            String::new()
         } else {
             key.to_string()
         }
@@ -2192,7 +2268,26 @@ impl<'gc> VM<'gc> {
             _ => return,
         };
 
-        let inferred = Self::infer_name_from_property_key(key);
+        let inferred = if let Some(id_str) = key.strip_prefix("@@sym:") {
+            if let Ok(id) = id_str.parse::<u64>() {
+                if let Some(Value::VmObject(m)) = self.symbol_values.get(&id) {
+                    let desc = m.borrow().get("description").cloned();
+                    match desc {
+                        Some(Value::String(s)) => {
+                            let d = crate::unicode::utf16_to_utf8(&s);
+                            if d.is_empty() { String::new() } else { format!("[{}]", d) }
+                        }
+                        _ => String::new(),
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            Self::infer_name_from_property_key(key)
+        };
         match self.chunk.fn_names.get(&ip) {
             Some(existing) if !existing.is_empty() => {}
             _ => {
@@ -2414,21 +2509,33 @@ impl<'gc> VM<'gc> {
         self.globals
             .insert("__forOfValues".to_string(), Self::make_host_fn("global.__forOfValues"));
         // Minimal Symbol object — callable via __native_id__, with well-known symbol properties
+        // Well-known symbols are proper VmObject symbols with fixed IDs: iterator=1, hasInstance=2, toPrimitive=3, toStringTag=4
+        let make_well_known_symbol = |id: u64, name: &str| -> Value<'gc> {
+            let mut m = IndexMap::new();
+            m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
+            m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
+            m.insert(
+                "description".to_string(),
+                Value::String(crate::unicode::utf8_to_utf16(&format!("Symbol.{}", name))),
+            );
+            Value::VmObject(Rc::new(RefCell::new(m)))
+        };
+        let sym_iterator = make_well_known_symbol(1, "iterator");
+        let sym_has_instance = make_well_known_symbol(2, "hasInstance");
+        let sym_to_primitive = make_well_known_symbol(3, "toPrimitive");
+        let sym_to_string_tag = make_well_known_symbol(4, "toStringTag");
+        self.symbol_values.insert(1, sym_iterator.clone());
+        self.symbol_values.insert(2, sym_has_instance.clone());
+        self.symbol_values.insert(3, sym_to_primitive.clone());
+        self.symbol_values.insert(4, sym_to_string_tag.clone());
+        self.symbol_counter = 4; // user symbols start from 5+
+
         let mut sym_obj = IndexMap::new();
         sym_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_SYMBOL as f64));
-        sym_obj.insert("iterator".to_string(), Value::String(crate::unicode::utf8_to_utf16("iterator")));
-        sym_obj.insert(
-            "hasInstance".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("Symbol(Symbol.hasInstance)")),
-        );
-        sym_obj.insert(
-            "toPrimitive".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("Symbol(Symbol.toPrimitive)")),
-        );
-        sym_obj.insert(
-            "toStringTag".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("Symbol(Symbol.toStringTag)")),
-        );
+        sym_obj.insert("iterator".to_string(), sym_iterator);
+        sym_obj.insert("hasInstance".to_string(), sym_has_instance);
+        sym_obj.insert("toPrimitive".to_string(), sym_to_primitive);
+        sym_obj.insert("toStringTag".to_string(), sym_to_string_tag);
         sym_obj.insert("for".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_FOR));
         sym_obj.insert("keyFor".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_KEYFOR));
         self.globals
@@ -2481,7 +2588,7 @@ impl<'gc> VM<'gc> {
         array_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAY as f64));
         // Create Array.prototype with iterator method
         let mut arr_proto = IndexMap::new();
-        arr_proto.insert("iterator".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ITERATOR));
+        arr_proto.insert("@@sym:1".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ITERATOR));
         arr_proto.insert("push".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_PUSH));
         arr_proto.insert("pop".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_POP));
         arr_proto.insert("join".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_JOIN));
@@ -2744,6 +2851,10 @@ impl<'gc> VM<'gc> {
         object_map.insert(
             "getOwnPropertyDescriptors".to_string(),
             Self::make_host_fn("object.getOwnPropertyDescriptors"),
+        );
+        object_map.insert(
+            "getOwnPropertySymbols".to_string(),
+            Self::make_host_fn("object.getOwnPropertySymbols"),
         );
         let object_val = Value::VmObject(Rc::new(RefCell::new(object_map)));
         // Set Object.prototype.constructor = Object (circular reference)
@@ -4735,15 +4846,15 @@ impl<'gc> VM<'gc> {
             }
             // Number() as function: convert argument to number
             BUILTIN_CTOR_NUMBER => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(0.0);
-                Value::Number(n)
+                let arg = args.first().cloned().unwrap_or(Value::Number(0.0));
+                let coerced = self.try_to_primitive(&arg, "number");
+                Value::Number(to_number(&coerced))
             }
             // String() as function: convert argument to string
             BUILTIN_CTOR_STRING => {
-                let s = match args.first() {
-                    Some(v) => self.vm_to_string(v),
-                    None => String::new(),
-                };
+                let arg = args.first().cloned().unwrap_or(Value::String(Vec::new()));
+                let coerced = self.try_to_primitive(&arg, "string");
+                let s = self.vm_to_string(&coerced);
                 Value::String(crate::unicode::utf8_to_utf16(&s))
             }
             BUILTIN_CTOR_BOOLEAN => {
@@ -4993,7 +5104,7 @@ impl<'gc> VM<'gc> {
                     let keys: Vec<Value<'gc>> = obj
                         .borrow()
                         .keys()
-                        .filter(|k| !k.starts_with("__"))
+                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
                         .map(|k| Value::String(crate::unicode::utf8_to_utf16(k)))
                         .collect();
                     Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(keys))))
@@ -5014,7 +5125,7 @@ impl<'gc> VM<'gc> {
                     let vals: Vec<Value<'gc>> = obj
                         .borrow()
                         .iter()
-                        .filter(|(k, _)| !k.starts_with("__"))
+                        .filter(|(k, _)| !k.starts_with("__") && !k.starts_with("@@sym:"))
                         .map(|(_, v)| v.clone())
                         .collect();
                     Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vals))))
@@ -5049,7 +5160,7 @@ impl<'gc> VM<'gc> {
                             let entries: Vec<(String, Value<'gc>)> = src_map
                                 .borrow()
                                 .iter()
-                                .filter(|(k, _)| !k.starts_with("__"))
+                                .filter(|(k, _)| !k.starts_with("__") && !k.starts_with("@@sym:"))
                                 .map(|(k, v)| (k.clone(), v.clone()))
                                 .collect();
                             let mut tgt = target.borrow_mut();
@@ -5405,45 +5516,61 @@ impl<'gc> VM<'gc> {
                     _ => Some(value_to_string(v)),
                 });
                 self.symbol_counter += 1;
+                let id = self.symbol_counter;
                 let mut m = IndexMap::new();
                 m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
-                m.insert("__symbol_id__".to_string(), Value::Number(self.symbol_counter as f64));
+                m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
                 if let Some(d) = &desc {
                     m.insert("description".to_string(), Value::String(crate::unicode::utf8_to_utf16(d)));
                 } else {
                     m.insert("description".to_string(), Value::Undefined);
                 }
-                Value::VmObject(Rc::new(RefCell::new(m)))
+                let val = Value::VmObject(Rc::new(RefCell::new(m)));
+                self.symbol_values.insert(id, val.clone());
+                val
             }
             BUILTIN_SYMBOL_FOR => {
                 // Symbol.for(key) — return or create a registered symbol
-                let key = args.first().map(value_to_string).unwrap_or_default();
+                let key = args.first().map(value_to_string).unwrap_or_else(|| "undefined".to_string());
                 if let Some(existing) = self.symbol_registry.get(&key) {
                     return existing.clone();
                 }
                 self.symbol_counter += 1;
+                let id = self.symbol_counter;
                 let mut m = IndexMap::new();
                 m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
-                m.insert("__symbol_id__".to_string(), Value::Number(self.symbol_counter as f64));
+                m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
                 m.insert("__registered__".to_string(), Value::Boolean(true));
                 m.insert("description".to_string(), Value::String(crate::unicode::utf8_to_utf16(&key)));
                 let val = Value::VmObject(Rc::new(RefCell::new(m)));
+                self.symbol_values.insert(id, val.clone());
                 self.symbol_registry.insert(key, val.clone());
                 val
             }
             BUILTIN_SYMBOL_KEYFOR => {
                 // Symbol.keyFor(sym) — return key if registered, else undefined
                 let sym = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Value::VmObject(ref obj) = sym {
-                    let borrow = obj.borrow();
-                    if borrow.get("__vm_symbol__").is_some()
-                        && borrow.get("__registered__").is_some()
-                        && let Some(Value::String(desc)) = borrow.get("description")
-                    {
-                        return Value::String(desc.clone());
+                match &sym {
+                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => {
+                        let borrow = obj.borrow();
+                        if borrow.get("__registered__").is_some()
+                            && let Some(Value::String(desc)) = borrow.get("description")
+                        {
+                            return Value::String(desc.clone());
+                        }
+                        Value::Undefined
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Symbol.keyFor requires a symbol argument")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
                     }
                 }
-                Value::Undefined
             }
             _ => {
                 log::warn!("Unknown builtin ID: {}", id);
@@ -5543,7 +5670,10 @@ impl<'gc> VM<'gc> {
             | BUILTIN_PROMISE_RESOLVE
             | BUILTIN_PROMISE_ALL
             | BUILTIN_CTOR_DATE
-            | BUILTIN_REFLECT_APPLY => {
+            | BUILTIN_REFLECT_APPLY
+            | BUILTIN_SYMBOL
+            | BUILTIN_SYMBOL_FOR
+            | BUILTIN_SYMBOL_KEYFOR => {
                 return self.call_builtin(id, args);
             }
             _ => {}
@@ -7156,7 +7286,11 @@ impl<'gc> VM<'gc> {
 
         // Object.prototype.hasOwnProperty(key)
         if id == BUILTIN_OBJ_HASOWNPROPERTY {
-            let key = args.first().map(value_to_string).unwrap_or_default();
+            let key_val = args.first().cloned().unwrap_or(Value::Undefined);
+            let key = match self.as_property_key_string(&key_val) {
+                Ok(k) => k,
+                Err(_) => value_to_string(&key_val),
+            };
             return match &receiver {
                 Value::VmObject(map) => {
                     let has = map.borrow().contains_key(&key) && !key.starts_with("__proto__") && !key.starts_with("__type__");
@@ -7168,6 +7302,19 @@ impl<'gc> VM<'gc> {
 
         // Object.prototype.toString()
         if id == BUILTIN_OBJ_TOSTRING {
+            // Symbol.prototype.toString() — returns "Symbol(desc)"
+            if let Value::VmObject(map) = &receiver {
+                let b = map.borrow();
+                if b.contains_key("__vm_symbol__") {
+                    return match b.get("description") {
+                        Some(Value::String(d)) => Value::String(crate::unicode::utf8_to_utf16(&format!(
+                            "Symbol({})",
+                            crate::unicode::utf16_to_utf8(d)
+                        ))),
+                        _ => Value::String(crate::unicode::utf8_to_utf16("Symbol()")),
+                    };
+                }
+            }
             let tag = match &receiver {
                 Value::Undefined => "Undefined",
                 Value::Null => "Null",
@@ -7184,7 +7331,7 @@ impl<'gc> VM<'gc> {
                         let tag_str = crate::unicode::utf16_to_utf8(tag);
                         return Value::String(crate::unicode::utf8_to_utf16(&format!("[object {}]", tag_str)));
                     }
-                    if let Some(Value::String(tag)) = b.get("Symbol(Symbol.toStringTag)") {
+                    if let Some(Value::String(tag)) = b.get("Symbol(Symbol.toStringTag)").or_else(|| b.get("@@sym:4")) {
                         let tag_str = crate::unicode::utf16_to_utf8(tag);
                         return Value::String(crate::unicode::utf8_to_utf16(&format!("[object {}]", tag_str)));
                     }
@@ -7661,6 +7808,58 @@ impl<'gc> VM<'gc> {
         Value::VmObject(Rc::new(RefCell::new(obj)))
     }
 
+    /// Try to coerce a value via [Symbol.toPrimitive] if present.
+    fn try_to_primitive(&mut self, val: &Value<'gc>, hint: &str) -> Value<'gc> {
+        if let Value::VmObject(map) = val {
+            let tp_fn = {
+                let borrow = map.borrow();
+                borrow.get("@@sym:3").cloned()
+            };
+            if let Some(func) = tp_fn {
+                let hint_val = Value::String(crate::unicode::utf8_to_utf16(hint));
+                let result = match func {
+                    Value::VmFunction(ip, _) => {
+                        self.this_stack.push(val.clone());
+                        let r = self.call_vm_function(ip, &[hint_val], &[]);
+                        self.this_stack.pop();
+                        Some(r)
+                    }
+                    Value::VmClosure(ip, _, ref upv) => {
+                        self.this_stack.push(val.clone());
+                        let uv = (**upv).clone();
+                        let r = self.call_vm_function(ip, &[hint_val], &uv);
+                        self.this_stack.pop();
+                        Some(r)
+                    }
+                    _ => None,
+                };
+                if let Some(r) = result {
+                    // If toPrimitive returned a non-primitive, throw TypeError
+                    if matches!(r, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Symbol.toPrimitive must return a primitive value")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+                    return r;
+                }
+            }
+        }
+        val.clone()
+    }
+
+    fn is_symbol_value(val: &Value<'gc>) -> bool {
+        if let Value::VmObject(map) = val {
+            map.borrow().contains_key("__vm_symbol__")
+        } else {
+            false
+        }
+    }
+
     /// Compare two values for equality (used by indexOf etc.)
     fn values_equal(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
         match (a, b) {
@@ -7767,7 +7966,39 @@ impl<'gc> VM<'gc> {
     fn as_property_key_string(&mut self, index: &Value<'gc>) -> Result<String, JSError> {
         match index {
             Value::String(s) => Ok(crate::unicode::utf16_to_utf8(s)),
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
+            Value::VmObject(map) => {
+                // If it's a symbol VmObject, return @@sym:<id> key
+                let is_sym = map.borrow().contains_key("__vm_symbol__");
+                if is_sym {
+                    let id = map
+                        .borrow()
+                        .get("__symbol_id__")
+                        .and_then(|v| if let Value::Number(n) = v { Some(*n as u64) } else { None })
+                        .unwrap_or(0);
+                    return Ok(format!("@@sym:{}", id));
+                }
+                let receiver = index.clone();
+                let to_string_fn = self.read_named_property(receiver.clone(), "toString");
+                let out = match to_string_fn {
+                    Value::VmFunction(ip, _) => {
+                        self.this_stack.push(receiver.clone());
+                        let result = self.call_vm_function_result(ip, &[], &[]);
+                        self.this_stack.pop();
+                        result?
+                    }
+                    Value::VmClosure(ip, _, upv) => {
+                        self.this_stack.push(receiver.clone());
+                        let uv = (*upv).clone();
+                        let result = self.call_vm_function_result(ip, &[], &uv);
+                        self.this_stack.pop();
+                        result?
+                    }
+                    Value::VmNativeFunction(id) => self.call_method_builtin(id, receiver.clone(), vec![]),
+                    _ => index.clone(),
+                };
+                Ok(value_to_string(&out))
+            }
+            Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
                 let receiver = index.clone();
                 let to_string_fn = self.read_named_property(receiver.clone(), "toString");
                 let out = match to_string_fn {
@@ -8368,7 +8599,7 @@ impl<'gc> VM<'gc> {
                 let m = map.borrow();
                 let parts: Vec<String> = m
                     .iter()
-                    .filter(|(k, _)| !k.starts_with("__"))
+                    .filter(|(k, _)| !k.starts_with("__") && !k.starts_with("@@sym:"))
                     .map(|(k, v)| format!("\"{}\":{}", k.replace('\\', "\\\\").replace('"', "\\\""), self.json_stringify(v)))
                     .collect();
                 format!("{{{}}}", parts.join(","))
@@ -9222,8 +9453,29 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 Opcode::Add => {
-                    let b = self.stack.pop().expect("VM Stack underflow on Add (b)");
-                    let a = self.stack.pop().expect("VM Stack underflow on Add (a)");
+                    let b_raw = self.stack.pop().expect("VM Stack underflow on Add (b)");
+                    let a_raw = self.stack.pop().expect("VM Stack underflow on Add (a)");
+                    let a = self.try_to_primitive(&a_raw, "default");
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(thrown)?;
+                        continue;
+                    }
+                    let b = self.try_to_primitive(&b_raw, "default");
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(thrown)?;
+                        continue;
+                    }
+                    // Symbols cannot be implicitly converted
+                    if Self::is_symbol_value(&a) || Self::is_symbol_value(&b) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                        );
+                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                        continue;
+                    }
                     let is_a_str = matches!(&a, Value::String(_));
                     let is_b_str = matches!(&b, Value::String(_));
                     match (&a, &b) {
@@ -9308,6 +9560,16 @@ impl<'gc> VM<'gc> {
                 Opcode::LessThan => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
+                    if Self::is_symbol_value(&a) || Self::is_symbol_value(&b) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                        );
+                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                        continue;
+                    }
                     let result = match (&a, &b) {
                         (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi < b_bi,
                         (Value::BigInt(a_bi), Value::Number(b_num)) => {
@@ -9325,6 +9587,16 @@ impl<'gc> VM<'gc> {
                 Opcode::GreaterThan => {
                     let b = self.stack.pop().expect("VM Stack underflow");
                     let a = self.stack.pop().expect("VM Stack underflow");
+                    if Self::is_symbol_value(&a) || Self::is_symbol_value(&b) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                        );
+                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                        continue;
+                    }
                     let result = match (&a, &b) {
                         (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi > b_bi,
                         (Value::BigInt(a_bi), Value::Number(b_num)) => {
@@ -10257,11 +10529,11 @@ impl<'gc> VM<'gc> {
                             "findLast" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_FINDLAST)),
                             "findLastIndex" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_FINDLASTINDEX)),
                             "reduceRight" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_REDUCERIGHT)),
-                            "iterator" => {
+                            "@@sym:1" => {
                                 // lookup on Array.prototype so deletion propagates
                                 if let Some(Value::VmObject(arr_ctor)) = self.globals.get("Array") {
                                     if let Some(Value::VmObject(proto)) = arr_ctor.borrow().get("prototype").cloned() {
-                                        if let Some(v) = proto.borrow().get("iterator").cloned() {
+                                        if let Some(v) = proto.borrow().get("@@sym:1").cloned() {
                                             self.stack.push(v);
                                         } else {
                                             self.stack.push(Value::Undefined);
@@ -10317,7 +10589,7 @@ impl<'gc> VM<'gc> {
                             "search" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_SEARCH)),
                             "concat" => self.stack.push(Self::make_host_fn("string.concat")),
                             "substr" => self.stack.push(Self::make_host_fn("string.substr")),
-                            "iterator" => self.stack.push(Value::Boolean(true)), // strings are iterable
+                            "@@sym:1" => self.stack.push(Value::Boolean(true)), // strings are iterable
                             _ => self.stack.push(Value::Undefined),
                         },
                         Value::Number(_) => match key.as_str() {
@@ -10556,18 +10828,62 @@ impl<'gc> VM<'gc> {
                                 if let Ok(i) = coerced_key.parse::<usize>() {
                                     let val = arr.borrow().get(i).cloned().unwrap_or(Value::Undefined);
                                     self.stack.push(val);
+                                } else if coerced_key == "@@sym:1" {
+                                    // Symbol.iterator for arrays — check Array.prototype so deletion propagates
+                                    let mut found = false;
+                                    if let Some(Value::VmObject(arr_ctor)) = self.globals.get("Array")
+                                        && let Some(Value::VmObject(proto)) = arr_ctor.borrow().get("prototype").cloned()
+                                        && proto.borrow().get("@@sym:1").is_some()
+                                    {
+                                        found = true;
+                                    }
+                                    if found {
+                                        self.stack.push(Self::make_bound_host_fn("array.symbolIterator", obj.clone()));
+                                    } else {
+                                        self.stack.push(Value::Undefined);
+                                    }
+                                } else if coerced_key == "@@sym:4" {
+                                    // Symbol.toStringTag for arrays
+                                    self.stack.push(Value::String(crate::unicode::utf8_to_utf16("Array")));
                                 } else {
                                     let val = arr.borrow().props.get(&coerced_key).cloned().unwrap_or(Value::Undefined);
                                     self.stack.push(val);
                                 }
                             }
                         }
-                        Value::VmObject(map) => {
-                            let val = map.borrow().get(&coerced_key).cloned().unwrap_or(Value::Undefined);
+                        Value::VmObject(_map) => {
+                            // Use read_named_property for proto chain lookup (needed for symbol keys)
+                            let val = self.read_named_property(obj.clone(), &coerced_key);
+                            if matches!(val, Value::Undefined) {
+                                // Fall back to boxed type handling for symbol keys
+                                if let Value::VmObject(ref m) = obj {
+                                    let type_tag = m.borrow().get("__type__").and_then(|v| {
+                                        if let Value::String(s) = v {
+                                            Some(crate::unicode::utf16_to_utf8(s))
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    match (type_tag.as_deref(), coerced_key.as_str()) {
+                                        (Some("String"), "@@sym:1") => {
+                                            self.stack.push(Self::make_bound_host_fn("string.symbolIterator", obj.clone()));
+                                            continue;
+                                        }
+                                        (Some("String"), "@@sym:4") => {
+                                            self.stack.push(Value::String(crate::unicode::utf8_to_utf16("String")));
+                                            continue;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
                             self.stack.push(val);
                         }
                         Value::String(s) => {
-                            if let Value::Number(n) = &index {
+                            if coerced_key == "@@sym:1" {
+                                // Symbol.iterator on string — return a bound string iterator factory
+                                self.stack.push(Self::make_bound_host_fn("string.symbolIterator", obj.clone()));
+                            } else if let Value::Number(n) = &index {
                                 let i = *n as usize;
                                 if *n >= 0.0 && *n == (i as f64) && i < s.len() {
                                     self.stack.push(Value::String(vec![s[i]]));
@@ -11018,6 +11334,36 @@ impl<'gc> VM<'gc> {
                 Opcode::InstanceOf => {
                     let rhs = self.stack.pop().expect("VM Stack underflow on InstanceOf (rhs)");
                     let lhs = self.stack.pop().expect("VM Stack underflow on InstanceOf (lhs)");
+
+                    // Check Symbol.hasInstance (@@sym:2) on rhs first
+                    let has_instance_fn = match &rhs {
+                        Value::VmObject(map) => map.borrow().get("@@sym:2").cloned(),
+                        Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                            self.get_fn_props(*ip, *arity).borrow().get("@@sym:2").cloned()
+                        }
+                        _ => None,
+                    };
+                    if let Some(hi_fn) = has_instance_fn {
+                        let result = match hi_fn {
+                            Value::VmFunction(ip, _) => {
+                                self.this_stack.push(rhs.clone());
+                                let r = self.call_vm_function_result(ip, std::slice::from_ref(&lhs), &[]);
+                                self.this_stack.pop();
+                                r?
+                            }
+                            Value::VmClosure(ip, _, upv) => {
+                                self.this_stack.push(rhs.clone());
+                                let uv = (*upv).clone();
+                                let r = self.call_vm_function_result(ip, std::slice::from_ref(&lhs), &uv);
+                                self.this_stack.pop();
+                                r?
+                            }
+                            Value::VmNativeFunction(id) => self.call_method_builtin(id, rhs.clone(), vec![lhs.clone()]),
+                            _ => Value::Boolean(false),
+                        };
+                        self.stack.push(Value::Boolean(result.to_truthy()));
+                        continue;
+                    }
 
                     // Try prototype-chain based instanceof first (works for user-defined classes)
                     let mut proto_chain_result: Option<bool> = None;
@@ -11646,6 +11992,18 @@ impl<'gc> VM<'gc> {
                                         continue;
                                     }
 
+                                    // new Symbol() should throw TypeError
+                                    if id == BUILTIN_SYMBOL {
+                                        let mut err_map = IndexMap::new();
+                                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                        err_map.insert(
+                                            "message".to_string(),
+                                            Value::String(crate::unicode::utf8_to_utf16("Symbol is not a constructor")),
+                                        );
+                                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                        continue;
+                                    }
+
                                     let result = self.call_builtin(id, args);
                                     // For constructors like Number/String/Boolean,
                                     // wrap the primitive result in an object
@@ -11715,7 +12073,10 @@ impl<'gc> VM<'gc> {
                             self.stack.push(Value::Boolean(true));
                         }
                         Value::VmObject(map) => {
-                            let key = value_to_string(&idx_val);
+                            let key = match self.as_property_key_string(&idx_val) {
+                                Ok(k) => k,
+                                Err(_) => value_to_string(&idx_val),
+                            };
                             map.borrow_mut().shift_remove(&key);
                             self.stack.push(Value::Boolean(true));
                         }

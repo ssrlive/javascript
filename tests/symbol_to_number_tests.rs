@@ -1,10 +1,10 @@
-use javascript::{JSErrorKind, evaluate_script};
+use javascript::*;
 
 #[test]
 fn symbol_to_number_in_relational_should_throw() {
     // Try an explicit comparison that triggers ToNumber coercion path
     let script = "Symbol() < 5";
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Err(err) => match err.kind() {
             JSErrorKind::TypeError { message, .. } => assert!(message.contains("Cannot convert a Symbol value to a number")),
@@ -18,7 +18,7 @@ fn symbol_to_number_in_relational_should_throw() {
 fn symbol_to_number_in_add_should_throw() {
     // '+' with number attempts ToPrimitive then numeric coercion; Symbol should cause TypeError
     let script = "1 + Symbol()";
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Err(err) => match err.kind() {
             JSErrorKind::TypeError { message, .. } => {
@@ -37,7 +37,7 @@ fn symbol_to_primitive_method_must_return_primitive() {
         let o = { [Symbol.toPrimitive]() { return {x:1}; } };
         1 + o
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     match res {
         Err(err) => match err.kind() {
             JSErrorKind::TypeError { message, .. } => {

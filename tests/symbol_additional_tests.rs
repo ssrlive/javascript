@@ -20,7 +20,7 @@ mod symbol_additional_tests {
         let script = r#"
             typeof Symbol('x')
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"symbol\"");
     }
 
@@ -34,7 +34,7 @@ mod symbol_additional_tests {
             let d = Object.getOwnPropertyDescriptors(o);
             [d.a.value === 1, d[s].value === 2, d.a.writable === true]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[true,true,true]");
     }
 
@@ -51,7 +51,7 @@ mod symbol_additional_tests {
             s1 + '|' + s2 + '|' + (typeof d1) + '|' + (typeof d2)
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
 
         // Expect: "Symbol(my-desc)|Symbol()|string|undefined"
         assert_eq!(result, "\"Symbol(my-desc)|Symbol()|string|undefined\"");
@@ -63,7 +63,7 @@ mod symbol_additional_tests {
         let script = r#"
             Symbol() !== Symbol()
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -76,7 +76,7 @@ mod symbol_additional_tests {
             o[s] = 1;
             JSON.stringify(o);
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"{}\"");
     }
 
@@ -90,7 +90,7 @@ mod symbol_additional_tests {
             o[s] = 2;
             [Object.keys(o).length, Object.values(o).length]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[1,1]");
     }
 
@@ -105,7 +105,7 @@ mod symbol_additional_tests {
             Object.assign(target, src);
             JSON.stringify(target)
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"{\\\"a\\\":1}\"");
     }
 
@@ -119,7 +119,7 @@ mod symbol_additional_tests {
             }
         "#;
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"error\"");
     }
 
@@ -130,7 +130,7 @@ mod symbol_additional_tests {
             s.valueOf() === s
         "#;
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -149,7 +149,7 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[1,2,1]");
     }
 
@@ -167,7 +167,7 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[0,1,true]");
     }
 
@@ -182,7 +182,7 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[1,true]");
     }
 
@@ -197,7 +197,7 @@ mod symbol_additional_tests {
             [d.a.value === 1, d[s].value === 2, d.a.writable === true]
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[true,true,true]");
 
         // Part 2: accessor descriptors (getters/setters)
@@ -207,7 +207,7 @@ mod symbol_additional_tests {
             [typeof d.x.get, typeof d.x.set]
         "#;
 
-        let result2 = evaluate_script(script2, None::<&std::path::Path>).unwrap();
+        let result2 = evaluate_script_with_vm(script2, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result2, "[\"function\",\"function\"]");
     }
 
@@ -222,7 +222,7 @@ mod symbol_additional_tests {
                 return 1 instanceof F;
             })();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -231,7 +231,7 @@ mod symbol_additional_tests {
         let script = r#"
             typeof Symbol.iterator
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"symbol\"");
 
         // Custom iterable using computed symbol key
@@ -247,7 +247,7 @@ mod symbol_additional_tests {
             sum
         "#;
 
-        let result2 = evaluate_script(script2, None::<&std::path::Path>).unwrap();
+        let result2 = evaluate_script_with_vm(script2, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result2, "6");
     }
 
@@ -260,7 +260,7 @@ mod symbol_additional_tests {
             o.toString();
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"[object MyTag]\"");
     }
 
@@ -273,7 +273,7 @@ mod symbol_additional_tests {
             acc
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"abc\"");
     }
 
@@ -285,7 +285,7 @@ mod symbol_additional_tests {
             [a[Symbol.toStringTag], s[Symbol.toStringTag]]
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"Array\",\"String\"]");
     }
 
@@ -301,7 +301,7 @@ mod symbol_additional_tests {
             s
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "6");
     }
 
@@ -314,7 +314,7 @@ mod symbol_additional_tests {
             a
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"xy\"");
     }
 
@@ -331,7 +331,7 @@ mod symbol_additional_tests {
                 let res = [String(o), Number(o), o + 2]; res
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"S-PRIM\",40,42]");
     }
 }

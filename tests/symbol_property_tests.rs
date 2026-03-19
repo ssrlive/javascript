@@ -19,7 +19,7 @@ mod symbol_property_tests {
             obj[sym] = "symbol value";
             obj[sym]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"symbol value\"");
     }
 
@@ -33,7 +33,7 @@ mod symbol_property_tests {
             obj[sym2] = "value2";
             obj[sym1] != obj[sym2]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -46,7 +46,7 @@ mod symbol_property_tests {
             delete obj[sym];
             obj[sym]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "undefined");
     }
 
@@ -59,7 +59,7 @@ mod symbol_property_tests {
             obj[sym]++;
             obj[sym]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "6");
     }
 
@@ -72,7 +72,7 @@ mod symbol_property_tests {
             obj[sym]--;
             obj[sym]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "4");
     }
 }

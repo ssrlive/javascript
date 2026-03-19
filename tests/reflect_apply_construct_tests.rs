@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -10,7 +10,7 @@ fn __init_test_logger() {
 #[test]
 fn test_reflect_apply_with_non_array_arguments_list_errors() {
     let script = "Reflect.apply(function(){}, undefined, 123)";
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     assert!(res.is_err(), "expected Reflect.apply with non-array argumentsList to error");
 }
 
@@ -27,7 +27,7 @@ fn test_reflect_construct_with_new_target_parameter() {
           && (o instanceof B)
           && !(o instanceof A);
     "#;
-    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
+    let v = evaluate_script_with_vm(script, false, None::<&std::path::Path>).expect("script ran");
     assert_eq!(v, "true");
 }
 
@@ -38,14 +38,14 @@ fn test_reflect_apply_with_async_closure_returns_promise_resolved() {
         let p = Reflect.apply(fnc, undefined, [1]);
         await p;
     "#;
-    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
+    let v = evaluate_script_with_vm(script, false, None::<&std::path::Path>).expect("script ran");
     assert_eq!(v, "2");
 }
 
 #[test]
 fn test_reflect_apply_with_non_callable_target_errors() {
     let script = "Reflect.apply(123, undefined, [])";
-    let res = evaluate_script(script, None::<&std::path::Path>);
+    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
     assert!(res.is_err(), "expected Reflect.apply with non-callable target to error");
 }
 
@@ -59,7 +59,7 @@ fn test_reflect_apply_with_closure_and_this() {
         result;
     "#;
 
-    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
+    let v = evaluate_script_with_vm(script, false, None::<&std::path::Path>).expect("script ran");
     assert_eq!(v, "13");
 }
 
@@ -72,7 +72,7 @@ fn test_reflect_apply_with_native_function() {
         res;
     "#;
 
-    let v = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let v = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(v, "\"123\"");
 }
 
@@ -87,6 +87,6 @@ fn test_reflect_construct_with_constructor_args() {
         p.full();
     "#;
 
-    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
+    let v = evaluate_script_with_vm(script, false, None::<&std::path::Path>).expect("script ran");
     assert_eq!(v, "\"Jane Doe\"");
 }

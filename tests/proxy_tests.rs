@@ -1,4 +1,4 @@
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -10,7 +10,7 @@ fn __init_test_logger() {
 #[test]
 fn test_proxy_basic() {
     // Test basic Proxy creation
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         var target = { foo: 42 };
         var handler = {
@@ -24,6 +24,7 @@ fn test_proxy_basic() {
         var proxy = new Proxy(target, handler);
         proxy.foo
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();
@@ -33,7 +34,7 @@ fn test_proxy_basic() {
 #[test]
 fn test_proxy_revocable() {
     // Test Proxy.revocable
-    let result = evaluate_script(
+    let result = evaluate_script_with_vm(
         r#"
         var target = { foo: 42 };
         var handler = {
@@ -47,6 +48,7 @@ fn test_proxy_revocable() {
         revocable.revoke();
         result
     "#,
+        false,
         None::<&std::path::Path>,
     )
     .unwrap();

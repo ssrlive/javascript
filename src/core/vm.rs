@@ -641,7 +641,7 @@ impl<'gc> VM<'gc> {
 
     fn is_constructor_value(&self, v: &Value<'gc>) -> bool {
         match v {
-            Value::VmFunction(..) | Value::VmClosure(..) => true,
+            Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => !self.chunk.async_function_ips.contains(ip),
             Value::VmNativeFunction(id) => matches!(
                 *id,
                 BUILTIN_CTOR_ERROR
@@ -688,6 +688,10 @@ impl<'gc> VM<'gc> {
                     return false;
                 }
                 if let Some(target) = b.get("__proxy_target__").cloned() {
+                    drop(b);
+                    return self.is_constructor_value(&target);
+                }
+                if let Some(target) = b.get("__bound_target__").cloned() {
                     drop(b);
                     return self.is_constructor_value(&target);
                 }
@@ -823,6 +827,43 @@ impl<'gc> VM<'gc> {
 
     fn call_host_fn(&mut self, name: &str, receiver: Option<Value<'gc>>, args: Vec<Value<'gc>>) -> Value<'gc> {
         match name {
+            "__detachArrayBuffer__" => {
+                let Some(Value::VmObject(buf_obj)) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("detachArrayBuffer requires an ArrayBuffer object")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                let is_array_buffer = matches!(
+                    buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer"
+                );
+                if !is_array_buffer {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("detachArrayBuffer requires an ArrayBuffer object")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
+
+                let bytes_arr = { buf_obj.borrow().get("__buffer_bytes__").cloned() };
+                if let Some(Value::VmArray(bytes)) = bytes_arr {
+                    bytes.borrow_mut().elements.clear();
+                }
+
+                let mut buf_borrow = buf_obj.borrow_mut();
+                buf_borrow.insert("byteLength".to_string(), Value::Number(0.0));
+                buf_borrow.insert("__detached__".to_string(), Value::Boolean(true));
+                Value::Undefined
+            }
             "boolean.valueOf" => {
                 let this_val = receiver.unwrap_or(Value::Undefined);
                 match this_val {
@@ -903,6 +944,37 @@ impl<'gc> VM<'gc> {
             }
             "arrayBuffer.isView" => {
                 let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let is_builtin_view_ctor = |ctor: &Value<'gc>| -> bool {
+                    matches!(ctor, Value::VmNativeFunction(id) if matches!(
+                        *id,
+                        BUILTIN_CTOR_DATAVIEW
+                            | BUILTIN_CTOR_INT8ARRAY
+                            | BUILTIN_CTOR_UINT8ARRAY
+                            | BUILTIN_CTOR_UINT8CLAMPEDARRAY
+                            | BUILTIN_CTOR_INT16ARRAY
+                            | BUILTIN_CTOR_UINT16ARRAY
+                            | BUILTIN_CTOR_INT32ARRAY
+                            | BUILTIN_CTOR_UINT32ARRAY
+                            | BUILTIN_CTOR_FLOAT32ARRAY
+                            | BUILTIN_CTOR_FLOAT64ARRAY
+                    )) || matches!(ctor, Value::VmObject(o)
+                            if o.borrow().get("__native_id__").and_then(|v| match v { Value::Number(n) => Some(*n as u8), _ => None })
+                                .map(|id| matches!(
+                                    id,
+                                    BUILTIN_CTOR_DATAVIEW
+                                        | BUILTIN_CTOR_INT8ARRAY
+                                        | BUILTIN_CTOR_UINT8ARRAY
+                                        | BUILTIN_CTOR_UINT8CLAMPEDARRAY
+                                        | BUILTIN_CTOR_INT16ARRAY
+                                        | BUILTIN_CTOR_UINT16ARRAY
+                                        | BUILTIN_CTOR_INT32ARRAY
+                                        | BUILTIN_CTOR_UINT32ARRAY
+                                        | BUILTIN_CTOR_FLOAT32ARRAY
+                                        | BUILTIN_CTOR_FLOAT64ARRAY
+                                ))
+                                .unwrap_or(false))
+                };
+
                 let view_proto_ptrs: Vec<Rc<RefCell<IndexMap<String, Value<'gc>>>>> = [
                     "DataView",
                     "Int8Array",
@@ -919,44 +991,20 @@ impl<'gc> VM<'gc> {
                 ]
                 .iter()
                 .filter_map(|name| match self.globals.get(*name) {
-                    Some(Value::VmObject(ctor)) => match ctor.borrow().get("prototype").cloned() {
-                        Some(Value::VmObject(proto)) => Some(proto),
+                    Some(Value::VmObject(ctor)) => match ctor.borrow().get("prototype") {
+                        Some(Value::VmObject(proto)) => Some(proto.clone()),
                         _ => None,
                     },
                     _ => None,
                 })
                 .collect();
-                let is_builtin_view_ctor = |v: &Value<'gc>| -> bool {
-                    let Value::VmObject(candidate) = v else {
-                        return false;
-                    };
-                    [
-                        "DataView",
-                        "Int8Array",
-                        "Uint8Array",
-                        "Uint8ClampedArray",
-                        "Int16Array",
-                        "Uint16Array",
-                        "Int32Array",
-                        "Uint32Array",
-                        "Float32Array",
-                        "Float64Array",
-                        "BigInt64Array",
-                        "BigUint64Array",
-                    ]
-                    .iter()
-                    .any(|name| {
-                        if let Some(Value::VmObject(global_ctor)) = self.globals.get(*name) {
-                            Rc::ptr_eq(candidate, global_ctor)
-                        } else {
-                            false
-                        }
-                    })
-                };
+
                 let is_view = match arg {
                     Value::VmArray(arr) => {
-                        let props = &arr.borrow().props;
-                        props.contains_key("__typedarray_name__") || props.contains_key("__buffer_type__")
+                        let b = arr.borrow();
+                        b.props.contains_key("__typedarray_name__")
+                            || b.props.contains_key("__buffer_type__")
+                            || b.props.contains_key("__typedarray_buffer__")
                     }
                     Value::VmObject(obj) => {
                         let mut cur = Some(obj.clone());
@@ -1012,6 +1060,41 @@ impl<'gc> VM<'gc> {
                 };
                 Value::Boolean(is_view)
             }
+            "arrayBuffer.getByteLength" => {
+                let this_val = receiver.unwrap_or(Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16(
+                            "Method get ArrayBuffer.prototype.byteLength called on incompatible receiver",
+                        )),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                let is_array_buffer = matches!(
+                    buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer"
+                );
+                if !is_array_buffer {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16(
+                            "Method get ArrayBuffer.prototype.byteLength called on incompatible receiver",
+                        )),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
+
+                let len = buf_obj.borrow().get("byteLength").map(to_number).unwrap_or(0.0);
+                Value::Number(len)
+            }
             "arrayBuffer.slice" => {
                 let this_val = receiver.unwrap_or(Value::Undefined);
                 let Value::VmObject(buf_obj) = this_val else {
@@ -1026,6 +1109,57 @@ impl<'gc> VM<'gc> {
                     self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
                     return Value::Undefined;
                 };
+
+                let is_array_buffer = matches!(
+                    buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer"
+                );
+                if !is_array_buffer {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16(
+                            "ArrayBuffer.prototype.slice called on incompatible receiver",
+                        )),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
+
+                let ctor_v = self.read_named_property(Value::VmObject(buf_obj.clone()), "constructor");
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.pending_throw = Some(thrown);
+                    return Value::Undefined;
+                }
+                if Self::is_symbol_value(&ctor_v) {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer constructor property is not an object")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
+                if !matches!(
+                    ctor_v,
+                    Value::Undefined
+                        | Value::VmObject(_)
+                        | Value::VmFunction(_, _)
+                        | Value::VmClosure(_, _, _)
+                        | Value::VmNativeFunction(_)
+                        | Value::Function(_)
+                ) {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer constructor property is not an object")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
 
                 let (len, bytes_arr) = {
                     let b = buf_obj.borrow();
@@ -1120,7 +1254,7 @@ impl<'gc> VM<'gc> {
                     Some(v) => v,
                     None => return Value::Undefined,
                 };
-                let end_n = if args.len() > 1 {
+                let end_n = if args.len() > 1 && !matches!(args.get(1), Some(Value::Undefined)) {
                     match coerce_to_number(self, args.get(1).cloned().unwrap_or(Value::Undefined)) {
                         Some(v) => v,
                         None => return Value::Undefined,
@@ -1593,13 +1727,25 @@ impl<'gc> VM<'gc> {
 
                 match target {
                     Value::VmArray(arr) => {
-                        let (ta_name, buffer_type, has_buffer_type, len) = {
+                        let (ta_name, buffer_type, has_buffer_type, len, detached_before_index) = {
                             let arr_borrow = arr.borrow();
+                            let detached = arr_borrow
+                                .props
+                                .get("__typedarray_buffer__")
+                                .and_then(|v| {
+                                    if let Value::VmObject(buf_obj) = v {
+                                        Some(matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true))))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(false);
                             (
                                 arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
                                 arr_borrow.props.get("__buffer_type__").map(value_to_string).unwrap_or_default(),
                                 arr_borrow.props.contains_key("__buffer_type__"),
                                 arr_borrow.elements.len(),
+                                detached,
                             )
                         };
 
@@ -1611,6 +1757,19 @@ impl<'gc> VM<'gc> {
                             err_map.insert(
                                 "message".to_string(),
                                 Value::String(crate::unicode::utf8_to_utf16("Atomics.notify requires Int32Array or BigInt64Array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        if detached_before_index {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(
+                                    "Cannot perform Atomics.notify on a detached ArrayBuffer",
+                                )),
                             );
                             self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
                             return Value::Undefined;
@@ -1837,13 +1996,25 @@ impl<'gc> VM<'gc> {
 
                 match target {
                     Value::VmArray(arr) => {
-                        let (ta_name, buffer_type, has_buffer_type, len) = {
+                        let (ta_name, buffer_type, has_buffer_type, len, detached_before_index) = {
                             let arr_borrow = arr.borrow();
+                            let detached = arr_borrow
+                                .props
+                                .get("__typedarray_buffer__")
+                                .and_then(|v| {
+                                    if let Value::VmObject(buf_obj) = v {
+                                        Some(matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true))))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(false);
                             (
                                 arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
                                 arr_borrow.props.get("__buffer_type__").map(value_to_string).unwrap_or_default(),
                                 arr_borrow.props.contains_key("__buffer_type__"),
                                 arr_borrow.elements.len(),
+                                detached,
                             )
                         };
 
@@ -1854,6 +2025,32 @@ impl<'gc> VM<'gc> {
                             err_map.insert(
                                 "message".to_string(),
                                 Value::String(crate::unicode::utf8_to_utf16("Atomics.wait requires Int32Array or BigInt64Array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        if detached_before_index {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(
+                                    "Cannot perform Atomics.wait on a detached ArrayBuffer",
+                                )),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        if buffer_type != "SharedArrayBuffer" {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(
+                                    "Atomics.wait requires SharedArrayBuffer-backed typed array",
+                                )),
                             );
                             self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
                             return Value::Undefined;
@@ -1964,19 +2161,6 @@ impl<'gc> VM<'gc> {
                             err_map.insert(
                                 "message".to_string(),
                                 Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
-                            );
-                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
-                            return Value::Undefined;
-                        }
-
-                        if buffer_type != "SharedArrayBuffer" {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                            err_map.insert(
-                                "message".to_string(),
-                                Value::String(crate::unicode::utf8_to_utf16(
-                                    "Atomics.wait requires SharedArrayBuffer-backed typed array",
-                                )),
                             );
                             self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
                             return Value::Undefined;
@@ -5070,6 +5254,43 @@ impl<'gc> VM<'gc> {
 
     fn call_named_host_function(&mut self, name: &str, args: Vec<Value<'gc>>) -> Value<'gc> {
         match name {
+            "__detachArrayBuffer__" => {
+                let Some(Value::VmObject(buf_obj)) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("detachArrayBuffer requires an ArrayBuffer object")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                let is_array_buffer = matches!(
+                    buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer"
+                );
+                if !is_array_buffer {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("detachArrayBuffer requires an ArrayBuffer object")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
+
+                let bytes_arr = { buf_obj.borrow().get("__buffer_bytes__").cloned() };
+                if let Some(Value::VmArray(bytes)) = bytes_arr {
+                    bytes.borrow_mut().elements.clear();
+                }
+
+                let mut buf_borrow = buf_obj.borrow_mut();
+                buf_borrow.insert("byteLength".to_string(), Value::Number(0.0));
+                buf_borrow.insert("__detached__".to_string(), Value::Boolean(true));
+                Value::Undefined
+            }
             "console.log" => self.call_builtin(BUILTIN_CONSOLE_LOG, args),
             "console.warn" => self.call_builtin(BUILTIN_CONSOLE_WARN, args),
             "console.error" => self.call_builtin(BUILTIN_CONSOLE_ERROR, args),
@@ -5217,34 +5438,53 @@ impl<'gc> VM<'gc> {
             return existing.clone();
         }
         let is_generator = self.chunk.generator_function_ips.contains(&ip);
-        let mut proto = IndexMap::new();
-        proto.insert("constructor".to_string(), Value::VmFunction(ip, arity));
-        // Generator functions: fn.prototype.__proto__ = %GeneratorPrototype%
-        // Regular functions: fn.prototype.__proto__ = Object.prototype
-        if is_generator {
-            if !matches!(self.generator_prototype, Value::Undefined) {
-                proto.insert("__proto__".to_string(), self.generator_prototype.clone());
-            }
-        } else if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
-            && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
-        {
-            proto.insert("__proto__".to_string(), obj_proto);
-        }
+        let is_async = self.chunk.async_function_ips.contains(&ip);
+        let is_async_generator = is_async && is_generator;
         let mut props = IndexMap::new();
-        props.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(proto))));
+        if !is_async || is_async_generator {
+            let mut proto = IndexMap::new();
+            proto.insert("constructor".to_string(), Value::VmFunction(ip, arity));
+            // Generator functions: fn.prototype.__proto__ = %GeneratorPrototype%
+            // Regular functions: fn.prototype.__proto__ = Object.prototype
+            if is_generator {
+                if !matches!(self.generator_prototype, Value::Undefined) {
+                    proto.insert("__proto__".to_string(), self.generator_prototype.clone());
+                }
+            } else if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
+                && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
+            {
+                proto.insert("__proto__".to_string(), obj_proto);
+            }
+            props.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(proto))));
+        }
         // Generator functions: fn.__proto__ = %GeneratorFunction.prototype%
         // Regular functions: fn.__proto__ = Function.prototype
-        if is_generator && !matches!(self.generator_function_prototype, Value::Undefined) {
+        if is_generator && !is_async && !matches!(self.generator_function_prototype, Value::Undefined) {
             props.insert("__proto__".to_string(), self.generator_function_prototype.clone());
+        } else if is_async {
+            if let Some(async_fn_proto) = self.globals.get("__async_function_prototype").cloned() {
+                props.insert("__proto__".to_string(), async_fn_proto);
+            } else if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
+                && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
+            {
+                props.insert("__proto__".to_string(), fn_proto);
+            }
         } else if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
             && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
         {
             props.insert("__proto__".to_string(), fn_proto);
         }
+        props.insert("length".to_string(), Value::Number(arity as f64));
+        props.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        props.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
         // Set function name if known
         if let Some(name) = self.chunk.fn_names.get(&ip) {
             props.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16(name)));
+        } else {
+            props.insert("name".to_string(), Value::String(Vec::new()));
         }
+        props.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        props.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
         let props_rc = Rc::new(RefCell::new(props));
         self.fn_props.insert(ip, props_rc.clone());
         props_rc
@@ -5518,32 +5758,12 @@ impl<'gc> VM<'gc> {
     }
 
     fn invoke_getter_with_receiver(&mut self, getter: Value<'gc>, receiver: Value<'gc>) -> Value<'gc> {
-        match getter {
-            Value::VmFunction(ip, _) => {
-                self.this_stack.push(receiver);
-                let result = self.call_vm_function_result(ip, &[], &[]);
-                self.this_stack.pop();
-                match result {
-                    Ok(v) => v,
-                    Err(err) => {
-                        self.set_pending_throw_from_error(&err);
-                        Value::Undefined
-                    }
-                }
+        match self.vm_call_function_value(getter, receiver, &[]) {
+            Ok(v) => v,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                Value::Undefined
             }
-            Value::VmClosure(ip, _, ups) => {
-                self.this_stack.push(receiver);
-                let result = self.call_vm_function_result(ip, &[], &ups);
-                self.this_stack.pop();
-                match result {
-                    Ok(v) => v,
-                    Err(err) => {
-                        self.set_pending_throw_from_error(&err);
-                        Value::Undefined
-                    }
-                }
-            }
-            _ => Value::Undefined,
         }
     }
 
@@ -5890,6 +6110,11 @@ impl<'gc> VM<'gc> {
             .insert("Date".to_string(), Value::VmObject(Rc::new(RefCell::new(date_map))));
         let mut array_buffer_proto = IndexMap::new();
         array_buffer_proto.insert(
+            "__get_byteLength".to_string(),
+            Self::make_host_fn_with_name_len("arrayBuffer.getByteLength", "get byteLength", 0.0, false),
+        );
+        array_buffer_proto.insert("__nonenumerable_byteLength__".to_string(), Value::Boolean(true));
+        array_buffer_proto.insert(
             "slice".to_string(),
             Self::make_host_fn_with_name_len("arrayBuffer.slice", "slice", 2.0, false),
         );
@@ -5917,6 +6142,14 @@ impl<'gc> VM<'gc> {
         array_buffer_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
         array_buffer_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
         let array_buffer_ctor = Value::VmObject(Rc::new(RefCell::new(array_buffer_map)));
+        if let Value::VmObject(ctor_obj) = &array_buffer_ctor
+            && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
+        {
+            proto_obj.borrow_mut().insert("constructor".to_string(), array_buffer_ctor.clone());
+            proto_obj
+                .borrow_mut()
+                .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        }
         self.globals.insert("ArrayBuffer".to_string(), array_buffer_ctor.clone());
         self.global_this.borrow_mut().insert("ArrayBuffer".to_string(), array_buffer_ctor);
         self.global_this
@@ -6207,6 +6440,7 @@ impl<'gc> VM<'gc> {
         object_map.insert("getPrototypeOf".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_GETPROTOTYPEOF));
         object_map.insert("defineProperties".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_DEFINEPROPS));
         object_map.insert("preventExtensions".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_PREVENTEXT));
+        object_map.insert("isExtensible".to_string(), Self::make_host_fn("reflect.isExtensible"));
         object_map.insert("groupBy".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_GROUPBY));
         object_map.insert("defineProperty".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_DEFINEPROP));
         object_map.insert(
@@ -6229,7 +6463,20 @@ impl<'gc> VM<'gc> {
         let object_val = Value::VmObject(Rc::new(RefCell::new(object_map)));
         // Set Object.prototype.constructor = Object (circular reference)
         object_proto.borrow_mut().insert("constructor".to_string(), object_val.clone());
+        object_proto
+            .borrow_mut()
+            .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
         self.globals.insert("Object".to_string(), object_val);
+
+        if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
+            let function_ctor_val = Value::VmObject(function_ctor.clone());
+            if let Some(Value::VmObject(fn_proto_obj)) = function_ctor.borrow().get("prototype").cloned() {
+                let mut fn_proto_b = fn_proto_obj.borrow_mut();
+                fn_proto_b.insert("constructor".to_string(), function_ctor_val);
+                fn_proto_b.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+                fn_proto_b.insert("__proto__".to_string(), Value::VmObject(object_proto.clone()));
+            }
+        }
 
         // Number object with constants and static methods
         let mut number_map = IndexMap::new();
@@ -6344,6 +6591,14 @@ impl<'gc> VM<'gc> {
         // globalThis — refers to the global this object
         self.globals
             .insert("globalThis".to_string(), Value::VmObject(self.global_this.clone()));
+        self.globals.insert(
+            "__detachArrayBuffer__".to_string(),
+            Self::make_host_fn_with_name_len("__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
+        );
+        self.global_this.borrow_mut().insert(
+            "__detachArrayBuffer__".to_string(),
+            Self::make_host_fn_with_name_len("__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
+        );
 
         // Minimal `os` namespace for VM module import interop
         let mut os_path_map = IndexMap::new();
@@ -6378,14 +6633,83 @@ impl<'gc> VM<'gc> {
         fn_proto.insert("call".to_string(), Value::VmNativeFunction(BUILTIN_FN_CALL));
         fn_proto.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_FN_APPLY));
         fn_proto.insert("bind".to_string(), Value::VmNativeFunction(BUILTIN_FN_BIND));
-        let fn_proto_val = Value::VmObject(Rc::new(RefCell::new(fn_proto)));
+        if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
+            && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
+        {
+            fn_proto.insert("__proto__".to_string(), obj_proto);
+        }
+        let fn_proto_obj = Rc::new(RefCell::new(fn_proto));
+        let fn_proto_val = Value::VmObject(fn_proto_obj.clone());
         let mut function_map = IndexMap::new();
         function_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
         function_map.insert("prototype".to_string(), fn_proto_val);
         function_map.insert("length".to_string(), Value::Number(1.0));
         function_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
-        self.globals
-            .insert("Function".to_string(), Value::VmObject(Rc::new(RefCell::new(function_map))));
+        let function_val = Value::VmObject(Rc::new(RefCell::new(function_map)));
+        fn_proto_obj.borrow_mut().insert("constructor".to_string(), function_val.clone());
+        fn_proto_obj
+            .borrow_mut()
+            .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        self.globals.insert("Function".to_string(), function_val);
+
+        // %AsyncFunction% constructor and %AsyncFunction.prototype%
+        let mut async_fn_ctor = IndexMap::new();
+        async_fn_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
+        async_fn_ctor.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")));
+        async_fn_ctor.insert("length".to_string(), Value::Number(1.0));
+        async_fn_ctor.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        async_fn_ctor.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        async_fn_ctor.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        async_fn_ctor.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        async_fn_ctor.insert("__async_function_constructor__".to_string(), Value::Boolean(true));
+        if let Some(function_ctor) = self.globals.get("Function").cloned() {
+            async_fn_ctor.insert("__proto__".to_string(), function_ctor);
+        }
+
+        let mut async_fn_proto = IndexMap::new();
+        async_fn_proto.insert("constructor".to_string(), Value::Undefined);
+        async_fn_proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        async_fn_proto.insert("@@sym:4".to_string(), Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")));
+        async_fn_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        async_fn_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        if let Some(Value::VmObject(function_ctor_obj)) = self.globals.get("Function")
+            && let Some(fn_proto) = function_ctor_obj.borrow().get("prototype").cloned()
+        {
+            async_fn_proto.insert("__proto__".to_string(), fn_proto);
+        }
+
+        let async_fn_ctor_val = Value::VmObject(Rc::new(RefCell::new(async_fn_ctor)));
+        let async_fn_proto_val = Value::VmObject(Rc::new(RefCell::new(async_fn_proto)));
+        if let Value::VmObject(ctor_obj) = &async_fn_ctor_val {
+            let mut b = ctor_obj.borrow_mut();
+            b.insert("prototype".to_string(), async_fn_proto_val.clone());
+            b.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+            b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            b.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        }
+        if let Value::VmObject(proto_obj) = &async_fn_proto_val {
+            proto_obj.borrow_mut().insert("constructor".to_string(), async_fn_ctor_val.clone());
+        }
+        self.globals.insert("__async_function_ctor".to_string(), async_fn_ctor_val);
+        self.globals.insert("__async_function_prototype".to_string(), async_fn_proto_val);
+
+        // Ensure constructor objects created before Function initialization still
+        // inherit from Function.prototype.
+        let function_proto = self
+            .globals
+            .get("Function")
+            .and_then(|v| match v {
+                Value::VmObject(obj) => obj.borrow().get("prototype").cloned(),
+                _ => None,
+            })
+            .unwrap_or(Value::Undefined);
+        if !matches!(function_proto, Value::Undefined) {
+            for ctor_name in ["Boolean", "Number", "String"] {
+                if let Some(Value::VmObject(ctor)) = self.globals.get(ctor_name).cloned() {
+                    ctor.borrow_mut().insert("__proto__".to_string(), function_proto.clone());
+                }
+            }
+        }
 
         // AbstractModuleSource intrinsic constructor and prototype
         let object_proto = self
@@ -6438,7 +6762,7 @@ impl<'gc> VM<'gc> {
             );
             ctor.insert("length".to_string(), Value::Number(0.0));
             ctor.insert("prototype".to_string(), abs_mod_src_proto_val);
-            ctor.insert("__proto__".to_string(), function_proto);
+            ctor.insert("__proto__".to_string(), function_proto.clone());
             ctor.insert("__readonly_name__".to_string(), Value::Boolean(true));
             ctor.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
             ctor.insert("__readonly_length__".to_string(), Value::Boolean(true));
@@ -7893,6 +8217,17 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             BUILTIN_CTOR_ARRAYBUFFER => {
+                let Some(new_target) = self.new_target_stack.last().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Constructor ArrayBuffer requires 'new'")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
                 let length_v = args.first().cloned().unwrap_or(Value::Undefined);
                 let len = if matches!(length_v, Value::Undefined) {
                     0usize
@@ -7982,21 +8317,49 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
 
-                    // Safety cap to avoid allocator aborts on intentionally huge Test262 lengths.
-                    const VM_MAX_ARRAYBUFFER_LENGTH: usize = 16 * 1024 * 1024;
-                    let idx = int_index as usize;
-                    if idx > VM_MAX_ARRAYBUFFER_LENGTH {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::String(crate::unicode::utf8_to_utf16("Invalid ArrayBuffer length")),
-                        );
-                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
-                        return Value::Undefined;
-                    }
-                    idx
+                    int_index as usize
                 };
+
+                let default_proto = if let Some(Value::VmObject(ab_ctor)) = self.globals.get("ArrayBuffer").cloned() {
+                    ab_ctor.borrow().get("prototype").cloned().unwrap_or(Value::Undefined)
+                } else {
+                    Value::Undefined
+                };
+
+                let proto_candidate = if let Value::VmObject(nt_obj) = &new_target {
+                    let getter = nt_obj.borrow().get("__get_prototype").cloned();
+                    if let Some(getter_fn) = getter {
+                        self.invoke_getter_with_receiver(getter_fn, new_target.clone())
+                    } else {
+                        self.read_named_property(new_target.clone(), "prototype")
+                    }
+                } else {
+                    self.read_named_property(new_target.clone(), "prototype")
+                };
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.pending_throw = Some(thrown);
+                    return Value::Undefined;
+                }
+                let proto_is_object = match &proto_candidate {
+                    Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
+                    Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::Object(_) => true,
+                    _ => false,
+                };
+                let selected_proto = if proto_is_object { proto_candidate } else { default_proto };
+
+                // Safety cap to avoid allocator aborts on intentionally huge Test262 lengths.
+                const VM_MAX_ARRAYBUFFER_LENGTH: usize = 16 * 1024 * 1024;
+                if len > VM_MAX_ARRAYBUFFER_LENGTH {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Invalid ArrayBuffer length")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
+
                 let max_len = match args.get(1) {
                     Some(Value::VmObject(opts)) => opts
                         .borrow()
@@ -8021,10 +8384,8 @@ impl<'gc> VM<'gc> {
                     "__buffer_bytes__".to_string(),
                     Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(bytes)))),
                 );
-                if let Some(Value::VmObject(ab_ctor)) = self.globals.get("ArrayBuffer").cloned()
-                    && let Some(proto) = ab_ctor.borrow().get("prototype").cloned()
-                {
-                    map.insert("__proto__".to_string(), proto);
+                if !matches!(selected_proto, Value::Undefined) {
+                    map.insert("__proto__".to_string(), selected_proto);
                 }
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
@@ -8136,6 +8497,8 @@ impl<'gc> VM<'gc> {
                             "__buffer_type__".to_string(),
                             Value::String(crate::unicode::utf8_to_utf16(&buffer_type)),
                         );
+                        data.props.insert("buffer".to_string(), Value::VmObject(buf_obj.clone()));
+                        data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
                         data.props.insert("__byte_offset__".to_string(), Value::Number(byte_offset as f64));
                         data.props
                             .insert("__bytes_per_element__".to_string(), Value::Number(bytes_per_element as f64));
@@ -8840,10 +9203,33 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_NEW_FUNCTION | BUILTIN_CTOR_FUNCTION => {
                 // new Function(body): return a callable wrapper with __fn_body__
-                let body = args.first().map(value_to_string).unwrap_or_default();
+                let body = args.last().map(value_to_string).unwrap_or_default();
+                let mut params: Vec<String> = Vec::new();
+                if args.len() > 1 {
+                    for p in args.iter().take(args.len() - 1) {
+                        let raw = value_to_string(p);
+                        for seg in raw.split(',') {
+                            let s = seg.trim();
+                            if !s.is_empty() {
+                                params.push(s.to_string());
+                            }
+                        }
+                    }
+                }
                 let mut map = IndexMap::new();
                 map.insert("__fn_body__".to_string(), Value::String(crate::unicode::utf8_to_utf16(&body)));
+                map.insert("length".to_string(), Value::Number(params.len() as f64));
+                map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("anonymous")));
+                map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+                map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+                map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+                map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Function")));
+                if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
+                    && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
+                {
+                    map.insert("__proto__".to_string(), fn_proto);
+                }
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
             // Number() as function: convert argument to number
@@ -9291,6 +9677,28 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     Value::VmObject(obj.clone())
+                } else if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
+                    let key = args
+                        .get(1)
+                        .and_then(|v| self.as_property_key_string(v).ok())
+                        .unwrap_or_else(|| args.get(1).map(value_to_string).unwrap_or_default());
+                    if let Some(Value::VmObject(desc)) = args.get(2) {
+                        let desc_borrow = desc.borrow();
+                        if self.validate_property_descriptor(&desc_borrow).is_err() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Invalid property descriptor")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let props = self.get_fn_props(*ip, *arity);
+                        self.apply_object_property_descriptor(&props, &key, &desc_borrow);
+                    }
+                    args.first().cloned().unwrap_or(Value::Undefined)
                 } else if let Some(Value::VmArray(arr)) = args.first() {
                     let key = args.get(1).map(|v| value_to_string(v)).unwrap_or_default();
                     if let Some(Value::VmObject(desc)) = args.get(2) {
@@ -11389,6 +11797,10 @@ impl<'gc> VM<'gc> {
                     let has = map.borrow().contains_key(&key) && !key.starts_with("__proto__") && !key.starts_with("__type__");
                     Value::Boolean(has)
                 }
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    let props = self.get_fn_props(*ip, *arity);
+                    Value::Boolean(props.borrow().contains_key(&key))
+                }
                 _ => Value::Boolean(false),
             };
         }
@@ -11440,6 +11852,18 @@ impl<'gc> VM<'gc> {
                         let tag_str = crate::unicode::utf16_to_utf8(tag);
                         return Value::String(crate::unicode::utf8_to_utf16(&format!("[object {}]", tag_str)));
                     }
+                    if let Some(Value::String(type_name)) = b.get("__type__") {
+                        let type_name = crate::unicode::utf16_to_utf8(type_name);
+                        if matches!(type_name.as_str(), "Boolean" | "Number" | "String" | "BigInt" | "Symbol") {
+                            return Value::String(crate::unicode::utf8_to_utf16(&format!("[object {}]", type_name)));
+                        }
+                    }
+                    let proto = b.get("__proto__").cloned();
+                    drop(b);
+                    if let Some(Value::String(tag)) = self.lookup_proto_chain(&proto, "@@sym:4") {
+                        let tag_str = crate::unicode::utf16_to_utf8(&tag);
+                        return Value::String(crate::unicode::utf8_to_utf16(&format!("[object {}]", tag_str)));
+                    }
                     "Object"
                 }
                 _ => "Object",
@@ -11468,16 +11892,14 @@ impl<'gc> VM<'gc> {
                     self.this_stack.pop();
                     return result;
                 }
-                Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
-                    self.this_stack.push(this_arg);
-                    let __cb_uv = if let Value::VmClosure(_, _, u) = &receiver {
-                        (**u).to_vec()
-                    } else {
-                        Vec::new()
+                Value::VmFunction(..) | Value::VmClosure(..) => {
+                    return match self.vm_call_function_value(receiver.clone(), this_arg, &call_args) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.pending_throw = Some(self.vm_value_from_error(&e));
+                            Value::Undefined
+                        }
                     };
-                    let result = self.call_vm_function(*ip, &call_args, &__cb_uv);
-                    self.this_stack.pop();
-                    return result;
                 }
                 Value::VmObject(map) => {
                     let host_fn = map.borrow().get("__host_fn__").cloned();
@@ -11515,16 +11937,14 @@ impl<'gc> VM<'gc> {
                     self.this_stack.pop();
                     return result;
                 }
-                Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
-                    self.this_stack.push(this_arg);
-                    let __cb_uv = if let Value::VmClosure(_, _, u) = &receiver {
-                        (**u).to_vec()
-                    } else {
-                        Vec::new()
+                Value::VmFunction(..) | Value::VmClosure(..) => {
+                    return match self.vm_call_function_value(receiver.clone(), this_arg, &call_args) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.pending_throw = Some(self.vm_value_from_error(&e));
+                            Value::Undefined
+                        }
                     };
-                    let result = self.call_vm_function(*ip, &call_args, &__cb_uv);
-                    self.this_stack.pop();
-                    return result;
                 }
                 Value::VmObject(map) => {
                     let host_fn = map.borrow().get("__host_fn__").cloned();
@@ -12245,6 +12665,10 @@ impl<'gc> VM<'gc> {
             borrow.shift_remove(&nonconfigurable_key);
             borrow.shift_remove(&nonenumerable_key);
 
+            if is_accessor {
+                // Converting a property to an accessor must not leave stale data values behind.
+                borrow.shift_remove(key);
+            }
             if let Some(val) = desc.get("value") {
                 borrow.insert(key.to_string(), val.clone());
             }
@@ -12593,6 +13017,9 @@ impl<'gc> VM<'gc> {
     ) -> Result<Value<'gc>, JSError> {
         match target.clone() {
             Value::VmFunction(target_ip, _arity) | Value::VmClosure(target_ip, _arity, _) => {
+                if self.chunk.async_function_ips.contains(&target_ip) {
+                    return Err(crate::raise_type_error!("Target is not a constructor"));
+                }
                 let new_obj = Rc::new(RefCell::new(IndexMap::new()));
                 let proto_source = new_target.unwrap_or(target.clone());
                 let proto = match proto_source {
@@ -12621,15 +13048,22 @@ impl<'gc> VM<'gc> {
             Value::VmObject(map) => {
                 if let Some(Value::Number(native_id)) = map.borrow().get("__native_id__") {
                     let id = *native_id as u8;
-                    let result = self.call_builtin(id, args);
+                    let ctor_prototype = map.borrow().get("prototype").cloned();
+                    let result = if id == BUILTIN_CTOR_ARRAYBUFFER {
+                        let ctor_new_target = new_target.clone().unwrap_or(target.clone());
+                        self.new_target_stack.push(ctor_new_target);
+                        let out = self.call_builtin(id, args);
+                        self.new_target_stack.pop();
+                        out
+                    } else {
+                        self.call_builtin(id, args)
+                    };
                     let wrapped = match id {
                         BUILTIN_CTOR_NUMBER => {
                             let mut m = IndexMap::new();
                             m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Number")));
                             m.insert("__value__".to_string(), result);
-                            if let Some(Value::VmObject(ctor)) = self.globals.get("Number")
-                                && let Some(proto) = ctor.borrow().get("prototype").cloned()
-                            {
+                            if let Some(proto) = ctor_prototype.clone() {
                                 m.insert("__proto__".to_string(), proto);
                             }
                             Value::VmObject(Rc::new(RefCell::new(m)))
@@ -12638,9 +13072,7 @@ impl<'gc> VM<'gc> {
                             let mut m = IndexMap::new();
                             m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("String")));
                             m.insert("__value__".to_string(), result);
-                            if let Some(Value::VmObject(ctor)) = self.globals.get("String")
-                                && let Some(proto) = ctor.borrow().get("prototype").cloned()
-                            {
+                            if let Some(proto) = ctor_prototype.clone() {
                                 m.insert("__proto__".to_string(), proto);
                             }
                             Value::VmObject(Rc::new(RefCell::new(m)))
@@ -12649,9 +13081,7 @@ impl<'gc> VM<'gc> {
                             let mut m = IndexMap::new();
                             m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Boolean")));
                             m.insert("__value__".to_string(), result);
-                            if let Some(Value::VmObject(ctor)) = self.globals.get("Boolean")
-                                && let Some(proto) = ctor.borrow().get("prototype").cloned()
-                            {
+                            if let Some(proto) = ctor_prototype {
                                 m.insert("__proto__".to_string(), proto);
                             }
                             Value::VmObject(Rc::new(RefCell::new(m)))
@@ -12670,7 +13100,17 @@ impl<'gc> VM<'gc> {
                     Err(crate::raise_type_error!("Target is not a constructor"))
                 }
             }
-            Value::VmNativeFunction(id) => Ok(self.call_builtin(id, args)),
+            Value::VmNativeFunction(id) => {
+                if id == BUILTIN_CTOR_ARRAYBUFFER {
+                    let ctor_new_target = new_target.unwrap_or(target);
+                    self.new_target_stack.push(ctor_new_target);
+                    let out = self.call_builtin(id, args);
+                    self.new_target_stack.pop();
+                    Ok(out)
+                } else {
+                    Ok(self.call_builtin(id, args))
+                }
+            }
             _ => Err(crate::raise_type_error!("Target is not a constructor")),
         }
     }
@@ -13266,10 +13706,24 @@ impl<'gc> VM<'gc> {
                 }
                 Opcode::GetLocal => {
                     let index = self.read_byte() as usize;
+                    if self.frames.is_empty()
+                        && let Some(local_names) = self.chunk.fn_local_names.get(&0)
+                        && let Some(name) = local_names.get(index)
+                        && let Some(v) = self.globals.get(name).cloned()
+                    {
+                        self.stack.push(v);
+                        continue;
+                    }
                     let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
                     if bp + index >= self.stack.len() {
-                        // Internal bytecode/local-slot mismatch should not surface as a user-visible ReferenceError.
-                        self.stack.push(Value::Undefined);
+                        if self.frames.is_empty() {
+                            self.stack.push(Value::Undefined);
+                            continue;
+                        }
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("message".to_string(), Value::from("Invalid local access"));
+                        err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
+                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                         continue;
                     }
                     // Check if this local has been captured as an upvalue cell
@@ -13285,14 +13739,8 @@ impl<'gc> VM<'gc> {
                     // TDZ check: Uninitialized variables throw ReferenceError
                     if matches!(val, Value::Uninitialized) {
                         let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::String(crate::unicode::utf8_to_utf16("Cannot access variable before initialization")),
-                        );
-                        err_map.insert(
-                            "__type__".to_string(),
-                            Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
-                        );
+                        err_map.insert("message".to_string(), Value::from("Cannot access variable before initialization"));
+                        err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
                         let err = Value::VmObject(Rc::new(RefCell::new(err_map)));
                         self.handle_throw(err)?;
                     } else {
@@ -13304,14 +13752,8 @@ impl<'gc> VM<'gc> {
                     let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
                     if bp + index >= self.stack.len() {
                         let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::String(crate::unicode::utf8_to_utf16("Invalid local assignment")),
-                        );
-                        err_map.insert(
-                            "__type__".to_string(),
-                            Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
-                        );
+                        err_map.insert("message".to_string(), Value::from("Invalid local assignment"));
+                        err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
                         self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                         continue;
                     }
@@ -13389,15 +13831,10 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(result);
 
                                     let mut err_map = IndexMap::new();
-                                    err_map.insert(
-                                        "__type__".to_string(),
-                                        Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
-                                    );
+                                    err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
                                     err_map.insert(
                                         "message".to_string(),
-                                        Value::String(crate::unicode::utf8_to_utf16(
-                                            "Super constructor may only be called directly in a derived constructor",
-                                        )),
+                                        Value::from("Super constructor may only be called directly in a derived constructor"),
                                     );
                                     self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                                     continue;
@@ -13405,10 +13842,10 @@ impl<'gc> VM<'gc> {
                             }
                             if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
                                 let mut err_map = IndexMap::new();
-                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert(
                                     "message".to_string(),
-                                    Value::String(crate::unicode::utf8_to_utf16("Class constructor cannot be invoked without 'new'")),
+                                    Value::from("Class constructor cannot be invoked without 'new'"),
                                 );
                                 self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                                 continue;
@@ -13524,15 +13961,10 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(result);
 
                                     let mut err_map = IndexMap::new();
-                                    err_map.insert(
-                                        "__type__".to_string(),
-                                        Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
-                                    );
+                                    err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
                                     err_map.insert(
                                         "message".to_string(),
-                                        Value::String(crate::unicode::utf8_to_utf16(
-                                            "Super constructor may only be called directly in a derived constructor",
-                                        )),
+                                        Value::from("Super constructor may only be called directly in a derived constructor"),
                                     );
                                     self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                                     continue;
@@ -13540,10 +13972,10 @@ impl<'gc> VM<'gc> {
                             }
                             if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
                                 let mut err_map = IndexMap::new();
-                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert(
                                     "message".to_string(),
-                                    Value::String(crate::unicode::utf8_to_utf16("Class constructor cannot be invoked without 'new'")),
+                                    Value::from("Class constructor cannot be invoked without 'new'"),
                                 );
                                 self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                                 continue;
@@ -13625,21 +14057,15 @@ impl<'gc> VM<'gc> {
                                     );
                                     if !target_is_object {
                                         let mut err_map = IndexMap::new();
-                                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                                        err_map.insert(
-                                            "message".to_string(),
-                                            Value::String(crate::unicode::utf8_to_utf16("Invalid value used in FinalizationRegistry")),
-                                        );
+                                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                                        err_map.insert("message".to_string(), Value::from("Invalid value used in FinalizationRegistry"));
                                         self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                                         continue;
                                     }
                                     if self.values_same(&target, &held) {
                                         let mut err_map = IndexMap::new();
-                                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                                        err_map.insert(
-                                            "message".to_string(),
-                                            Value::String(crate::unicode::utf8_to_utf16("target and held value must not be the same")),
-                                        );
+                                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                                        err_map.insert("message".to_string(), Value::from("target and held value must not be the same"));
                                         self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                                         continue;
                                     }
@@ -13657,12 +14083,8 @@ impl<'gc> VM<'gc> {
                                         );
                                         if !tok_ok {
                                             let mut err_map = IndexMap::new();
-                                            err_map
-                                                .insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                                            err_map.insert(
-                                                "message".to_string(),
-                                                Value::String(crate::unicode::utf8_to_utf16("Invalid unregister token")),
-                                            );
+                                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                                            err_map.insert("message".to_string(), Value::from("Invalid unregister token"));
                                             self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                                             continue;
                                         }
@@ -13788,13 +14210,22 @@ impl<'gc> VM<'gc> {
                                     }
                                 } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
                                     let id = *native_id as u8;
+                                    let is_async_ctor = matches!(borrow.get("__async_function_constructor__"), Some(Value::Boolean(true)));
                                     drop(borrow);
                                     let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
                                     self.stack.pop(); // pop callee
                                     if is_method {
                                         self.stack.pop(); // pop receiver
                                     }
-                                    let result = self.call_builtin(id, args_collected);
+                                    let mut result = self.call_builtin(id, args_collected);
+                                    if is_async_ctor
+                                        && let Some(async_proto) = self.globals.get("__async_function_prototype").cloned()
+                                        && let Value::VmObject(obj) = &mut result
+                                    {
+                                        let mut b = obj.borrow_mut();
+                                        b.insert("__proto__".to_string(), async_proto);
+                                        b.insert("__async_dynamic_function__".to_string(), Value::Boolean(true));
+                                    }
                                     self.stack.push(result);
                                     if let Some(thrown) = self.pending_throw.take() {
                                         self.handle_throw(thrown)?;
@@ -14664,6 +15095,17 @@ impl<'gc> VM<'gc> {
                     let constructor = self.stack[callee_idx].clone();
                     match constructor {
                         Value::VmFunction(target_ip, _arity) | Value::VmClosure(target_ip, _arity, _) => {
+                            if self.chunk.async_function_ips.contains(&target_ip) {
+                                self.stack.truncate(callee_idx);
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("is not a constructor")),
+                                );
+                                self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                continue;
+                            }
                             let new_obj = Rc::new(RefCell::new(IndexMap::new()));
                             let fn_props = self.get_fn_props(target_ip, _arity);
                             if let Some(proto) = fn_props.borrow().get("prototype").cloned() {
@@ -14704,7 +15146,14 @@ impl<'gc> VM<'gc> {
                         Value::VmNativeFunction(id) => {
                             let args: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
                             self.stack.pop(); // pop constructor
-                            let result = self.call_builtin(id, args);
+                            let result = if id == BUILTIN_CTOR_ARRAYBUFFER {
+                                self.new_target_stack.push(constructor.clone());
+                                let out = self.call_builtin(id, args);
+                                self.new_target_stack.pop();
+                                out
+                            } else {
+                                self.call_builtin(id, args)
+                            };
                             self.stack.push(result);
                         }
                         _ => {
@@ -14942,6 +15391,21 @@ impl<'gc> VM<'gc> {
                                 let result = self.call_vm_function_result(ip, &[], &upvals);
                                 self.this_stack.pop();
                                 self.stack.push(result?);
+                            } else if let Some(Value::VmObject(getter_obj)) = borrow.get(&getter_key) {
+                                let host_name = getter_obj.borrow().get("__host_fn__").cloned();
+                                drop(borrow);
+                                if let Some(Value::String(host_name_u16)) = host_name {
+                                    let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
+                                    let getter_result = self.call_host_fn(&host_name, Some(obj.clone()), vec![]);
+                                    self.stack.push(getter_result);
+                                } else {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            } else if let Some(Value::Function(host_name)) = borrow.get(&getter_key) {
+                                let host_name = host_name.clone();
+                                drop(borrow);
+                                let getter_result = self.call_named_host_function(&host_name, vec![]);
+                                self.stack.push(getter_result);
                             } else {
                                 let val = borrow.get(&key).cloned();
                                 if let Some(v) = val {
@@ -15033,6 +15497,21 @@ impl<'gc> VM<'gc> {
                                                     let result = self.call_vm_function_result(ip, &[], &ups);
                                                     self.this_stack.pop();
                                                     self.stack.push(result?);
+                                                }
+                                                Value::VmObject(getter_obj) => {
+                                                    if let Some(Value::String(host_name_u16)) =
+                                                        getter_obj.borrow().get("__host_fn__").cloned()
+                                                    {
+                                                        let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
+                                                        let getter_result = self.call_host_fn(&host_name, Some(obj.clone()), vec![]);
+                                                        self.stack.push(getter_result);
+                                                    } else {
+                                                        self.stack.push(Value::Undefined);
+                                                    }
+                                                }
+                                                Value::Function(host_name) => {
+                                                    let getter_result = self.call_named_host_function(&host_name, vec![]);
+                                                    self.stack.push(getter_result);
                                                 }
                                                 _ => self.stack.push(Value::Undefined),
                                             }
@@ -15208,13 +15687,19 @@ impl<'gc> VM<'gc> {
                         },
                         Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                             let props = self.get_fn_props(*ip, *arity);
-                            let val = props.borrow().get(&key).cloned();
-                            let result = val.unwrap_or_else(|| match key.as_str() {
-                                "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                                "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                                "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
-                                _ => Value::Undefined,
-                            });
+                            let borrow = props.borrow();
+                            let result = if let Some(v) = borrow.get(&key).cloned() {
+                                v
+                            } else {
+                                let proto = borrow.get("__proto__").cloned();
+                                drop(borrow);
+                                match key.as_str() {
+                                    "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
+                                    "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
+                                    "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                                    _ => self.lookup_proto_chain(&proto, &key).unwrap_or(Value::Undefined),
+                                }
+                            };
                             self.stack.push(result);
                         }
                         Value::Function(name) => {
@@ -15497,6 +15982,43 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                         }
+                        Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                            let props = self.get_fn_props(*ip, *arity);
+                            let borrow = props.borrow();
+                            let val = if let Some(v) = borrow.get(&coerced_key).cloned() {
+                                v
+                            } else {
+                                let proto = borrow.get("__proto__").cloned();
+                                drop(borrow);
+                                match coerced_key.as_str() {
+                                    "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
+                                    "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
+                                    "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                                    _ => self.lookup_proto_chain(&proto, &coerced_key).unwrap_or(Value::Undefined),
+                                }
+                            };
+                            self.stack.push(val);
+                        }
+                        Value::VmNativeFunction(_) => {
+                            let val = match coerced_key.as_str() {
+                                "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
+                                "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
+                                "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                                _ => Value::Undefined,
+                            };
+                            self.stack.push(val);
+                        }
+                        Value::Function(name) => {
+                            let val = match coerced_key.as_str() {
+                                "name" => Value::String(crate::unicode::utf8_to_utf16(name)),
+                                "length" => Value::Number(1.0),
+                                "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
+                                "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
+                                "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                                _ => Value::Undefined,
+                            };
+                            self.stack.push(val);
+                        }
                         _ => {
                             log::warn!("GetIndex on non-indexable: {}", value_to_string(&obj));
                             self.stack.push(Value::Undefined);
@@ -15619,7 +16141,7 @@ impl<'gc> VM<'gc> {
                                 .map(|i| Value::String(crate::unicode::utf8_to_utf16(&i.to_string())))
                                 .collect();
                             for prop_key in a.props.keys() {
-                                if !prop_key.starts_with("__") {
+                                if !prop_key.starts_with("__") && !a.props.contains_key(&format!("__nonenumerable_{}__", prop_key)) {
                                     k.push(Value::String(crate::unicode::utf8_to_utf16(prop_key)));
                                 }
                             }
@@ -16181,6 +16703,25 @@ impl<'gc> VM<'gc> {
                             map.borrow_mut().shift_remove(&key);
                             self.stack.push(Value::Boolean(true));
                         }
+                    } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
+                        let props = self.get_fn_props(*ip, *arity);
+                        let nc_key = format!("__nonconfigurable_{}__", key);
+                        if props.borrow().contains_key(&nc_key) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(&format!(
+                                    "Cannot delete property '{}' of #<Object>",
+                                    key
+                                ))),
+                            );
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                            self.stack.push(Value::Boolean(false));
+                        } else {
+                            props.borrow_mut().shift_remove(&key);
+                            self.stack.push(Value::Boolean(true));
+                        }
                     } else if let Value::VmArray(arr) = &obj {
                         arr.borrow_mut().props.shift_remove(&key);
                         self.stack.push(Value::Boolean(true));
@@ -16195,6 +16736,38 @@ impl<'gc> VM<'gc> {
                     let callee = self.stack[callee_idx].clone();
                     match callee {
                         Value::VmFunction(target_ip, _arity) | Value::VmClosure(target_ip, _arity, _) => {
+                            if self.chunk.async_function_ips.contains(&target_ip) {
+                                let callee_name = self.resolve_callee_name(callee_idx);
+                                for _ in 0..arg_count {
+                                    self.stack.pop();
+                                }
+                                self.stack.pop();
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16(&format!("{} is not a constructor", callee_name))),
+                                );
+                                self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                continue;
+                            }
+                            // Match regular Call behavior: keep parameter slots aligned with arity.
+                            if arg_count < _arity as usize {
+                                for _ in 0..(_arity as usize - arg_count) {
+                                    self.stack.push(Value::Undefined);
+                                }
+                            }
+                            let saved_args = if arg_count > _arity as usize {
+                                let first_arg_idx = callee_idx + 1;
+                                let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
+                                let drain_start = first_arg_idx + _arity as usize;
+                                let drain_end = first_arg_idx + arg_count;
+                                self.stack.drain(drain_start..drain_end);
+                                Some(all_args)
+                            } else {
+                                None
+                            };
+
                             // Create new empty object as `this`
                             let new_obj = Rc::new(RefCell::new(IndexMap::new()));
                             // Set __proto__ to constructor's prototype property
@@ -16220,7 +16793,7 @@ impl<'gc> VM<'gc> {
                                 func_ip: target_ip,
                                 arguments_obj: None,
                                 upvalues: closure_uv,
-                                saved_args: None,
+                                saved_args,
                                 local_cells: HashMap::new(),
                             };
                             self.frames.push(frame);
@@ -16515,9 +17088,52 @@ impl<'gc> VM<'gc> {
                                     map.insert("getUTCSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS));
                                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
                                 }
+                                BUILTIN_CTOR_NUMBER => {
+                                    let result = self.call_builtin(id, args);
+                                    let mut m = IndexMap::new();
+                                    m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Number")));
+                                    m.insert("__value__".to_string(), result);
+                                    if let Some(Value::VmObject(ctor)) = self.globals.get("Number")
+                                        && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                                    {
+                                        m.insert("__proto__".to_string(), proto);
+                                    }
+                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
+                                }
+                                BUILTIN_CTOR_STRING => {
+                                    let result = self.call_builtin(id, args);
+                                    let mut m = IndexMap::new();
+                                    m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("String")));
+                                    m.insert("__value__".to_string(), result);
+                                    if let Some(Value::VmObject(ctor)) = self.globals.get("String")
+                                        && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                                    {
+                                        m.insert("__proto__".to_string(), proto);
+                                    }
+                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
+                                }
+                                BUILTIN_CTOR_BOOLEAN => {
+                                    let bool_value = args.first().map(|v| v.to_truthy()).unwrap_or(false);
+                                    let mut m = IndexMap::new();
+                                    m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Boolean")));
+                                    m.insert("__value__".to_string(), Value::Boolean(bool_value));
+                                    if let Some(Value::VmObject(ctor)) = self.globals.get("Boolean")
+                                        && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                                    {
+                                        m.insert("__proto__".to_string(), proto);
+                                    }
+                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
+                                }
                                 _ => {
                                     log::warn!("NewCall on VmNativeFunction #{}: returning empty object", id);
-                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+                                    if id == BUILTIN_CTOR_ARRAYBUFFER {
+                                        self.new_target_stack.push(Value::VmNativeFunction(id));
+                                        let result = self.call_builtin(id, args);
+                                        self.new_target_stack.pop();
+                                        self.stack.push(result);
+                                    } else {
+                                        self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+                                    }
                                 }
                             }
                             if let Some(thrown) = self.pending_throw.take() {
@@ -16531,6 +17147,8 @@ impl<'gc> VM<'gc> {
                                 let borrow = map.borrow();
                                 if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
                                     let id = *native_id as u8;
+                                    let is_async_ctor = matches!(borrow.get("__async_function_constructor__"), Some(Value::Boolean(true)));
+                                    let ctor_prototype = borrow.get("prototype").cloned();
                                     drop(borrow);
                                     let args: Vec<Value<'gc>> = (0..arg_count)
                                         .map(|_| self.stack.pop().expect("VM Stack underflow"))
@@ -16669,20 +17287,33 @@ impl<'gc> VM<'gc> {
                                     } else {
                                         None
                                     };
-                                    let result = self.call_builtin(id, args);
+                                    let result = if id == BUILTIN_CTOR_ARRAYBUFFER {
+                                        self.new_target_stack.push(callee.clone());
+                                        let out = self.call_builtin(id, args);
+                                        self.new_target_stack.pop();
+                                        out
+                                    } else {
+                                        self.call_builtin(id, args)
+                                    };
                                     // For constructors like Number/String/Boolean,
                                     // wrap the primitive result in an object
-                                    let wrapped = match id {
+                                    let mut wrapped = match id {
                                         BUILTIN_CTOR_NUMBER => {
                                             let mut m = IndexMap::new();
                                             m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Number")));
                                             m.insert("__value__".to_string(), result);
+                                            if let Some(proto) = ctor_prototype.clone() {
+                                                m.insert("__proto__".to_string(), proto);
+                                            }
                                             Value::VmObject(Rc::new(RefCell::new(m)))
                                         }
                                         BUILTIN_CTOR_STRING => {
                                             let mut m = IndexMap::new();
                                             m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("String")));
                                             m.insert("__value__".to_string(), result);
+                                            if let Some(proto) = ctor_prototype.clone() {
+                                                m.insert("__proto__".to_string(), proto);
+                                            }
                                             Value::VmObject(Rc::new(RefCell::new(m)))
                                         }
                                         BUILTIN_CTOR_BOOLEAN => {
@@ -16690,15 +17321,21 @@ impl<'gc> VM<'gc> {
                                             m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Boolean")));
                                             let bool_value = bool_ctor_value.unwrap_or(false);
                                             m.insert("__value__".to_string(), Value::Boolean(bool_value));
-                                            if let Some(Value::VmObject(ctor)) = self.globals.get("Boolean")
-                                                && let Some(proto) = ctor.borrow().get("prototype").cloned()
-                                            {
+                                            if let Some(proto) = ctor_prototype {
                                                 m.insert("__proto__".to_string(), proto);
                                             }
                                             Value::VmObject(Rc::new(RefCell::new(m)))
                                         }
                                         _ => result,
                                     };
+                                    if is_async_ctor
+                                        && let Some(async_proto) = self.globals.get("__async_function_prototype").cloned()
+                                        && let Value::VmObject(obj) = &mut wrapped
+                                    {
+                                        let mut b = obj.borrow_mut();
+                                        b.insert("__proto__".to_string(), async_proto);
+                                        b.insert("__async_dynamic_function__".to_string(), Value::Boolean(true));
+                                    }
                                     self.stack.push(wrapped);
                                     if let Some(thrown) = self.pending_throw.take() {
                                         self.handle_throw(thrown)?;
@@ -16814,6 +17451,34 @@ impl<'gc> VM<'gc> {
                                 }
                             } else {
                                 map.borrow_mut().shift_remove(&key);
+                                self.stack.push(Value::Boolean(true));
+                            }
+                        }
+                        Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                            let key = match self.as_property_key_string(&idx_val) {
+                                Ok(k) => k,
+                                Err(_) => value_to_string(&idx_val),
+                            };
+                            let props = self.get_fn_props(*ip, *arity);
+                            let nc_key = format!("__nonconfigurable_{}__", key);
+                            if props.borrow().contains_key(&nc_key) {
+                                if self.current_execution_is_strict() {
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16(&format!(
+                                            "Cannot delete property '{}' of #<Object>",
+                                            key
+                                        ))),
+                                    );
+                                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                    self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                    self.stack.push(Value::Boolean(false));
+                                } else {
+                                    self.stack.push(Value::Boolean(false));
+                                }
+                            } else {
+                                props.borrow_mut().shift_remove(&key);
                                 self.stack.push(Value::Boolean(true));
                             }
                         }

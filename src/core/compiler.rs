@@ -2284,12 +2284,11 @@ impl<'gc> Compiler<'gc> {
             }
             Expr::SuperCall(args) => {
                 // super(args) → call parent constructor with current this
-                if let Some(ref pname) = self.current_class_parent {
+                if let Some(pname) = self.current_class_parent.clone() {
                     // Stack: [this (receiver), ParentCtor (callee), args...]
                     self.chunk.write_opcode(Opcode::GetThis);
-                    let par_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(pname)));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(par_idx);
+                    let parent_expr = Expr::Var(pname, None, None);
+                    self.compile_expr(&parent_expr)?;
                     // Handle spread in super(...args)
                     let mut real_count = 0u8;
                     let mut has_spread = false;
@@ -4917,13 +4916,9 @@ impl<'gc> Compiler<'gc> {
         }
         // Default constructor for derived class: constructor(...args) { super(...args); }
         if !has_explicit_ctor && parent_name.is_some() {
-            ctor_params = vec![DestructuringElement::Rest("__args__".to_string())];
+            ctor_params = vec![];
             ctor_body = vec![Statement {
-                kind: Box::new(StatementKind::Expr(Expr::SuperCall(vec![Expr::Spread(Box::new(Expr::Var(
-                    "__args__".to_string(),
-                    None,
-                    None,
-                )))]))),
+                kind: Box::new(StatementKind::Expr(Expr::SuperCall(vec![]))),
                 line: 0,
                 column: 0,
             }];
@@ -4944,9 +4939,26 @@ impl<'gc> Compiler<'gc> {
         let fn_start = self.chunk.code.len();
         let ctor_is_strict = self.record_fn_strictness(fn_start, &ctor_body, true);
 
+        // Save and reset function-scope state for constructor compilation.
+        let old_locals = std::mem::take(&mut self.locals);
+        let old_depth = self.scope_depth;
+        let old_loops = std::mem::take(&mut self.loop_stack);
         let old_strict = self.current_strict;
+        let old_parent_locals = std::mem::take(&mut self.parent_locals);
+        let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
+        let old_upvalues = std::mem::take(&mut self.upvalues);
+        let old_allow_super = self.allow_super_call;
+        self.parent_locals = old_locals.clone();
+        self.parent_upvalues = old_upvalues.clone();
+
+        // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
+        for (idx, local_name) in self.parent_locals.clone().iter().enumerate() {
+            self.add_upvalue(local_name, idx as u8, true);
+        }
+
         self.current_strict = ctor_is_strict;
-        self.scope_depth += 1;
+        self.allow_super_call = true;
+        self.scope_depth = 1;
         let mut ctor_non_rest = 0u8;
         for p in &ctor_params {
             match p {
@@ -4973,23 +4985,25 @@ impl<'gc> Compiler<'gc> {
             }
         }
 
-        let prev_allow_super = self.allow_super_call;
-        self.allow_super_call = true;
         for stmt in ctor_body.iter() {
             self.compile_statement(stmt, false)?;
         }
-        self.allow_super_call = prev_allow_super;
         self.chunk.write_opcode(Opcode::GetThis);
         self.chunk.write_opcode(Opcode::Return);
 
-        let locals_to_remove = ctor_params.len();
-        for _ in 0..locals_to_remove {
-            self.locals.pop();
-        }
-        self.scope_depth -= 1;
-        self.current_strict = old_strict;
-
         self.patch_jump(jump_over);
+        self.chunk.fn_local_names.insert(fn_start, self.locals.clone());
+        let ctor_upvalues = std::mem::take(&mut self.upvalues);
+
+        self.locals = old_locals;
+        self.scope_depth = old_depth;
+        self.loop_stack = old_loops;
+        self.current_strict = old_strict;
+        self.allow_super_call = old_allow_super;
+        self.parent_locals = old_parent_locals;
+        self.parent_upvalues = old_parent_upvalues;
+        self.upvalues = old_upvalues;
+
         // Register constructor name
         if !name.is_empty() {
             self.chunk.fn_names.insert(fn_start, name.clone());
@@ -4999,8 +5013,18 @@ impl<'gc> Compiler<'gc> {
         // Define constructor as constant, push onto stack
         let fn_val = Value::VmFunction(fn_start, arity);
         let fn_idx = self.chunk.add_constant(fn_val);
-        self.chunk.write_opcode(Opcode::Constant);
-        self.chunk.write_u16(fn_idx);
+        if ctor_upvalues.is_empty() {
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(fn_idx);
+        } else {
+            self.chunk.write_opcode(Opcode::MakeClosure);
+            self.chunk.write_u16(fn_idx);
+            self.chunk.write_byte(ctor_upvalues.len() as u8);
+            for uv in &ctor_upvalues {
+                self.chunk.write_byte(if uv.is_local { 1 } else { 0 });
+                self.chunk.write_byte(uv.index);
+            }
+        }
         // stack: [ctor]
 
         let mut class_expr_temp: Option<String> = None;
@@ -5013,7 +5037,6 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::DefineGlobal);
                 self.chunk.write_u16(name_idx);
             } else {
-                self.locals.push(name.clone());
                 self.emit_define_var(name);
             }
         } else {
@@ -5029,7 +5052,6 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::DefineGlobal);
                 self.chunk.write_u16(temp_idx);
             } else {
-                self.locals.push(temp_name.clone());
                 self.emit_define_var(&temp_name);
             }
             class_expr_temp = Some(temp_name);
@@ -5265,10 +5287,9 @@ impl<'gc> Compiler<'gc> {
             let proto_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
             self.chunk.write_opcode(Opcode::GetProperty);
             self.chunk.write_u16(proto_k);
-            // GetGlobal ParentClass, GetProperty "prototype" -> parent proto
-            let par_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(pname)));
-            self.chunk.write_opcode(Opcode::GetGlobal);
-            self.chunk.write_u16(par_idx);
+            // Resolve parent via normal binding lookup (local/upvalue/global).
+            let parent_expr = Expr::Var(pname.clone(), None, None);
+            self.compile_expr(&parent_expr)?;
             let proto_k2 = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
             self.chunk.write_opcode(Opcode::GetProperty);
             self.chunk.write_u16(proto_k2);

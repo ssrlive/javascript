@@ -4,6 +4,8 @@ const path = require('path');
 const {spawnSync, spawn} = require('child_process');
 const {composeTest, extractMeta, parseList, hasFlag, referencesAssert} = require('./compose_test');
 
+const SCRIPT_START_NS = process.hrtime.bigint();
+
 const REPO_DIR = path.resolve(__dirname, '..', '..', 'test262');
 const RESULTS_FILE = 'test262-results.log';
 fs.writeFileSync(RESULTS_FILE, '');
@@ -12,12 +14,21 @@ fs.writeFileSync(RESULTS_FILE, '');
 let LIMIT = 100;
 let FAIL_ON_FAILURE = false;
 let CAP_MULTIPLIER = 5;
+let JOBS = Number(process.env.TEST262_JOBS || 8);
+let USE_VM = false;
 // FOCUS_LIST: array of focus tokens. Accepts multiple `--focus` flags and comma-separated tokens.
 let FOCUS_LIST = [];
 let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 60;
 const envKeep = process.env.TEST262_KEEP_TMP;
 // Default: keep composed temporary files (set TEST262_KEEP_TMP=0 to disable)
 let KEEP_TMP = (envKeep === undefined) ? true : (envKeep === '1' || envKeep === 'true');
+
+process.on('exit', (code) => {
+  const elapsedMs = Number((process.hrtime.bigint() - SCRIPT_START_NS) / 1000000n);
+  const elapsedLine = `Total elapsed: ${formatElapsed(elapsedMs)} (${elapsedMs} ms), exit=${code}`;
+  console.log(elapsedLine);
+  log(elapsedLine);
+});
 
 // Simple arg parsing
 const argv = process.argv.slice(2);
@@ -26,17 +37,34 @@ for (let i=0;i<argv.length;i++){
   if (a === '--limit') { LIMIT = Number(argv[++i]); }
   else if (a === '--fail-on-failure') { FAIL_ON_FAILURE = true; }
   else if (a === '--cap-multiplier') { CAP_MULTIPLIER = Number(argv[++i]); }
+  else if (a === '--jobs') { JOBS = Number(argv[++i]); }
+  else if (a === '--use-vm') { USE_VM = true; }
   else if (a === '--focus') { const val = argv[++i]; FOCUS_LIST.push(...String(val).split(',').map(s=>s.trim()).filter(Boolean)); }
   else if (a === '--timeout') { TIMEOUT_SECS = Number(argv[++i]); }
   else if (a === '--keep-tmp') { KEEP_TMP = true; }
   else if (a === '--help') {
-    console.log('Usage: node ci/runner.js [--keep-tmp] --limit N --focus name[,name2] (multiple --focus allowed)');
+    console.log('Usage: node ci/runner.js [--keep-tmp] [--use-vm] [--jobs N] --limit N --focus name[,name2] (multiple --focus allowed)');
     console.log('  Append (filesonly) to a focus token to collect only top-level files, e.g. "a/(filesonly)",b/c');
     process.exit(0);
   }
 }
 
+JOBS = Math.max(1, Number.isFinite(JOBS) ? Math.floor(JOBS) : 1);
+
 function log(line){ fs.appendFileSync(RESULTS_FILE, line + '\n'); }
+
+function formatElapsed(elapsedMs){
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const ms = elapsedMs % 1000;
+
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s ${ms}ms`;
+  if (minutes > 0) return `${minutes}m ${seconds}s ${ms}ms`;
+  if (seconds > 0) return `${seconds}s ${ms}ms`;
+  return `${ms}ms`;
+}
 
 function cleanupComposedArtifacts(tmpPath){
   try {
@@ -60,6 +88,51 @@ function cleanupComposedArtifacts(tmpPath){
 
 console.log(`Running Test262 tests (node runner)`);
 console.log(`Composed temporary files are kept by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=0 to disable.`);
+console.log(`Execution jobs: ${JOBS}`);
+console.log(`Use VM mode: ${USE_VM}`);
+
+function runCommandAsync(cmd, args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, options);
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timeoutMs = Number(options.timeout || 0);
+
+    if (child.stdout) {
+      child.stdout.on('data', (d) => {
+        stdout += d.toString();
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (d) => {
+        stderr += d.toString();
+      });
+    }
+
+    let timeoutId = null;
+    if (timeoutMs > 0) {
+      timeoutId = setTimeout(() => {
+        if (settled) return;
+        try { child.kill('SIGKILL'); } catch (e) { /* ignore */ }
+      }, timeoutMs);
+    }
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      resolve({status: -1, stdout, stderr: `${stderr}\n${String(err)}`});
+    });
+
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      resolve({status: code, stdout, stderr});
+    });
+  });
+}
 
 if (!fs.existsSync(REPO_DIR)){
   console.log('Cloning test262...');
@@ -164,7 +237,6 @@ function listFilesOnly(dir){
 function collectTests(){
   const basic = [];
   const other = [];
-  const intl = [];
   for (const entry of SEARCH_DIRS){
     const dir = entry.path;
     if (!fs.existsSync(dir)) continue;
@@ -186,19 +258,17 @@ function collectTests(){
     for (const f of files){
       if (f.includes('/.test262.')) continue;
       const meta = extractMeta(f);
-      if ((/features:\s*\[.*Intl.*\]/.test(meta)) || /\bIntl\b/.test(fs.readFileSync(f,'utf8'))) {
-        intl.push(f);
-      } else if (/includes:|flags:\s*\[.*module.*\]|negative:|features:/.test(meta)) {
+      if (/includes:|flags:\s*\[.*module.*\]|negative:|features:/.test(meta)) {
         other.push(f);
       } else {
         basic.push(f);
       }
-      if ((basic.length + other.length + intl.length) >= CAP) break;
+      if ((basic.length + other.length) >= CAP) break;
     }
-    if ((basic.length + other.length + intl.length) >= CAP) break;
+    if ((basic.length + other.length) >= CAP) break;
   }
-  console.log(`Collected: basic=${basic.length} other=${other.length} intl=${intl.length} (total=${basic.length+other.length+intl.length})`);
-  return basic.concat(other, intl);
+  console.log(`Collected: basic=${basic.length} other=${other.length} (total=${basic.length+other.length})`);
+  return basic.concat(other);
 }
 
 const ordered = collectTests();
@@ -248,7 +318,10 @@ function detectFeature(feat){
       probeIsModule = false;
     }
 
-    const runArgs = probeIsModule ? ['--module', probeFile] : [probeFile];
+    const runArgs = [];
+    if (USE_VM) runArgs.push('--use-vm');
+    if (probeIsModule) runArgs.push('--module');
+    runArgs.push(probeFile);
     const probeTimeoutMs = Math.max(5000, Number(TIMEOUT_SECS || 0) * 1000);
     const res = spawnSync(BIN, runArgs, {timeout: probeTimeoutMs, encoding:'utf8'});
     const out = (res && res.stdout) ? String(res.stdout) : '';
@@ -301,10 +374,108 @@ const SLOW_DIRS = [
   - Skipped tests (noStrict, negative, missing includes, unsupported features) do NOT count toward the limit.
 */
 async function runAll(){
-  let execCount = 0; // counts executed tests (pass+fail)
+  let scheduledCount = 0; // counts scheduled executions (will end up as pass+fail)
+  const running = new Set();
+
+  async function runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule) {
+    let currentSucceeds = false;
+    try {
+      log(`RUN ${f}`);
+      let res;
+      if (BIN) {
+        const binArgs = [];
+        if (USE_VM) binArgs.push('--use-vm');
+        if (isModule) binArgs.push('--module');
+        binArgs.push(tmpPath);
+        res = await runCommandAsync(BIN, binArgs, {timeout: TIMEOUT_SECS*1000, cwd: testCwd});
+      } else {
+        const cargoArgs = ['run', '--all-features', '--package', 'js', '--'];
+        if (isModule) cargoArgs.push('--module');
+        if (USE_VM) cargoArgs.push('--use-vm');
+        cargoArgs.push(tmpPath);
+        res = await runCommandAsync('cargo', cargoArgs, {timeout: TIMEOUT_SECS*1000, cwd: testCwd});
+      }
+
+      if (res && res.status === 0) {
+        log(`PASS ${f}`); pass++;
+        try { process.stdout.write('.'); } catch (e) { /* ignore */ }
+        if (cleanupTmp) cleanupComposedArtifacts(tmpPath);
+        currentSucceeds = true;
+      } else {
+        log(`FAIL ${f}`);
+        log('---- OUTPUT (summary) ----');
+        const outStr = ((res && res.stderr) ? res.stderr : (res && res.stdout ? res.stdout : '') ) || '';
+        const outLines = String(outStr).split('\n');
+        let idx = 0;
+        while (idx < outLines.length && outLines[idx].trim() === '') idx++;
+        let summaryText = '';
+        if (idx < outLines.length) {
+          summaryText = outLines.slice(idx, idx + 5).join('\n');
+          log(summaryText);
+        } else if (outLines.length > 0 && outLines.join('').trim() === '') {
+          summaryText = '<no output>';
+          log(summaryText);
+        } else if (outLines.length > 0) {
+          summaryText = outLines.slice(0,5).join('\n');
+          log(summaryText);
+        } else {
+          summaryText = '<no output>';
+          log(summaryText);
+        }
+        try {
+          console.error(`\nFAIL ${f}`);
+          console.error(summaryText);
+          if (KEEP_TMP) console.error(`TEST FILE KEPT: ${tmpPath}`);
+          console.error('----------------');
+        } catch (e) { /* ignore terminal print errors */ }
+        if (cleanupTmp && tmpPath && fs.existsSync(tmpPath)) {
+          try {
+            if (KEEP_TMP) {
+              log(`TEST FILE KEPT: ${tmpPath}`);
+              if (process.env.TEST262_LOG_LEVEL === 'debug') {
+                const content = fs.readFileSync(tmpPath,'utf8').split('\n').slice(0,60).join('\n');
+                log('---- TEST FILE (head 60 lines): ----');
+                log(content);
+                log('---- END TEST FILE ----');
+              }
+            }
+          } catch (e) {
+            log(`WARN (retain-check failed) ${e}`);
+          }
+        }
+        fail++;
+      }
+    } catch (err) {
+      log(`FAIL ${f}`);
+      log('---- OUTPUT ----');
+      const errText = String(err);
+      log(errText);
+      try {
+        console.error(`FAIL ${f}`);
+        console.error(errText);
+        if (KEEP_TMP) console.error(`TEST FILE KEPT: ${tmpPath}`);
+        console.error('----------------');
+      } catch (e) { /* ignore terminal print errors */ }
+      fail++;
+    } finally {
+      try {
+        if (cleanupTmp) {
+          if (currentSucceeds || !KEEP_TMP) {
+            cleanupComposedArtifacts(tmpPath);
+          } else {
+            log(`NOTE: keeping composed temp file ${tmpPath} because TEST262_KEEP_TMP is set`);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+      if (!currentSucceeds) log('----------------');
+    }
+  }
+
   for (const f of ordered){
-    // stop when we've executed LIMIT tests
-    if (execCount >= LIMIT) break;
+    // stop when we've scheduled LIMIT tests
+    if (scheduledCount >= LIMIT) break;
     n++;
     if (/_FIXTURE\.js$/.test(f)) { skip++; log(`SKIP (fixture) ${f}`); continue; }
 
@@ -411,122 +582,23 @@ async function runAll(){
     const needStrict = !isModule && hasFlag(meta, 'onlyStrict');
     const {testToRun, tmpPath, cleanupTmp} = composeTest({testPath: f, repoDir: REPO_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict, needsAgent});
 
-    let currentSucceeds = false;
-    // Run test
-    try {
-      log(`RUN ${f}`);
-      let res;
-      // Set cwd to the directory of the composed test file so that relative
-      // module specifiers (e.g. './import-value_FIXTURE.js' in ShadowRealm
-      // importValue tests) resolve correctly.
-      const testCwd = path.dirname(tmpPath);
-      if (BIN) {
-        // call the built engine binary directly with the composed test file
-        const binArgs = isModule ? ['--module', tmpPath] : [tmpPath];
-        res = spawnSync(BIN, binArgs, {timeout: TIMEOUT_SECS*1000, encoding:'utf8', cwd: testCwd});
-      } else {
-        // fall back to cargo run with appropriate args
-        const cargoArgs = ['run', '--all-features', '--package', 'js', '--'];
-        if (isModule) cargoArgs.push('--module');
-        cargoArgs.push(tmpPath);
-        res = spawnSync('cargo', cargoArgs, {timeout: TIMEOUT_SECS*1000, encoding:'utf8', cwd: testCwd});
-      }
+    // Set cwd to the directory of the composed test file so that relative
+    // module specifiers (e.g. './import-value_FIXTURE.js' in ShadowRealm
+    // importValue tests) resolve correctly.
+    const testCwd = path.dirname(tmpPath);
 
-      if (res && res.status === 0) {
-        log(`PASS ${f}`); pass++;
-        execCount++;
-        // Progress indicator: print a dot to terminal after each successful test
-        try { process.stdout.write('.'); } catch (e) { /* ignore */ }
-        // On success, remove temporary composed file to avoid clutter
-        if (cleanupTmp) {
-          cleanupComposedArtifacts(tmpPath);
-        }
-        currentSucceeds = true;
-      } else {
-        log(`FAIL ${f}`);
-        execCount++;
-        // Print a concise output summary (prefer stderr, else stdout). Show first non-empty line + up to 4 following lines
-        log('---- OUTPUT (summary) ----');
-        const outStr = ((res && res.stderr) ? res.stderr : (res && res.stdout ? res.stdout : '') ) || '';
-        const outLines = String(outStr).split('\n');
-        // find first non-empty line index
-        let idx = 0;
-        while (idx < outLines.length && outLines[idx].trim() === '') idx++;
-        let summaryText = '';
-        if (idx < outLines.length) {
-          summaryText = outLines.slice(idx, idx + 5).join('\n');
-          log(summaryText);
-        } else if (outLines.length > 0 && outLines.join('').trim() === '') {
-          summaryText = '<no output>';
-          log(summaryText);
-        } else if (outLines.length > 0) {
-          summaryText = outLines.slice(0,5).join('\n');
-          log(summaryText);
-        } else {
-          summaryText = '<no output>';
-          log(summaryText);
-        }
-        // Also print concise failure summary to terminal (stderr)
-        try {
-          console.error(`\nFAIL ${f}`);
-          console.error(summaryText);
-          if (KEEP_TMP) {
-            console.error(`TEST FILE KEPT: ${tmpPath}`);
-          }
-          console.error('----------------');
-        } catch (e) { /* ignore terminal print errors */ }
-        // If KEEP_TMP is true, keep the composed temporary file for debugging.
-        if (cleanupTmp && tmpPath && fs.existsSync(tmpPath)){
-          try {
-            if (KEEP_TMP) {
-              log(`TEST FILE KEPT: ${tmpPath}`);
-              // in debug mode, include a short head of the file for convenience
-              if (process.env.TEST262_LOG_LEVEL === 'debug') {
-                const content = fs.readFileSync(tmpPath,'utf8').split('\n').slice(0,60).join('\n');
-                log('---- TEST FILE (head 60 lines): ----');
-                log(content);
-                log('---- END TEST FILE ----');
-              }
-            }
-            // otherwise: do nothing here; tmp will be removed in finally block
-          } catch (e) {
-            log(`WARN (retain-check failed) ${e}`);
-          }
-        }
-        fail++;
-      }
-    } catch (err) {
-      log(`FAIL ${f}`);
-      log('---- OUTPUT ----');
-      const errText = String(err);
-      log(errText);
-      // Also print exception to terminal (stderr)
-      try {
-        console.error(`FAIL ${f}`);
-        console.error(errText);
-        if (KEEP_TMP) {
-          console.error(`TEST FILE KEPT: ${tmpPath}`);
-        }
-        console.error('----------------');
-      } catch (e) { /* ignore terminal print errors */ }
-      fail++;
-    } finally {
-      // Remove composed temp file unless KEEP_TMP is true.
-      try {
-        if (cleanupTmp) {
-          if (currentSucceeds || !KEEP_TMP) {
-            cleanupComposedArtifacts(tmpPath);
-          } else {
-            log(`NOTE: keeping composed temp file ${tmpPath} because TEST262_KEEP_TMP is set`);
-          }
-        }
-      } catch (e) {
-        // ignore
-      }
-      if (!currentSucceeds) {
-        log('----------------');
-      }
+    const p = runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule)
+      .finally(() => running.delete(p));
+    running.add(p);
+    scheduledCount++;
+
+    if (running.size >= JOBS) {
+      await Promise.race(Array.from(running));
     }
+  }
+
+  if (running.size > 0) {
+    await Promise.all(Array.from(running));
   }
 
   log(`Ran ${n} candidates: pass=${pass} fail=${fail} skip=${skip}`);

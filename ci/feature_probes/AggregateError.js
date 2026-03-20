@@ -11,6 +11,7 @@ try {
   }
 
   console.log("OK");
-} catch (_) {
+} catch (e) {
   // unsupported
+  console.log("NO: " + e.message);
 }

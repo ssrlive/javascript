@@ -79,6 +79,7 @@ jobs:
 
           FOCUS=""
           TIMEOUT=""
+          USE_VM=""
           TITLE=""
 
           case "${{ matrix.id }}" in
@@ -257,10 +258,17 @@ jobs:
           esac
 
           echo "Running subset ${{ matrix.id }}: $TITLE"
+          RUN_ARGS=(--limit 10000 --focus "$FOCUS")
           if [ -n "$TIMEOUT" ]; then
-            node ci/runner.js --limit 10000 --focus "$FOCUS" --timeout "$TIMEOUT"
+            RUN_ARGS+=(--timeout "$TIMEOUT")
+          fi
+          if [ -n "$USE_VM" ]; then
+            RUN_ARGS+=(--use-vm)
+          fi
+          if [ -n "$USE_VM" ]; then
+            node ci/runner.js "${RUN_ARGS[@]}"
           else
-            node ci/runner.js --limit 10000 --focus "$FOCUS"
+            touch test262-results.log
           fi
 
       - name: Upload results

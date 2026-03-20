@@ -617,6 +617,21 @@ impl<'gc> VM<'gc> {
         Value::VmObject(Rc::new(RefCell::new(map)))
     }
 
+    fn make_host_fn_with_name_len(name: &str, display_name: &str, length: f64, constructible: bool) -> Value<'gc> {
+        let mut map = IndexMap::new();
+        map.insert("__host_fn__".to_string(), Value::String(crate::unicode::utf8_to_utf16(name)));
+        map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16(display_name)));
+        map.insert("length".to_string(), Value::Number(length));
+        map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        if !constructible {
+            map.insert("__non_constructor__".to_string(), Value::Boolean(true));
+        }
+        Value::VmObject(Rc::new(RefCell::new(map)))
+    }
+
     fn make_bound_host_fn(name: &str, receiver: Value<'gc>) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__host_fn__".to_string(), Value::String(crate::unicode::utf8_to_utf16(name)));
@@ -624,13 +639,70 @@ impl<'gc> VM<'gc> {
         Value::VmObject(Rc::new(RefCell::new(map)))
     }
 
+    fn is_constructor_value(&self, v: &Value<'gc>) -> bool {
+        match v {
+            Value::VmFunction(..) | Value::VmClosure(..) => true,
+            Value::VmNativeFunction(id) => matches!(
+                *id,
+                BUILTIN_CTOR_ERROR
+                    | BUILTIN_CTOR_TYPEERROR
+                    | BUILTIN_CTOR_SYNTAXERROR
+                    | BUILTIN_CTOR_RANGEERROR
+                    | BUILTIN_CTOR_REFERENCEERROR
+                    | BUILTIN_CTOR_DATE
+                    | BUILTIN_CTOR_FUNCTION
+                    | BUILTIN_CTOR_NUMBER
+                    | BUILTIN_CTOR_STRING
+                    | BUILTIN_CTOR_BOOLEAN
+                    | BUILTIN_CTOR_OBJECT
+                    | BUILTIN_CTOR_MAP
+                    | BUILTIN_CTOR_SET
+                    | BUILTIN_CTOR_WEAKMAP
+                    | BUILTIN_CTOR_WEAKSET
+                    | BUILTIN_CTOR_WEAKREF
+                    | BUILTIN_CTOR_FR
+                    | BUILTIN_CTOR_PROMISE
+                    | BUILTIN_CTOR_REGEXP
+                    | BUILTIN_CTOR_ARRAY
+                    | BUILTIN_CTOR_ARRAYBUFFER
+                    | BUILTIN_CTOR_SHAREDARRAYBUFFER
+                    | BUILTIN_CTOR_DATAVIEW
+                    | BUILTIN_CTOR_INT8ARRAY
+                    | BUILTIN_CTOR_UINT8ARRAY
+                    | BUILTIN_CTOR_UINT8CLAMPEDARRAY
+                    | BUILTIN_CTOR_INT16ARRAY
+                    | BUILTIN_CTOR_UINT16ARRAY
+                    | BUILTIN_CTOR_INT32ARRAY
+                    | BUILTIN_CTOR_UINT32ARRAY
+                    | BUILTIN_CTOR_FLOAT32ARRAY
+                    | BUILTIN_CTOR_FLOAT64ARRAY
+                    | BUILTIN_CTOR_PROXY
+                    | BUILTIN_CTOR_ABSTRACT_MODULE_SOURCE
+            ),
+            Value::VmObject(map) => {
+                let b = map.borrow();
+                if matches!(b.get("__non_constructor__"), Some(Value::Boolean(true))) {
+                    return false;
+                }
+                if b.contains_key("__native_id__") || b.contains_key("__fn_body__") {
+                    return true;
+                }
+                if b.get("__host_fn__").is_some() {
+                    return matches!(b.get("__constructible__"), Some(Value::Boolean(true)));
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// Create a pending promise (no __promise_value__ yet).
     fn make_pending_promise(&self) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
         map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
-        if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
-            && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
+        if let Some(Value::VmObject(ctor)) = self.globals.get("Promise")
+            && let Some(proto) = ctor.borrow().get("prototype").cloned()
         {
             map.insert("__proto__".to_string(), proto);
         }
@@ -744,6 +816,443 @@ impl<'gc> VM<'gc> {
 
     fn call_host_fn(&mut self, name: &str, receiver: Option<Value<'gc>>, args: Vec<Value<'gc>>) -> Value<'gc> {
         match name {
+            "boolean.valueOf" => {
+                let this_val = receiver.unwrap_or(Value::Undefined);
+                match this_val {
+                    Value::Boolean(b) => Value::Boolean(b),
+                    Value::VmObject(obj) => {
+                        let borrow = obj.borrow();
+                        let type_ok =
+                            matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Boolean");
+                        let inner = borrow.get("__value__").cloned();
+                        if type_ok {
+                            match inner {
+                                Some(Value::Boolean(b)) => Value::Boolean(b),
+                                Some(v) => Value::Boolean(v.to_truthy()),
+                                None => Value::Boolean(false),
+                            }
+                        } else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(
+                                    "Boolean.prototype.valueOf requires that 'this' be a Boolean",
+                                )),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            Value::Undefined
+                        }
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16(
+                                "Boolean.prototype.valueOf requires that 'this' be a Boolean",
+                            )),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "boolean.toString" => {
+                let this_val = receiver.unwrap_or(Value::Undefined);
+                let bool_value = match this_val {
+                    Value::Boolean(b) => Some(b),
+                    Value::VmObject(obj) => {
+                        let borrow = obj.borrow();
+                        let type_ok =
+                            matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Boolean");
+                        if type_ok {
+                            match borrow.get("__value__") {
+                                Some(Value::Boolean(b)) => Some(*b),
+                                Some(v) => Some(v.to_truthy()),
+                                None => Some(false),
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some(b) = bool_value {
+                    Value::String(crate::unicode::utf8_to_utf16(if b { "true" } else { "false" }))
+                } else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16(
+                            "Boolean.prototype.toString requires that 'this' be a Boolean",
+                        )),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    Value::Undefined
+                }
+            }
+            "atomics.or" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.or requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.or requires integer typed array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.or requires index")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+
+                        let Some(value_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.or requires value")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+                        let or_with = to_int32(to_number(value_v));
+
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let old_num = match arr.borrow().elements.get(idx) {
+                            Some(Value::Number(n)) => *n,
+                            Some(v) => to_number(v),
+                            None => 0.0,
+                        };
+                        let old_i32 = to_int32(old_num);
+                        let new_i32 = old_i32 | or_with;
+
+                        let new_num = if old_num >= 0.0 && new_i32 < 0 {
+                            (new_i32 as u32) as f64
+                        } else {
+                            new_i32 as f64
+                        };
+
+                        arr.borrow_mut().elements[idx] = Value::Number(new_num);
+                        Value::Number(old_num)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.or requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.xor" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.xor requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.xor requires integer typed array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.xor requires index")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+
+                        let Some(value_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.xor requires value")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+                        let xor_with = to_int32(to_number(value_v));
+
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let old_num = match arr.borrow().elements.get(idx) {
+                            Some(Value::Number(n)) => *n,
+                            Some(v) => to_number(v),
+                            None => 0.0,
+                        };
+                        let old_i32 = to_int32(old_num);
+                        let new_i32 = old_i32 ^ xor_with;
+
+                        let new_num = if old_num >= 0.0 && new_i32 < 0 {
+                            (new_i32 as u32) as f64
+                        } else {
+                            new_i32 as f64
+                        };
+
+                        arr.borrow_mut().elements[idx] = Value::Number(new_num);
+                        Value::Number(old_num)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.xor requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
             "import.source" => {
                 let specifier = args.first().map(value_to_string).unwrap_or_default();
                 let resolved_path = self.resolve_import_specifier_path(&specifier);
@@ -1453,6 +1962,17 @@ impl<'gc> VM<'gc> {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
                 let arg_list = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let new_target = args.get(2).cloned();
+                let effective_new_target = new_target.clone().unwrap_or_else(|| target.clone());
+                if !self.is_constructor_value(&effective_new_target) {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("newTarget is not a constructor")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
                 let target_is_function_ctor = match &target {
                     Value::VmNativeFunction(id) => *id == BUILTIN_CTOR_FUNCTION,
                     Value::VmObject(map) => {
@@ -1547,7 +2067,7 @@ impl<'gc> VM<'gc> {
                     }
                 };
 
-                match self.construct_value(target, call_args, new_target) {
+                match self.construct_value(target, call_args, Some(effective_new_target)) {
                     Ok(v) => v,
                     Err(err) => {
                         if let Some(thrown) = self.pending_throw.take() {
@@ -1578,33 +2098,6 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(symbols))))
             }
-            "array.symbolIterator" => {
-                if let Some(Value::VmArray(arr)) = receiver {
-                    let items = arr.borrow().elements.clone();
-                    self.make_iterator(items)
-                } else {
-                    Value::Undefined
-                }
-            }
-            "string.symbolIterator" => {
-                let s = match receiver {
-                    Some(Value::String(ref s)) => crate::unicode::utf16_to_utf8(s),
-                    Some(Value::VmObject(ref obj)) => {
-                        if let Some(Value::String(ref s)) = obj.borrow().get("__value__").cloned() {
-                            crate::unicode::utf16_to_utf8(s)
-                        } else {
-                            value_to_string(receiver.as_ref().unwrap())
-                        }
-                    }
-                    Some(ref v) => value_to_string(v),
-                    None => String::new(),
-                };
-                let chars: Vec<Value<'gc>> = s
-                    .chars()
-                    .map(|ch| Value::String(crate::unicode::utf8_to_utf16(&ch.to_string())))
-                    .collect();
-                self.make_iterator(chars)
-            }
             "object.getOwnPropertyDescriptors" => {
                 let Some(target) = args.first().cloned() else {
                     return Value::VmObject(Rc::new(RefCell::new(IndexMap::new())));
@@ -1614,7 +2107,6 @@ impl<'gc> VM<'gc> {
                 match target {
                     Value::VmObject(obj) => {
                         let mut property_keys: Vec<String> = obj.borrow().keys().filter(|k| !k.starts_with("__")).cloned().collect();
-                        // Also collect accessor keys stored as __get_<name> / __set_<name>
                         {
                             let borrow = obj.borrow();
                             for k in borrow.keys() {
@@ -1679,6 +2171,29 @@ impl<'gc> VM<'gc> {
                     Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(entries))))
                 } else {
                     Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(Vec::new()))))
+                }
+            }
+            "array.symbolIterator" => {
+                if let Some(Value::VmArray(arr)) = receiver {
+                    self.make_iterator(arr.borrow().elements.clone())
+                } else {
+                    self.make_iterator(Vec::new())
+                }
+            }
+            "string.symbolIterator" => {
+                let source = match receiver {
+                    Some(Value::String(s)) => Some(s),
+                    Some(Value::VmObject(obj)) => obj
+                        .borrow()
+                        .get("__value__")
+                        .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None }),
+                    _ => None,
+                };
+                if let Some(s) = source {
+                    let values = s.into_iter().map(|u| Value::String(vec![u])).collect::<Vec<_>>();
+                    self.make_iterator(values)
+                } else {
+                    self.make_iterator(Vec::new())
                 }
             }
             "array.copyWithin" => {
@@ -3271,6 +3786,13 @@ impl<'gc> VM<'gc> {
         );
         atomics_map.insert("add".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_ADD));
         atomics_map.insert("exchange".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_EXCHANGE));
+        atomics_map.insert("or".to_string(), Self::make_host_fn_with_name_len("atomics.or", "or", 3.0, false));
+        atomics_map.insert("__nonenumerable_or__".to_string(), Value::Boolean(true));
+        atomics_map.insert(
+            "xor".to_string(),
+            Self::make_host_fn_with_name_len("atomics.xor", "xor", 3.0, false),
+        );
+        atomics_map.insert("__nonenumerable_xor__".to_string(), Value::Boolean(true));
         atomics_map.insert("wait".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_WAIT));
         atomics_map.insert("notify".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_NOTIFY));
         let mut wait_async_fn = IndexMap::new();
@@ -3552,11 +4074,43 @@ impl<'gc> VM<'gc> {
         {
             let mut boolean_map = IndexMap::new();
             boolean_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_BOOLEAN as f64));
+            boolean_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Boolean")));
+            boolean_map.insert("length".to_string(), Value::Number(1.0));
+            boolean_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+            boolean_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+            boolean_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+            boolean_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
             let mut boolean_proto = IndexMap::new();
+            boolean_proto.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Boolean")));
+            boolean_proto.insert("__value__".to_string(), Value::Boolean(false));
+            boolean_proto.insert(
+                "toString".to_string(),
+                Self::make_host_fn_with_name_len("boolean.toString", "toString", 0.0, false),
+            );
+            boolean_proto.insert(
+                "valueOf".to_string(),
+                Self::make_host_fn_with_name_len("boolean.valueOf", "valueOf", 0.0, false),
+            );
+            boolean_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
+            boolean_proto.insert("__nonenumerable_valueOf__".to_string(), Value::Boolean(true));
             boolean_proto.insert("__proto__".to_string(), Value::VmObject(object_proto.clone()));
-            boolean_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(boolean_proto))));
-            self.globals
-                .insert("Boolean".to_string(), Value::VmObject(Rc::new(RefCell::new(boolean_map))));
+            let boolean_proto_obj = Value::VmObject(Rc::new(RefCell::new(boolean_proto)));
+            boolean_map.insert("prototype".to_string(), boolean_proto_obj.clone());
+            boolean_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+            boolean_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            boolean_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+            let boolean_ctor = Value::VmObject(Rc::new(RefCell::new(boolean_map)));
+            if let Value::VmObject(proto_obj) = boolean_proto_obj {
+                proto_obj.borrow_mut().insert("constructor".to_string(), boolean_ctor.clone());
+                proto_obj
+                    .borrow_mut()
+                    .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            }
+            self.globals.insert("Boolean".to_string(), boolean_ctor.clone());
+            self.global_this.borrow_mut().insert("Boolean".to_string(), boolean_ctor);
+            self.global_this
+                .borrow_mut()
+                .insert("__nonenumerable_Boolean__".to_string(), Value::Boolean(true));
         }
 
         // Global constants
@@ -4796,8 +5350,16 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             BUILTIN_ATOMICS_STORE => {
-                if let (Some(Value::VmArray(arr)), Some(Value::Number(idx)), Some(val)) = (args.first(), args.get(1), args.get(2)) {
-                    let i = (*idx as isize).max(0) as usize;
+                if let (Some(Value::VmArray(arr)), Some(idx_val), Some(val)) = (args.first(), args.get(1), args.get(2)) {
+                    let mut idx_num = to_number(idx_val);
+                    if idx_num.is_nan() {
+                        idx_num = 0.0;
+                    }
+                    let i = if idx_num.is_finite() && idx_num.trunc() >= 0.0 {
+                        idx_num.trunc() as usize
+                    } else {
+                        0
+                    };
                     if i < arr.borrow().elements.len() {
                         arr.borrow_mut().elements[i] = val.clone();
                     }
@@ -12106,6 +12668,11 @@ impl<'gc> VM<'gc> {
                             "valueOf" => self.stack.push(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
                             _ => self.stack.push(Value::Undefined),
                         },
+                        Value::Boolean(_) => match key.as_str() {
+                            "toString" => self.stack.push(Self::make_host_fn("boolean.toString")),
+                            "valueOf" => self.stack.push(Self::make_host_fn("boolean.valueOf")),
+                            _ => self.stack.push(Value::Undefined),
+                        },
                         Value::VmMap(m) => match key.as_str() {
                             "size" => self.stack.push(Value::Number(m.borrow().entries.len() as f64)),
                             "set" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_SET)),
@@ -12627,6 +13194,11 @@ impl<'gc> VM<'gc> {
                                             "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
                                             _ => None,
                                         },
+                                        Some("Boolean") => match key.as_str() {
+                                            "toString" => Some(Self::make_host_fn("boolean.toString")),
+                                            "valueOf" => Some(Self::make_host_fn("boolean.valueOf")),
+                                            _ => None,
+                                        },
                                         Some("RegExp") => match key.as_str() {
                                             "exec" => Some(Value::VmNativeFunction(BUILTIN_REGEX_EXEC)),
                                             "test" => Some(Value::VmNativeFunction(BUILTIN_REGEX_TEST)),
@@ -12718,6 +13290,11 @@ impl<'gc> VM<'gc> {
                             "toPrecision" => Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION),
                             "toString" => Value::VmNativeFunction(BUILTIN_NUM_TOSTRING),
                             "valueOf" => Value::VmNativeFunction(BUILTIN_NUM_VALUEOF),
+                            _ => Value::Undefined,
+                        },
+                        Value::Boolean(_) => match key.as_str() {
+                            "toString" => Self::make_host_fn("boolean.toString"),
+                            "valueOf" => Self::make_host_fn("boolean.valueOf"),
                             _ => Value::Undefined,
                         },
                         Value::VmMap(_) => match key.as_str() {
@@ -13080,6 +13657,16 @@ impl<'gc> VM<'gc> {
                     } else if let Value::VmObject(map) = &obj {
                         let nc_key = format!("__nonconfigurable_{}__", key);
                         if map.borrow().contains_key(&nc_key) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(&format!(
+                                    "Cannot delete property '{}' of #<Object>",
+                                    key
+                                ))),
+                            );
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
                             self.stack.push(Value::Boolean(false));
                         } else {
                             map.borrow_mut().shift_remove(&key);
@@ -13568,6 +14155,11 @@ impl<'gc> VM<'gc> {
                                         continue;
                                     }
 
+                                    let bool_ctor_value = if id == BUILTIN_CTOR_BOOLEAN {
+                                        Some(args.first().map(|v| v.to_truthy()).unwrap_or(false))
+                                    } else {
+                                        None
+                                    };
                                     let result = self.call_builtin(id, args);
                                     // For constructors like Number/String/Boolean,
                                     // wrap the primitive result in an object
@@ -13587,7 +14179,13 @@ impl<'gc> VM<'gc> {
                                         BUILTIN_CTOR_BOOLEAN => {
                                             let mut m = IndexMap::new();
                                             m.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Boolean")));
-                                            m.insert("__value__".to_string(), result);
+                                            let bool_value = bool_ctor_value.unwrap_or(false);
+                                            m.insert("__value__".to_string(), Value::Boolean(bool_value));
+                                            if let Some(Value::VmObject(ctor)) = self.globals.get("Boolean")
+                                                && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                                            {
+                                                m.insert("__proto__".to_string(), proto);
+                                            }
                                             Value::VmObject(Rc::new(RefCell::new(m)))
                                         }
                                         _ => result,
@@ -13598,6 +14196,17 @@ impl<'gc> VM<'gc> {
                                         continue;
                                     }
                                 } else if borrow.get("__host_fn__").is_some() {
+                                    if matches!(borrow.get("__non_constructor__"), Some(Value::Boolean(true))) {
+                                        drop(borrow);
+                                        let mut err_map = IndexMap::new();
+                                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                        err_map.insert(
+                                            "message".to_string(),
+                                            Value::String(crate::unicode::utf8_to_utf16("is not a constructor")),
+                                        );
+                                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                        continue;
+                                    }
                                     drop(borrow);
                                     let args: Vec<Value<'gc>> = (0..arg_count)
                                         .map(|_| self.stack.pop().expect("VM Stack underflow"))
@@ -13663,7 +14272,21 @@ impl<'gc> VM<'gc> {
                             };
                             let nc_key = format!("__nonconfigurable_{}__", key);
                             if map.borrow().contains_key(&nc_key) {
-                                self.stack.push(Value::Boolean(false));
+                                if self.current_execution_is_strict() {
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16(&format!(
+                                            "Cannot delete property '{}' of #<Object>",
+                                            key
+                                        ))),
+                                    );
+                                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                    self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                    self.stack.push(Value::Boolean(false));
+                                } else {
+                                    self.stack.push(Value::Boolean(false));
+                                }
                             } else {
                                 map.borrow_mut().shift_remove(&key);
                                 self.stack.push(Value::Boolean(true));

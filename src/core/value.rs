@@ -1755,7 +1755,9 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         }
         Value::VmObject(obj) => {
             {
-                let borrowed = obj.borrow();
+                let Ok(borrowed) = obj.try_borrow() else {
+                    return "[object Object]".to_string();
+                };
                 if let Some(Value::String(tname)) = borrowed.get("__type__") {
                     let tname_str = crate::unicode::utf16_to_utf8(tname);
                     if tname_str == "RegExp" {

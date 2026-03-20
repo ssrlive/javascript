@@ -684,6 +684,13 @@ impl<'gc> VM<'gc> {
                 if matches!(b.get("__non_constructor__"), Some(Value::Boolean(true))) {
                     return false;
                 }
+                if matches!(b.get("__proxy_revoked__"), Some(Value::Boolean(true))) {
+                    return false;
+                }
+                if let Some(target) = b.get("__proxy_target__").cloned() {
+                    drop(b);
+                    return self.is_constructor_value(&target);
+                }
                 if b.contains_key("__native_id__") || b.contains_key("__fn_body__") {
                     return true;
                 }
@@ -894,6 +901,847 @@ impl<'gc> VM<'gc> {
                     Value::Undefined
                 }
             }
+            "atomics.load" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.load requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.load requires integer typed array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let index_v = args.get(1).cloned().unwrap_or(Value::Undefined);
+                        let mut index_prim = self.try_to_primitive(&index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.load requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.isLockFree" => {
+                let size_v = args.first().cloned().unwrap_or(Value::Undefined);
+                if Self::is_symbol_value(&size_v) {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                }
+
+                let mut size_prim = self.try_to_primitive(&size_v, "number");
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.pending_throw = Some(thrown);
+                    return Value::Undefined;
+                }
+                if let Value::VmObject(obj) = size_prim.clone() {
+                    let this_obj = Value::VmObject(obj.clone());
+                    let value_of = obj.borrow().get("valueOf").cloned();
+                    if let Some(value_of_fn) = value_of
+                        && matches!(
+                            value_of_fn,
+                            Value::VmFunction(..)
+                                | Value::VmClosure(..)
+                                | Value::VmNativeFunction(_)
+                                | Value::Function(_)
+                                | Value::VmObject(_)
+                        )
+                    {
+                        match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                            Ok(v) => size_prim = v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                    if matches!(
+                        size_prim,
+                        Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                    ) {
+                        let to_string = obj.borrow().get("toString").cloned();
+                        if let Some(to_string_fn) = to_string
+                            && matches!(
+                                to_string_fn,
+                                Value::VmFunction(..)
+                                    | Value::VmClosure(..)
+                                    | Value::VmNativeFunction(_)
+                                    | Value::Function(_)
+                                    | Value::VmObject(_)
+                            )
+                        {
+                            match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                Ok(v) => size_prim = v,
+                                Err(err) => {
+                                    self.set_pending_throw_from_error(&err);
+                                    return Value::Undefined;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut n = to_number(&size_prim);
+                if n.is_nan() {
+                    n = 0.0;
+                }
+                if n == 0.0 {
+                    n = 0.0;
+                }
+                let size = if n.is_finite() { n.trunc() as i64 } else { 0 };
+                Value::Boolean(matches!(size, 1 | 2 | 4 | 8))
+            }
+            "atomics.store" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.store requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.store requires integer typed array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.store requires index")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let value_v = args.get(2).cloned().unwrap_or(Value::Undefined);
+                        let val_num = to_number(&value_v);
+                        let to_integer = if val_num.is_nan() {
+                            0.0
+                        } else if val_num == 0.0 || !val_num.is_finite() {
+                            val_num
+                        } else {
+                            val_num.trunc()
+                        };
+                        let normalized_ret = if to_integer == 0.0 { 0.0 } else { to_integer };
+
+                        let store_i32 = to_int32(normalized_ret);
+                        let store_num = if normalized_ret >= 0.0 && store_i32 < 0 {
+                            (store_i32 as u32) as f64
+                        } else {
+                            store_i32 as f64
+                        };
+                        arr.borrow_mut().elements[idx] = Value::Number(store_num);
+
+                        Value::Number(normalized_ret)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.store requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.notify" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.notify requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, buffer_type, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.get("__buffer_type__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_notify_ta = matches!(ta_name.as_str(), "Int32Array" | "BigInt64Array");
+
+                        if !(is_notify_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.notify requires Int32Array or BigInt64Array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let index_v = args.get(1).cloned().unwrap_or(Value::Undefined);
+                        let mut index_prim = self.try_to_primitive(&index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        // count is evaluated before the non-shared early return.
+                        let count_v = args.get(2).cloned().unwrap_or(Value::Undefined);
+                        let _count = if matches!(count_v, Value::Undefined) {
+                            f64::INFINITY
+                        } else {
+                            if Self::is_symbol_value(&count_v) {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
+
+                            let mut count_prim = self.try_to_primitive(&count_v, "number");
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.pending_throw = Some(thrown);
+                                return Value::Undefined;
+                            }
+                            if let Value::VmObject(obj) = count_prim.clone() {
+                                let this_obj = Value::VmObject(obj.clone());
+                                let value_of = obj.borrow().get("valueOf").cloned();
+                                if let Some(value_of_fn) = value_of
+                                    && matches!(
+                                        value_of_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                        Ok(v) => count_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                                if matches!(
+                                    count_prim,
+                                    Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                                ) {
+                                    let to_string = obj.borrow().get("toString").cloned();
+                                    if let Some(to_string_fn) = to_string
+                                        && matches!(
+                                            to_string_fn,
+                                            Value::VmFunction(..)
+                                                | Value::VmClosure(..)
+                                                | Value::VmNativeFunction(_)
+                                                | Value::Function(_)
+                                                | Value::VmObject(_)
+                                        )
+                                    {
+                                        match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                            Ok(v) => count_prim = v,
+                                            Err(err) => {
+                                                self.set_pending_throw_from_error(&err);
+                                                return Value::Undefined;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            let c = to_number(&count_prim);
+                            if c.is_nan() {
+                                0.0
+                            } else if c.is_finite() {
+                                c.trunc().max(0.0)
+                            } else {
+                                f64::INFINITY
+                            }
+                        };
+
+                        if buffer_type != "SharedArrayBuffer" {
+                            return Value::Number(0.0);
+                        }
+
+                        // Agent waiter-list semantics are not implemented yet.
+                        Value::Number(0.0)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.notify requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.wait" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.wait requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, buffer_type, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.get("__buffer_type__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_wait_ta = matches!(ta_name.as_str(), "Int32Array" | "BigInt64Array");
+                        if !(is_wait_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.wait requires Int32Array or BigInt64Array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let index_v = args.get(1).cloned().unwrap_or(Value::Undefined);
+                        let mut index_prim = self.try_to_primitive(&index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        if buffer_type != "SharedArrayBuffer" {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(
+                                    "Atomics.wait requires SharedArrayBuffer-backed typed array",
+                                )),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
+                        let current = arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined);
+
+                        // Coerce timeout for abrupt-completion coverage (e.g. Symbol/object valueOf throws).
+                        let timeout_v = args.get(3).cloned().unwrap_or(Value::Undefined);
+                        if !matches!(timeout_v, Value::Undefined) {
+                            if Self::is_symbol_value(&timeout_v) {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
+                            let mut timeout_prim = self.try_to_primitive(&timeout_v, "number");
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.pending_throw = Some(thrown);
+                                return Value::Undefined;
+                            }
+                            if let Value::VmObject(obj) = timeout_prim.clone() {
+                                let this_obj = Value::VmObject(obj.clone());
+                                let value_of = obj.borrow().get("valueOf").cloned();
+                                if let Some(value_of_fn) = value_of
+                                    && matches!(
+                                        value_of_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                        Ok(v) => timeout_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                                if matches!(
+                                    timeout_prim,
+                                    Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                                ) {
+                                    let to_string = obj.borrow().get("toString").cloned();
+                                    if let Some(to_string_fn) = to_string
+                                        && matches!(
+                                            to_string_fn,
+                                            Value::VmFunction(..)
+                                                | Value::VmClosure(..)
+                                                | Value::VmNativeFunction(_)
+                                                | Value::Function(_)
+                                                | Value::VmObject(_)
+                                        )
+                                    {
+                                        match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                            Ok(v) => timeout_prim = v,
+                                            Err(err) => {
+                                                self.set_pending_throw_from_error(&err);
+                                                return Value::Undefined;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let _ = to_number(&timeout_prim);
+                        }
+
+                        if !self.strict_equal(&current, &expected) {
+                            Value::String(crate::unicode::utf8_to_utf16("not-equal"))
+                        } else {
+                            Value::String(crate::unicode::utf8_to_utf16("timed-out"))
+                        }
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.wait requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
             "atomics.or" => {
                 let Some(target) = args.first().cloned() else {
                     let mut err_map = IndexMap::new();
@@ -1067,6 +1915,907 @@ impl<'gc> VM<'gc> {
                         err_map.insert(
                             "message".to_string(),
                             Value::String(crate::unicode::utf8_to_utf16("Atomics.or requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.and" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.and requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.and requires integer typed array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.and requires index")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+
+                        let Some(value_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.and requires value")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+                        let and_with = to_int32(to_number(value_v));
+
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let old_num = match arr.borrow().elements.get(idx) {
+                            Some(Value::Number(n)) => *n,
+                            Some(v) => to_number(v),
+                            None => 0.0,
+                        };
+                        let old_i32 = to_int32(old_num);
+                        let new_i32 = old_i32 & and_with;
+
+                        let new_num = if old_num >= 0.0 && new_i32 < 0 {
+                            (new_i32 as u32) as f64
+                        } else {
+                            new_i32 as f64
+                        };
+
+                        arr.borrow_mut().elements[idx] = Value::Number(new_num);
+                        Value::Number(old_num)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.and requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.compareExchange" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.compareExchange requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16(
+                                    "Atomics.compareExchange requires integer typed array",
+                                )),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.compareExchange requires index")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+
+                        let Some(expected_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.compareExchange requires expected value")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+                        let expected_i32 = to_int32(to_number(expected_v));
+
+                        let Some(replacement_v) = args.get(3) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.compareExchange requires replacement value")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+                        let replacement_i32 = to_int32(to_number(replacement_v));
+
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let old_num = match arr.borrow().elements.get(idx) {
+                            Some(Value::Number(n)) => *n,
+                            Some(v) => to_number(v),
+                            None => 0.0,
+                        };
+                        let old_i32 = to_int32(old_num);
+                        if old_i32 == expected_i32 {
+                            let new_num = replacement_i32 as f64;
+                            arr.borrow_mut().elements[idx] = Value::Number(new_num);
+                        }
+
+                        Value::Number(old_num)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.compareExchange requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.add" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.add requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.add requires integer typed array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.add requires index")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+
+                        let Some(value_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.add requires value")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+                        let add_with = to_int32(to_number(value_v));
+
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let old_num = match arr.borrow().elements.get(idx) {
+                            Some(Value::Number(n)) => *n,
+                            Some(v) => to_number(v),
+                            None => 0.0,
+                        };
+                        let old_i32 = to_int32(old_num);
+                        let new_i32 = old_i32.wrapping_add(add_with);
+
+                        let new_num = if old_num >= 0.0 && new_i32 < 0 {
+                            (new_i32 as u32) as f64
+                        } else {
+                            new_i32 as f64
+                        };
+
+                        arr.borrow_mut().elements[idx] = Value::Number(new_num);
+                        Value::Number(old_num)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.add requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.exchange" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.exchange requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.exchange requires integer typed array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.exchange requires index")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+
+                        let Some(value_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.exchange requires value")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+                        let exchanged_with = to_int32(to_number(value_v));
+
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let old_num = match arr.borrow().elements.get(idx) {
+                            Some(Value::Number(n)) => *n,
+                            Some(v) => to_number(v),
+                            None => 0.0,
+                        };
+
+                        let new_num = exchanged_with as f64;
+
+                        arr.borrow_mut().elements[idx] = Value::Number(new_num);
+                        Value::Number(old_num)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.exchange requires typed array")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        Value::Undefined
+                    }
+                }
+            }
+            "atomics.sub" => {
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("Atomics.sub requires a typed array")),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+                match target {
+                    Value::VmArray(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array" | "Uint8Array" | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.sub requires integer typed array")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.sub requires index")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(obj) = index_prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(
+                                index_prim,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                            ) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+
+                        let Some(value_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Atomics.sub requires value")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        };
+                        let sub_with = to_int32(to_number(value_v));
+
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
+                        let old_num = match arr.borrow().elements.get(idx) {
+                            Some(Value::Number(n)) => *n,
+                            Some(v) => to_number(v),
+                            None => 0.0,
+                        };
+                        let old_i32 = to_int32(old_num);
+                        let new_i32 = old_i32.wrapping_sub(sub_with);
+
+                        let new_num = if old_num >= 0.0 && new_i32 < 0 {
+                            (new_i32 as u32) as f64
+                        } else {
+                            new_i32 as f64
+                        };
+
+                        arr.borrow_mut().elements[idx] = Value::Number(new_num);
+                        Value::Number(old_num)
+                    }
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Atomics.sub requires typed array")),
                         );
                         self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
                         Value::Undefined
@@ -2144,6 +3893,11 @@ impl<'gc> VM<'gc> {
                 }
 
                 Value::VmObject(Rc::new(RefCell::new(out)))
+            }
+            "object.is" => {
+                let a = args.first().cloned().unwrap_or(Value::Undefined);
+                let b = args.get(1).cloned().unwrap_or(Value::Undefined);
+                Value::Boolean(self.values_same(&a, &b))
             }
             "array.toString" => {
                 if let Some(Value::VmArray(arr)) = receiver {
@@ -3777,15 +5531,46 @@ impl<'gc> VM<'gc> {
         );
 
         let mut atomics_map = IndexMap::new();
-        atomics_map.insert("isLockFree".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_ISLOCKFREE));
-        atomics_map.insert("load".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_LOAD));
-        atomics_map.insert("store".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_STORE));
+        atomics_map.insert(
+            "isLockFree".to_string(),
+            Self::make_host_fn_with_name_len("atomics.isLockFree", "isLockFree", 1.0, false),
+        );
+        atomics_map.insert("__nonenumerable_isLockFree__".to_string(), Value::Boolean(true));
+        atomics_map.insert(
+            "load".to_string(),
+            Self::make_host_fn_with_name_len("atomics.load", "load", 2.0, false),
+        );
+        atomics_map.insert("__nonenumerable_load__".to_string(), Value::Boolean(true));
+        atomics_map.insert(
+            "store".to_string(),
+            Self::make_host_fn_with_name_len("atomics.store", "store", 3.0, false),
+        );
+        atomics_map.insert("__nonenumerable_store__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "compareExchange".to_string(),
-            Value::VmNativeFunction(BUILTIN_ATOMICS_COMPAREEXCHANGE),
+            Self::make_host_fn_with_name_len("atomics.compareExchange", "compareExchange", 4.0, false),
         );
-        atomics_map.insert("add".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_ADD));
-        atomics_map.insert("exchange".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_EXCHANGE));
+        atomics_map.insert("__nonenumerable_compareExchange__".to_string(), Value::Boolean(true));
+        atomics_map.insert(
+            "and".to_string(),
+            Self::make_host_fn_with_name_len("atomics.and", "and", 3.0, false),
+        );
+        atomics_map.insert("__nonenumerable_and__".to_string(), Value::Boolean(true));
+        atomics_map.insert(
+            "add".to_string(),
+            Self::make_host_fn_with_name_len("atomics.add", "add", 3.0, false),
+        );
+        atomics_map.insert("__nonenumerable_add__".to_string(), Value::Boolean(true));
+        atomics_map.insert(
+            "exchange".to_string(),
+            Self::make_host_fn_with_name_len("atomics.exchange", "exchange", 3.0, false),
+        );
+        atomics_map.insert("__nonenumerable_exchange__".to_string(), Value::Boolean(true));
+        atomics_map.insert(
+            "sub".to_string(),
+            Self::make_host_fn_with_name_len("atomics.sub", "sub", 3.0, false),
+        );
+        atomics_map.insert("__nonenumerable_sub__".to_string(), Value::Boolean(true));
         atomics_map.insert("or".to_string(), Self::make_host_fn_with_name_len("atomics.or", "or", 3.0, false));
         atomics_map.insert("__nonenumerable_or__".to_string(), Value::Boolean(true));
         atomics_map.insert(
@@ -3793,8 +5578,19 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len("atomics.xor", "xor", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_xor__".to_string(), Value::Boolean(true));
-        atomics_map.insert("wait".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_WAIT));
-        atomics_map.insert("notify".to_string(), Value::VmNativeFunction(BUILTIN_ATOMICS_NOTIFY));
+        atomics_map.insert(
+            "wait".to_string(),
+            Self::make_host_fn_with_name_len("atomics.wait", "wait", 4.0, false),
+        );
+        atomics_map.insert("__nonenumerable_wait__".to_string(), Value::Boolean(true));
+        atomics_map.insert(
+            "notify".to_string(),
+            Self::make_host_fn_with_name_len("atomics.notify", "notify", 3.0, false),
+        );
+        atomics_map.insert("__nonenumerable_notify__".to_string(), Value::Boolean(true));
+        atomics_map.insert("@@sym:4".to_string(), Value::String(crate::unicode::utf8_to_utf16("Atomics")));
+        atomics_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        atomics_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
         let mut wait_async_fn = IndexMap::new();
         wait_async_fn.insert("__native_id__".to_string(), Value::Number(BUILTIN_ATOMICS_WAITASYNC as f64));
         wait_async_fn.insert("length".to_string(), Value::Number(4.0));
@@ -3835,6 +5631,7 @@ impl<'gc> VM<'gc> {
             "__host_fn__".to_string(),
             Value::String(crate::unicode::utf8_to_utf16("error.aggregate")),
         );
+        aggregate_error_ctor.insert("__constructible__".to_string(), Value::Boolean(true));
         aggregate_error_ctor.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("AggregateError")));
         aggregate_error_ctor.insert("length".to_string(), Value::Number(2.0));
         aggregate_error_ctor.insert("prototype".to_string(), aggregate_error_proto_obj.clone());
@@ -4002,6 +5799,7 @@ impl<'gc> VM<'gc> {
         object_map.insert("keys".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_KEYS));
         object_map.insert("values".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_VALUES));
         object_map.insert("entries".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_ENTRIES));
+        object_map.insert("is".to_string(), Self::make_host_fn("object.is"));
         object_map.insert("assign".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_ASSIGN));
         object_map.insert("freeze".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_FREEZE));
         object_map.insert("hasOwn".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_HASOWN));
@@ -5343,8 +7141,16 @@ impl<'gc> VM<'gc> {
                 Value::Boolean(matches!(size, 1 | 2 | 4 | 8))
             }
             BUILTIN_ATOMICS_LOAD => {
-                if let (Some(Value::VmArray(arr)), Some(Value::Number(idx))) = (args.first(), args.get(1)) {
-                    let i = (*idx as isize).max(0) as usize;
+                if let (Some(Value::VmArray(arr)), Some(idx_val)) = (args.first(), args.get(1)) {
+                    let mut idx_num = to_number(idx_val);
+                    if idx_num.is_nan() {
+                        idx_num = 0.0;
+                    }
+                    let i = if idx_num.is_finite() && idx_num.trunc() >= 0.0 {
+                        idx_num.trunc() as usize
+                    } else {
+                        0
+                    };
                     return arr.borrow().elements.get(i).cloned().unwrap_or(Value::Undefined);
                 }
                 Value::Undefined

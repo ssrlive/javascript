@@ -526,6 +526,11 @@ async function runAll(){
 
     // Detect tests that require $262.agent (multi-threaded worker support)
     const needsAgent = /\$262\.agent\b/.test(testSrc);
+    if (USE_VM && needsAgent) {
+      skip++;
+      log(`SKIP (agent unsupported in vm mode) ${f}`);
+      continue;
+    }
 
     // handle includes
     const includes = parseList(meta, 'includes');

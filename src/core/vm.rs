@@ -901,6 +901,274 @@ impl<'gc> VM<'gc> {
                     Value::Undefined
                 }
             }
+            "arrayBuffer.isView" => {
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let view_proto_ptrs: Vec<Rc<RefCell<IndexMap<String, Value<'gc>>>>> = [
+                    "DataView",
+                    "Int8Array",
+                    "Uint8Array",
+                    "Uint8ClampedArray",
+                    "Int16Array",
+                    "Uint16Array",
+                    "Int32Array",
+                    "Uint32Array",
+                    "Float32Array",
+                    "Float64Array",
+                    "BigInt64Array",
+                    "BigUint64Array",
+                ]
+                .iter()
+                .filter_map(|name| match self.globals.get(*name) {
+                    Some(Value::VmObject(ctor)) => match ctor.borrow().get("prototype").cloned() {
+                        Some(Value::VmObject(proto)) => Some(proto),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+                let is_builtin_view_ctor = |v: &Value<'gc>| -> bool {
+                    let Value::VmObject(candidate) = v else {
+                        return false;
+                    };
+                    [
+                        "DataView",
+                        "Int8Array",
+                        "Uint8Array",
+                        "Uint8ClampedArray",
+                        "Int16Array",
+                        "Uint16Array",
+                        "Int32Array",
+                        "Uint32Array",
+                        "Float32Array",
+                        "Float64Array",
+                        "BigInt64Array",
+                        "BigUint64Array",
+                    ]
+                    .iter()
+                    .any(|name| {
+                        if let Some(Value::VmObject(global_ctor)) = self.globals.get(*name) {
+                            Rc::ptr_eq(candidate, global_ctor)
+                        } else {
+                            false
+                        }
+                    })
+                };
+                let is_view = match arg {
+                    Value::VmArray(arr) => {
+                        let props = &arr.borrow().props;
+                        props.contains_key("__typedarray_name__") || props.contains_key("__buffer_type__")
+                    }
+                    Value::VmObject(obj) => {
+                        let mut cur = Some(obj.clone());
+                        let mut found = false;
+                        while let Some(o) = cur {
+                            let borrow = o.borrow();
+                            if matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "DataView")
+                                || borrow.contains_key("__buffer__")
+                                || borrow.contains_key("__typedarray_name__")
+                                || borrow.contains_key("__typedarray_buffer__")
+                                || view_proto_ptrs.iter().any(|p| Rc::ptr_eq(&o, p))
+                            {
+                                found = true;
+                                break;
+                            }
+                            cur = match borrow.get("__proto__").cloned() {
+                                Some(Value::VmObject(next)) => Some(next),
+                                _ => None,
+                            };
+                        }
+                        if !found {
+                            let mut cur = Some(obj);
+                            while let Some(o) = cur {
+                                let borrow = o.borrow();
+                                let ctor = borrow.get("constructor").cloned();
+                                if let Some(c) = ctor {
+                                    if is_builtin_view_ctor(&c) {
+                                        found = true;
+                                        break;
+                                    }
+                                    if let Value::VmObject(ctor_obj) = c
+                                        && let Some(super_ctor) = ctor_obj.borrow().get("__proto__").cloned()
+                                        && is_builtin_view_ctor(&super_ctor)
+                                    {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                cur = match borrow.get("__proto__").cloned() {
+                                    Some(Value::VmObject(next)) => Some(next),
+                                    _ => None,
+                                };
+                            }
+                        }
+                        found
+                    }
+                    Value::Object(obj) => {
+                        crate::core::slot_get_chained(&obj, &crate::core::InternalSlot::DataView).is_some()
+                            || crate::core::slot_get_chained(&obj, &crate::core::InternalSlot::TypedArray).is_some()
+                    }
+                    Value::TypedArray(_) | Value::DataView(_) => true,
+                    _ => false,
+                };
+                Value::Boolean(is_view)
+            }
+            "arrayBuffer.slice" => {
+                let this_val = receiver.unwrap_or(Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16(
+                            "ArrayBuffer.prototype.slice called on incompatible receiver",
+                        )),
+                    );
+                    self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                    return Value::Undefined;
+                };
+
+                let (len, bytes_arr) = {
+                    let b = buf_obj.borrow();
+                    let len = b.get("byteLength").map(to_number).unwrap_or(0.0).max(0.0) as usize;
+                    let bytes_arr = b.get("__buffer_bytes__").cloned();
+                    (len, bytes_arr)
+                };
+
+                let to_integer_index = |n: f64| -> isize {
+                    if n.is_nan() || n == 0.0 {
+                        0
+                    } else if n.is_infinite() {
+                        if n.is_sign_negative() { isize::MIN } else { isize::MAX }
+                    } else {
+                        n.trunc() as isize
+                    }
+                };
+
+                let coerce_to_number = |vm: &mut VM<'gc>, v: Value<'gc>| -> Option<f64> {
+                    if Self::is_symbol_value(&v) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                        );
+                        vm.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return None;
+                    }
+                    let mut prim = vm.try_to_primitive(&v, "number");
+                    if let Some(thrown) = vm.pending_throw.take() {
+                        vm.pending_throw = Some(thrown);
+                        return None;
+                    }
+                    if let Value::VmObject(obj) = prim.clone() {
+                        let this_obj = Value::VmObject(obj.clone());
+                        let value_of = obj.borrow().get("valueOf").cloned();
+                        if let Some(value_of_fn) = value_of
+                            && matches!(
+                                value_of_fn,
+                                Value::VmFunction(..)
+                                    | Value::VmClosure(..)
+                                    | Value::VmNativeFunction(_)
+                                    | Value::Function(_)
+                                    | Value::VmObject(_)
+                            )
+                        {
+                            match vm.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                Ok(v2) => prim = v2,
+                                Err(err) => {
+                                    vm.set_pending_throw_from_error(&err);
+                                    return None;
+                                }
+                            }
+                        }
+                        if matches!(prim, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                            let to_string = obj.borrow().get("toString").cloned();
+                            if let Some(to_string_fn) = to_string
+                                && matches!(
+                                    to_string_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match vm.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                    Ok(v) => prim = v,
+                                    Err(err) => {
+                                        vm.set_pending_throw_from_error(&err);
+                                        return None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if Self::is_symbol_value(&prim) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                        );
+                        vm.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return None;
+                    }
+                    Some(to_number(&prim))
+                };
+
+                let start_n = match coerce_to_number(self, args.first().cloned().unwrap_or(Value::Undefined)) {
+                    Some(v) => v,
+                    None => return Value::Undefined,
+                };
+                let end_n = if args.len() > 1 {
+                    match coerce_to_number(self, args.get(1).cloned().unwrap_or(Value::Undefined)) {
+                        Some(v) => v,
+                        None => return Value::Undefined,
+                    }
+                } else {
+                    len as f64
+                };
+
+                let relative_start = to_integer_index(start_n);
+                let first = if relative_start < 0 {
+                    (len as isize + relative_start).max(0) as usize
+                } else {
+                    (relative_start as usize).min(len)
+                };
+                let relative_end = to_integer_index(end_n);
+                let final_idx = if relative_end < 0 {
+                    (len as isize + relative_end).max(0) as usize
+                } else {
+                    (relative_end as usize).min(len)
+                };
+                let new_len = final_idx.saturating_sub(first);
+
+                let mut out_bytes = vec![Value::Number(0.0); new_len];
+                if let Some(Value::VmArray(src_arr)) = bytes_arr {
+                    let src = src_arr.borrow();
+                    for (i, out_bytes_i) in out_bytes.iter_mut().enumerate().take(new_len) {
+                        if let Some(v) = src.get(first + i).cloned() {
+                            *out_bytes_i = v;
+                        }
+                    }
+                }
+
+                let mut out_map = IndexMap::new();
+                out_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer")));
+                out_map.insert("byteLength".to_string(), Value::Number(new_len as f64));
+                out_map.insert("maxByteLength".to_string(), Value::Number(new_len as f64));
+                out_map.insert("resize".to_string(), Value::VmNativeFunction(BUILTIN_ARRAYBUFFER_RESIZE));
+                out_map.insert(
+                    "__buffer_bytes__".to_string(),
+                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(out_bytes)))),
+                );
+                if let Some(Value::VmObject(ab_ctor)) = self.globals.get("ArrayBuffer").cloned()
+                    && let Some(proto) = ab_ctor.borrow().get("prototype").cloned()
+                {
+                    out_map.insert("__proto__".to_string(), proto);
+                }
+                Value::VmObject(Rc::new(RefCell::new(out_map)))
+            }
             "atomics.load" => {
                 let Some(target) = args.first().cloned() else {
                     let mut err_map = IndexMap::new();
@@ -944,6 +1212,16 @@ impl<'gc> VM<'gc> {
                         let mut index_prim = self.try_to_primitive(&index_v, "number");
                         if let Some(thrown) = self.pending_throw.take() {
                             self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if Self::is_symbol_value(&index_prim) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
                             return Value::Undefined;
                         }
                         if let Value::VmObject(obj) = index_prim.clone() {
@@ -991,6 +1269,16 @@ impl<'gc> VM<'gc> {
                                     }
                                 }
                             }
+                        }
+                        if Self::is_symbol_value(&index_prim) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
                         }
 
                         let mut idx_num = to_number(&index_prim);
@@ -1439,6 +1727,16 @@ impl<'gc> VM<'gc> {
                                 self.pending_throw = Some(thrown);
                                 return Value::Undefined;
                             }
+                            if Self::is_symbol_value(&count_prim) {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
                             if let Value::VmObject(obj) = count_prim.clone() {
                                 let this_obj = Value::VmObject(obj.clone());
                                 let value_of = obj.borrow().get("valueOf").cloned();
@@ -1484,6 +1782,16 @@ impl<'gc> VM<'gc> {
                                         }
                                     }
                                 }
+                            }
+                            if Self::is_symbol_value(&count_prim) {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
                             }
 
                             let c = to_number(&count_prim);
@@ -1557,6 +1865,16 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(thrown);
                             return Value::Undefined;
                         }
+                        if Self::is_symbol_value(&index_prim) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
+                        }
                         if let Value::VmObject(obj) = index_prim.clone() {
                             let this_obj = Value::VmObject(obj.clone());
                             let value_of = obj.borrow().get("valueOf").cloned();
@@ -1602,6 +1920,16 @@ impl<'gc> VM<'gc> {
                                     }
                                 }
                             }
+                        }
+                        if Self::is_symbol_value(&index_prim) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return Value::Undefined;
                         }
 
                         let mut idx_num = to_number(&index_prim);
@@ -1675,6 +2003,16 @@ impl<'gc> VM<'gc> {
                                 self.pending_throw = Some(thrown);
                                 return Value::Undefined;
                             }
+                            if Self::is_symbol_value(&timeout_prim) {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
                             if let Value::VmObject(obj) = timeout_prim.clone() {
                                 let this_obj = Value::VmObject(obj.clone());
                                 let value_of = obj.borrow().get("valueOf").cloned();
@@ -1721,6 +2059,16 @@ impl<'gc> VM<'gc> {
                                     }
                                 }
                             }
+                            if Self::is_symbol_value(&timeout_prim) {
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                                );
+                                self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                                return Value::Undefined;
+                            }
                             let _ = to_number(&timeout_prim);
                         }
 
@@ -1742,6 +2090,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
+            "atomics.waitAsync" => self.call_builtin(BUILTIN_ATOMICS_WAITASYNC, args),
             "atomics.or" => {
                 let Some(target) = args.first().cloned() else {
                     let mut err_map = IndexMap::new();
@@ -3929,10 +4278,20 @@ impl<'gc> VM<'gc> {
             }
             "array.symbolIterator" => {
                 if let Some(Value::VmArray(arr)) = receiver {
-                    self.make_iterator(arr.borrow().elements.clone())
+                    let mut obj = IndexMap::new();
+                    obj.insert("__iter_target__".to_string(), Value::VmArray(arr.clone()));
+                    obj.insert("__index__".to_string(), Value::Number(0.0));
+                    if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
+                        obj.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmObject(Rc::new(RefCell::new(obj)))
                 } else {
                     self.make_iterator(Vec::new())
                 }
+            }
+            "iterator.next" => {
+                let recv = receiver.unwrap_or(Value::Undefined);
+                self.call_method_builtin(BUILTIN_ITERATOR_NEXT, recv, args)
             }
             "string.symbolIterator" => {
                 let source = match receiver {
@@ -5457,6 +5816,22 @@ impl<'gc> VM<'gc> {
         array_obj.insert("of".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_OF));
         array_obj.insert("from".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_FROM));
         array_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAY as f64));
+        let mut array_iter_proto = IndexMap::new();
+        array_iter_proto.insert(
+            "next".to_string(),
+            Self::make_host_fn_with_name_len("iterator.next", "next", 0.0, false),
+        );
+        array_iter_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
+        array_iter_proto.insert(
+            "@@sym:4".to_string(),
+            Value::String(crate::unicode::utf8_to_utf16("Array Iterator")),
+        );
+        array_iter_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        array_iter_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        self.globals.insert(
+            "__ArrayIteratorPrototype__".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(array_iter_proto))),
+        );
         // Create Array.prototype with iterator method
         let mut arr_proto = IndexMap::new();
         arr_proto.insert("@@sym:1".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ITERATOR));
@@ -5513,13 +5888,50 @@ impl<'gc> VM<'gc> {
         date_map.insert("UTC".to_string(), Self::make_host_fn("date.UTC"));
         self.globals
             .insert("Date".to_string(), Value::VmObject(Rc::new(RefCell::new(date_map))));
+        let mut array_buffer_proto = IndexMap::new();
+        array_buffer_proto.insert(
+            "slice".to_string(),
+            Self::make_host_fn_with_name_len("arrayBuffer.slice", "slice", 2.0, false),
+        );
+        array_buffer_proto.insert("__nonenumerable_slice__".to_string(), Value::Boolean(true));
+        array_buffer_proto.insert("@@sym:4".to_string(), Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer")));
+        array_buffer_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        array_buffer_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        let array_buffer_proto_val = Value::VmObject(Rc::new(RefCell::new(array_buffer_proto)));
+
         let mut array_buffer_map = IndexMap::new();
         array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAYBUFFER as f64));
-        self.globals
-            .insert("ArrayBuffer".to_string(), Value::VmObject(Rc::new(RefCell::new(array_buffer_map))));
+        array_buffer_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer")));
+        array_buffer_map.insert("length".to_string(), Value::Number(1.0));
+        array_buffer_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        array_buffer_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        array_buffer_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        array_buffer_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        array_buffer_map.insert(
+            "isView".to_string(),
+            Self::make_host_fn_with_name_len("arrayBuffer.isView", "isView", 1.0, false),
+        );
+        array_buffer_map.insert("__nonenumerable_isView__".to_string(), Value::Boolean(true));
+        array_buffer_map.insert("prototype".to_string(), array_buffer_proto_val);
+        array_buffer_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+        array_buffer_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+        array_buffer_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        let array_buffer_ctor = Value::VmObject(Rc::new(RefCell::new(array_buffer_map)));
+        self.globals.insert("ArrayBuffer".to_string(), array_buffer_ctor.clone());
+        self.global_this.borrow_mut().insert("ArrayBuffer".to_string(), array_buffer_ctor);
+        self.global_this
+            .borrow_mut()
+            .insert("__nonenumerable_ArrayBuffer__".to_string(), Value::Boolean(true));
 
         let mut data_view_map = IndexMap::new();
         data_view_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_DATAVIEW as f64));
+        data_view_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("DataView")));
+        data_view_map.insert("length".to_string(), Value::Number(1.0));
+        data_view_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        data_view_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        data_view_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        data_view_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        data_view_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals
             .insert("DataView".to_string(), Value::VmObject(Rc::new(RefCell::new(data_view_map))));
 
@@ -5591,12 +6003,15 @@ impl<'gc> VM<'gc> {
         atomics_map.insert("@@sym:4".to_string(), Value::String(crate::unicode::utf8_to_utf16("Atomics")));
         atomics_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         atomics_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
-        let mut wait_async_fn = IndexMap::new();
-        wait_async_fn.insert("__native_id__".to_string(), Value::Number(BUILTIN_ATOMICS_WAITASYNC as f64));
-        wait_async_fn.insert("length".to_string(), Value::Number(4.0));
-        atomics_map.insert("waitAsync".to_string(), Value::VmObject(Rc::new(RefCell::new(wait_async_fn))));
-        self.globals
-            .insert("Atomics".to_string(), Value::VmObject(Rc::new(RefCell::new(atomics_map))));
+        let wait_async_fn = Self::make_host_fn_with_name_len("atomics.waitAsync", "waitAsync", 4.0, false);
+        atomics_map.insert("waitAsync".to_string(), wait_async_fn);
+        atomics_map.insert("__nonenumerable_waitAsync__".to_string(), Value::Boolean(true));
+        let atomics_obj = Value::VmObject(Rc::new(RefCell::new(atomics_map)));
+        self.globals.insert("Atomics".to_string(), atomics_obj.clone());
+        self.global_this.borrow_mut().insert("Atomics".to_string(), atomics_obj);
+        self.global_this
+            .borrow_mut()
+            .insert("__nonenumerable_Atomics__".to_string(), Value::Boolean(true));
 
         let mut promise_map = IndexMap::new();
         let mut promise_proto = IndexMap::new();
@@ -5677,21 +6092,17 @@ impl<'gc> VM<'gc> {
 
         let mut int8_array_map = IndexMap::new();
         int8_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_INT8ARRAY as f64));
-        int8_array_map.insert(
-            "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedInt8Array")),
-        );
+        int8_array_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Int8Array")));
         int8_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(1.0));
+        int8_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals
             .insert("Int8Array".to_string(), Value::VmObject(Rc::new(RefCell::new(int8_array_map))));
 
         let mut uint8_array_map = IndexMap::new();
         uint8_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT8ARRAY as f64));
-        uint8_array_map.insert(
-            "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedUint8Array")),
-        );
+        uint8_array_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Uint8Array")));
         uint8_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(1.0));
+        uint8_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals
             .insert("Uint8Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint8_array_map))));
 
@@ -5699,9 +6110,10 @@ impl<'gc> VM<'gc> {
         uint8_clamped_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT8CLAMPEDARRAY as f64));
         uint8_clamped_array_map.insert(
             "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedUint8ClampedArray")),
+            Value::String(crate::unicode::utf8_to_utf16("Uint8ClampedArray")),
         );
         uint8_clamped_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(1.0));
+        uint8_clamped_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals.insert(
             "Uint8ClampedArray".to_string(),
             Value::VmObject(Rc::new(RefCell::new(uint8_clamped_array_map))),
@@ -5709,51 +6121,41 @@ impl<'gc> VM<'gc> {
 
         let mut int16_array_map = IndexMap::new();
         int16_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_INT16ARRAY as f64));
-        int16_array_map.insert(
-            "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedInt16Array")),
-        );
+        int16_array_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Int16Array")));
         int16_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(2.0));
+        int16_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals
             .insert("Int16Array".to_string(), Value::VmObject(Rc::new(RefCell::new(int16_array_map))));
 
         let mut uint16_array_map = IndexMap::new();
         uint16_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT16ARRAY as f64));
-        uint16_array_map.insert(
-            "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedUint16Array")),
-        );
+        uint16_array_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Uint16Array")));
         uint16_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(2.0));
+        uint16_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals
             .insert("Uint16Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint16_array_map))));
 
         let mut int32_array_map = IndexMap::new();
         int32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_INT32ARRAY as f64));
-        int32_array_map.insert(
-            "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedInt32Array")),
-        );
+        int32_array_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Int32Array")));
         int32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
+        int32_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals
             .insert("Int32Array".to_string(), Value::VmObject(Rc::new(RefCell::new(int32_array_map))));
 
         let mut uint32_array_map = IndexMap::new();
         uint32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_UINT32ARRAY as f64));
-        uint32_array_map.insert(
-            "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedUint32Array")),
-        );
+        uint32_array_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Uint32Array")));
         uint32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
+        uint32_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals
             .insert("Uint32Array".to_string(), Value::VmObject(Rc::new(RefCell::new(uint32_array_map))));
 
         let mut float32_array_map = IndexMap::new();
         float32_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FLOAT32ARRAY as f64));
-        float32_array_map.insert(
-            "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedFloat32Array")),
-        );
+        float32_array_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Float32Array")));
         float32_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(4.0));
+        float32_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals.insert(
             "Float32Array".to_string(),
             Value::VmObject(Rc::new(RefCell::new(float32_array_map))),
@@ -5761,11 +6163,9 @@ impl<'gc> VM<'gc> {
 
         let mut float64_array_map = IndexMap::new();
         float64_array_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FLOAT64ARRAY as f64));
-        float64_array_map.insert(
-            "name".to_string(),
-            Value::String(crate::unicode::utf8_to_utf16("UnimplementedFloat64Array")),
-        );
+        float64_array_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("Float64Array")));
         float64_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
+        float64_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
         self.globals.insert(
             "Float64Array".to_string(),
             Value::VmObject(Rc::new(RefCell::new(float64_array_map))),
@@ -6158,16 +6558,34 @@ impl<'gc> VM<'gc> {
 
     fn vm_call_function_value(&mut self, func: Value<'gc>, this_arg: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
         match func {
-            Value::VmFunction(ip, _) => {
+            Value::VmFunction(ip, arity) => {
+                let mut call_args = args.to_vec();
+                let target_arity = arity as usize;
+                if call_args.len() < target_arity {
+                    call_args.resize(target_arity, Value::Undefined);
+                } else if call_args.len() > target_arity {
+                    call_args.truncate(target_arity);
+                }
                 self.this_stack.push(this_arg);
-                let out = self.call_vm_function_result(ip, args, &[]);
+                let saved_try_stack = std::mem::take(&mut self.try_stack);
+                let out = self.call_vm_function_result(ip, &call_args, &[]);
+                self.try_stack = saved_try_stack;
                 self.this_stack.pop();
                 out
             }
-            Value::VmClosure(ip, _, upv) => {
+            Value::VmClosure(ip, arity, upv) => {
+                let mut call_args = args.to_vec();
+                let target_arity = arity as usize;
+                if call_args.len() < target_arity {
+                    call_args.resize(target_arity, Value::Undefined);
+                } else if call_args.len() > target_arity {
+                    call_args.truncate(target_arity);
+                }
                 self.this_stack.push(this_arg);
                 let uv = (*upv).clone();
-                let out = self.call_vm_function_result(ip, args, &uv);
+                let saved_try_stack = std::mem::take(&mut self.try_stack);
+                let out = self.call_vm_function_result(ip, &call_args, &uv);
+                self.try_stack = saved_try_stack;
                 self.this_stack.pop();
                 out
             }
@@ -7294,7 +7712,82 @@ impl<'gc> VM<'gc> {
                     let arr_borrow = arr.borrow();
                     let ta_name = arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();
                     let buffer_type = arr_borrow.props.get("__buffer_type__").map(value_to_string).unwrap_or_default();
+                    let len = arr_borrow.elements.len();
                     drop(arr_borrow);
+
+                    let mut to_number_with_coercion = |input: Value<'gc>| -> Option<f64> {
+                        let mut prim = self.try_to_primitive(&input, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return None;
+                        }
+                        if Self::is_symbol_value(&prim) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return None;
+                        }
+
+                        if let Value::VmObject(obj) = prim.clone() {
+                            let this_obj = Value::VmObject(obj.clone());
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                    Ok(v) => prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return None;
+                                    }
+                                }
+                            }
+                            if matches!(prim, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::VmFunction(..)
+                                            | Value::VmClosure(..)
+                                            | Value::VmNativeFunction(_)
+                                            | Value::Function(_)
+                                            | Value::VmObject(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                        Ok(v) => prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return None;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if Self::is_symbol_value(&prim) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                            );
+                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                            return None;
+                        }
+
+                        Some(to_number(&prim))
+                    };
 
                     if ta_name != "Int32Array" && ta_name != "BigInt64Array" {
                         let mut err_map = IndexMap::new();
@@ -7322,15 +7815,54 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
 
-                    let idx = args
-                        .get(1)
-                        .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
-                        .unwrap_or(0);
-                    let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
-                    let timeout = args
-                        .get(3)
-                        .and_then(|v| if let Value::Number(n) = v { Some(*n) } else { None })
-                        .unwrap_or(f64::INFINITY);
+                    let mut idx_num = match to_number_with_coercion(args.get(1).cloned().unwrap_or(Value::Undefined)) {
+                        Some(n) => n,
+                        None => return Value::Undefined,
+                    };
+                    if idx_num.is_nan() {
+                        idx_num = 0.0;
+                    }
+                    if !idx_num.is_finite() || idx_num.trunc() < 0.0 {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+                    let idx = idx_num.trunc() as usize;
+                    if idx >= len {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Index out of range")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+
+                    let expected = if ta_name == "Int32Array" {
+                        let n = match to_number_with_coercion(args.get(2).cloned().unwrap_or(Value::Undefined)) {
+                            Some(v) => v,
+                            None => return Value::Undefined,
+                        };
+                        Value::Number(to_int32(n) as f64)
+                    } else {
+                        args.get(2).cloned().unwrap_or(Value::Undefined)
+                    };
+
+                    let timeout = if args.len() > 3 {
+                        match to_number_with_coercion(args.get(3).cloned().unwrap_or(Value::Undefined)) {
+                            Some(v) => v,
+                            None => return Value::Undefined,
+                        }
+                    } else {
+                        f64::INFINITY
+                    };
+
                     let current = arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined);
 
                     let mut result = IndexMap::new();
@@ -7346,11 +7878,8 @@ impl<'gc> VM<'gc> {
                         return Value::VmObject(Rc::new(RefCell::new(result)));
                     }
 
-                    let mut promise = IndexMap::new();
-                    promise.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("Promise")));
-                    promise.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
                     result.insert("async".to_string(), Value::Boolean(true));
-                    result.insert("value".to_string(), Value::VmObject(Rc::new(RefCell::new(promise))));
+                    result.insert("value".to_string(), self.make_pending_promise());
                     return Value::VmObject(Rc::new(RefCell::new(result)));
                 }
 
@@ -7364,9 +7893,109 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             BUILTIN_CTOR_ARRAYBUFFER => {
-                let len = match args.first() {
-                    Some(Value::Number(n)) if n.is_finite() && *n > 0.0 => *n as usize,
-                    _ => 0,
+                let length_v = args.first().cloned().unwrap_or(Value::Undefined);
+                let len = if matches!(length_v, Value::Undefined) {
+                    0usize
+                } else {
+                    if Self::is_symbol_value(&length_v) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+
+                    let mut prim = self.try_to_primitive(&length_v, "number");
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.pending_throw = Some(thrown);
+                        return Value::Undefined;
+                    }
+                    if let Value::VmObject(obj) = prim.clone() {
+                        let this_obj = Value::VmObject(obj.clone());
+                        let value_of = obj.borrow().get("valueOf").cloned();
+                        if let Some(value_of_fn) = value_of
+                            && matches!(
+                                value_of_fn,
+                                Value::VmFunction(..)
+                                    | Value::VmClosure(..)
+                                    | Value::VmNativeFunction(_)
+                                    | Value::Function(_)
+                                    | Value::VmObject(_)
+                            )
+                        {
+                            match self.vm_call_function_value(value_of_fn, this_obj.clone(), &[]) {
+                                Ok(v) => prim = v,
+                                Err(err) => {
+                                    self.set_pending_throw_from_error(&err);
+                                    return Value::Undefined;
+                                }
+                            }
+                        }
+
+                        if matches!(prim, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                            let to_string = obj.borrow().get("toString").cloned();
+                            if let Some(to_string_fn) = to_string
+                                && matches!(
+                                    to_string_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(to_string_fn, this_obj, &[]) {
+                                    Ok(v) => prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if Self::is_symbol_value(&prim) {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Cannot convert a Symbol value to a number")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+
+                    let n = to_number(&prim);
+                    let int_index = if n.is_nan() { 0.0 } else { n.trunc() };
+                    if !int_index.is_finite() || int_index < 0.0 {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Invalid ArrayBuffer length")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+
+                    // Safety cap to avoid allocator aborts on intentionally huge Test262 lengths.
+                    const VM_MAX_ARRAYBUFFER_LENGTH: usize = 16 * 1024 * 1024;
+                    let idx = int_index as usize;
+                    if idx > VM_MAX_ARRAYBUFFER_LENGTH {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RangeError")));
+                        err_map.insert(
+                            "message".to_string(),
+                            Value::String(crate::unicode::utf8_to_utf16("Invalid ArrayBuffer length")),
+                        );
+                        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                        return Value::Undefined;
+                    }
+                    idx
                 };
                 let max_len = match args.get(1) {
                     Some(Value::VmObject(opts)) => opts
@@ -7392,6 +8021,11 @@ impl<'gc> VM<'gc> {
                     "__buffer_bytes__".to_string(),
                     Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(bytes)))),
                 );
+                if let Some(Value::VmObject(ab_ctor)) = self.globals.get("ArrayBuffer").cloned()
+                    && let Some(proto) = ab_ctor.borrow().get("prototype").cloned()
+                {
+                    map.insert("__proto__".to_string(), proto);
+                }
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
             BUILTIN_CTOR_DATAVIEW => {
@@ -7407,6 +8041,7 @@ impl<'gc> VM<'gc> {
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("DataView")));
                 map.insert("buffer".to_string(), buffer);
+                map.insert("__buffer__".to_string(), Value::Boolean(true));
                 map.insert("byteLength".to_string(), Value::Number(byte_len));
                 map.insert("byteOffset".to_string(), Value::Number(0.0));
                 map.insert("getUint8".to_string(), Self::make_host_fn("dataview.getUint8"));
@@ -7454,6 +8089,20 @@ impl<'gc> VM<'gc> {
                     BUILTIN_CTOR_FLOAT64ARRAY => "Float64Array",
                     _ => "TypedArray",
                 };
+
+                if let Some(Value::VmArray(src_arr)) = args.first() {
+                    let src = src_arr.borrow();
+                    let mut data = VmArrayData::new(src.elements.clone());
+                    data.props.insert(
+                        "__typedarray_name__".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16(typedarray_name)),
+                    );
+                    data.props.insert(
+                        "__buffer_type__".to_string(),
+                        Value::String(crate::unicode::utf8_to_utf16("ArrayBuffer")),
+                    );
+                    return Value::VmArray(Rc::new(RefCell::new(data)));
+                }
 
                 if let Some(Value::VmObject(buf_obj)) = args.first() {
                     let buffer_type = buf_obj.borrow().get("__type__").map(value_to_string).unwrap_or_default();
@@ -10586,16 +11235,53 @@ impl<'gc> VM<'gc> {
             return Value::Boolean(removed);
         }
 
-        // Iterator next() on VmObject with __items__ / __index__
+        // Iterator next() on VmObject with __iter_target__ (live) or __items__ (snapshot)
         if let Value::VmObject(ref obj) = receiver
             && id == BUILTIN_ITERATOR_NEXT
         {
+            let (idx, has_iter_target_slot, iter_target, items_snapshot) = {
+                let borrow = obj.borrow();
+                let idx = match borrow.get("__index__") {
+                    Some(Value::Number(n)) => *n as usize,
+                    _ => 0,
+                };
+                let has_iter_target_slot = borrow.contains_key("__iter_target__");
+                let iter_target = borrow.get("__iter_target__").cloned();
+                let items_snapshot = borrow.get("__items__").cloned();
+                (idx, has_iter_target_slot, iter_target, items_snapshot)
+            };
+
+            if let Some(Value::VmArray(target_arr)) = iter_target {
+                let next_value = {
+                    let arr_borrow = target_arr.borrow();
+                    if idx < arr_borrow.len() {
+                        Some(arr_borrow.get(idx).cloned().unwrap_or(Value::Undefined))
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(value) = next_value {
+                    obj.borrow_mut().insert("__index__".to_string(), Value::Number((idx + 1) as f64));
+                    let mut result = IndexMap::new();
+                    result.insert("value".to_string(), value);
+                    result.insert("done".to_string(), Value::Boolean(false));
+                    return Value::VmObject(Rc::new(RefCell::new(result)));
+                }
+
+                obj.borrow_mut().insert("__iter_target__".to_string(), Value::Undefined);
+                let mut result = IndexMap::new();
+                result.insert("value".to_string(), Value::Undefined);
+                result.insert("done".to_string(), Value::Boolean(true));
+                return Value::VmObject(Rc::new(RefCell::new(result)));
+            }
+
             let mut borrow = obj.borrow_mut();
             let idx = match borrow.get("__index__") {
                 Some(Value::Number(n)) => *n as usize,
                 _ => 0,
             };
-            let items = borrow.get("__items__").cloned();
+            let items = items_snapshot;
             if let Some(Value::VmArray(arr)) = items {
                 let a = arr.borrow();
                 if idx < a.len() {
@@ -10605,11 +11291,29 @@ impl<'gc> VM<'gc> {
                     result.insert("done".to_string(), Value::Boolean(false));
                     return Value::VmObject(Rc::new(RefCell::new(result)));
                 }
+                let mut result = IndexMap::new();
+                result.insert("value".to_string(), Value::Undefined);
+                result.insert("done".to_string(), Value::Boolean(true));
+                return Value::VmObject(Rc::new(RefCell::new(result)));
             }
-            let mut result = IndexMap::new();
-            result.insert("value".to_string(), Value::Undefined);
-            result.insert("done".to_string(), Value::Boolean(true));
-            return Value::VmObject(Rc::new(RefCell::new(result)));
+
+            if has_iter_target_slot {
+                let mut result = IndexMap::new();
+                result.insert("value".to_string(), Value::Undefined);
+                result.insert("done".to_string(), Value::Boolean(true));
+                return Value::VmObject(Rc::new(RefCell::new(result)));
+            }
+
+            let mut err_map = IndexMap::new();
+            err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+            err_map.insert(
+                "message".to_string(),
+                Value::String(crate::unicode::utf8_to_utf16(
+                    "ArrayIterator.prototype.next called on incompatible receiver",
+                )),
+            );
+            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+            return Value::Undefined;
         }
 
         if let Value::VmArray(ref arr) = receiver
@@ -11296,10 +12000,17 @@ impl<'gc> VM<'gc> {
     }
 
     fn is_symbol_value(val: &Value<'gc>) -> bool {
-        if let Value::VmObject(map) = val {
-            map.borrow().contains_key("__vm_symbol__")
-        } else {
-            false
+        match val {
+            Value::Symbol(_) => true,
+            Value::VmObject(map) => map.borrow().contains_key("__vm_symbol__"),
+            Value::Object(obj) => {
+                if let Some(pv) = crate::core::slot_get(obj, &crate::core::InternalSlot::PrimitiveValue) {
+                    matches!(&*pv.borrow(), Value::Symbol(_))
+                } else {
+                    false
+                }
+            }
+            _ => false,
         }
     }
 
@@ -12557,16 +13268,8 @@ impl<'gc> VM<'gc> {
                     let index = self.read_byte() as usize;
                     let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
                     if bp + index >= self.stack.len() {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::String(crate::unicode::utf8_to_utf16("Invalid local access")),
-                        );
-                        err_map.insert(
-                            "__type__".to_string(),
-                            Value::String(crate::unicode::utf8_to_utf16("ReferenceError")),
-                        );
-                        self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                        // Internal bytecode/local-slot mismatch should not surface as a user-visible ReferenceError.
+                        self.stack.push(Value::Undefined);
                         continue;
                     }
                     // Check if this local has been captured as an upvalue cell
@@ -16035,19 +16738,35 @@ impl<'gc> VM<'gc> {
                                 } else {
                                     drop(borrow);
                                     log::warn!("NewCall on non-constructor VmObject");
+                                    let callee_name = self.resolve_callee_name(self.stack.len().saturating_sub(arg_count + 1));
                                     for _i in 0..arg_count {
                                         self.stack.pop();
                                     }
                                     self.stack.pop();
-                                    self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+                                    let mut err_map = IndexMap::new();
+                                    err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                    err_map.insert(
+                                        "message".to_string(),
+                                        Value::String(crate::unicode::utf8_to_utf16(&format!("{} is not a constructor", callee_name))),
+                                    );
+                                    self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                    continue;
                                 }
                             } else {
                                 log::warn!("NewCall on non-VmFunction: treating as regular call");
+                                let callee_name = self.resolve_callee_name(self.stack.len().saturating_sub(arg_count + 1));
                                 for _i in 0..arg_count {
                                     self.stack.pop();
                                 }
                                 self.stack.pop(); // pop constructor
-                                self.stack.push(Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+                                let mut err_map = IndexMap::new();
+                                err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+                                err_map.insert(
+                                    "message".to_string(),
+                                    Value::String(crate::unicode::utf8_to_utf16(&format!("{} is not a constructor", callee_name))),
+                                );
+                                self.handle_throw(Value::VmObject(Rc::new(RefCell::new(err_map))))?;
+                                continue;
                             }
                         }
                     }

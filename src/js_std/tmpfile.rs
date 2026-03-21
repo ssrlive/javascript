@@ -309,7 +309,7 @@ pub fn vm_create_tmpfile<'gc>() -> Value<'gc> {
             // Each method is a small VmObject with __host_fn__ key
             fn make_host_fn<'a>(name: &str) -> Value<'a> {
                 let mut map = IndexMap::new();
-                map.insert("__host_fn__".to_string(), Value::String(crate::unicode::utf8_to_utf16(name)));
+                map.insert("__host_fn__".to_string(), Value::from(name));
                 Value::VmObject(Rc::new(RefCell::new(map)))
             }
             obj.insert("puts".to_string(), make_host_fn("tmp.puts"));

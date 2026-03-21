@@ -1420,7 +1420,7 @@ fn function_constructor<'gc>(
             return Err(raise_syntax_error!(msg).into());
         };
 
-        let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+        let msg_val = Value::from(msg);
         match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
             Ok(Value::Object(obj)) => Err(EvalError::Throw(Value::Object(obj), None, None)),
             Ok(other) => Err(EvalError::Throw(other, None, None)),
@@ -1579,7 +1579,7 @@ fn function_constructor<'gc>(
             slot_set(mc, &func_obj, InternalSlot::OriginGlobal, &Value::Object(global_env));
 
             // Set name as anonymous for Function constructor-produced functions
-            object_set_key_value(mc, &func_obj, "name", &Value::String(crate::unicode::utf8_to_utf16("anonymous")))?;
+            object_set_key_value(mc, &func_obj, "name", &Value::from("anonymous"))?;
             func_obj.borrow_mut(mc).set_non_writable("name");
             func_obj.borrow_mut(mc).set_non_enumerable("name");
             func_obj.borrow_mut(mc).set_configurable("name");
@@ -2597,7 +2597,7 @@ fn evalute_eval_function<'gc>(
         );
         if is_in_module && !is_indirect_eval {
             let msg = "import.meta is not allowed in eval code";
-            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -2678,7 +2678,7 @@ fn evalute_eval_function<'gc>(
         if !(!is_indirect_eval && in_function && !in_arrow) {
             // throw SyntaxError
             let msg = "Invalid use of 'new.target' in eval code";
-            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -2817,7 +2817,7 @@ fn evalute_eval_function<'gc>(
         );
         if has_super_call && !(in_method && in_constructor) {
             let msg = "Invalid use of 'super' in eval code";
-            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -2835,7 +2835,7 @@ fn evalute_eval_function<'gc>(
         // SuperProperty: only allowed in direct eval when inMethod
         if has_super_prop && !in_method {
             let msg = "Invalid use of 'super' in eval code";
-            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -2866,7 +2866,7 @@ fn evalute_eval_function<'gc>(
             let is_in_module = slot_get_chained(&root_env, &InternalSlot::ImportMeta).is_some();
             if is_in_module && !is_indirect_eval {
                 let msg = "import.meta is not allowed in eval code";
-                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                let msg_val = Value::from(msg);
                 let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                     v.borrow().clone()
                 } else {
@@ -2920,7 +2920,7 @@ fn evalute_eval_function<'gc>(
             );
             if !(!is_indirect_eval && in_function && !in_arrow) {
                 let msg = "Invalid use of 'new.target' in eval code";
-                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                let msg_val = Value::from(msg);
                 let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                     v.borrow().clone()
                 } else {
@@ -2942,7 +2942,7 @@ fn evalute_eval_function<'gc>(
         .any(|s| matches!(&*s.kind, StatementKind::Import(..) | StatementKind::Export(..)))
     {
         let msg = "Import/Export declarations may not appear in eval code";
-        let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+        let msg_val = Value::from(msg);
         let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
             v.borrow().clone()
         } else {
@@ -3025,7 +3025,7 @@ fn evalute_eval_function<'gc>(
             // Convert parse/eval errors into a thrown JS Error object so that
             // `try { eval(...) } catch (e) { e instanceof SyntaxError }` works
             let msg = err.message();
-            let msg_val = Value::String(crate::unicode::utf8_to_utf16(&msg));
+            let msg_val = Value::from(&msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -3945,8 +3945,7 @@ pub fn handle_function_prototype_method<'gc>(
         let (target_name, raw_len) = get_target_name_and_length(target)?;
 
         let bound_name = format!("bound {}", target_name);
-        let name_desc =
-            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(&bound_name)), false, false, true)?;
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::from(&bound_name), false, false, true)?;
         crate::js_object::define_property_internal(mc, bound_obj, "name", &name_desc)?;
 
         let target_len = if raw_len.is_infinite() {
@@ -4249,7 +4248,7 @@ pub fn handle_function_prototype_method<'gc>(
             };
 
             let repr = format!("function {accessor_prefix}{property_name}() {{ [native code] }}");
-            Ok(Value::String(crate::unicode::utf8_to_utf16(&repr)))
+            Ok(Value::from(&repr))
         }
         _ => Err(crate::raise_type_error!(format!("Unknown Function.prototype method: {method}")).into()),
     }
@@ -4273,7 +4272,7 @@ fn annexb_escape<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSOb
             result.push_str(&format!("%u{:04X}", ch));
         }
     }
-    Ok(Value::String(crate::unicode::utf8_to_utf16(&result)))
+    Ok(Value::from(&result))
 }
 
 /// AnnexB B.2.1.2 — unescape(string)

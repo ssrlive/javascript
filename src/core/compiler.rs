@@ -1844,7 +1844,7 @@ impl<'gc> Compiler<'gc> {
                     self.patch_jump_to(bp, end_ip);
                 }
 
-                let delete_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&switch_name)));
+                let delete_idx = self.chunk.add_constant(Value::from(&switch_name));
                 self.chunk.write_opcode(Opcode::DeleteGlobal);
                 self.chunk.write_u16(delete_idx);
 
@@ -1958,22 +1958,22 @@ impl<'gc> Compiler<'gc> {
                         }
                         ("console", ImportSpecifier::Named(name, alias)) => {
                             let local = alias.as_deref().unwrap_or(name);
-                            let console_name = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("console")));
+                            let console_name = self.chunk.add_constant(Value::from("console"));
                             self.chunk.write_opcode(Opcode::GetGlobal);
                             self.chunk.write_u16(console_name);
-                            let key_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(name)));
+                            let key_idx = self.chunk.add_constant(Value::from(name));
                             self.chunk.write_opcode(Opcode::GetProperty);
                             self.chunk.write_u16(key_idx);
                             define_binding(self, local);
                         }
                         ("os", ImportSpecifier::Namespace(local)) => {
-                            let os_name = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("os")));
+                            let os_name = self.chunk.add_constant(Value::from("os"));
                             self.chunk.write_opcode(Opcode::GetGlobal);
                             self.chunk.write_u16(os_name);
                             define_binding(self, local);
                         }
                         ("std", ImportSpecifier::Namespace(local)) => {
-                            let std_name = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("std")));
+                            let std_name = self.chunk.add_constant(Value::from("std"));
                             self.chunk.write_opcode(Opcode::GetGlobal);
                             self.chunk.write_u16(std_name);
                             define_binding(self, local);
@@ -2236,7 +2236,7 @@ impl<'gc> Compiler<'gc> {
                 } else if let Expr::PrivateMember(obj, prop) | Expr::OptionalPrivateMember(obj, prop) = &**callee {
                     // Private method call: obj.#method(args)
                     self.compile_expr(obj)?;
-                    let name_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop)));
+                    let name_idx = self.chunk.add_constant(Value::from(prop));
                     self.chunk.write_opcode(Opcode::GetMethod);
                     self.chunk.write_u16(name_idx);
                     if has_spread {
@@ -2308,9 +2308,7 @@ impl<'gc> Compiler<'gc> {
                     self.compile_expr(opts)?;
                     self.chunk.write_opcode(Opcode::Pop);
                 }
-                let marker_key = self
-                    .chunk
-                    .add_constant(Value::String(crate::unicode::utf8_to_utf16("__dynamic_import_live__")));
+                let marker_key = self.chunk.add_constant(Value::from("__dynamic_import_live__"));
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(marker_key);
                 let marker_val = self.chunk.add_constant(Value::Boolean(true));
@@ -2367,7 +2365,7 @@ impl<'gc> Compiler<'gc> {
             Expr::SuperMethod(method_name, args) => {
                 // Stack before call: [this (receiver), method (callee), args...]
                 self.chunk.write_opcode(Opcode::GetThis);
-                let mk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(method_name)));
+                let mk = self.chunk.add_constant(Value::from(method_name));
                 self.chunk.write_opcode(Opcode::GetSuperProperty);
                 self.chunk.write_u16(mk);
                 for arg in args {
@@ -2377,7 +2375,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_byte(args.len() as u8 | 0x80);
             }
             Expr::SuperProperty(prop_name) => {
-                let pk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop_name)));
+                let pk = self.chunk.add_constant(Value::from(prop_name));
                 self.chunk.write_opcode(Opcode::GetSuperProperty);
                 self.chunk.write_u16(pk);
             }
@@ -2509,7 +2507,7 @@ impl<'gc> Compiler<'gc> {
                             if !*is_computed && let Expr::StringLit(s) = key {
                                 let prefixed = format!("__get_{}", crate::unicode::utf16_to_utf8(s));
                                 self.compile_expr(val)?;
-                                let idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&prefixed)));
+                                let idx = self.chunk.add_constant(Value::from(&prefixed));
                                 self.chunk.write_opcode(Opcode::SetProperty);
                                 self.chunk.write_u16(idx);
                                 self.chunk.write_opcode(Opcode::Pop);
@@ -2525,7 +2523,7 @@ impl<'gc> Compiler<'gc> {
                             if !*is_computed && let Expr::StringLit(s) = key {
                                 let prefixed = format!("__set_{}", crate::unicode::utf16_to_utf8(s));
                                 self.compile_expr(val)?;
-                                let idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&prefixed)));
+                                let idx = self.chunk.add_constant(Value::from(&prefixed));
                                 self.chunk.write_opcode(Opcode::SetProperty);
                                 self.chunk.write_u16(idx);
                                 self.chunk.write_opcode(Opcode::Pop);
@@ -2569,7 +2567,7 @@ impl<'gc> Compiler<'gc> {
             }
             Expr::PrivateMember(obj, prop) | Expr::OptionalPrivateMember(obj, prop) => {
                 self.compile_expr(obj)?;
-                let name_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop)));
+                let name_idx = self.chunk.add_constant(Value::from(prop));
                 self.chunk.write_opcode(Opcode::GetProperty);
                 self.chunk.write_u16(name_idx);
             }
@@ -2657,7 +2655,7 @@ impl<'gc> Compiler<'gc> {
                 Expr::PrivateMember(obj, prop) | Expr::OptionalPrivateMember(obj, prop) => {
                     self.compile_expr(obj)?;
                     self.compile_expr(right)?;
-                    let name_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop)));
+                    let name_idx = self.chunk.add_constant(Value::from(prop));
                     self.chunk.write_opcode(Opcode::SetProperty);
                     self.chunk.write_u16(name_idx);
                 }
@@ -2967,7 +2965,7 @@ impl<'gc> Compiler<'gc> {
                     match name.as_str() {
                         "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" => {
                             // Push error type name
-                            let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(name)));
+                            let type_idx = self.chunk.add_constant(Value::from(name));
                             self.chunk.write_opcode(Opcode::Constant);
                             self.chunk.write_u16(type_idx);
                             // Push message
@@ -3196,12 +3194,12 @@ impl<'gc> Compiler<'gc> {
                     Expr::Var(..) => {
                         // delete variable → SyntaxError in strict mode
                         // Emit: push SyntaxError type name, push message, NewError, Throw
-                        let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("SyntaxError")));
+                        let type_idx = self.chunk.add_constant(Value::from("SyntaxError"));
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(type_idx);
-                        let msg_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(
-                            "Delete of an unqualified identifier in strict mode.",
-                        )));
+                        let msg_idx = self
+                            .chunk
+                            .add_constant(Value::from("Delete of an unqualified identifier in strict mode."));
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(msg_idx);
                         self.chunk.write_opcode(Opcode::NewError);
@@ -3474,18 +3472,12 @@ impl<'gc> Compiler<'gc> {
                 use std::cell::RefCell;
                 use std::rc::Rc;
                 let mut map = indexmap::IndexMap::new();
-                map.insert(
-                    "__regex_pattern__".to_string(),
-                    Value::String(crate::unicode::utf8_to_utf16(pattern)),
-                );
-                map.insert("__regex_flags__".to_string(), Value::String(crate::unicode::utf8_to_utf16(flags)));
-                map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("RegExp")));
-                map.insert(
-                    "__toStringTag__".to_string(),
-                    Value::String(crate::unicode::utf8_to_utf16("RegExp")),
-                );
-                map.insert("source".to_string(), Value::String(crate::unicode::utf8_to_utf16(pattern)));
-                map.insert("flags".to_string(), Value::String(crate::unicode::utf8_to_utf16(flags)));
+                map.insert("__regex_pattern__".to_string(), Value::from(pattern));
+                map.insert("__regex_flags__".to_string(), Value::from(flags));
+                map.insert("__type__".to_string(), Value::from("RegExp"));
+                map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
+                map.insert("source".to_string(), Value::from(pattern));
+                map.insert("flags".to_string(), Value::from(flags));
                 map.insert("global".to_string(), Value::Boolean(flags.contains('g')));
                 map.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
                 map.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
@@ -3542,7 +3534,7 @@ impl<'gc> Compiler<'gc> {
             Expr::PrivateName(prop) => {
                 // Used for `#field in obj` — push the private name as a string
                 let private_name = format!("#{}", prop);
-                let name_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&private_name)));
+                let name_idx = self.chunk.add_constant(Value::from(&private_name));
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(name_idx);
             }
@@ -3615,7 +3607,7 @@ impl<'gc> Compiler<'gc> {
             Expr::PrivateMember(obj, prop) | Expr::OptionalPrivateMember(obj, prop) => {
                 self.compile_expr(obj)?;
                 self.chunk.write_opcode(Opcode::Swap);
-                let key_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(prop)));
+                let key_idx = self.chunk.add_constant(Value::from(prop));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(key_idx);
             }
@@ -4473,18 +4465,16 @@ impl<'gc> Compiler<'gc> {
 
         // runtime check: ensure iterator exists on the object (via prototype)
         self.emit_helper_get(&temp); // push arr
-        let iter_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("@@sym:1")));
+        let iter_key = self.chunk.add_constant(Value::from("@@sym:1"));
         self.chunk.write_opcode(Opcode::GetProperty); // will traverse prototype
         self.chunk.write_u16(iter_key);
         let ok_jump = self.emit_jump(Opcode::JumpIfTrue);
         // iterator missing → throw TypeError
         // Use NewError special-case constructor used elsewhere
-        let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+        let type_idx = self.chunk.add_constant(Value::from("TypeError"));
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(type_idx);
-        let msg_idx = self
-            .chunk
-            .add_constant(Value::String(crate::unicode::utf8_to_utf16("iterator missing")));
+        let msg_idx = self.chunk.add_constant(Value::from("iterator missing"));
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(msg_idx);
         self.chunk.write_opcode(Opcode::NewError);
@@ -4522,7 +4512,7 @@ impl<'gc> Compiler<'gc> {
                     // Stack: [receiver, callee, args...] then Call with method flag
                     self.emit_helper_get(&temp); // receiver
                     self.emit_helper_get(&temp); // for GetProperty
-                    let slice_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("slice")));
+                    let slice_k = self.chunk.add_constant(Value::from("slice"));
                     self.chunk.write_opcode(Opcode::GetProperty);
                     self.chunk.write_u16(slice_k); // callee
                     let start_idx = self.chunk.add_constant(Value::Number(i as f64));
@@ -4580,7 +4570,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_u16(undef_idx);
         self.chunk.write_opcode(Opcode::Equal);
         let undefined_ok = self.emit_jump(Opcode::JumpIfFalse);
-        let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+        let type_idx = self.chunk.add_constant(Value::from("TypeError"));
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(type_idx);
         let msg = if let Some(k) = &first_prop {
@@ -4588,7 +4578,7 @@ impl<'gc> Compiler<'gc> {
         } else {
             "Cannot destructure undefined".to_string()
         };
-        let msg_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&msg)));
+        let msg_idx = self.chunk.add_constant(Value::from(&msg));
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(msg_idx);
         self.chunk.write_opcode(Opcode::NewError);
@@ -4601,7 +4591,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_u16(null_idx);
         self.chunk.write_opcode(Opcode::Equal);
         let null_ok = self.emit_jump(Opcode::JumpIfFalse);
-        let type_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("TypeError")));
+        let type_idx = self.chunk.add_constant(Value::from("TypeError"));
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(type_idx);
         let msg = if let Some(k) = &first_prop {
@@ -4609,7 +4599,7 @@ impl<'gc> Compiler<'gc> {
         } else {
             "Cannot destructure null".to_string()
         };
-        let msg_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&msg)));
+        let msg_idx = self.chunk.add_constant(Value::from(&msg));
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(msg_idx);
         self.chunk.write_opcode(Opcode::NewError);
@@ -4624,7 +4614,7 @@ impl<'gc> Compiler<'gc> {
                 ObjectDestructuringElement::Property { key, value } => {
                     extracted_keys.push(key.clone());
                     self.emit_helper_get(&temp);
-                    let k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(key)));
+                    let k = self.chunk.add_constant(Value::from(key));
                     self.chunk.write_opcode(Opcode::GetProperty);
                     self.chunk.write_u16(k);
                     self.compile_destructuring_target(value)?;
@@ -4685,7 +4675,7 @@ impl<'gc> Compiler<'gc> {
                     let loop_start = self.chunk.code.len();
                     self.emit_helper_get(&ki_temp);
                     self.emit_helper_get(&keys_temp);
-                    let len_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("length")));
+                    let len_key = self.chunk.add_constant(Value::from("length"));
                     self.chunk.write_opcode(Opcode::GetProperty);
                     self.chunk.write_u16(len_key);
                     self.chunk.write_opcode(Opcode::LessThan);
@@ -4700,7 +4690,7 @@ impl<'gc> Compiler<'gc> {
                     let mut skip_patches = Vec::new();
                     for ek in &extracted_keys {
                         self.chunk.write_opcode(Opcode::Dup);
-                        let ek_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(ek)));
+                        let ek_idx = self.chunk.add_constant(Value::from(ek));
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(ek_idx);
                         self.chunk.write_opcode(Opcode::Equal);
@@ -4852,7 +4842,7 @@ impl<'gc> Compiler<'gc> {
                 DestructuringElement::Variable(name, default) => {
                     // Shorthand: {name} = obj → obj.name
                     self.emit_helper_get(&temp);
-                    let k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(name)));
+                    let k = self.chunk.add_constant(Value::from(name));
                     self.chunk.write_opcode(Opcode::GetProperty);
                     self.chunk.write_u16(k);
                     if let Some(def_expr) = default {
@@ -4871,7 +4861,7 @@ impl<'gc> Compiler<'gc> {
                 DestructuringElement::Property(key, target) => {
                     // {key: target} = obj → obj.key, then assign to target
                     self.emit_helper_get(&temp);
-                    let k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(key)));
+                    let k = self.chunk.add_constant(Value::from(key));
                     self.chunk.write_opcode(Opcode::GetProperty);
                     self.chunk.write_u16(k);
                     self.compile_destructuring_target(target)?;
@@ -5123,7 +5113,7 @@ impl<'gc> Compiler<'gc> {
         if has_instance_members {
             // Push prototype: GetClass, GetProperty "prototype"
             self.emit_get_class_ref(name, is_expr)?;
-            let proto_key = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
+            let proto_key = self.chunk.add_constant(Value::from("prototype"));
             self.chunk.write_opcode(Opcode::GetProperty);
             self.chunk.write_u16(proto_key);
             // stack: [proto]
@@ -5221,7 +5211,7 @@ impl<'gc> Compiler<'gc> {
                 let m_idx = self.chunk.add_constant(m_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(m_idx);
-                let mk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(mname)));
+                let mk_idx = self.chunk.add_constant(Value::from(mname));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(mk_idx);
                 self.chunk.write_opcode(Opcode::Pop);
@@ -5250,7 +5240,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(g_idx);
                 let getter_key = format!("__get_{}", gname);
-                let gk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&getter_key)));
+                let gk_idx = self.chunk.add_constant(Value::from(&getter_key));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(gk_idx);
                 self.chunk.write_opcode(Opcode::Pop);
@@ -5288,7 +5278,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(s_idx);
                 let setter_key = format!("__set_{}", sname);
-                let sk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&setter_key)));
+                let sk_idx = self.chunk.add_constant(Value::from(&setter_key));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(sk_idx);
                 self.chunk.write_opcode(Opcode::Pop);
@@ -5304,17 +5294,17 @@ impl<'gc> Compiler<'gc> {
         if let Some(ref pname) = parent_name {
             // GetClass, GetProperty "prototype" -> child proto
             self.emit_get_class_ref(name, is_expr)?;
-            let proto_k = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
+            let proto_k = self.chunk.add_constant(Value::from("prototype"));
             self.chunk.write_opcode(Opcode::GetProperty);
             self.chunk.write_u16(proto_k);
             // Resolve parent via normal binding lookup (local/upvalue/global).
             let parent_expr = Expr::Var(pname.clone(), None, None);
             self.compile_expr(&parent_expr)?;
-            let proto_k2 = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("prototype")));
+            let proto_k2 = self.chunk.add_constant(Value::from("prototype"));
             self.chunk.write_opcode(Opcode::GetProperty);
             self.chunk.write_u16(proto_k2);
             // SetProperty "__proto__" on child prototype
-            let dunder_proto = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16("__proto__")));
+            let dunder_proto = self.chunk.add_constant(Value::from("__proto__"));
             self.chunk.write_opcode(Opcode::SetProperty);
             self.chunk.write_u16(dunder_proto);
             self.chunk.write_opcode(Opcode::Pop);
@@ -5422,7 +5412,7 @@ impl<'gc> Compiler<'gc> {
         let m_idx = self.chunk.add_constant(m_val);
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(m_idx);
-        let mk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(mname)));
+        let mk_idx = self.chunk.add_constant(Value::from(mname));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(mk_idx);
         self.chunk.write_opcode(Opcode::Pop);
@@ -5450,7 +5440,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(g_idx);
         let getter_key = format!("__get_{}", gname);
-        let gk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&getter_key)));
+        let gk_idx = self.chunk.add_constant(Value::from(&getter_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(gk_idx);
         self.chunk.write_opcode(Opcode::Pop);
@@ -5487,7 +5477,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(s_idx);
         let setter_key = format!("__set_{}", sname);
-        let sk_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&setter_key)));
+        let sk_idx = self.chunk.add_constant(Value::from(&setter_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(sk_idx);
         self.chunk.write_opcode(Opcode::Pop);
@@ -5501,7 +5491,7 @@ impl<'gc> Compiler<'gc> {
             ClassMember::Property(fname, init_expr) => {
                 self.chunk.write_opcode(Opcode::GetThis);
                 self.compile_expr(init_expr)?;
-                let fk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(fname)));
+                let fk = self.chunk.add_constant(Value::from(fname));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(fk);
                 self.chunk.write_opcode(Opcode::Pop);
@@ -5510,7 +5500,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::GetThis);
                 self.compile_expr(init_expr)?;
                 let private_name = format!("#{}", fname);
-                let fk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&private_name)));
+                let fk = self.chunk.add_constant(Value::from(&private_name));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(fk);
                 self.chunk.write_opcode(Opcode::Pop);
@@ -5531,7 +5521,7 @@ impl<'gc> Compiler<'gc> {
             ClassMember::StaticProperty(fname, init_expr) => {
                 self.emit_get_class_ref(class_name, is_expr)?;
                 self.compile_expr(init_expr)?;
-                let fk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(fname)));
+                let fk = self.chunk.add_constant(Value::from(fname));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(fk);
                 self.chunk.write_opcode(Opcode::Pop);
@@ -5540,7 +5530,7 @@ impl<'gc> Compiler<'gc> {
                 self.emit_get_class_ref(class_name, is_expr)?;
                 self.compile_expr(init_expr)?;
                 let private_name = format!("#{}", fname);
-                let fk = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&private_name)));
+                let fk = self.chunk.add_constant(Value::from(&private_name));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(fk);
                 self.chunk.write_opcode(Opcode::Pop);

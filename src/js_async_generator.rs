@@ -23,16 +23,16 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         _ => ("Error", fallback_msg.as_str()),
     };
 
-    let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+    let msg_val = Value::from(msg);
     if let Some(ctor_val) = crate::core::env_get(env, ctor_name)
         && let Value::Object(ctor_obj) = &*ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(ctor_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
-        return crate::core::create_error(mc, Some(*proto_obj), &msg_val).unwrap_or(Value::String(crate::unicode::utf8_to_utf16(msg)));
+        return crate::core::create_error(mc, Some(*proto_obj), &msg_val).unwrap_or(Value::from(msg));
     }
 
-    Value::String(crate::unicode::utf8_to_utf16(msg))
+    Value::from(msg)
 }
 
 fn eval_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
@@ -229,8 +229,7 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         if let Some(fp) = func_proto_opt {
             fn_obj.borrow_mut(mc).prototype = Some(fp);
         }
-        let desc_name =
-            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(method_name)), false, false, true)?;
+        let desc_name = crate::core::create_descriptor_object(mc, &Value::from(method_name), false, false, true)?;
         crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
         let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(length as f64), false, false, true)?;
         crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
@@ -307,13 +306,7 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         if let Some(fp) = func_proto_opt {
             fn_obj.borrow_mut(mc).prototype = Some(fp);
         }
-        let desc_name = crate::core::create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("[Symbol.asyncIterator]")),
-            false,
-            false,
-            true,
-        )?;
+        let desc_name = crate::core::create_descriptor_object(mc, &Value::from("[Symbol.asyncIterator]"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
         let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
         crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
@@ -339,13 +332,7 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         if let Some(fp) = func_proto_opt {
             fn_obj.borrow_mut(mc).prototype = Some(fp);
         }
-        let desc_name = crate::core::create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("[Symbol.asyncDispose]")),
-            false,
-            false,
-            true,
-        )?;
+        let desc_name = crate::core::create_descriptor_object(mc, &Value::from("[Symbol.asyncDispose]"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
         let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
         crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
@@ -360,13 +347,7 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc_tag = crate::core::create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("AsyncGenerator")),
-            false,
-            false,
-            true,
-        )?;
+        let desc_tag = crate::core::create_descriptor_object(mc, &Value::from("AsyncGenerator"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &async_gen_proto, *tag_sym, &desc_tag)?;
     }
 
@@ -401,7 +382,7 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         mc,
         &async_gen_func_ctor,
         InternalSlot::NativeCtor,
-        &Value::String(crate::unicode::utf8_to_utf16("AsyncGeneratorFunction")),
+        &Value::from("AsyncGeneratorFunction"),
     );
     // Mark as constructor so typeof returns "function" and isConstructor is true
     slot_set(mc, &async_gen_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
@@ -411,13 +392,7 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
     crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "length", &desc_len)?;
 
     // AsyncGeneratorFunction.name = "AsyncGeneratorFunction" (non-writable, non-enumerable, configurable)
-    let desc_name = crate::core::create_descriptor_object(
-        mc,
-        &Value::String(crate::unicode::utf8_to_utf16("AsyncGeneratorFunction")),
-        false,
-        false,
-        true,
-    )?;
+    let desc_name = crate::core::create_descriptor_object(mc, &Value::from("AsyncGeneratorFunction"), false, false, true)?;
     crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "name", &desc_name)?;
 
     // AsyncGeneratorFunction.prototype.prototype → %AsyncGenerator.prototype%
@@ -436,13 +411,7 @@ pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObject
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc_tag = crate::core::create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("AsyncGeneratorFunction")),
-            false,
-            false,
-            true,
-        )?;
+        let desc_tag = crate::core::create_descriptor_object(mc, &Value::from("AsyncGeneratorFunction"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &async_gen_func_proto, *tag_sym, &desc_tag)?;
     }
 
@@ -2064,7 +2033,7 @@ fn process_one_pending<'gc>(
             }
             (GeneratorState::Running { .. }, _) => {
                 // Shouldn't happen; reject the promise
-                let reason = Value::String(crate::unicode::utf8_to_utf16("Async generator already running"));
+                let reason = Value::from("Async generator already running");
                 reject_promise(mc, &promise_cell, reason, env);
                 // continue processing remaining requests (unlikely)
                 continue;
@@ -2185,7 +2154,7 @@ fn reject_with_type_error<'gc>(
     let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
     // Build a TypeError value from the current realm's TypeError constructor
     let err_val = {
-        let msg_val: Value<'gc> = Value::String(crate::unicode::utf8_to_utf16(message));
+        let msg_val: Value<'gc> = Value::from(message);
         let mut proto_opt: Option<JSObjectDataPtr<'gc>> = None;
         if let Some(err_ctor_val) = crate::core::env_get(env, "TypeError")
             && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
@@ -2194,7 +2163,7 @@ fn reject_with_type_error<'gc>(
         {
             proto_opt = Some(*proto);
         }
-        crate::core::create_error(mc, proto_opt, &msg_val).unwrap_or(Value::String(crate::unicode::utf8_to_utf16(message)))
+        crate::core::create_error(mc, proto_opt, &msg_val).unwrap_or(Value::from(message))
     };
     reject_promise(mc, &promise_cell, err_val, env);
     Ok(Some(promise_obj_val))
@@ -2743,7 +2712,7 @@ fn handle_yield_star_call<'gc>(
         gen_mut.yield_star_iterator = None;
         gen_mut.state = crate::core::GeneratorState::Completed;
         drop(gen_mut);
-        let err = Value::String(crate::unicode::utf8_to_utf16("TypeError: Iterator has no next method"));
+        let err = Value::from("TypeError: Iterator has no next method");
         reject_promise(mc, &promise_cell, err, env);
     }
     Ok(())

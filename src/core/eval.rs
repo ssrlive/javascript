@@ -7885,7 +7885,7 @@ pub(crate) fn get_primitive_prototype_property<'gc>(
             && let Value::Symbol(sd) = obj_val
         {
             if let Some(desc) = sd.description() {
-                return Ok(Value::String(crate::unicode::utf8_to_utf16(desc)));
+                return Ok(Value::from(desc));
             }
             return Ok(Value::Undefined);
         }
@@ -7915,7 +7915,7 @@ pub(crate) fn get_primitive_prototype_property<'gc>(
     {
         let us = crate::unicode::utf16_to_utf8(s);
         if let Some(ch) = us.chars().nth(idx) {
-            return Ok(Value::String(crate::unicode::utf8_to_utf16(&ch.to_string())));
+            return Ok(Value::from(&ch.to_string()));
         }
     }
 
@@ -8912,7 +8912,7 @@ fn evaluate_expr_assign<'gc>(
             log::debug!("NamedEvaluation: should_set = {}", should_set);
 
             if should_set {
-                let desc = create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(&nm)), false, false, true)?;
+                let desc = create_descriptor_object(mc, &Value::from(&nm), false, false, true)?;
                 crate::js_object::define_property_internal(mc, obj, "name", &desc)?;
                 log::debug!("NamedEvaluation: set name='{}' on object", nm);
             } else {
@@ -12035,7 +12035,7 @@ fn handle_eval_function<'gc>(
         if script.contains("import.meta") {
             log::trace!("HANDLE_EVAL quick-check (string): script contains import.meta - throwing SyntaxError");
             let msg = "import.meta is not allowed in eval code";
-            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = Value::from(msg);
             let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -12065,7 +12065,7 @@ fn handle_eval_function<'gc>(
         if has_import_meta_token {
             log::trace!("HANDLE_EVAL token-check: import.meta tokens found - throwing SyntaxError");
             let msg = "import.meta is not allowed in eval code";
-            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = Value::from(msg);
             let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -12151,7 +12151,7 @@ fn handle_eval_function<'gc>(
 
             if !(!is_indirect_eval && in_function && !in_arrow) {
                 let msg = "Invalid use of 'new.target' in eval code";
-                let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+                let msg_val = Value::from(msg);
                 let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                     v.borrow().clone()
                 } else {
@@ -12203,7 +12203,7 @@ fn handle_eval_function<'gc>(
             .any(|s| matches!(&*s.kind, StatementKind::Import(..) | StatementKind::Export(..)))
         {
             let msg = "Import/Export declarations may not appear in eval code";
-            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = crate::core::Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -12224,7 +12224,7 @@ fn handle_eval_function<'gc>(
             .any(|s| matches!(&*s.kind, StatementKind::Using(..) | StatementKind::AwaitUsing(..)))
         {
             let msg = "using declarations may not appear at the top level of eval code";
-            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = crate::core::Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -12304,7 +12304,7 @@ fn handle_eval_function<'gc>(
 
         if has_super_call && !(in_method && in_constructor) {
             let msg = "Invalid use of 'super' in eval code";
-            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = crate::core::Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -12319,7 +12319,7 @@ fn handle_eval_function<'gc>(
 
         if has_super_prop && !in_method {
             let msg = "Invalid use of 'super' in eval code";
-            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = crate::core::Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -12334,7 +12334,7 @@ fn handle_eval_function<'gc>(
 
         if has_arguments && in_class_field_initializer {
             let msg = "Invalid use of 'arguments' in class field initializer";
-            let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = crate::core::Value::from(msg);
             let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -12373,7 +12373,7 @@ fn handle_eval_function<'gc>(
             // Allowed only when direct eval, inside a function, and that function is NOT an arrow
             if !(!is_indirect_eval && in_function && !in_arrow) {
                 let msg = "Invalid use of 'new.target' in eval code";
-                let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+                let msg_val = crate::core::Value::from(msg);
                 let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                     v.borrow().clone()
                 } else {
@@ -12407,7 +12407,7 @@ fn handle_eval_function<'gc>(
 
         if is_strict_eval && contains_strict_legacy_octal_literal(&script) {
             let msg = "Legacy octal literals are not allowed in strict mode";
-            let msg_val = Value::String(crate::unicode::utf8_to_utf16(msg));
+            let msg_val = Value::from(msg);
             let constructor_val = if let Some(v) = env_get(env, "SyntaxError") {
                 v.borrow().clone()
             } else {
@@ -13765,7 +13765,7 @@ pub fn evaluate_call_dispatch<'gc>(
                                 if matches!(prim, Value::Symbol(_)) {
                                     return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                                 }
-                                Value::String(crate::unicode::utf8_to_utf16(&value_to_string(&prim)))
+                                Value::from(&value_to_string(&prim))
                             };
                             // The constructor's "prototype" property points to the error prototype
                             let err = if let Some(prototype_rc) = object_get_key_value(obj, "prototype")
@@ -13887,7 +13887,7 @@ fn evaluate_expr_call<'gc>(
             }
             if !(!is_indirect_eval && in_function && !in_arrow) {
                 let msg = "Invalid use of 'new.target' in eval code";
-                let msg_val = crate::core::Value::String(crate::unicode::utf8_to_utf16(msg));
+                let msg_val = crate::core::Value::from(msg);
                 let constructor_val = if let Some(v) = crate::core::env_get(env, "SyntaxError") {
                     v.borrow().clone()
                 } else {
@@ -16261,7 +16261,7 @@ fn evaluate_expr_logical_assign<'gc>(
                     }
 
                     if should_set {
-                        let desc = create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(&nm)), false, false, true)?;
+                        let desc = create_descriptor_object(mc, &Value::from(&nm), false, false, true)?;
                         crate::js_object::define_property_internal(mc, obj, "name", &desc)?;
                     }
                 }
@@ -19137,7 +19137,7 @@ fn evaluate_function_expression<'gc>(
         _ => {
             // Anonymous function expressions expose an own 'name' property with the empty string
             // Use direct insertion + flags to ensure non-writable / non-enumerable markers are set atomically
-            object_set_key_value(mc, &func_obj, "name", &Value::String(crate::unicode::utf8_to_utf16("")))?;
+            object_set_key_value(mc, &func_obj, "name", &Value::from(""))?;
             func_obj.borrow_mut(mc).set_non_writable("name");
             func_obj.borrow_mut(mc).set_non_enumerable("name");
             // Mark configurable=true explicitly (default is configurable unless non-configurable marker present)
@@ -20241,7 +20241,7 @@ pub fn call_native_function<'gc>(
     }
     if name == "__agent_getReport" {
         return Ok(Some(match crate::js_agent::agent_get_report() {
-            Some(s) => Value::String(crate::unicode::utf8_to_utf16(&s)),
+            Some(s) => Value::from(&s),
             None => Value::Null,
         }));
     }
@@ -20822,7 +20822,7 @@ pub fn call_native_function<'gc>(
             Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function".to_string(),
             _ => "Object".to_string(),
         };
-        return Ok(Some(Value::String(crate::unicode::utf8_to_utf16(&format!("[object {tag}]")))));
+        return Ok(Some(Value::from(&format!("[object {tag}]"))));
     }
     if name == "IteratorSelf" {
         return Ok(Some(this_val.unwrap_or(&Value::Undefined).clone()));
@@ -23408,7 +23408,7 @@ fn evaluate_expr_new<'gc>(
                             if matches!(prim, Value::Symbol(_)) {
                                 return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                             }
-                            Value::String(crate::unicode::utf8_to_utf16(&value_to_string(&prim)))
+                            Value::from(&value_to_string(&prim))
                         };
                         let prototype = if let Some(proto_val) = object_get_key_value(&obj, "prototype") {
                             let prototype_val = match &*proto_val.borrow() {

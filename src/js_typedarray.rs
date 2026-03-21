@@ -4919,7 +4919,7 @@ pub fn handle_typedarray_accessor<'gc>(
                         TypedArrayKind::BigInt64 => "BigInt64Array",
                         TypedArrayKind::BigUint64 => "BigUint64Array",
                     };
-                    Ok(Value::String(crate::unicode::utf8_to_utf16(name)))
+                    Ok(Value::from(name))
                 }
                 _ => Ok(Value::Undefined),
             }

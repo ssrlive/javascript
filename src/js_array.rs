@@ -389,13 +389,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         iter_fn_obj
             .borrow_mut(mc)
             .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function("IteratorSelf".to_string()))));
-        let name_desc = crate::core::create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("[Symbol.iterator]")),
-            false,
-            false,
-            true,
-        )?;
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::from("[Symbol.iterator]"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &iter_fn_obj, "name", &name_desc)?;
         let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
         crate::js_object::define_property_internal(mc, &iter_fn_obj, "length", &len_desc)?;
@@ -424,13 +418,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
             Value::Function("IteratorPrototype.dispose".to_string()),
         )));
         slot_set(mc, &dispose_fn_obj, InternalSlot::Callable, &Value::Boolean(true));
-        let name_desc = crate::core::create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("[Symbol.dispose]")),
-            false,
-            false,
-            true,
-        )?;
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::from("[Symbol.dispose]"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &dispose_fn_obj, "name", &name_desc)?;
         let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
         crate::js_object::define_property_internal(mc, &dispose_fn_obj, "length", &len_desc)?;

@@ -208,14 +208,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                                 PropertyKey::Internal(s) => format!("[[{:?}]]", s),
                             };
                             let full_name = format!("get {}", prop_name);
-                            let desc = crate::core::create_descriptor_object(
-                                mc,
-                                &Value::String(crate::unicode::utf8_to_utf16(&full_name)),
-                                false,
-                                false,
-                                true,
-                            )
-                            .unwrap();
+                            let desc = crate::core::create_descriptor_object(mc, &Value::from(&full_name), false, false, true).unwrap();
                             let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
                             pd.get = Some(Value::Object(func_obj));
                         }
@@ -252,14 +245,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                                 PropertyKey::Internal(s) => format!("[[{:?}]]", s),
                             };
                             let full_name = format!("set {}", prop_name);
-                            let desc = crate::core::create_descriptor_object(
-                                mc,
-                                &Value::String(crate::unicode::utf8_to_utf16(&full_name)),
-                                false,
-                                false,
-                                true,
-                            )
-                            .unwrap();
+                            let desc = crate::core::create_descriptor_object(mc, &Value::from(&full_name), false, false, true).unwrap();
                             let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
                             pd.set = Some(Value::Object(func_obj));
                         }
@@ -299,14 +285,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                     PropertyKey::Internal(s) => format!("[[{:?}]]", s),
                 };
                 let full_name = format!("get {}", prop_name);
-                let desc = crate::core::create_descriptor_object(
-                    mc,
-                    &Value::String(crate::unicode::utf8_to_utf16(&full_name)),
-                    false,
-                    false,
-                    true,
-                )
-                .unwrap();
+                let desc = crate::core::create_descriptor_object(mc, &Value::from(&full_name), false, false, true).unwrap();
                 let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
 
                 PropertyDescriptor::new_accessor(
@@ -344,14 +323,7 @@ pub(crate) fn build_property_descriptor<'gc>(
                     PropertyKey::Internal(s) => format!("[[{:?}]]", s),
                 };
                 let full_name = format!("set {}", prop_name);
-                let desc = crate::core::create_descriptor_object(
-                    mc,
-                    &Value::String(crate::unicode::utf8_to_utf16(&full_name)),
-                    false,
-                    false,
-                    true,
-                )
-                .unwrap();
+                let desc = crate::core::create_descriptor_object(mc, &Value::from(&full_name), false, false, true).unwrap();
                 let _ = crate::js_object::define_property_internal(mc, &func_obj, "name", &desc);
 
                 PropertyDescriptor::new_accessor(

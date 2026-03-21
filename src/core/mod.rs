@@ -217,23 +217,12 @@ pub fn initialize_global_constructors_with_parent<'gc>(
             && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
-            let desc_tag = crate::core::create_descriptor_object(
-                mc,
-                &Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")),
-                false,
-                false,
-                true,
-            )?;
+            let desc_tag = crate::core::create_descriptor_object(mc, &Value::from("AsyncFunction"), false, false, true)?;
             crate::js_object::define_property_internal(mc, &async_func_proto, *tag_sym, &desc_tag)?;
         }
 
         // Make AsyncFunction callable via __native_ctor so AsyncFunction("...") works
-        slot_set(
-            mc,
-            &async_func_ctor,
-            InternalSlot::NativeCtor,
-            &Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")),
-        );
+        slot_set(mc, &async_func_ctor, InternalSlot::NativeCtor, &Value::from("AsyncFunction"));
         // Mark as constructor so typeof returns "function" and isConstructor is true
         slot_set(mc, &async_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
 
@@ -242,13 +231,7 @@ pub fn initialize_global_constructors_with_parent<'gc>(
         crate::js_object::define_property_internal(mc, &async_func_ctor, "length", &desc_len)?;
 
         // AsyncFunction.name = "AsyncFunction" (non-writable, non-enumerable, configurable)
-        let desc_name = crate::core::create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("AsyncFunction")),
-            false,
-            false,
-            true,
-        )?;
+        let desc_name = crate::core::create_descriptor_object(mc, &Value::from("AsyncFunction"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &async_func_ctor, "name", &desc_name)?;
 
         // Link constructor ↔ prototype

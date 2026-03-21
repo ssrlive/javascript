@@ -672,7 +672,7 @@ fn json_to_js_value<'gc>(
         JsonValue::Null => Value::Null,
         JsonValue::Bool(b) => Value::Boolean(*b),
         JsonValue::Number(n) => Value::Number(n.as_f64().unwrap_or(f64::NAN)),
-        JsonValue::String(s) => Value::String(crate::unicode::utf8_to_utf16(s)),
+        JsonValue::String(s) => Value::from(s),
         JsonValue::Array(items) => {
             let arr_obj = if let Some(env) = caller_env {
                 crate::js_array::create_array(mc, env).map_err(EvalError::from)?
@@ -1106,7 +1106,7 @@ fn execute_module<'gc>(
 
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__filepath` similarly to `evaluate_script`.
-    let val = Value::String(crate::unicode::utf8_to_utf16(module_path));
+    let val = Value::from(module_path);
     slot_set(mc, &env, InternalSlot::Filepath, &val);
 
     // Add exports object to the environment
@@ -1132,7 +1132,7 @@ fn execute_module<'gc>(
     // Create and store import.meta object for this module
     let import_meta = new_js_object_data(mc);
     // Provide a 'url' property referencing the module path; leave as raw path string
-    object_set_key_value(mc, &import_meta, "url", &Value::String(crate::unicode::utf8_to_utf16(module_path)))?;
+    object_set_key_value(mc, &import_meta, "url", &Value::from(module_path))?;
     // Store the import.meta object on the module environment under a hidden key
     slot_set(mc, &env, InternalSlot::ImportMeta, &Value::Object(import_meta));
 
@@ -1350,7 +1350,7 @@ pub fn queue_deferred_async_preload_module<'gc>(
         }
     }
 
-    object_set_key_value(mc, &pending, length, &Value::String(crate::unicode::utf8_to_utf16(module_path))).map_err(EvalError::from)?;
+    object_set_key_value(mc, &pending, length, &Value::from(module_path)).map_err(EvalError::from)?;
     object_set_key_value(mc, &pending, "length", &Value::Number((length + 1) as f64)).map_err(EvalError::from)?;
     Ok(())
 }
@@ -1423,7 +1423,7 @@ pub fn flush_deferred_async_preload_modules<'gc>(mc: &MutationContext<'gc>, env:
         preload_async_transitive_module(mc, module_path.as_str(), None, Some(cache_env))?;
     }
     for (idx, module_path) in deferred_retry.iter().enumerate() {
-        object_set_key_value(mc, &pending, idx, &Value::String(crate::unicode::utf8_to_utf16(module_path))).map_err(EvalError::from)?;
+        object_set_key_value(mc, &pending, idx, &Value::from(module_path)).map_err(EvalError::from)?;
     }
     object_set_key_value(mc, &pending, "length", &Value::Number(deferred_retry.len() as f64)).map_err(EvalError::from)?;
     for _ in 0..8 {
@@ -1444,7 +1444,7 @@ pub fn flush_deferred_async_preload_modules<'gc>(mc: &MutationContext<'gc>, env:
         }
 
         for (idx, module_path) in still_retry.iter().enumerate() {
-            object_set_key_value(mc, &pending, idx, &Value::String(crate::unicode::utf8_to_utf16(module_path))).map_err(EvalError::from)?;
+            object_set_key_value(mc, &pending, idx, &Value::from(module_path)).map_err(EvalError::from)?;
         }
         object_set_key_value(mc, &pending, "length", &Value::Number(still_retry.len() as f64)).map_err(EvalError::from)?;
     }
@@ -1581,8 +1581,7 @@ pub fn make_module_namespace_object<'gc>(
     if let Some(sym_tst_val) = get_symbol_to_string_tag(env)
         && let Value::Symbol(sym_tst) = sym_tst_val
     {
-        let desc = create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16("Module")), false, false, false)
-            .map_err(EvalError::from)?;
+        let desc = create_descriptor_object(mc, &Value::from("Module"), false, false, false).map_err(EvalError::from)?;
         crate::js_object::define_property_internal(mc, &namespace_obj, crate::core::PropertyKey::Symbol(sym_tst), &desc)
             .map_err(EvalError::from)?;
     }
@@ -1838,14 +1837,7 @@ pub fn load_module_deferred_namespace<'gc>(
     if let Some(sym_tst_val) = get_symbol_to_string_tag(&cache_env)
         && let Value::Symbol(sym_tst) = sym_tst_val
     {
-        let desc = create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("Deferred Module")),
-            false,
-            false,
-            false,
-        )
-        .map_err(EvalError::from)?;
+        let desc = create_descriptor_object(mc, &Value::from("Deferred Module"), false, false, false).map_err(EvalError::from)?;
         crate::js_object::define_property_internal(mc, &namespace_obj, crate::core::PropertyKey::Symbol(sym_tst), &desc)
             .map_err(EvalError::from)?;
     }

@@ -1682,7 +1682,7 @@ pub(crate) fn evaluate_new<'gc>(
                             if matches!(prim, Value::Symbol(_)) {
                                 return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                             }
-                            Value::String(crate::unicode::utf8_to_utf16(&crate::core::value_to_string(&prim)))
+                            Value::from(&crate::core::value_to_string(&prim))
                         };
                         return Ok(crate::core::create_error(mc, prototype, &msg_val)?);
                     }

@@ -199,7 +199,7 @@ pub fn initialize_symbol<'gc>(
         object_set_key_value(mc, &for_obj, "length", &Value::Number(1.0))?;
         for_obj.borrow_mut(mc).set_non_enumerable("length");
         for_obj.borrow_mut(mc).set_non_writable("length");
-        object_set_key_value(mc, &for_obj, "name", &Value::String(crate::unicode::utf8_to_utf16("for")))?;
+        object_set_key_value(mc, &for_obj, "name", &Value::from("for"))?;
         for_obj.borrow_mut(mc).set_non_enumerable("name");
         for_obj.borrow_mut(mc).set_non_writable("name");
         object_set_key_value(mc, &symbol_ctor, "for", &Value::Object(for_obj))?;
@@ -216,7 +216,7 @@ pub fn initialize_symbol<'gc>(
         object_set_key_value(mc, &keyfor_obj, "length", &Value::Number(1.0))?;
         keyfor_obj.borrow_mut(mc).set_non_enumerable("length");
         keyfor_obj.borrow_mut(mc).set_non_writable("length");
-        object_set_key_value(mc, &keyfor_obj, "name", &Value::String(crate::unicode::utf8_to_utf16("keyFor")))?;
+        object_set_key_value(mc, &keyfor_obj, "name", &Value::from("keyFor"))?;
         keyfor_obj.borrow_mut(mc).set_non_enumerable("name");
         keyfor_obj.borrow_mut(mc).set_non_writable("name");
         object_set_key_value(mc, &symbol_ctor, "keyFor", &Value::Object(keyfor_obj))?;
@@ -420,7 +420,7 @@ pub(crate) fn handle_symbol_keyfor<'gc>(
                     {
                         // Found the key; return it as a JS string
                         if let PropertyKey::String(utf8_key) = k {
-                            return Ok(Value::String(crate::unicode::utf8_to_utf16(utf8_key)));
+                            return Ok(Value::from(utf8_key));
                         }
                     }
                 }

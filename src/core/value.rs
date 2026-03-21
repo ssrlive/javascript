@@ -1452,7 +1452,7 @@ pub fn to_primitive<'gc>(
                 if !matches!(func_val, Value::Undefined | Value::Null) {
                     log::debug!("DBG to_primitive: calling @@toPrimitive with hint={}", hint);
                     // Call it with hint
-                    let arg = Value::String(crate::unicode::utf8_to_utf16(hint));
+                    let arg = Value::from(hint);
                     // Support closures or function objects
                     use std::slice::from_ref;
                     let res_eval: Result<Value<'gc>, crate::core::js_error::EvalError> = match func_val {
@@ -1516,7 +1516,7 @@ pub fn to_primitive<'gc>(
                             false
                         };
                         if is_ident {
-                            return Ok(Value::String(crate::unicode::utf8_to_utf16(&format!("{}(){{}}", name))));
+                            return Ok(Value::from(&format!("{}(){{}}", name)));
                         }
                     }
                 }

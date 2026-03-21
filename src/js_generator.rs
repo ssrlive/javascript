@@ -5124,8 +5124,7 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
             .borrow_mut(mc)
             .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function(native_name.to_string()))));
 
-        let name_desc =
-            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16(display_name)), false, false, true)?;
+        let name_desc = crate::core::create_descriptor_object(mc, &Value::from(display_name), false, false, true)?;
         crate::js_object::define_property_internal(mc, &method_obj, "name", &name_desc)?;
 
         let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(length), false, false, true)?;
@@ -5172,8 +5171,7 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc_tag =
-            crate::core::create_descriptor_object(mc, &Value::String(crate::unicode::utf8_to_utf16("Generator")), false, false, true)?;
+        let desc_tag = crate::core::create_descriptor_object(mc, &Value::from("Generator"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &gen_proto, *tag_sym, &desc_tag)?;
     }
 
@@ -5187,12 +5185,7 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     // This prototype object should expose a `prototype` property pointing to
     // the `Generator.prototype` intrinsic (used as generator instances' [[Prototype]]).
     let gen_func_ctor = crate::core::new_js_object_data(mc);
-    slot_set(
-        mc,
-        &gen_func_ctor,
-        InternalSlot::NativeCtor,
-        &Value::String(crate::unicode::utf8_to_utf16("GeneratorFunction")),
-    );
+    slot_set(mc, &gen_func_ctor, InternalSlot::NativeCtor, &Value::from("GeneratorFunction"));
     // Set internal prototype of constructor to Function when available
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
@@ -5208,13 +5201,7 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     crate::js_object::define_property_internal(mc, &gen_func_ctor, "length", &desc_len)?;
 
     // GeneratorFunction.name = "GeneratorFunction" (non-writable, non-enumerable, configurable)
-    let desc_name = crate::core::create_descriptor_object(
-        mc,
-        &Value::String(crate::unicode::utf8_to_utf16("GeneratorFunction")),
-        false,
-        false,
-        true,
-    )?;
+    let desc_name = crate::core::create_descriptor_object(mc, &Value::from("GeneratorFunction"), false, false, true)?;
     crate::js_object::define_property_internal(mc, &gen_func_ctor, "name", &desc_name)?;
 
     let gen_func_proto = crate::core::new_js_object_data(mc);
@@ -5286,13 +5273,7 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc_tag = crate::core::create_descriptor_object(
-            mc,
-            &Value::String(crate::unicode::utf8_to_utf16("GeneratorFunction")),
-            false,
-            false,
-            true,
-        )?;
+        let desc_tag = crate::core::create_descriptor_object(mc, &Value::from("GeneratorFunction"), false, false, true)?;
         crate::js_object::define_property_internal(mc, &gen_func_proto, *tag_sym, &desc_tag)?;
     }
 

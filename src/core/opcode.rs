@@ -79,6 +79,8 @@ pub enum Opcode {
     DefineGlobalConst = 73, // define an immutable global binding
     GetNewTarget = 74,      // push current new.target value onto stack
     Yield = 75,             // suspend generator: pop yielded value, save state, return {value, done: false}
+    SetComputedGetter = 76, // pop val, pop computed key, peek obj; store val under __get_<key>
+    SetComputedSetter = 77, // pop val, pop computed key, peek obj; store val under __set_<key>
 }
 
 impl TryFrom<u8> for Opcode {
@@ -162,6 +164,8 @@ impl TryFrom<u8> for Opcode {
             73 => Opcode::DefineGlobalConst,
             74 => Opcode::GetNewTarget,
             75 => Opcode::Yield,
+            76 => Opcode::SetComputedGetter,
+            77 => Opcode::SetComputedSetter,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

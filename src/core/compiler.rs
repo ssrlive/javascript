@@ -2515,10 +2515,10 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::Pop);
                                 continue;
                             }
-                            // Fallback for computed accessors: install as a data property.
+                            // Computed getter: emit key and value, use dedicated opcode
                             self.compile_expr(key)?;
                             self.compile_expr(val)?;
-                            self.chunk.write_opcode(Opcode::SetIndex);
+                            self.chunk.write_opcode(Opcode::SetComputedGetter);
                             self.chunk.write_opcode(Opcode::Pop);
                         }
                         Expr::Setter(_) => {
@@ -2531,10 +2531,10 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::Pop);
                                 continue;
                             }
-                            // Fallback for computed accessors: install as a data property.
+                            // Computed setter: emit key and value, use dedicated opcode
                             self.compile_expr(key)?;
                             self.compile_expr(val)?;
-                            self.chunk.write_opcode(Opcode::SetIndex);
+                            self.chunk.write_opcode(Opcode::SetComputedSetter);
                             self.chunk.write_opcode(Opcode::Pop);
                         }
                         _ => {
@@ -2981,27 +2981,14 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::NewError);
                         }
                         "Object" | "Number" | "Boolean" | "String" => {
-                            // Create typed wrapper: { __type__: "TypeName", __value__: arg }
-                            let type_key = crate::unicode::utf8_to_utf16("__type__");
-                            let type_key_idx = self.chunk.add_constant(Value::String(type_key));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(type_key_idx);
-                            let type_val = crate::unicode::utf8_to_utf16(name);
-                            let type_val_idx = self.chunk.add_constant(Value::String(type_val));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(type_val_idx);
-                            if let Some(first_arg) = args.first() {
-                                let val_key = crate::unicode::utf8_to_utf16("__value__");
-                                let val_key_idx = self.chunk.add_constant(Value::String(val_key));
-                                self.chunk.write_opcode(Opcode::Constant);
-                                self.chunk.write_u16(val_key_idx);
-                                self.compile_expr(first_arg)?;
-                                self.chunk.write_opcode(Opcode::NewObject);
-                                self.chunk.write_byte(2); // 2 key-value pairs
-                            } else {
-                                self.chunk.write_opcode(Opcode::NewObject);
-                                self.chunk.write_byte(1); // 1 key-value pair
+                            // Route through normal NewCall so the VM runtime
+                            // can set __proto__ correctly (e.g. Boolean.prototype for new Object(true)).
+                            self.compile_expr(constructor)?;
+                            for a in args {
+                                self.compile_expr(a)?;
                             }
+                            self.chunk.write_opcode(Opcode::NewCall);
+                            self.chunk.write_byte(args.len() as u8);
                         }
                         "Function" => {
                             // new Function(body) → compile to: push native_fn, push body, Call(1)

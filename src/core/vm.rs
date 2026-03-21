@@ -6087,11 +6087,10 @@ impl<'gc> VM<'gc> {
             .insert("encodeURIComponent".to_string(), Self::make_host_fn("global.encodeURIComponent"));
         self.globals
             .insert("decodeURIComponent".to_string(), Self::make_host_fn("global.decodeURIComponent"));
-        self.globals
-            .insert("__forOfValues".to_string(), Self::make_host_fn("global.__forOfValues"));
-        self.global_this
-            .borrow_mut()
-            .insert("__forOfValues".to_string(), Self::make_host_fn("global.__forOfValues"));
+        self.globals.insert(
+            crate::core::INTERNAL_FOROF_HELPER.to_string(),
+            Self::make_host_fn("global.__forOfValues"),
+        );
         let mut import_map = IndexMap::new();
         import_map.insert("source".to_string(), Self::make_host_fn("import.source"));
         self.globals

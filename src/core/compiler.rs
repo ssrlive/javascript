@@ -7,6 +7,8 @@ use crate::core::value::VmArrayData;
 use crate::core::{JSError, Value};
 use crate::raise_syntax_error;
 
+pub(crate) const INTERNAL_FOROF_HELPER: &str = "__forOfValues internal";
+
 pub struct Compiler<'gc> {
     chunk: Chunk<'gc>,
     locals: Vec<String>,
@@ -1450,7 +1452,7 @@ impl<'gc> Compiler<'gc> {
                 // Current VM lowers both for-of and for-await through __forOfValues.
                 // For for-await we additionally await each element on assignment below.
                 self.compile_expr(&Expr::Call(
-                    Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+                    Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
                     vec![iterable_expr.clone()],
                 ))?;
                 // Store iterable as __forofArr__
@@ -1614,7 +1616,7 @@ impl<'gc> Compiler<'gc> {
                     self.setup_completion_var();
                 }
                 self.compile_expr(&Expr::Call(
-                    Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+                    Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
                     vec![iterable_expr.clone()],
                 ))?;
                 if self.scope_depth > 0 {
@@ -3830,7 +3832,7 @@ impl<'gc> Compiler<'gc> {
         self.forin_counter += 1;
 
         self.compile_expr(&Expr::Call(
-            Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+            Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
             vec![iterable_expr.clone()],
         ))?;
         self.emit_define_var(&arr_name);
@@ -3913,7 +3915,7 @@ impl<'gc> Compiler<'gc> {
         self.forin_counter += 1;
 
         self.compile_expr(&Expr::Call(
-            Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+            Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
             vec![iterable_expr.clone()],
         ))?;
         self.emit_define_var(&arr_name);

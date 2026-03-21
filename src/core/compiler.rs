@@ -117,6 +117,10 @@ impl<'gc> Compiler<'gc> {
                 _ => break,
             }
         }
+        // Hoist top-level `var` declarations to `undefined` before execution.
+        // Function declarations are still emitted first right below, so they override
+        // same-name hoisted vars at initialization time.
+        self.emit_hoisted_global_vars(statements);
         // Hoist function declarations to the top
         for stmt in statements.iter() {
             if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) {
@@ -283,6 +287,24 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_opcode(Opcode::Constant);
             self.chunk.write_u16(undef_idx);
             self.locals.push(name);
+        }
+    }
+
+    fn emit_hoisted_global_vars(&mut self, body: &[Statement]) {
+        let mut hoisted = Vec::new();
+        for stmt in body {
+            Self::collect_function_var_names_from_statement(stmt, &mut hoisted);
+        }
+
+        for name in hoisted {
+            let undef_idx = self.chunk.add_constant(Value::Undefined);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(undef_idx);
+
+            let name_u16 = crate::unicode::utf8_to_utf16(&name);
+            let name_idx = self.chunk.add_constant(Value::String(name_u16));
+            self.chunk.write_opcode(Opcode::DefineGlobal);
+            self.chunk.write_u16(name_idx);
         }
     }
 
@@ -631,10 +653,22 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Return(expr_opt) => {
+                if !self.async_generator_items_stack.is_empty() {
+                    if let Some(expr) = expr_opt {
+                        self.compile_expr(expr)?;
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let patch = self.emit_jump(Opcode::Jump);
+                    self.generator_return_patches.push(patch);
+                }
                 // Inside a suspendable generator body, return compiles normally.
                 // The VM handles wrapping the value as {value, done: true}.
                 // For legacy eager generators (async gen), use old items-array approach.
-                if let Some(items_name) = self.generator_items_stack.last().cloned() {
+                else if let Some(items_name) = self.generator_items_stack.last().cloned() {
                     if items_name == "__gen_yield_marker__" {
                         // Suspendable generator: compile return value, emit Return
                         if let Some(expr) = expr_opt {
@@ -1413,14 +1447,12 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 let is_for_await = matches!(*stmt.kind, StatementKind::ForAwaitOf(..));
-                if is_for_await {
-                    self.compile_expr(iterable_expr)?;
-                } else {
-                    self.compile_expr(&Expr::Call(
-                        Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
-                        vec![iterable_expr.clone()],
-                    ))?;
-                }
+                // Current VM lowers both for-of and for-await through __forOfValues.
+                // For for-await we additionally await each element on assignment below.
+                self.compile_expr(&Expr::Call(
+                    Box::new(Expr::Var("__forOfValues".to_string(), None, None)),
+                    vec![iterable_expr.clone()],
+                ))?;
                 // Store iterable as __forofArr__
                 if self.scope_depth > 0 {
                     self.locals.push("__forofArr__".to_string());
@@ -1468,6 +1500,12 @@ impl<'gc> Compiler<'gc> {
                 self.emit_helper_get("__forofArr__");
                 self.emit_helper_get("__forofIdx__");
                 self.chunk.write_opcode(Opcode::GetIndex);
+                if is_for_await {
+                    self.emit_helper_get("__await__");
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Call);
+                    self.chunk.write_byte(1);
+                }
                 if self.scope_depth > 0 {
                     let pos = self.locals.iter().rposition(|l| l == var_name).unwrap();
                     self.chunk.write_opcode(Opcode::SetLocal);
@@ -4249,36 +4287,29 @@ impl<'gc> Compiler<'gc> {
 
         self.emit_hoisted_var_slots(body);
 
-        // Collect yielded values into a synthetic local array.
-        let items_name = format!("__async_gen_items_{}__", self.try_finally_counter);
-        self.try_finally_counter += 1;
-        self.chunk.write_opcode(Opcode::NewArray);
-        self.chunk.write_byte(0);
-        self.locals.push(items_name.clone());
-        self.async_generator_items_stack.push(items_name.clone());
+        // Async generators are suspendable like generators, but the VM wraps
+        // each resume result into Promise objects.
+        let gen_marker = "__gen_yield_marker__".to_string();
+        self.generator_items_stack.push(gen_marker);
 
         for (i, s) in body.iter().enumerate() {
             self.compile_statement(s, i == body.len() - 1)?;
         }
 
-        self.async_generator_items_stack.pop();
+        self.generator_items_stack.pop();
 
-        // Mark array so runtime can expose next/throw/return.
-        self.emit_helper_get(&items_name);
-        let true_idx = self.chunk.add_constant(Value::Boolean(true));
+        // Implicit return undefined at end of async generator body.
+        let undef_idx = self.chunk.add_constant(Value::Undefined);
         self.chunk.write_opcode(Opcode::Constant);
-        self.chunk.write_u16(true_idx);
-        let marker_key = self
-            .chunk
-            .add_constant(Value::String(crate::unicode::utf8_to_utf16("__async_generator__")));
-        self.chunk.write_opcode(Opcode::SetProperty);
-        self.chunk.write_u16(marker_key);
-        self.chunk.write_opcode(Opcode::Pop);
-
-        self.emit_helper_get(&items_name);
+        self.chunk.write_u16(undef_idx);
         self.chunk.write_opcode(Opcode::Return);
 
         self.patch_jump(jump_over);
+
+        // Async generator functions participate in both async and generator
+        // semantics in VM runtime/prototype wiring.
+        self.chunk.async_function_ips.insert(func_ip);
+        self.chunk.generator_function_ips.insert(func_ip);
 
         self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
         if let Some(name) = function_name

@@ -1859,7 +1859,17 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
                 .filter(|(k, _)| !k.starts_with("__"))
                 .map(|(k, v)| {
                     let escaped_key = k.replace('\\', "\\\\").replace('"', "\\\"");
-                    format!("\"{}\":{}", escaped_key, value_to_compact_result_string(v))
+                    let rendered = match v {
+                        Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmMap(_)
+                        | Value::VmSet(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(_) => value_to_string(v),
+                        _ => value_to_compact_result_string(v),
+                    };
+                    format!("\"{}\":{}", escaped_key, rendered)
                 })
                 .collect();
 

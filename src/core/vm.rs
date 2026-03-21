@@ -6000,6 +6000,11 @@ impl<'gc> VM<'gc> {
                     if let Some(getter_fn) = borrow.get(&getter_key).cloned() {
                         return self.invoke_getter_with_receiver(getter_fn, receiver.clone());
                     }
+                    // Setter-only accessor: if __set_<key> exists but no getter/data, return undefined
+                    let setter_key = format!("__set_{}", key);
+                    if borrow.contains_key(&setter_key) {
+                        return Value::Undefined;
+                    }
                     // Typed wrapper dispatch for String/Number/BigInt
                     if depth == 1 {
                         let type_name = borrow.get("__type__").map(|v| value_to_string(v));
@@ -6125,6 +6130,21 @@ impl<'gc> VM<'gc> {
                     "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
                     _ => Value::Undefined,
                 })
+            }
+            Value::VmArray(arr) => {
+                let borrow = arr.borrow();
+                if key == "length" {
+                    return Value::Number(borrow.elements.len() as f64);
+                }
+                if let Ok(idx) = key.parse::<usize>()
+                    && idx < borrow.elements.len()
+                {
+                    return borrow.elements[idx].clone();
+                }
+                if let Some(v) = borrow.props.get(key) {
+                    return v.clone();
+                }
+                Value::Undefined
             }
             _ => Value::Undefined,
         }
@@ -6397,6 +6417,9 @@ impl<'gc> VM<'gc> {
 
                 let mut ctor = IndexMap::new();
                 ctor.insert("__native_id__".to_string(), Value::Number(id as f64));
+                ctor.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16(name)));
+                ctor.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+                ctor.insert("__nonconfigurable_name__".to_string(), Value::Boolean(true));
                 ctor.insert("prototype".to_string(), proto_obj.clone());
                 ctor.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
                 ctor.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
@@ -10026,11 +10049,17 @@ impl<'gc> VM<'gc> {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
                 err_map.insert("name".to_string(), Value::String(crate::unicode::utf8_to_utf16("TypeError")));
-                err_map.insert("constructor".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_TYPEERROR));
                 err_map.insert(
                     "message".to_string(),
                     Value::String(crate::unicode::utf8_to_utf16("AbstractModuleSource constructor cannot be invoked")),
                 );
+                if let Some(ctor) = self.globals.get("TypeError").cloned() {
+                    err_map.insert("constructor".to_string(), ctor.clone());
+                    let proto = self.read_named_property(ctor, "prototype");
+                    if !matches!(proto, Value::Undefined) {
+                        err_map.insert("__proto__".to_string(), proto);
+                    }
+                }
                 self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
                 Value::Undefined
             }
@@ -10424,6 +10453,20 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         keys
+                    } else if let Value::VmArray(arr) = &descs_val {
+                        // Array (or other object-like) as Properties: enumerate own string-keyed properties
+                        let b = arr.borrow();
+                        let mut keys: Vec<String> = (0..b.elements.len())
+                            .filter(|i| !b.props.contains_key(&format!("__deleted_{}", i)))
+                            .map(|i| i.to_string())
+                            .collect();
+                        // Also include string props from the array's props map
+                        for k in b.props.keys() {
+                            if !k.starts_with("__") && !keys.contains(k) {
+                                keys.push(k.clone());
+                            }
+                        }
+                        keys
                     } else {
                         Vec::new()
                     };
@@ -10636,12 +10679,14 @@ impl<'gc> VM<'gc> {
                                 _ => make_desc(val.clone(), !is_readonly, !is_nonenumerable, !is_nonconfigurable),
                             }
                         } else {
-                            // Check for getter
+                            // Check for getter/setter accessor
                             let getter_key = format!("__get_{}", key);
-                            if let Some(getter) = borrow.get(&getter_key) {
+                            let setter_key = format!("__set_{}", key);
+                            let has_getter = borrow.contains_key(&getter_key);
+                            let has_setter = borrow.contains_key(&setter_key);
+                            if has_getter || has_setter {
                                 let mut desc = IndexMap::new();
-                                desc.insert("get".to_string(), getter.clone());
-                                let setter_key = format!("__set_{}", key);
+                                desc.insert("get".to_string(), borrow.get(&getter_key).cloned().unwrap_or(Value::Undefined));
                                 desc.insert("set".to_string(), borrow.get(&setter_key).cloned().unwrap_or(Value::Undefined));
                                 desc.insert("enumerable".to_string(), Value::Boolean(!is_nonenumerable));
                                 desc.insert("configurable".to_string(), Value::Boolean(!is_nonconfigurable));
@@ -10724,11 +10769,24 @@ impl<'gc> VM<'gc> {
             // Object.getOwnPropertyNames(obj) → array of own property names (including non-enumerable)
             BUILTIN_OBJECT_GETOWNPROPERTYNAMES => {
                 if let Some(Value::VmObject(obj)) = args.first() {
-                    let keys: Vec<Value<'gc>> = obj
-                        .borrow()
+                    let borrow = obj.borrow();
+                    let mut names: Vec<String> = borrow
                         .keys()
-                        .filter(|k| !k.starts_with("__"))
-                        .map(|k| Value::String(crate::unicode::utf8_to_utf16(k)))
+                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
+                        .cloned()
+                        .collect();
+                    // Include accessor property names from __get_/__set_ keys
+                    for k in borrow.keys() {
+                        if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                            && !names.contains(&name.to_string())
+                        {
+                            names.push(name.to_string());
+                        }
+                    }
+                    drop(borrow);
+                    let keys: Vec<Value<'gc>> = names
+                        .into_iter()
+                        .map(|k| Value::String(crate::unicode::utf8_to_utf16(&k)))
                         .collect();
                     Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(keys))))
                 } else {
@@ -15810,6 +15868,8 @@ impl<'gc> VM<'gc> {
                             map.insert("length".to_string(), Value::Number(arg_count as f64));
                             // mark length as non-enumerable
                             map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+                            // Tag for Object.prototype.toString → [object Arguments]
+                            map.insert("__toStringTag__".to_string(), Value::from("Arguments"));
                             // callee property
                             if let Some(&is_strict) = self.chunk.fn_strictness.get(&frame.func_ip) {
                                 if is_strict {
@@ -16892,6 +16952,13 @@ impl<'gc> VM<'gc> {
                                     drop(borrow);
                                     self.stack.push(v);
                                 } else {
+                                    // Setter-only accessor: if __set_<key> exists but no __get_<key>, return undefined
+                                    let setter_key = format!("__set_{}", key);
+                                    if borrow.contains_key(&setter_key) {
+                                        drop(borrow);
+                                        self.stack.push(Value::Undefined);
+                                        continue;
+                                    }
                                     // Check typed wrapper built-in methods first
                                     let type_name = borrow.get("__type__").map(|v| value_to_string(v));
                                     let mut proto = borrow.get("__proto__").cloned();

@@ -3863,6 +3863,16 @@ impl<'gc> VM<'gc> {
                 }
             }
             "object.valueOf" => receiver.unwrap_or(Value::Undefined),
+            "error.toString" => {
+                if let Some(Value::VmObject(obj)) = receiver {
+                    let borrow = obj.borrow();
+                    let name = borrow.get("name").map(value_to_string).unwrap_or_else(|| "Error".to_string());
+                    let message = borrow.get("message").map(value_to_string).unwrap_or_default();
+                    Value::from(Self::format_error_name_message(&name, &message))
+                } else {
+                    Value::from("Error")
+                }
+            }
             "object.isPrototypeOf" => {
                 let Some(proto_obj) = receiver else {
                     return Value::Boolean(false);
@@ -3924,18 +3934,28 @@ impl<'gc> VM<'gc> {
                     Some(Value::VmObject(map)) => {
                         let b = map.borrow();
                         let ne_key = format!("__nonenumerable_{}__", key);
-                        let is_own = b.contains_key(&key) && !key.starts_with("__");
+                        let is_own = (b.contains_key(&key)
+                            || b.contains_key(&format!("__get_{}", key))
+                            || b.contains_key(&format!("__set_{}", key)))
+                            && !key.starts_with("__");
                         Value::Boolean(is_own && !b.contains_key(&ne_key))
                     }
                     Some(Value::VmArray(arr)) => {
                         let b = arr.borrow();
-                        if let Ok(i) = key.parse::<usize>()
-                            && i < b.elements.len()
-                        {
-                            return Value::Boolean(!b.props.contains_key(&format!("__deleted_{}", i)));
+                        if let Ok(i) = key.parse::<usize>() {
+                            let has_element = i < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", i));
+                            let has_accessor =
+                                b.props.contains_key(&format!("__get_{}", key)) || b.props.contains_key(&format!("__set_{}", key));
+                            if has_element || has_accessor {
+                                let ne_key = format!("__nonenumerable_{}__", key);
+                                return Value::Boolean(!b.props.contains_key(&ne_key));
+                            }
                         }
                         let ne_key = format!("__nonenumerable_{}__", key);
-                        Value::Boolean(b.props.contains_key(&key) && !b.props.contains_key(&ne_key))
+                        let is_own = b.props.contains_key(&key)
+                            || b.props.contains_key(&format!("__get_{}", key))
+                            || b.props.contains_key(&format!("__set_{}", key));
+                        Value::Boolean(is_own && !b.props.contains_key(&ne_key))
                     }
                     _ => Value::Boolean(false),
                 }
@@ -4012,6 +4032,13 @@ impl<'gc> VM<'gc> {
             }
             "reflect.isExtensible" => match args.first() {
                 Some(Value::VmObject(obj)) => Value::Boolean(!matches!(obj.borrow().get("__non_extensible__"), Some(Value::Boolean(true)))),
+                Some(Value::VmArray(arr)) => {
+                    Value::Boolean(!matches!(arr.borrow().props.get("__non_extensible__"), Some(Value::Boolean(true))))
+                }
+                Some(Value::VmFunction(ip, arity)) | Some(Value::VmClosure(ip, arity, _)) => {
+                    let props = self.get_fn_props(*ip, *arity);
+                    Value::Boolean(!matches!(props.borrow().get("__non_extensible__"), Some(Value::Boolean(true))))
+                }
                 _ => Value::Boolean(false),
             },
             "reflect.getPrototypeOf" => {
@@ -4176,11 +4203,30 @@ impl<'gc> VM<'gc> {
             }
             "object.getOwnPropertyDescriptors" => {
                 let Some(target) = args.first().cloned() else {
-                    return Value::VmObject(Rc::new(RefCell::new(IndexMap::new())));
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
                 };
+
+                if matches!(target, Value::Undefined | Value::Null) {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
 
                 let mut out = IndexMap::new();
                 match target {
+                    Value::String(s) => {
+                        for i in 0..s.len() {
+                            let key = i.to_string();
+                            let desc = self.call_builtin(BUILTIN_OBJECT_GETOWNPROPDESC, vec![Value::String(s.clone()), Value::from(&key)]);
+                            if !matches!(desc, Value::Undefined) {
+                                out.insert(key, desc);
+                            }
+                        }
+                        let len_desc = self.call_builtin(BUILTIN_OBJECT_GETOWNPROPDESC, vec![Value::String(s), Value::from("length")]);
+                        if !matches!(len_desc, Value::Undefined) {
+                            out.insert("length".to_string(), len_desc);
+                        }
+                    }
                     Value::VmObject(obj) => {
                         let mut property_keys: Vec<String> = obj.borrow().keys().filter(|k| !k.starts_with("__")).cloned().collect();
                         {
@@ -4249,10 +4295,58 @@ impl<'gc> VM<'gc> {
                     if !non_ext {
                         return Value::Boolean(false);
                     }
-                    let all_nonconfig = b.keys().filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:")).all(|k| {
+                    let mut keys: Vec<String> = b
+                        .keys()
+                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
+                        .cloned()
+                        .collect();
+                    for k in b.keys() {
+                        if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                            && !keys.contains(&name.to_string())
+                        {
+                            keys.push(name.to_string());
+                        }
+                    }
+                    let all_nonconfig = keys.iter().all(|k| {
                         let nc_key = format!("__nonconfigurable_{}__", k);
                         matches!(b.get(&nc_key), Some(Value::Boolean(true)))
                     });
+                    Value::Boolean(all_nonconfig)
+                } else if let Value::VmArray(arr) = &arg {
+                    let b = arr.borrow();
+                    let non_ext = matches!(b.props.get("__non_extensible__"), Some(Value::Boolean(true)));
+                    if !non_ext {
+                        return Value::Boolean(false);
+                    }
+                    for (i, v) in b.elements.iter().enumerate() {
+                        if !matches!(v, Value::Undefined) && !b.props.contains_key(&format!("__deleted_{}", i)) {
+                            let nc_key = format!("__nonconfigurable_{}__", i);
+                            if !matches!(b.props.get(&nc_key), Some(Value::Boolean(true))) {
+                                return Value::Boolean(false);
+                            }
+                        }
+                    }
+                    for k in b.props.keys() {
+                        if k.starts_with("__") {
+                            continue;
+                        }
+                        let nc_key = format!("__nonconfigurable_{}__", k);
+                        if !matches!(b.props.get(&nc_key), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                    }
+                    Value::Boolean(true)
+                } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &arg {
+                    let props = self.get_fn_props(*ip, *arity);
+                    let b = props.borrow();
+                    let non_ext = matches!(b.get("__non_extensible__"), Some(Value::Boolean(true)));
+                    if !non_ext {
+                        return Value::Boolean(false);
+                    }
+                    let all_nonconfig = b
+                        .keys()
+                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
+                        .all(|k| matches!(b.get(&format!("__nonconfigurable_{}__", k)), Some(Value::Boolean(true))));
                     Value::Boolean(all_nonconfig)
                 } else {
                     Value::Boolean(true)
@@ -4262,7 +4356,104 @@ impl<'gc> VM<'gc> {
                 let arg = args.first().cloned().unwrap_or(Value::Undefined);
                 if let Value::VmObject(obj) = &arg {
                     let b = obj.borrow();
-                    Value::Boolean(matches!(b.get("__frozen__"), Some(Value::Boolean(true))))
+                    let non_ext = matches!(b.get("__non_extensible__"), Some(Value::Boolean(true)));
+                    if !non_ext {
+                        return Value::Boolean(false);
+                    }
+                    for (k, v) in b.iter() {
+                        if k.starts_with("__") || k.starts_with("@@sym:") {
+                            continue;
+                        }
+                        let nc_key = format!("__nonconfigurable_{}__", k);
+                        if !matches!(b.get(&nc_key), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                        let is_accessor = matches!(v, Value::Property { .. })
+                            || b.contains_key(&format!("__get_{}", k))
+                            || b.contains_key(&format!("__set_{}", k));
+                        if !is_accessor {
+                            let ro_key = format!("__readonly_{}__", k);
+                            if !matches!(b.get(&ro_key), Some(Value::Boolean(true))) {
+                                return Value::Boolean(false);
+                            }
+                        }
+                    }
+                    let mut accessor_keys: Vec<String> = Vec::new();
+                    for k in b.keys() {
+                        if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                            && !accessor_keys.contains(&name.to_string())
+                        {
+                            accessor_keys.push(name.to_string());
+                        }
+                    }
+                    for key in accessor_keys {
+                        if !matches!(b.get(&format!("__nonconfigurable_{}__", key)), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                    }
+                    Value::Boolean(true)
+                } else if let Value::VmArray(arr) = &arg {
+                    let b = arr.borrow();
+                    let non_ext = matches!(b.props.get("__non_extensible__"), Some(Value::Boolean(true)));
+                    if !non_ext {
+                        return Value::Boolean(false);
+                    }
+                    for (i, v) in b.elements.iter().enumerate() {
+                        if matches!(v, Value::Undefined) || b.props.contains_key(&format!("__deleted_{}", i)) {
+                            continue;
+                        }
+                        if !matches!(b.props.get(&format!("__nonconfigurable_{}__", i)), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                        if !matches!(b.props.get(&format!("__readonly_{}__", i)), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                    }
+                    for k in b.props.keys() {
+                        if k.starts_with("__") {
+                            continue;
+                        }
+                        if !matches!(b.props.get(&format!("__nonconfigurable_{}__", k)), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                        let has_accessor = b.props.contains_key(&format!("__get_{}", k)) || b.props.contains_key(&format!("__set_{}", k));
+                        if !has_accessor && !matches!(b.props.get(&format!("__readonly_{}__", k)), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                    }
+                    let mut accessor_keys: Vec<String> = Vec::new();
+                    for k in b.props.keys() {
+                        if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                            && !accessor_keys.contains(&name.to_string())
+                        {
+                            accessor_keys.push(name.to_string());
+                        }
+                    }
+                    for key in accessor_keys {
+                        if !matches!(b.props.get(&format!("__nonconfigurable_{}__", key)), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                    }
+                    Value::Boolean(true)
+                } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &arg {
+                    let props = self.get_fn_props(*ip, *arity);
+                    let b = props.borrow();
+                    let non_ext = matches!(b.get("__non_extensible__"), Some(Value::Boolean(true)));
+                    if !non_ext {
+                        return Value::Boolean(false);
+                    }
+                    for k in b.keys() {
+                        if k.starts_with("__") || k.starts_with("@@sym:") {
+                            continue;
+                        }
+                        if !matches!(b.get(&format!("__nonconfigurable_{}__", k)), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                        if !matches!(b.get(&format!("__readonly_{}__", k)), Some(Value::Boolean(true))) {
+                            return Value::Boolean(false);
+                        }
+                    }
+                    Value::Boolean(true)
                 } else {
                     Value::Boolean(true)
                 }
@@ -5815,16 +6006,17 @@ impl<'gc> VM<'gc> {
                     }
                     return Value::Number(borrow.elements.len() as f64);
                 }
-                if let Ok(idx) = key.parse::<usize>()
-                    && idx < borrow.elements.len()
-                {
-                    return borrow.elements[idx].clone();
-                }
                 // Check accessor properties
                 let getter_key = format!("__get_{}", key);
                 if let Some(gf) = borrow.props.get(&getter_key).cloned() {
                     drop(borrow);
                     return self.invoke_getter_with_receiver(gf, obj.clone());
+                }
+                if let Ok(idx) = key.parse::<usize>()
+                    && idx < borrow.elements.len()
+                    && !borrow.props.contains_key(&format!("__deleted_{}", idx))
+                {
+                    return borrow.elements[idx].clone();
                 }
                 if let Some(v) = borrow.props.get(key) {
                     return v.clone();
@@ -6009,6 +6201,8 @@ impl<'gc> VM<'gc> {
         let mut json_map = IndexMap::new();
         json_map.insert("stringify".to_string(), Value::VmNativeFunction(BUILTIN_JSON_STRINGIFY));
         json_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_JSON_PARSE));
+        json_map.insert("__nonenumerable_stringify__".to_string(), Value::Boolean(true));
+        json_map.insert("__nonenumerable_parse__".to_string(), Value::Boolean(true));
         self.globals
             .insert("JSON".to_string(), Value::VmObject(Rc::new(RefCell::new(json_map))));
 
@@ -6028,6 +6222,21 @@ impl<'gc> VM<'gc> {
         reflect_map.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_REFLECT_APPLY));
         reflect_map.insert("construct".to_string(), Self::make_host_fn("reflect.construct"));
         reflect_map.insert("setPrototypeOf".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_SETPROTOTYPEOF));
+        for key in [
+            "has",
+            "get",
+            "set",
+            "ownKeys",
+            "isExtensible",
+            "getPrototypeOf",
+            "getOwnPropertyDescriptor",
+            "defineProperty",
+            "apply",
+            "construct",
+            "setPrototypeOf",
+        ] {
+            reflect_map.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+        }
         self.globals
             .insert("Reflect".to_string(), Value::VmObject(Rc::new(RefCell::new(reflect_map))));
 
@@ -6037,6 +6246,15 @@ impl<'gc> VM<'gc> {
         array_obj.insert("of".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_OF));
         array_obj.insert("from".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_FROM));
         array_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAY as f64));
+        array_obj.insert("name".to_string(), Value::from("Array"));
+        array_obj.insert("length".to_string(), Value::Number(1.0));
+        array_obj.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        array_obj.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        array_obj.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        array_obj.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        array_obj.insert("__nonenumerable_isArray__".to_string(), Value::Boolean(true));
+        array_obj.insert("__nonenumerable_of__".to_string(), Value::Boolean(true));
+        array_obj.insert("__nonenumerable_from__".to_string(), Value::Boolean(true));
         let mut array_iter_proto = IndexMap::new();
         array_iter_proto.insert(
             "next".to_string(),
@@ -6087,7 +6305,44 @@ impl<'gc> VM<'gc> {
         arr_proto.insert("findLast".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_FINDLAST));
         arr_proto.insert("findLastIndex".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_FINDLASTINDEX));
         arr_proto.insert("reduceRight".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_REDUCERIGHT));
+        for key in [
+            "@@sym:1",
+            "push",
+            "pop",
+            "join",
+            "toString",
+            "indexOf",
+            "slice",
+            "concat",
+            "map",
+            "filter",
+            "forEach",
+            "reduce",
+            "shift",
+            "unshift",
+            "splice",
+            "reverse",
+            "sort",
+            "find",
+            "findIndex",
+            "includes",
+            "flat",
+            "flatMap",
+            "at",
+            "every",
+            "some",
+            "fill",
+            "lastIndexOf",
+            "findLast",
+            "findLastIndex",
+            "reduceRight",
+        ] {
+            arr_proto.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+        }
         array_obj.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(arr_proto))));
+        array_obj.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+        array_obj.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        array_obj.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
         self.globals
             .insert("Array".to_string(), Value::VmObject(Rc::new(RefCell::new(array_obj))));
 
@@ -6099,13 +6354,20 @@ impl<'gc> VM<'gc> {
                 ("SyntaxError", BUILTIN_CTOR_SYNTAXERROR),
                 ("RangeError", BUILTIN_CTOR_RANGEERROR),
                 ("ReferenceError", BUILTIN_CTOR_REFERENCEERROR),
+                ("EvalError", BUILTIN_CTOR_ERROR),
+                ("URIError", BUILTIN_CTOR_ERROR),
             ];
             for &(name, id) in error_types {
                 let mut proto = IndexMap::new();
                 proto.insert("name".to_string(), Value::from(name));
                 proto.insert("message".to_string(), Value::from(""));
+                proto.insert(
+                    "toString".to_string(),
+                    Self::make_host_fn_with_name_len("error.toString", "toString", 0.0, false),
+                );
                 proto.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
                 proto.insert("__nonenumerable_message__".to_string(), Value::Boolean(true));
+                proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
                 let proto_obj = Value::VmObject(Rc::new(RefCell::new(proto)));
 
                 let mut ctor = IndexMap::new();
@@ -6130,7 +6392,7 @@ impl<'gc> VM<'gc> {
             }
             // Set sub-error prototype chains: TypeError.prototype.__proto__ = Error.prototype, etc.
             let error_proto = self.read_named_property(self.globals.get("Error").cloned().unwrap_or(Value::Undefined), "prototype");
-            for &sub in &["TypeError", "SyntaxError", "RangeError", "ReferenceError"] {
+            for &sub in &["TypeError", "SyntaxError", "RangeError", "ReferenceError", "EvalError", "URIError"] {
                 let sub_proto = self.read_named_property(self.globals.get(sub).cloned().unwrap_or(Value::Undefined), "prototype");
                 if let Value::VmObject(p) = &sub_proto {
                     p.borrow_mut().insert("__proto__".to_string(), error_proto.clone());
@@ -6157,11 +6419,92 @@ impl<'gc> VM<'gc> {
         {
             date_proto.insert("__proto__".to_string(), obj_proto);
         }
+        for (key, value) in [
+            ("getTime", Value::VmNativeFunction(BUILTIN_DATE_GETTIME)),
+            ("valueOf", Value::VmNativeFunction(BUILTIN_DATE_VALUEOF)),
+            ("toString", Value::VmNativeFunction(BUILTIN_DATE_TOSTRING)),
+            (
+                "toTimeString",
+                Self::make_host_fn_with_name_len("date.toTimeString", "toTimeString", 0.0, false),
+            ),
+            ("toUTCString", Value::VmNativeFunction(BUILTIN_DATE_TOSTRING)),
+            ("toDateString", Value::VmNativeFunction(BUILTIN_DATE_TODATESTRING)),
+            ("setTime", Value::VmNativeFunction(BUILTIN_DATE_SETTIME)),
+            ("toJSON", Self::make_host_fn_with_name_len("date.toJSON", "toJSON", 1.0, false)),
+            ("toLocaleDateString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING)),
+            ("toLocaleTimeString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING)),
+            ("toLocaleString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALESTRING)),
+            ("toISOString", Value::VmNativeFunction(BUILTIN_DATE_TOISOSTRING)),
+            ("getFullYear", Value::VmNativeFunction(BUILTIN_DATE_GETFULLYEAR)),
+            ("getMonth", Value::VmNativeFunction(BUILTIN_DATE_GETMONTH)),
+            ("getDate", Value::VmNativeFunction(BUILTIN_DATE_GETDATE)),
+            ("getDay", Value::VmNativeFunction(BUILTIN_DATE_GETDAY)),
+            ("getUTCDay", Value::VmNativeFunction(BUILTIN_DATE_GETDAY)),
+            ("getHours", Value::VmNativeFunction(BUILTIN_DATE_GETHOURS)),
+            ("getMinutes", Value::VmNativeFunction(BUILTIN_DATE_GETMINUTES)),
+            ("getSeconds", Value::VmNativeFunction(BUILTIN_DATE_GETSECONDS)),
+            ("getMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS)),
+            ("setFullYear", Value::VmNativeFunction(BUILTIN_DATE_SETFULLYEAR)),
+            (
+                "setUTCFullYear",
+                Self::make_host_fn_with_name_len("date.setUTCFullYear", "setUTCFullYear", 3.0, false),
+            ),
+            ("setMonth", Value::VmNativeFunction(BUILTIN_DATE_SETMONTH)),
+            (
+                "setUTCMonth",
+                Self::make_host_fn_with_name_len("date.setUTCMonth", "setUTCMonth", 2.0, false),
+            ),
+            ("setDate", Value::VmNativeFunction(BUILTIN_DATE_SETDATE)),
+            (
+                "setUTCDate",
+                Self::make_host_fn_with_name_len("date.setUTCDate", "setUTCDate", 1.0, false),
+            ),
+            ("setHours", Value::VmNativeFunction(BUILTIN_DATE_SETHOURS)),
+            (
+                "setUTCHours",
+                Self::make_host_fn_with_name_len("date.setUTCHours", "setUTCHours", 4.0, false),
+            ),
+            ("setMinutes", Value::VmNativeFunction(BUILTIN_DATE_SETMINUTES)),
+            (
+                "setUTCMinutes",
+                Self::make_host_fn_with_name_len("date.setUTCMinutes", "setUTCMinutes", 3.0, false),
+            ),
+            (
+                "setSeconds",
+                Self::make_host_fn_with_name_len("date.setSeconds", "setSeconds", 2.0, false),
+            ),
+            (
+                "setUTCSeconds",
+                Self::make_host_fn_with_name_len("date.setUTCSeconds", "setUTCSeconds", 2.0, false),
+            ),
+            (
+                "setMilliseconds",
+                Self::make_host_fn_with_name_len("date.setMilliseconds", "setMilliseconds", 1.0, false),
+            ),
+            (
+                "setUTCMilliseconds",
+                Self::make_host_fn_with_name_len("date.setUTCMilliseconds", "setUTCMilliseconds", 1.0, false),
+            ),
+            ("getTimezoneOffset", Value::VmNativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET)),
+            ("getUTCFullYear", Value::VmNativeFunction(BUILTIN_DATE_GETUTCFULLYEAR)),
+            ("getUTCMonth", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMONTH)),
+            ("getUTCDate", Value::VmNativeFunction(BUILTIN_DATE_GETUTCDATE)),
+            ("getUTCHours", Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS)),
+            ("getUTCMinutes", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES)),
+            ("getUTCSeconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS)),
+            ("getUTCMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS)),
+        ] {
+            date_proto.insert(key.to_string(), value);
+            date_proto.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+        }
         let date_proto_val = Value::VmObject(Rc::new(RefCell::new(date_proto)));
         date_map.insert("prototype".to_string(), date_proto_val.clone());
         date_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
         date_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
         date_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        date_map.insert("__nonenumerable_now__".to_string(), Value::Boolean(true));
+        date_map.insert("__nonenumerable_parse__".to_string(), Value::Boolean(true));
+        date_map.insert("__nonenumerable_UTC__".to_string(), Value::Boolean(true));
         let date_ctor_val = Value::VmObject(Rc::new(RefCell::new(date_map)));
         if let Value::VmObject(proto_obj) = &date_proto_val {
             proto_obj.borrow_mut().insert("constructor".to_string(), date_ctor_val.clone());
@@ -6481,6 +6824,18 @@ impl<'gc> VM<'gc> {
             "propertyIsEnumerable".to_string(),
             Self::make_host_fn("object.propertyIsEnumerable"),
         );
+        for key in [
+            "hasOwnProperty",
+            "toString",
+            "toLocaleString",
+            "valueOf",
+            "isPrototypeOf",
+            "propertyIsEnumerable",
+        ] {
+            object_proto
+                .borrow_mut()
+                .insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+        }
         // Object.prototype is the root — explicitly null __proto__
         object_proto.borrow_mut().insert("__proto__".to_string(), Value::Null);
         object_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_OBJECT as f64));
@@ -6491,10 +6846,13 @@ impl<'gc> VM<'gc> {
         object_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
         object_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
         object_map.insert("prototype".to_string(), Value::VmObject(object_proto.clone()));
+        object_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+        object_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+        object_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
         object_map.insert("keys".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_KEYS));
         object_map.insert("values".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_VALUES));
         object_map.insert("entries".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_ENTRIES));
-        object_map.insert("is".to_string(), Self::make_host_fn("object.is"));
+        object_map.insert("is".to_string(), Self::make_host_fn_with_name_len("object.is", "is", 2.0, false));
         object_map.insert("assign".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_ASSIGN));
         object_map.insert("freeze".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_FREEZE));
         object_map.insert("hasOwn".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_HASOWN));
@@ -6502,10 +6860,22 @@ impl<'gc> VM<'gc> {
         object_map.insert("getPrototypeOf".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_GETPROTOTYPEOF));
         object_map.insert("defineProperties".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_DEFINEPROPS));
         object_map.insert("preventExtensions".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_PREVENTEXT));
-        object_map.insert("isExtensible".to_string(), Self::make_host_fn("reflect.isExtensible"));
-        object_map.insert("seal".to_string(), Self::make_host_fn("object.seal"));
-        object_map.insert("isSealed".to_string(), Self::make_host_fn("object.isSealed"));
-        object_map.insert("isFrozen".to_string(), Self::make_host_fn("object.isFrozen"));
+        object_map.insert(
+            "isExtensible".to_string(),
+            Self::make_host_fn_with_name_len("reflect.isExtensible", "isExtensible", 1.0, false),
+        );
+        object_map.insert(
+            "seal".to_string(),
+            Self::make_host_fn_with_name_len("object.seal", "seal", 1.0, false),
+        );
+        object_map.insert(
+            "isSealed".to_string(),
+            Self::make_host_fn_with_name_len("object.isSealed", "isSealed", 1.0, false),
+        );
+        object_map.insert(
+            "isFrozen".to_string(),
+            Self::make_host_fn_with_name_len("object.isFrozen", "isFrozen", 1.0, false),
+        );
         object_map.insert("groupBy".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_GROUPBY));
         object_map.insert("defineProperty".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_DEFINEPROP));
         object_map.insert(
@@ -6525,6 +6895,32 @@ impl<'gc> VM<'gc> {
             "getOwnPropertySymbols".to_string(),
             Self::make_host_fn("object.getOwnPropertySymbols"),
         );
+        for key in [
+            "keys",
+            "values",
+            "entries",
+            "is",
+            "assign",
+            "freeze",
+            "hasOwn",
+            "create",
+            "getPrototypeOf",
+            "defineProperties",
+            "preventExtensions",
+            "isExtensible",
+            "seal",
+            "isSealed",
+            "isFrozen",
+            "groupBy",
+            "defineProperty",
+            "getOwnPropertyDescriptor",
+            "setPrototypeOf",
+            "getOwnPropertyNames",
+            "getOwnPropertyDescriptors",
+            "getOwnPropertySymbols",
+        ] {
+            object_map.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+        }
         let object_val = Value::VmObject(Rc::new(RefCell::new(object_map)));
         // Set Object.prototype.constructor = Object (circular reference)
         object_proto.borrow_mut().insert("constructor".to_string(), object_val.clone());
@@ -6562,6 +6958,12 @@ impl<'gc> VM<'gc> {
         let mut number_map = IndexMap::new();
         number_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_NUMBER as f64));
         number_map.insert("__frozen__".to_string(), Value::Boolean(true));
+        number_map.insert("name".to_string(), Value::from("Number"));
+        number_map.insert("length".to_string(), Value::Number(1.0));
+        number_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        number_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        number_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        number_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
         number_map.insert("MAX_VALUE".to_string(), Value::Number(f64::MAX));
         number_map.insert("MIN_VALUE".to_string(), Value::Number(5e-324));
         number_map.insert("NaN".to_string(), Value::Number(f64::NAN));
@@ -6579,10 +6981,54 @@ impl<'gc> VM<'gc> {
         // Number.prototype stubs for test compatibility
         let mut num_proto = IndexMap::new();
         num_proto.insert("toFixed".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOFIXED));
+        num_proto.insert("toExponential".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL));
+        num_proto.insert("toPrecision".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION));
+        num_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOSTRING));
+        num_proto.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_NUM_VALUEOF));
+        num_proto.insert("__nonenumerable_toFixed__".to_string(), Value::Boolean(true));
+        num_proto.insert("__nonenumerable_toExponential__".to_string(), Value::Boolean(true));
+        num_proto.insert("__nonenumerable_toPrecision__".to_string(), Value::Boolean(true));
+        num_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
+        num_proto.insert("__nonenumerable_valueOf__".to_string(), Value::Boolean(true));
         num_proto.insert("call".to_string(), Value::Undefined); // stub
         num_proto.insert("__proto__".to_string(), Value::VmObject(object_proto.clone()));
         let num_proto_obj = Rc::new(RefCell::new(num_proto));
         number_map.insert("prototype".to_string(), Value::VmObject(num_proto_obj.clone()));
+        number_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+        number_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+        number_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        for key in [
+            "MAX_VALUE",
+            "MIN_VALUE",
+            "NaN",
+            "POSITIVE_INFINITY",
+            "NEGATIVE_INFINITY",
+            "EPSILON",
+            "MAX_SAFE_INTEGER",
+            "MIN_SAFE_INTEGER",
+            "isNaN",
+            "isFinite",
+            "isInteger",
+            "isSafeInteger",
+            "parseFloat",
+            "parseInt",
+        ] {
+            number_map.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+            if matches!(
+                key,
+                "MAX_VALUE"
+                    | "MIN_VALUE"
+                    | "NaN"
+                    | "POSITIVE_INFINITY"
+                    | "NEGATIVE_INFINITY"
+                    | "EPSILON"
+                    | "MAX_SAFE_INTEGER"
+                    | "MIN_SAFE_INTEGER"
+            ) {
+                number_map.insert(format!("__readonly_{}__", key), Value::Boolean(true));
+                number_map.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+            }
+        }
         let number_ctor = Value::VmObject(Rc::new(RefCell::new(number_map)));
         num_proto_obj.borrow_mut().insert("constructor".to_string(), number_ctor.clone());
         num_proto_obj
@@ -6597,11 +7043,50 @@ impl<'gc> VM<'gc> {
         // String constructor (as VmObject with __native_id__ for typeof "function")
         let mut string_map = IndexMap::new();
         string_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_STRING as f64));
+        string_map.insert("name".to_string(), Value::from("String"));
+        string_map.insert("length".to_string(), Value::Number(1.0));
+        string_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        string_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        string_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        string_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
         string_map.insert("fromCharCode".to_string(), Value::VmNativeFunction(BUILTIN_STRING_FROMCHARCODE));
+        string_map.insert("__nonenumerable_fromCharCode__".to_string(), Value::Boolean(true));
         let mut string_proto = IndexMap::new();
         string_proto.insert("__proto__".to_string(), Value::VmObject(object_proto.clone()));
+        for (name, builtin_id) in [
+            ("toString", BUILTIN_STRING_VALUEOF),
+            ("valueOf", BUILTIN_STRING_VALUEOF),
+            ("split", BUILTIN_STRING_SPLIT),
+            ("indexOf", BUILTIN_STRING_INDEXOF),
+            ("slice", BUILTIN_STRING_SLICE),
+            ("toUpperCase", BUILTIN_STRING_TOUPPERCASE),
+            ("toLowerCase", BUILTIN_STRING_TOLOWERCASE),
+            ("trim", BUILTIN_STRING_TRIM),
+            ("charAt", BUILTIN_STRING_CHARAT),
+            ("includes", BUILTIN_STRING_INCLUDES),
+            ("replace", BUILTIN_STRING_REPLACE),
+            ("replaceAll", BUILTIN_STRING_REPLACEALL),
+            ("match", BUILTIN_STRING_MATCH),
+            ("search", BUILTIN_STRING_SEARCH),
+            ("startsWith", BUILTIN_STRING_STARTSWITH),
+            ("endsWith", BUILTIN_STRING_ENDSWITH),
+            ("substring", BUILTIN_STRING_SUBSTRING),
+            ("padStart", BUILTIN_STRING_PADSTART),
+            ("padEnd", BUILTIN_STRING_PADEND),
+            ("repeat", BUILTIN_STRING_REPEAT),
+            ("charCodeAt", BUILTIN_STRING_CHARCODEAT),
+            ("trimStart", BUILTIN_STRING_TRIMSTART),
+            ("trimEnd", BUILTIN_STRING_TRIMEND),
+            ("lastIndexOf", BUILTIN_STRING_LASTINDEXOF),
+        ] {
+            string_proto.insert(name.to_string(), Value::VmNativeFunction(builtin_id));
+            string_proto.insert(format!("__nonenumerable_{}__", name), Value::Boolean(true));
+        }
         let string_proto_obj = Rc::new(RefCell::new(string_proto));
         string_map.insert("prototype".to_string(), Value::VmObject(string_proto_obj.clone()));
+        string_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+        string_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+        string_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
         let string_ctor = Value::VmObject(Rc::new(RefCell::new(string_map)));
         string_proto_obj.borrow_mut().insert("constructor".to_string(), string_ctor.clone());
         string_proto_obj
@@ -6661,6 +7146,56 @@ impl<'gc> VM<'gc> {
         self.globals.insert("NaN".to_string(), Value::Number(f64::NAN));
         self.globals.insert("undefined".to_string(), Value::Undefined);
 
+        {
+            let mut gt = self.global_this.borrow_mut();
+            for name in [
+                "isNaN",
+                "isFinite",
+                "encodeURI",
+                "decodeURI",
+                "encodeURIComponent",
+                "decodeURIComponent",
+                "parseInt",
+                "parseFloat",
+                "eval",
+                "Object",
+                "Function",
+                "Array",
+                "String",
+                "Number",
+                "Boolean",
+                "Date",
+                "RegExp",
+                "JSON",
+                "Math",
+                "Reflect",
+                "Error",
+                "TypeError",
+                "SyntaxError",
+                "RangeError",
+                "ReferenceError",
+                "EvalError",
+                "URIError",
+            ] {
+                if let Some(v) = self.globals.get(name).cloned() {
+                    gt.insert(name.to_string(), v);
+                    gt.insert(format!("__nonenumerable_{}__", name), Value::Boolean(true));
+                }
+            }
+            gt.insert("Infinity".to_string(), Value::Number(f64::INFINITY));
+            gt.insert("NaN".to_string(), Value::Number(f64::NAN));
+            gt.insert("undefined".to_string(), Value::Undefined);
+            gt.insert("__nonenumerable_Infinity__".to_string(), Value::Boolean(true));
+            gt.insert("__nonenumerable_NaN__".to_string(), Value::Boolean(true));
+            gt.insert("__nonenumerable_undefined__".to_string(), Value::Boolean(true));
+            gt.insert("__readonly_Infinity__".to_string(), Value::Boolean(true));
+            gt.insert("__readonly_NaN__".to_string(), Value::Boolean(true));
+            gt.insert("__readonly_undefined__".to_string(), Value::Boolean(true));
+            gt.insert("__nonconfigurable_Infinity__".to_string(), Value::Boolean(true));
+            gt.insert("__nonconfigurable_NaN__".to_string(), Value::Boolean(true));
+            gt.insert("__nonconfigurable_undefined__".to_string(), Value::Boolean(true));
+        }
+
         // Map / Set constructors
         self.globals.insert("Map".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_MAP));
         self.globals.insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
@@ -6690,6 +7225,15 @@ impl<'gc> VM<'gc> {
             {
                 regexp_proto.insert("__proto__".to_string(), obj_proto);
             }
+            regexp_proto.insert("exec".to_string(), Value::VmNativeFunction(BUILTIN_REGEX_EXEC));
+            regexp_proto.insert("test".to_string(), Value::VmNativeFunction(BUILTIN_REGEX_TEST));
+            regexp_proto.insert(
+                "toString".to_string(),
+                Self::make_host_fn_with_name_len("regexp.toString", "toString", 0.0, false),
+            );
+            regexp_proto.insert("__nonenumerable_exec__".to_string(), Value::Boolean(true));
+            regexp_proto.insert("__nonenumerable_test__".to_string(), Value::Boolean(true));
+            regexp_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
             let regexp_proto_val = Value::VmObject(Rc::new(RefCell::new(regexp_proto)));
             let mut regexp_ctor = IndexMap::new();
             regexp_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_REGEXP as f64));
@@ -6758,6 +7302,9 @@ impl<'gc> VM<'gc> {
         fn_proto.insert("call".to_string(), Value::VmNativeFunction(BUILTIN_FN_CALL));
         fn_proto.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_FN_APPLY));
         fn_proto.insert("bind".to_string(), Value::VmNativeFunction(BUILTIN_FN_BIND));
+        fn_proto.insert("__nonenumerable_call__".to_string(), Value::Boolean(true));
+        fn_proto.insert("__nonenumerable_apply__".to_string(), Value::Boolean(true));
+        fn_proto.insert("__nonenumerable_bind__".to_string(), Value::Boolean(true));
         if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
             && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
         {
@@ -6767,15 +7314,31 @@ impl<'gc> VM<'gc> {
         let fn_proto_val = Value::VmObject(fn_proto_obj.clone());
         let mut function_map = IndexMap::new();
         function_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
+        function_map.insert("name".to_string(), Value::from("Function"));
         function_map.insert("prototype".to_string(), fn_proto_val);
         function_map.insert("length".to_string(), Value::Number(1.0));
+        function_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        function_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
         function_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        function_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        function_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+        function_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+        function_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
         let function_val = Value::VmObject(Rc::new(RefCell::new(function_map)));
+        if let Value::VmObject(function_obj) = &function_val {
+            function_obj
+                .borrow_mut()
+                .insert("__proto__".to_string(), Value::VmObject(fn_proto_obj.clone()));
+        }
         fn_proto_obj.borrow_mut().insert("constructor".to_string(), function_val.clone());
         fn_proto_obj
             .borrow_mut()
             .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
-        self.globals.insert("Function".to_string(), function_val);
+        self.globals.insert("Function".to_string(), function_val.clone());
+        self.global_this.borrow_mut().insert("Function".to_string(), function_val);
+        self.global_this
+            .borrow_mut()
+            .insert("__nonenumerable_Function__".to_string(), Value::Boolean(true));
 
         // Now that Function exists, set Object.__proto__ = Function.prototype
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object") {
@@ -6783,12 +7346,25 @@ impl<'gc> VM<'gc> {
                 .borrow_mut()
                 .insert("__proto__".to_string(), Value::VmObject(fn_proto_obj.clone()));
         }
-        // Also set Error/TypeError/etc.__proto__ = Function.prototype
-        for err_name in &["Error", "TypeError", "SyntaxError", "RangeError", "ReferenceError"] {
-            if let Some(Value::VmObject(ctor)) = self.globals.get(*err_name) {
+        // Most constructors have [[Prototype]] = Function.prototype.
+        // Error sub-constructors are handled separately below (their [[Prototype]] = Error).
+        for ctor_name in &["Error", "Array", "Date", "Number", "String", "Boolean", "RegExp"] {
+            if let Some(Value::VmObject(ctor)) = self.globals.get(*ctor_name) {
                 ctor.borrow_mut()
                     .insert("__proto__".to_string(), Value::VmObject(fn_proto_obj.clone()));
             }
+        }
+        if let Some(error_ctor) = self.globals.get("Error").cloned() {
+            for sub in ["TypeError", "SyntaxError", "RangeError", "ReferenceError", "EvalError", "URIError"] {
+                if let Some(Value::VmObject(ctor)) = self.globals.get(sub) {
+                    ctor.borrow_mut().insert("__proto__".to_string(), error_ctor.clone());
+                }
+            }
+        }
+        if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+            && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
+        {
+            self.global_this.borrow_mut().insert("__proto__".to_string(), obj_proto);
         }
 
         // %AsyncFunction% constructor and %AsyncFunction.prototype%
@@ -9988,8 +10564,76 @@ impl<'gc> VM<'gc> {
             // Object.freeze(obj) — mark as frozen (stub: just returns the object)
             BUILTIN_OBJECT_FREEZE => {
                 if let Some(Value::VmObject(obj)) = args.first() {
-                    obj.borrow_mut().insert("__frozen__".to_string(), Value::Boolean(true));
+                    let keys: Vec<String> = {
+                        let b = obj.borrow();
+                        let mut keys: Vec<String> = b
+                            .keys()
+                            .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
+                            .cloned()
+                            .collect();
+                        for k in b.keys() {
+                            if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                                && !keys.contains(&name.to_string())
+                            {
+                                keys.push(name.to_string());
+                            }
+                        }
+                        keys
+                    };
+                    let mut b = obj.borrow_mut();
+                    for key in keys {
+                        b.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+                        let is_accessor = b.contains_key(&format!("__get_{}", key))
+                            || b.contains_key(&format!("__set_{}", key))
+                            || matches!(b.get(&key), Some(Value::Property { .. }));
+                        if !is_accessor {
+                            b.insert(format!("__readonly_{}__", key), Value::Boolean(true));
+                        }
+                    }
+                    b.insert("__non_extensible__".to_string(), Value::Boolean(true));
+                    b.insert("__frozen__".to_string(), Value::Boolean(true));
                     Value::VmObject(obj.clone())
+                } else if let Some(Value::VmArray(arr)) = args.first() {
+                    let len = arr.borrow().elements.len();
+                    let mut b = arr.borrow_mut();
+                    for i in 0..len {
+                        if b.props.contains_key(&format!("__deleted_{}", i)) {
+                            continue;
+                        }
+                        let key = i.to_string();
+                        b.props.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+                        b.props.insert(format!("__readonly_{}__", key), Value::Boolean(true));
+                    }
+                    let prop_keys: Vec<String> = b.props.keys().filter(|k| !k.starts_with("__")).cloned().collect();
+                    for key in prop_keys {
+                        b.props.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+                        let has_accessor =
+                            b.props.contains_key(&format!("__get_{}", key)) || b.props.contains_key(&format!("__set_{}", key));
+                        if !has_accessor {
+                            b.props.insert(format!("__readonly_{}__", key), Value::Boolean(true));
+                        }
+                    }
+                    b.props.insert("__readonly_length__".to_string(), Value::Boolean(true));
+                    b.props.insert("__nonconfigurable_length__".to_string(), Value::Boolean(true));
+                    b.props.insert("__non_extensible__".to_string(), Value::Boolean(true));
+                    b.props.insert("__frozen__".to_string(), Value::Boolean(true));
+                    Value::VmArray(arr.clone())
+                } else if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
+                    let props = self.get_fn_props(*ip, *arity);
+                    let keys: Vec<String> = props
+                        .borrow()
+                        .keys()
+                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
+                        .cloned()
+                        .collect();
+                    let mut b = props.borrow_mut();
+                    for key in keys {
+                        b.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+                        b.insert(format!("__readonly_{}__", key), Value::Boolean(true));
+                    }
+                    b.insert("__non_extensible__".to_string(), Value::Boolean(true));
+                    b.insert("__frozen__".to_string(), Value::Boolean(true));
+                    args.first().cloned().unwrap_or(Value::Undefined)
                 } else {
                     args.first().cloned().unwrap_or(Value::Undefined)
                 }
@@ -10087,7 +10731,17 @@ impl<'gc> VM<'gc> {
             }
             // Object.getPrototypeOf(obj)
             BUILTIN_OBJECT_GETPROTOTYPEOF => {
-                if let Some(Value::VmObject(map)) = args.first() {
+                let Some(target) = args.first() else {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                };
+
+                if matches!(target, Value::Undefined | Value::Null) {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+
+                if let Value::VmObject(map) = target {
                     let borrow = map.borrow();
                     if let Some(proto) = borrow.get("__proto__") {
                         proto.clone()
@@ -10108,7 +10762,7 @@ impl<'gc> VM<'gc> {
                             Value::Null
                         }
                     }
-                } else if let Some(Value::VmArray(arr)) = args.first() {
+                } else if let Value::VmArray(arr) = target {
                     if let Some(proto) = arr.borrow().props.get("__proto__").cloned() {
                         proto
                     } else if let Some(Value::VmObject(array_ctor)) = self.globals.get("Array") {
@@ -10116,9 +10770,27 @@ impl<'gc> VM<'gc> {
                     } else {
                         Value::Null
                     }
-                } else if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
+                } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = target {
                     let props = self.get_fn_props(*ip, *arity);
                     props.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
+                } else if matches!(target, Value::Number(_)) {
+                    if let Some(Value::VmObject(number_ctor)) = self.globals.get("Number") {
+                        number_ctor.borrow().get("prototype").cloned().unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
+                } else if matches!(target, Value::String(_)) {
+                    if let Some(Value::VmObject(string_ctor)) = self.globals.get("String") {
+                        string_ctor.borrow().get("prototype").cloned().unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
+                } else if matches!(target, Value::Boolean(_)) {
+                    if let Some(Value::VmObject(boolean_ctor)) = self.globals.get("Boolean") {
+                        boolean_ctor.borrow().get("prototype").cloned().unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
                 } else {
                     Value::Null
                 }
@@ -10193,10 +10865,20 @@ impl<'gc> VM<'gc> {
             }
             // Object.getOwnPropertyDescriptor(obj, prop)
             BUILTIN_OBJECT_GETOWNPROPDESC => {
-                let key = args
-                    .get(1)
-                    .and_then(|v| self.as_property_key_string(v).ok())
-                    .unwrap_or_else(|| args.get(1).map(value_to_string).unwrap_or_default());
+                if matches!(args.first(), None | Some(Value::Undefined) | Some(Value::Null)) {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                let key = match args.get(1) {
+                    Some(v) => match self.as_property_key_string(v) {
+                        Ok(k) => k,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    },
+                    None => String::new(),
+                };
                 let make_desc = |value: Value<'gc>, writable: bool, enumerable: bool, configurable: bool| -> Value<'gc> {
                     let mut desc = IndexMap::new();
                     desc.insert("value".to_string(), value);
@@ -10205,9 +10887,35 @@ impl<'gc> VM<'gc> {
                     desc.insert("configurable".to_string(), Value::Boolean(configurable));
                     Value::VmObject(Rc::new(RefCell::new(desc)))
                 };
+                if let Some(Value::String(s)) = args.first() {
+                    if key == "length" {
+                        return make_desc(Value::Number(s.len() as f64), false, false, false);
+                    }
+                    if let Ok(idx) = key.parse::<usize>()
+                        && idx < s.len()
+                    {
+                        let ch = String::from_utf16_lossy(&[s[idx]]);
+                        return make_desc(Value::from(&ch), false, true, false);
+                    }
+                    return Value::Undefined;
+                }
                 match args.first() {
                     Some(Value::VmObject(obj)) => {
                         let borrow = obj.borrow();
+                        if let (Some(Value::String(type_name_u16)), Some(Value::String(str_u16))) =
+                            (borrow.get("__type__"), borrow.get("__value__"))
+                            && crate::unicode::utf16_to_utf8(type_name_u16) == "String"
+                        {
+                            if key == "length" {
+                                return make_desc(Value::Number(str_u16.len() as f64), false, false, false);
+                            }
+                            if let Ok(idx) = key.parse::<usize>()
+                                && idx < str_u16.len()
+                            {
+                                let ch = String::from_utf16_lossy(&[str_u16[idx]]);
+                                return make_desc(Value::from(&ch), false, true, false);
+                            }
+                        }
                         let ro_key = format!("__readonly_{}__", key);
                         let is_readonly = borrow.contains_key(&ro_key);
                         let nc_key = format!("__nonconfigurable_{}__", key);
@@ -10306,16 +11014,58 @@ impl<'gc> VM<'gc> {
                     Some(Value::VmFunction(ip, arity)) | Some(Value::VmClosure(ip, arity, _)) => {
                         let fn_props = self.get_fn_props(*ip, *arity);
                         let borrow = fn_props.borrow();
+                        let ro_key = format!("__readonly_{}__", key);
+                        let is_readonly = borrow.contains_key(&ro_key);
+                        let nc_key = format!("__nonconfigurable_{}__", key);
+                        let is_nonconfigurable = borrow.contains_key(&nc_key);
+                        let ne_key = format!("__nonenumerable_{}__", key);
+                        let is_nonenumerable = borrow.contains_key(&ne_key);
                         if let Some(val) = borrow.get(&key) {
-                            // name and length are non-writable, non-enumerable, configurable
-                            let (writable, enumerable, configurable) = if key == "name" || key == "length" {
-                                (false, false, true)
-                            } else {
-                                (true, true, true)
-                            };
-                            make_desc(val.clone(), writable, enumerable, configurable)
+                            make_desc(val.clone(), !is_readonly, !is_nonenumerable, !is_nonconfigurable)
                         } else {
-                            Value::Undefined
+                            let getter_key = format!("__get_{}", key);
+                            let setter_key = format!("__set_{}", key);
+                            let has_getter = borrow.contains_key(&getter_key);
+                            let has_setter = borrow.contains_key(&setter_key);
+                            if has_getter || has_setter {
+                                let mut desc = IndexMap::new();
+                                desc.insert("get".to_string(), borrow.get(&getter_key).cloned().unwrap_or(Value::Undefined));
+                                desc.insert("set".to_string(), borrow.get(&setter_key).cloned().unwrap_or(Value::Undefined));
+                                desc.insert("enumerable".to_string(), Value::Boolean(!is_nonenumerable));
+                                desc.insert("configurable".to_string(), Value::Boolean(!is_nonconfigurable));
+                                Value::VmObject(Rc::new(RefCell::new(desc)))
+                            } else {
+                                Value::Undefined
+                            }
+                        }
+                    }
+                    Some(Value::VmNativeFunction(id)) => {
+                        let native_name = match *id {
+                            BUILTIN_OBJECT_CREATE => "create",
+                            BUILTIN_OBJECT_DEFINEPROP => "defineProperty",
+                            BUILTIN_OBJECT_DEFINEPROPS => "defineProperties",
+                            BUILTIN_OBJECT_GETOWNPROPDESC => "getOwnPropertyDescriptor",
+                            BUILTIN_OBJECT_GETOWNPROPERTYNAMES => "getOwnPropertyNames",
+                            BUILTIN_OBJECT_GETPROTOTYPEOF => "getPrototypeOf",
+                            BUILTIN_OBJECT_PREVENTEXT => "preventExtensions",
+                            BUILTIN_OBJECT_FREEZE => "freeze",
+                            BUILTIN_OBJECT_SETPROTOTYPEOF => "setPrototypeOf",
+                            BUILTIN_OBJECT_HASOWN => "hasOwn",
+                            BUILTIN_OBJECT_GROUPBY => "groupBy",
+                            BUILTIN_OBJECT_VALUES => "values",
+                            BUILTIN_OBJECT_ENTRIES => "entries",
+                            BUILTIN_OBJECT_KEYS => "keys",
+                            _ => "",
+                        };
+                        let native_len = match *id {
+                            BUILTIN_OBJECT_CREATE | BUILTIN_OBJECT_DEFINEPROPS => 2.0,
+                            BUILTIN_OBJECT_DEFINEPROP => 3.0,
+                            _ => 1.0,
+                        };
+                        match key.as_str() {
+                            "name" => make_desc(Value::from(native_name), false, false, true),
+                            "length" => make_desc(Value::Number(native_len), false, false, true),
+                            _ => Value::Undefined,
                         }
                     }
                     _ => Value::Undefined,
@@ -10410,6 +11160,24 @@ impl<'gc> VM<'gc> {
             }
             // Object.getOwnPropertyNames(obj) → array of own property names (including non-enumerable)
             BUILTIN_OBJECT_GETOWNPROPERTYNAMES => {
+                let mk_names_array = |vals: Vec<Value<'gc>>, this: &mut Self| -> Value<'gc> {
+                    let arr = Rc::new(RefCell::new(VmArrayData::new(vals)));
+                    if let Some(Value::VmObject(array_ctor)) = this.globals.get("Array")
+                        && let Some(proto) = array_ctor.borrow().get("prototype").cloned()
+                    {
+                        arr.borrow_mut().props.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmArray(arr)
+                };
+                if matches!(args.first(), None | Some(Value::Undefined) | Some(Value::Null)) {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                if let Some(Value::String(s)) = args.first() {
+                    let mut names: Vec<Value<'gc>> = (0..s.len()).map(|i| Value::from(i.to_string())).collect();
+                    names.push(Value::from("length"));
+                    return mk_names_array(names, self);
+                }
                 if let Some(Value::VmObject(obj)) = args.first() {
                     let borrow = obj.borrow();
                     let mut names: Vec<String> = borrow
@@ -10427,9 +11195,42 @@ impl<'gc> VM<'gc> {
                     }
                     drop(borrow);
                     let keys: Vec<Value<'gc>> = names.into_iter().map(|k| Value::from(&k)).collect();
-                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(keys))))
+                    mk_names_array(keys, self)
+                } else if let Some(Value::VmArray(arr)) = args.first() {
+                    let b = arr.borrow();
+                    let mut names: Vec<String> = Vec::new();
+                    for (i, v) in b.elements.iter().enumerate() {
+                        if !matches!(v, Value::Undefined) && !b.props.contains_key(&format!("__deleted_{}", i)) {
+                            names.push(i.to_string());
+                        }
+                    }
+                    for k in b.props.keys() {
+                        if !k.starts_with("__") && !names.contains(k) {
+                            names.push(k.clone());
+                        }
+                    }
+                    let keys: Vec<Value<'gc>> = names.into_iter().map(Value::from).collect();
+                    mk_names_array(keys, self)
+                } else if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
+                    let props = self.get_fn_props(*ip, *arity);
+                    let b = props.borrow();
+                    let mut names: Vec<String> = b
+                        .keys()
+                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
+                        .cloned()
+                        .collect();
+                    for k in b.keys() {
+                        if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                            && !names.contains(&name.to_string())
+                        {
+                            names.push(name.to_string());
+                        }
+                    }
+                    drop(b);
+                    let keys: Vec<Value<'gc>> = names.into_iter().map(Value::from).collect();
+                    mk_names_array(keys, self)
                 } else {
-                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![]))))
+                    mk_names_array(Vec::new(), self)
                 }
             }
             // new Object() constructor
@@ -13682,24 +14483,52 @@ impl<'gc> VM<'gc> {
         let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
         let nonenumerable_key = format!("__nonenumerable_{}__", key);
 
-        {
+        let (
+            current_exists,
+            current_is_accessor,
+            current_has_getter,
+            current_has_setter,
+            current_enumerable,
+            current_configurable,
+            current_writable,
+            current_get,
+            current_set,
+            current_value,
+        ) = {
             let borrow = obj.borrow();
             let current_has_data = borrow.contains_key(key);
             let current_has_getter = borrow.contains_key(&getter_key);
             let current_has_setter = borrow.contains_key(&setter_key);
             let current_exists = current_has_data || current_has_getter || current_has_setter;
+            let current_is_accessor = current_has_getter || current_has_setter;
+            let current_enumerable = !borrow.contains_key(&nonenumerable_key);
+            let current_writable = !borrow.contains_key(&readonly_key);
+            let current_get = borrow.get(&getter_key).cloned().unwrap_or(Value::Undefined);
+            let current_set = borrow.get(&setter_key).cloned().unwrap_or(Value::Undefined);
+            let current_value = borrow.get(key).cloned().unwrap_or(Value::Undefined);
+            let current_configurable = !borrow.contains_key(&nonconfigurable_key);
+            (
+                current_exists,
+                current_is_accessor,
+                current_has_getter,
+                current_has_setter,
+                current_enumerable,
+                current_configurable,
+                current_writable,
+                current_get,
+                current_set,
+                current_value,
+            )
+        };
+
+        {
+            let borrow = obj.borrow();
             let is_non_extensible = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
             if !current_exists && is_non_extensible {
                 self.throw_type_error("Cannot add property, object is not extensible");
                 return false;
             }
-            let current_is_accessor = current_has_getter || current_has_setter;
             let current_configurable = !borrow.contains_key(&nonconfigurable_key);
-            let current_enumerable = !borrow.contains_key(&nonenumerable_key);
-            let current_writable = !borrow.contains_key(&readonly_key);
-            let current_value = borrow.get(key).cloned().unwrap_or(Value::Undefined);
-            let current_get = borrow.get(&getter_key).cloned().unwrap_or(Value::Undefined);
-            let current_set = borrow.get(&setter_key).cloned().unwrap_or(Value::Undefined);
 
             if current_exists && !current_configurable {
                 if matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
@@ -13763,13 +14592,30 @@ impl<'gc> VM<'gc> {
                 borrow.shift_remove(key);
             }
             if is_accessor {
+                // For existing accessor properties, omitted get/set fields preserve current values.
+                // For newly created/accessor-converted properties, omitted fields default to undefined.
+                let mut wrote_accessor_slot = false;
                 if let Some(getter) = desc.get("get") {
-                    // Store getter even if undefined — marks this as an accessor property
-                    borrow.insert(getter_key.clone(), getter.clone());
+                    if !matches!(getter, Value::Undefined) {
+                        borrow.insert(getter_key.clone(), getter.clone());
+                        wrote_accessor_slot = true;
+                    }
+                } else if current_exists && current_is_accessor && current_has_getter {
+                    borrow.insert(getter_key.clone(), current_get.clone());
+                    wrote_accessor_slot = true;
                 }
                 if let Some(setter) = desc.get("set") {
-                    // Store setter even if undefined — marks this as an accessor property
-                    borrow.insert(setter_key.clone(), setter.clone());
+                    if !matches!(setter, Value::Undefined) {
+                        borrow.insert(setter_key.clone(), setter.clone());
+                        wrote_accessor_slot = true;
+                    }
+                } else if current_exists && current_is_accessor && current_has_setter {
+                    borrow.insert(setter_key.clone(), current_set.clone());
+                    wrote_accessor_slot = true;
+                }
+                if !wrote_accessor_slot {
+                    // Preserve own accessor property presence when both getter and setter are undefined.
+                    borrow.insert(setter_key.clone(), Value::Undefined);
                 }
             } else {
                 if let Some(val) = desc.get("value") {
@@ -13780,8 +14626,16 @@ impl<'gc> VM<'gc> {
                 }
             }
 
-            let enumerable = matches!(desc.get("enumerable"), Some(Value::Boolean(true)));
-            let configurable = matches!(desc.get("configurable"), Some(Value::Boolean(true)));
+            let enumerable = match desc.get("enumerable") {
+                Some(Value::Boolean(v)) => *v,
+                _ if current_exists => current_enumerable,
+                _ => false,
+            };
+            let configurable = match desc.get("configurable") {
+                Some(Value::Boolean(v)) => *v,
+                _ if current_exists => current_configurable,
+                _ => false,
+            };
             if !enumerable {
                 borrow.insert(nonenumerable_key, Value::Boolean(true));
             }
@@ -13790,7 +14644,11 @@ impl<'gc> VM<'gc> {
             }
 
             if !is_accessor {
-                let writable = matches!(desc.get("writable"), Some(Value::Boolean(true)));
+                let writable = match desc.get("writable") {
+                    Some(Value::Boolean(v)) => *v,
+                    _ if current_exists && !current_is_accessor => current_writable,
+                    _ => false,
+                };
                 if !writable {
                     borrow.insert(readonly_key, Value::Boolean(true));
                 }
@@ -13937,11 +14795,67 @@ impl<'gc> VM<'gc> {
                 let nonenumerable_key = format!("__nonenumerable_{}__", key);
                 let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
                 let readonly_key = format!("__readonly_{}__", key);
+                let current_is_accessor = b.props.contains_key(&getter_key) || b.props.contains_key(&setter_key);
+                let current_has_getter = b.props.contains_key(&getter_key);
+                let current_has_setter = b.props.contains_key(&setter_key);
+                let current_enumerable = !b.props.contains_key(&nonenumerable_key);
+                let current_configurable = !b.props.contains_key(&nonconfigurable_key);
+                let current_writable = !b.props.contains_key(&readonly_key);
+                let current_get = b.props.get(&getter_key).cloned().unwrap_or(Value::Undefined);
+                let current_set = b.props.get(&setter_key).cloned().unwrap_or(Value::Undefined);
+                let current_value = if (idx_u64 as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", idx_u64)) {
+                    b.elements[idx_u64 as usize].clone()
+                } else {
+                    b.props.get(key).cloned().unwrap_or(Value::Undefined)
+                };
 
                 // Preserve non-configurable invariant (minimal checks used by current tests)
                 if b.props.contains_key(&nonconfigurable_key) && matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
                     self.throw_type_error("Cannot redefine non-configurable property");
                     return false;
+                }
+                if own_exists && !current_configurable {
+                    if let Some(Value::Boolean(new_enumerable)) = desc.get("enumerable")
+                        && *new_enumerable != current_enumerable
+                    {
+                        self.throw_type_error("Cannot redefine non-configurable property");
+                        return false;
+                    }
+
+                    let desc_is_accessor = desc.contains_key("get") || desc.contains_key("set");
+                    let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
+                    if (current_is_accessor && desc_is_data) || (!current_is_accessor && desc_is_accessor) {
+                        self.throw_type_error("Cannot redefine non-configurable property");
+                        return false;
+                    }
+
+                    if current_is_accessor && desc_is_accessor {
+                        if let Some(new_get) = desc.get("get")
+                            && !self.values_equal(new_get, &current_get)
+                        {
+                            self.throw_type_error("Cannot redefine non-configurable property");
+                            return false;
+                        }
+                        if let Some(new_set) = desc.get("set")
+                            && !self.values_equal(new_set, &current_set)
+                        {
+                            self.throw_type_error("Cannot redefine non-configurable property");
+                            return false;
+                        }
+                    }
+
+                    if !current_is_accessor && !current_writable {
+                        if matches!(desc.get("writable"), Some(Value::Boolean(true))) {
+                            self.throw_type_error("Cannot redefine non-configurable property");
+                            return false;
+                        }
+                        if let Some(new_value) = desc.get("value")
+                            && !self.values_equal(new_value, &current_value)
+                        {
+                            self.throw_type_error("Cannot redefine non-configurable property");
+                            return false;
+                        }
+                    }
                 }
 
                 b.props.shift_remove(&getter_key);
@@ -13951,16 +14865,32 @@ impl<'gc> VM<'gc> {
                 b.props.shift_remove(&readonly_key);
 
                 if is_accessor {
+                    let mut wrote_accessor_slot = false;
                     if (idx_u64 as usize) < b.elements.len() {
                         b.elements[idx_u64 as usize] = Value::Undefined;
                         b.props.insert(format!("__deleted_{}", idx_u64), Value::Boolean(true));
                     }
                     b.props.shift_remove(key);
                     if let Some(val) = desc.get("get") {
-                        b.props.insert(getter_key, val.clone());
+                        if !matches!(val, Value::Undefined) {
+                            b.props.insert(getter_key.clone(), val.clone());
+                            wrote_accessor_slot = true;
+                        }
+                    } else if own_exists && current_is_accessor && current_has_getter {
+                        b.props.insert(getter_key.clone(), current_get);
+                        wrote_accessor_slot = true;
                     }
                     if let Some(val) = desc.get("set") {
-                        b.props.insert(setter_key, val.clone());
+                        if !matches!(val, Value::Undefined) {
+                            b.props.insert(setter_key.clone(), val.clone());
+                            wrote_accessor_slot = true;
+                        }
+                    } else if own_exists && current_is_accessor && current_has_setter {
+                        b.props.insert(setter_key.clone(), current_set);
+                        wrote_accessor_slot = true;
+                    }
+                    if !wrote_accessor_slot {
+                        b.props.insert(setter_key.clone(), Value::Undefined);
                     }
                 } else if let Some(val) = desc.get("value") {
                     // Keep dense representation for small contiguous indices; sparse for large indices.
@@ -13977,8 +14907,16 @@ impl<'gc> VM<'gc> {
                     b.props.insert(key.to_string(), Value::Undefined);
                 }
 
-                let enumerable = matches!(desc.get("enumerable"), Some(Value::Boolean(true)));
-                let configurable = matches!(desc.get("configurable"), Some(Value::Boolean(true)));
+                let enumerable = match desc.get("enumerable") {
+                    Some(Value::Boolean(v)) => *v,
+                    _ if own_exists => current_enumerable,
+                    _ => true,
+                };
+                let configurable = match desc.get("configurable") {
+                    Some(Value::Boolean(v)) => *v,
+                    _ if own_exists => current_configurable,
+                    _ => true,
+                };
                 if !enumerable {
                     b.props.insert(nonenumerable_key, Value::Boolean(true));
                 }
@@ -13986,7 +14924,11 @@ impl<'gc> VM<'gc> {
                     b.props.insert(nonconfigurable_key, Value::Boolean(true));
                 }
                 if !is_accessor {
-                    let writable = matches!(desc.get("writable"), Some(Value::Boolean(true)));
+                    let writable = match desc.get("writable") {
+                        Some(Value::Boolean(v)) => *v,
+                        _ if own_exists && !current_is_accessor => current_writable,
+                        _ => true,
+                    };
                     if !writable {
                         b.props.insert(readonly_key, Value::Boolean(true));
                     }
@@ -14012,6 +14954,62 @@ impl<'gc> VM<'gc> {
         let nonenumerable_key = format!("__nonenumerable_{}__", key);
         let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
         let readonly_key = format!("__readonly_{}__", key);
+        let current_is_accessor = b.props.contains_key(&getter_key) || b.props.contains_key(&setter_key);
+        let current_has_getter = b.props.contains_key(&getter_key);
+        let current_has_setter = b.props.contains_key(&setter_key);
+        let current_enumerable = !b.props.contains_key(&nonenumerable_key);
+        let current_configurable = !b.props.contains_key(&nonconfigurable_key);
+        let current_writable = !b.props.contains_key(&readonly_key);
+        let current_get = b.props.get(&getter_key).cloned().unwrap_or(Value::Undefined);
+        let current_set = b.props.get(&setter_key).cloned().unwrap_or(Value::Undefined);
+        let current_value = b.props.get(key).cloned().unwrap_or(Value::Undefined);
+        if own_exists && !current_configurable {
+            if matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
+                self.throw_type_error("Cannot redefine non-configurable property");
+                return false;
+            }
+            if let Some(Value::Boolean(new_enumerable)) = desc.get("enumerable")
+                && *new_enumerable != current_enumerable
+            {
+                self.throw_type_error("Cannot redefine non-configurable property");
+                return false;
+            }
+
+            let desc_is_accessor = desc.contains_key("get") || desc.contains_key("set");
+            let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
+            if (current_is_accessor && desc_is_data) || (!current_is_accessor && desc_is_accessor) {
+                self.throw_type_error("Cannot redefine non-configurable property");
+                return false;
+            }
+
+            if current_is_accessor && desc_is_accessor {
+                if let Some(new_get) = desc.get("get")
+                    && !self.values_equal(new_get, &current_get)
+                {
+                    self.throw_type_error("Cannot redefine non-configurable property");
+                    return false;
+                }
+                if let Some(new_set) = desc.get("set")
+                    && !self.values_equal(new_set, &current_set)
+                {
+                    self.throw_type_error("Cannot redefine non-configurable property");
+                    return false;
+                }
+            }
+
+            if !current_is_accessor && !current_writable {
+                if matches!(desc.get("writable"), Some(Value::Boolean(true))) {
+                    self.throw_type_error("Cannot redefine non-configurable property");
+                    return false;
+                }
+                if let Some(new_value) = desc.get("value")
+                    && !self.values_equal(new_value, &current_value)
+                {
+                    self.throw_type_error("Cannot redefine non-configurable property");
+                    return false;
+                }
+            }
+        }
         b.props.shift_remove(&getter_key);
         b.props.shift_remove(&setter_key);
         b.props.shift_remove(&nonenumerable_key);
@@ -14019,12 +15017,28 @@ impl<'gc> VM<'gc> {
         b.props.shift_remove(&readonly_key);
 
         if is_accessor {
+            let mut wrote_accessor_slot = false;
             b.props.shift_remove(key);
             if let Some(v) = desc.get("get") {
-                b.props.insert(getter_key, v.clone());
+                if !matches!(v, Value::Undefined) {
+                    b.props.insert(getter_key.clone(), v.clone());
+                    wrote_accessor_slot = true;
+                }
+            } else if own_exists && current_is_accessor && current_has_getter {
+                b.props.insert(getter_key.clone(), current_get);
+                wrote_accessor_slot = true;
             }
             if let Some(v) = desc.get("set") {
-                b.props.insert(setter_key, v.clone());
+                if !matches!(v, Value::Undefined) {
+                    b.props.insert(setter_key.clone(), v.clone());
+                    wrote_accessor_slot = true;
+                }
+            } else if own_exists && current_is_accessor && current_has_setter {
+                b.props.insert(setter_key.clone(), current_set);
+                wrote_accessor_slot = true;
+            }
+            if !wrote_accessor_slot {
+                b.props.insert(setter_key.clone(), Value::Undefined);
             }
         } else if let Some(v) = desc.get("value") {
             b.props.insert(key.to_string(), v.clone());
@@ -14032,8 +15046,16 @@ impl<'gc> VM<'gc> {
             b.props.insert(key.to_string(), Value::Undefined);
         }
 
-        let enumerable = matches!(desc.get("enumerable"), Some(Value::Boolean(true)));
-        let configurable = matches!(desc.get("configurable"), Some(Value::Boolean(true)));
+        let enumerable = match desc.get("enumerable") {
+            Some(Value::Boolean(v)) => *v,
+            _ if own_exists => current_enumerable,
+            _ => true,
+        };
+        let configurable = match desc.get("configurable") {
+            Some(Value::Boolean(v)) => *v,
+            _ if own_exists => current_configurable,
+            _ => true,
+        };
         if !enumerable {
             b.props.insert(nonenumerable_key, Value::Boolean(true));
         }
@@ -14041,7 +15063,11 @@ impl<'gc> VM<'gc> {
             b.props.insert(nonconfigurable_key, Value::Boolean(true));
         }
         if !is_accessor {
-            let writable = matches!(desc.get("writable"), Some(Value::Boolean(true)));
+            let writable = match desc.get("writable") {
+                Some(Value::Boolean(v)) => *v,
+                _ if own_exists && !current_is_accessor => current_writable,
+                _ => true,
+            };
             if !writable {
                 b.props.insert(readonly_key, Value::Boolean(true));
             }

@@ -324,7 +324,7 @@ pub fn vm_create_tmpfile<'gc>() -> Value<'gc> {
 }
 
 /// Dispatch a VM file method call by host-fn name.
-pub fn vm_dispatch_file_method<'gc>(name: &str, receiver: Option<Value<'gc>>, args: Vec<Value<'gc>>) -> Value<'gc> {
+pub fn vm_dispatch_file_method<'gc>(name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
     let file_id = match &receiver {
         Some(Value::VmObject(obj)) => match obj.borrow().get("__file_id__") {
             Some(Value::Number(n)) => *n as u64,
@@ -334,7 +334,7 @@ pub fn vm_dispatch_file_method<'gc>(name: &str, receiver: Option<Value<'gc>>, ar
     };
     match name {
         "tmp.puts" => {
-            vm_file_puts(file_id, &args);
+            vm_file_puts(file_id, args);
             Value::Undefined
         }
         "tmp.readAsString" => match vm_file_read_as_string(file_id) {

@@ -1181,7 +1181,7 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
                 let tn = crate::unicode::utf16_to_utf8(t);
                 if tn == "Error" || tn.ends_with("Error") {
                     drop(b);
-                    return Err(vm.vm_error_to_js_error(next));
+                    return Err(vm.vm_error_to_js_error(&next));
                 }
             }
         }

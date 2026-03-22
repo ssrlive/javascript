@@ -327,6 +327,15 @@ fn to_number<'gc>(val: &Value<'gc>) -> f64 {
             if trimmed.is_empty() {
                 return 0.0;
             }
+            if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+                return u64::from_str_radix(hex, 16).map(|n| n as f64).unwrap_or(f64::NAN);
+            }
+            if let Some(bin) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
+                return u64::from_str_radix(bin, 2).map(|n| n as f64).unwrap_or(f64::NAN);
+            }
+            if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
+                return u64::from_str_radix(oct, 8).map(|n| n as f64).unwrap_or(f64::NAN);
+            }
             trimmed.parse::<f64>().unwrap_or(f64::NAN)
         }
         _ => f64::NAN,
@@ -4026,8 +4035,11 @@ impl<'gc> VM<'gc> {
                 if self.validate_property_descriptor(&desc_borrow).is_err() {
                     return Value::Boolean(false);
                 }
-                self.apply_object_property_descriptor(&obj, &key, &desc_borrow);
-                Value::Boolean(true)
+                if self.apply_object_property_descriptor(&obj, &key, &desc_borrow) {
+                    Value::Boolean(true)
+                } else {
+                    Value::Boolean(false)
+                }
             }
             "reflect.construct" => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
@@ -5427,35 +5439,40 @@ impl<'gc> VM<'gc> {
             Ok(val)
         } else if let Value::VmArray(arr) = &obj {
             if key == "length" {
-                if let Value::Number(n) = &val {
-                    let new_len = *n as usize;
-                    let mut a = arr.borrow_mut();
-                    let cur_len = a.elements.len();
-                    if new_len > cur_len {
-                        for i in cur_len..new_len {
-                            a.elements.push(Value::Undefined);
-                            a.props.insert(format!("__deleted_{}", i), Value::Boolean(true));
-                        }
-                    } else if new_len < cur_len {
-                        a.elements.truncate(new_len);
-                        // Remove hole markers for truncated indices
-                        for i in new_len..cur_len {
-                            a.props.shift_remove(&format!("__deleted_{}", i));
-                        }
+                let mut desc = IndexMap::new();
+                desc.insert("value".to_string(), val.clone());
+                if !self.apply_array_property_descriptor(arr, "length", &desc) {
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(thrown)?;
                     }
+                    return Ok(val);
                 }
+                return Ok(val);
             } else if let Ok(idx) = key.parse::<usize>() {
                 // Only treat as array element index if idx < 2^32 - 1 (max array index per spec).
                 // Keys >= 2^32 - 1 (e.g. "4294967295") are stored as string properties.
                 if idx < 0xFFFF_FFFF {
                     let mut a = arr.borrow_mut();
-                    while a.elements.len() <= idx {
-                        let hole_idx = a.elements.len();
-                        a.elements.push(Value::Undefined);
-                        a.props.insert(format!("__deleted_{}", hole_idx), Value::Boolean(true));
+                    if idx <= a.elements.len() + 1024 && idx < 1_000_000 {
+                        while a.elements.len() <= idx {
+                            let hole_idx = a.elements.len();
+                            a.elements.push(Value::Undefined);
+                            a.props.insert(format!("__deleted_{}", hole_idx), Value::Boolean(true));
+                        }
+                        a.elements[idx] = val.clone();
+                        a.props.shift_remove(&format!("__deleted_{}", idx));
+                    } else {
+                        a.props.insert(key.clone(), val.clone());
                     }
-                    a.elements[idx] = val.clone();
-                    a.props.shift_remove(&format!("__deleted_{}", idx));
+                    let old_len = if let Some(Value::Number(n)) = a.props.get("__array_length__") {
+                        *n as u64
+                    } else {
+                        a.elements.len() as u64
+                    };
+                    let new_len = (idx as u64).saturating_add(1);
+                    if new_len > old_len {
+                        a.props.insert("__array_length__".to_string(), Value::Number(new_len as f64));
+                    }
                 } else {
                     arr.borrow_mut().props.insert(key, val.clone());
                 }
@@ -5715,7 +5732,27 @@ impl<'gc> VM<'gc> {
                             _ => {}
                         }
                     }
-                    current = borrow.get("__proto__").cloned();
+                    let mut next = borrow.get("__proto__").cloned();
+                    if next.is_none()
+                        && let Some(Value::String(type_name_u16)) = borrow.get("__type__")
+                    {
+                        let type_name = crate::unicode::utf16_to_utf8(type_name_u16);
+                        if let Some(Value::VmObject(ctor)) = self.globals.get(&type_name)
+                            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                        {
+                            next = Some(proto);
+                        }
+                    }
+                    // Some built-in singleton objects may not have __proto__ explicitly set;
+                    // treat them as inheriting from Object.prototype for [[Get]] lookups.
+                    if next.is_none()
+                        && let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
+                        && let Some(Value::VmObject(obj_proto)) = object_ctor.borrow().get("prototype").cloned()
+                        && !Rc::ptr_eq(&map, &obj_proto)
+                    {
+                        next = Some(Value::VmObject(obj_proto));
+                    }
+                    current = next;
                 }
                 Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                     let props = self.get_fn_props(ip, arity);
@@ -5773,6 +5810,9 @@ impl<'gc> VM<'gc> {
             Value::VmArray(arr) => {
                 let borrow = arr.borrow();
                 if key == "length" {
+                    if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
+                        return Value::Number(*n);
+                    }
                     return Value::Number(borrow.elements.len() as f64);
                 }
                 if let Ok(idx) = key.parse::<usize>()
@@ -5789,7 +5829,9 @@ impl<'gc> VM<'gc> {
                 if let Some(v) = borrow.props.get(key) {
                     return v.clone();
                 }
-                Value::Undefined
+                let proto = borrow.props.get("__proto__").cloned();
+                drop(borrow);
+                self.lookup_proto_chain(&proto, key).unwrap_or(Value::Undefined)
             }
             _ => Value::Undefined,
         }
@@ -6010,10 +6052,16 @@ impl<'gc> VM<'gc> {
         );
         // Create Array.prototype with iterator method
         let mut arr_proto = IndexMap::new();
+        if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+            && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
+        {
+            arr_proto.insert("__proto__".to_string(), obj_proto);
+        }
         arr_proto.insert("@@sym:1".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ITERATOR));
         arr_proto.insert("push".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_PUSH));
         arr_proto.insert("pop".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_POP));
         arr_proto.insert("join".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_JOIN));
+        arr_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_JOIN));
         arr_proto.insert("indexOf".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_INDEXOF));
         arr_proto.insert("slice".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_SLICE));
         arr_proto.insert("concat".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_CONCAT));
@@ -6094,11 +6142,34 @@ impl<'gc> VM<'gc> {
         // Date constructor with static methods
         let mut date_map = IndexMap::new();
         date_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_DATE as f64));
+        date_map.insert("name".to_string(), Value::from("Date"));
+        date_map.insert("length".to_string(), Value::Number(7.0));
+        date_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+        date_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        date_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        date_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
         date_map.insert("now".to_string(), Value::VmNativeFunction(BUILTIN_DATE_NOW));
         date_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_DATE_PARSE));
         date_map.insert("UTC".to_string(), Self::make_host_fn("date.UTC"));
-        self.globals
-            .insert("Date".to_string(), Value::VmObject(Rc::new(RefCell::new(date_map))));
+        let mut date_proto = IndexMap::new();
+        if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+            && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
+        {
+            date_proto.insert("__proto__".to_string(), obj_proto);
+        }
+        let date_proto_val = Value::VmObject(Rc::new(RefCell::new(date_proto)));
+        date_map.insert("prototype".to_string(), date_proto_val.clone());
+        date_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+        date_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+        date_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        let date_ctor_val = Value::VmObject(Rc::new(RefCell::new(date_map)));
+        if let Value::VmObject(proto_obj) = &date_proto_val {
+            proto_obj.borrow_mut().insert("constructor".to_string(), date_ctor_val.clone());
+            proto_obj
+                .borrow_mut()
+                .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        }
+        self.globals.insert("Date".to_string(), date_ctor_val);
         let mut array_buffer_proto = IndexMap::new();
         array_buffer_proto.insert(
             "__get_byteLength".to_string(),
@@ -6466,6 +6537,24 @@ impl<'gc> VM<'gc> {
             .borrow_mut()
             .insert("__nonenumerable_Object__".to_string(), Value::Boolean(true));
 
+        // Constructors created before Object may still need their prototype chains wired.
+        if let Some(Value::VmObject(array_ctor)) = self.globals.get("Array")
+            && let Some(Value::VmObject(array_proto)) = array_ctor.borrow().get("prototype").cloned()
+            && !array_proto.borrow().contains_key("__proto__")
+        {
+            array_proto
+                .borrow_mut()
+                .insert("__proto__".to_string(), Value::VmObject(object_proto.clone()));
+        }
+        if let Some(Value::VmObject(date_ctor)) = self.globals.get("Date")
+            && let Some(Value::VmObject(date_proto)) = date_ctor.borrow().get("prototype").cloned()
+            && !date_proto.borrow().contains_key("__proto__")
+        {
+            date_proto
+                .borrow_mut()
+                .insert("__proto__".to_string(), Value::VmObject(object_proto.clone()));
+        }
+
         // NOTE: Object.__proto__ = Function.prototype is set AFTER the Function
         // constructor is created below (since Function doesn't exist yet).
 
@@ -6594,8 +6683,35 @@ impl<'gc> VM<'gc> {
             self.globals
                 .insert("BigInt".to_string(), Value::VmObject(Rc::new(RefCell::new(bigint_map))));
         }
-        self.globals
-            .insert("RegExp".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_REGEXP));
+        {
+            let mut regexp_proto = IndexMap::new();
+            if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+                && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
+            {
+                regexp_proto.insert("__proto__".to_string(), obj_proto);
+            }
+            let regexp_proto_val = Value::VmObject(Rc::new(RefCell::new(regexp_proto)));
+            let mut regexp_ctor = IndexMap::new();
+            regexp_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_REGEXP as f64));
+            regexp_ctor.insert("name".to_string(), Value::from("RegExp"));
+            regexp_ctor.insert("length".to_string(), Value::Number(2.0));
+            regexp_ctor.insert("prototype".to_string(), regexp_proto_val.clone());
+            regexp_ctor.insert("__readonly_name__".to_string(), Value::Boolean(true));
+            regexp_ctor.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+            regexp_ctor.insert("__readonly_length__".to_string(), Value::Boolean(true));
+            regexp_ctor.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+            regexp_ctor.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+            regexp_ctor.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            regexp_ctor.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+            let regexp_ctor_val = Value::VmObject(Rc::new(RefCell::new(regexp_ctor)));
+            if let Value::VmObject(proto_obj) = &regexp_proto_val {
+                proto_obj.borrow_mut().insert("constructor".to_string(), regexp_ctor_val.clone());
+                proto_obj
+                    .borrow_mut()
+                    .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            }
+            self.globals.insert("RegExp".to_string(), regexp_ctor_val);
+        }
 
         // globalThis — refers to the global this object
         self.globals
@@ -7069,6 +7185,11 @@ impl<'gc> VM<'gc> {
             return Err(self.vm_error_to_js_error(thrown));
         }
 
+        // ToString(Symbol) must throw TypeError.
+        if Self::is_symbol_value(&prim) {
+            return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
+        }
+
         if !matches!(prim, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
             return Ok(value_to_string(&prim));
         }
@@ -7082,6 +7203,9 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Function(_) | Value::VmObject(_)
         ) {
             let out = self.vm_call_function_value(to_string_fn, prim.clone(), &[])?;
+            if Self::is_symbol_value(&out) {
+                return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
+            }
             if !matches!(out, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
                 return Ok(value_to_string(&out));
             }
@@ -7096,6 +7220,9 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Function(_) | Value::VmObject(_)
         ) {
             let out = self.vm_call_function_value(value_of_fn, prim.clone(), &[])?;
+            if Self::is_symbol_value(&out) {
+                return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
+            }
             if !matches!(out, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
                 return Ok(value_to_string(&out));
             }
@@ -9947,7 +10074,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                         let obj_rc = Rc::new(RefCell::new(obj));
-                        self.apply_object_property_descriptor(&obj_rc, &k, &desc);
+                        if !self.apply_object_property_descriptor(&obj_rc, &k, &desc) {
+                            return Value::Undefined;
+                        }
                         obj = match Rc::try_unwrap(obj_rc) {
                             Ok(cell) => cell.into_inner(),
                             Err(rc) => rc.borrow().clone(),
@@ -9963,6 +10092,14 @@ impl<'gc> VM<'gc> {
                     if let Some(proto) = borrow.get("__proto__") {
                         proto.clone()
                     } else {
+                        if let Some(Value::String(type_name_u16)) = borrow.get("__type__") {
+                            let type_name = crate::unicode::utf16_to_utf8(type_name_u16);
+                            if let Some(Value::VmObject(ctor)) = self.globals.get(&type_name)
+                                && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                            {
+                                return proto;
+                            }
+                        }
                         drop(borrow);
                         // Default prototype is Object.prototype
                         if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
@@ -9991,113 +10128,67 @@ impl<'gc> VM<'gc> {
                 if let Some(Value::VmObject(obj)) = args.first() {
                     obj.borrow_mut().insert("__non_extensible__".to_string(), Value::Boolean(true));
                     Value::VmObject(obj.clone())
+                } else if let Some(Value::VmArray(arr)) = args.first() {
+                    arr.borrow_mut()
+                        .props
+                        .insert("__non_extensible__".to_string(), Value::Boolean(true));
+                    Value::VmArray(arr.clone())
+                } else if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
+                    let props = self.get_fn_props(*ip, *arity);
+                    props.borrow_mut().insert("__non_extensible__".to_string(), Value::Boolean(true));
+                    args.first().cloned().unwrap_or(Value::Undefined)
                 } else {
                     args.first().cloned().unwrap_or(Value::Undefined)
                 }
             }
             // Object.defineProperty(obj, prop, descriptor)
             BUILTIN_OBJECT_DEFINEPROP => {
-                if let Some(Value::VmObject(obj)) = args.first() {
-                    let key = args
-                        .get(1)
-                        .and_then(|v| self.as_property_key_string(v).ok())
-                        .unwrap_or_else(|| args.get(1).map(value_to_string).unwrap_or_default());
-                    if let Some(Value::VmObject(desc)) = args.get(2) {
-                        let desc_borrow = desc.borrow();
-                        if self.validate_property_descriptor(&desc_borrow).is_err() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("name".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Invalid property descriptor"));
-                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+                let key = match args.get(1) {
+                    Some(v) => match self.as_property_key_string(v) {
+                        Ok(k) => k,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
                             return Value::Undefined;
-                        } else {
-                            self.apply_object_property_descriptor(obj, &key, &desc_borrow);
                         }
+                    },
+                    None => String::new(),
+                };
+                let desc_val = args.get(2).cloned().unwrap_or(Value::Undefined);
+                if matches!(
+                    desc_val,
+                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_)
+                ) {
+                    self.throw_type_error("Property description must be an object");
+                    return Value::Undefined;
+                }
+                let desc = self.extract_property_descriptor(desc_val);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if self.validate_property_descriptor(&desc).is_err() {
+                    self.throw_type_error("Invalid property descriptor");
+                    return Value::Undefined;
+                }
+
+                if let Some(Value::VmObject(obj)) = args.first() {
+                    if !self.apply_object_property_descriptor(obj, &key, &desc) {
+                        return Value::Undefined;
                     }
                     Value::VmObject(obj.clone())
                 } else if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
-                    let key = args
-                        .get(1)
-                        .and_then(|v| self.as_property_key_string(v).ok())
-                        .unwrap_or_else(|| args.get(1).map(value_to_string).unwrap_or_default());
-                    if let Some(Value::VmObject(desc)) = args.get(2) {
-                        let desc_borrow = desc.borrow();
-                        if self.validate_property_descriptor(&desc_borrow).is_err() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("name".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Invalid property descriptor"));
-                            self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
-                            return Value::Undefined;
-                        }
-                        let props = self.get_fn_props(*ip, *arity);
-                        self.apply_object_property_descriptor(&props, &key, &desc_borrow);
+                    let props = self.get_fn_props(*ip, *arity);
+                    if !self.apply_object_property_descriptor(&props, &key, &desc) {
+                        return Value::Undefined;
                     }
                     args.first().cloned().unwrap_or(Value::Undefined)
                 } else if let Some(Value::VmArray(arr)) = args.first() {
-                    let key = args.get(1).map(|v| value_to_string(v)).unwrap_or_default();
-                    if let Some(Value::VmObject(desc)) = args.get(2) {
-                        let desc_borrow = desc.borrow();
-                        let is_accessor = desc_borrow.contains_key("get") || desc_borrow.contains_key("set");
-                        let mut arr_borrow = arr.borrow_mut();
-                        // Check if key is a numeric index for value/length update
-                        if let Ok(idx) = key.parse::<usize>() {
-                            // Extend elements so array.length covers this index
-                            while arr_borrow.elements.len() <= idx {
-                                arr_borrow.elements.push(Value::Undefined);
-                            }
-                            if !is_accessor && let Some(val) = desc_borrow.get("value") {
-                                arr_borrow.elements[idx] = val.clone();
-                            }
-                        }
-                        // Clear stale accessor/attribute markers
-                        let getter_key = format!("__get_{}", key);
-                        let setter_key = format!("__set_{}", key);
-                        let nonenumerable_key = format!("__nonenumerable_{}__", key);
-                        let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
-                        let readonly_key = format!("__readonly_{}__", key);
-                        arr_borrow.props.shift_remove(&getter_key);
-                        arr_borrow.props.shift_remove(&setter_key);
-                        arr_borrow.props.shift_remove(&nonenumerable_key);
-                        arr_borrow.props.shift_remove(&nonconfigurable_key);
-                        arr_borrow.props.shift_remove(&readonly_key);
-                        if is_accessor {
-                            // Remove data slot for conversion to accessor
-                            arr_borrow.props.shift_remove(&key);
-                            if let Some(val) = desc_borrow.get("get") {
-                                arr_borrow.props.insert(getter_key, val.clone());
-                            }
-                            if let Some(val) = desc_borrow.get("set") {
-                                arr_borrow.props.insert(setter_key, val.clone());
-                            }
-                        } else if key.parse::<usize>().is_err() {
-                            // Non-numeric data property — store in props
-                            if let Some(val) = desc_borrow.get("value") {
-                                arr_borrow.props.insert(key.clone(), val.clone());
-                            } else if !arr_borrow.props.contains_key(&key) {
-                                arr_borrow.props.insert(key.clone(), Value::Undefined);
-                            }
-                        }
-                        // Attribute markers
-                        let enumerable = matches!(desc_borrow.get("enumerable"), Some(Value::Boolean(true)));
-                        let configurable = matches!(desc_borrow.get("configurable"), Some(Value::Boolean(true)));
-                        if !enumerable {
-                            arr_borrow.props.insert(nonenumerable_key, Value::Boolean(true));
-                        }
-                        if !configurable {
-                            arr_borrow.props.insert(nonconfigurable_key, Value::Boolean(true));
-                        }
-                        if !is_accessor {
-                            let writable = matches!(desc_borrow.get("writable"), Some(Value::Boolean(true)));
-                            if !writable {
-                                arr_borrow.props.insert(readonly_key, Value::Boolean(true));
-                            }
-                        }
+                    if !self.apply_array_property_descriptor(arr, &key, &desc) {
+                        return Value::Undefined;
                     }
                     Value::VmArray(arr.clone())
                 } else {
-                    args.first().cloned().unwrap_or(Value::Undefined)
+                    self.throw_type_error("Object.defineProperty called on non-object");
+                    Value::Undefined
                 }
             }
             // Object.getOwnPropertyDescriptor(obj, prop)
@@ -10163,6 +10254,55 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
+                    Some(Value::VmArray(arr)) => {
+                        let borrow = arr.borrow();
+                        if key == "length" {
+                            let len = if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
+                                *n
+                            } else {
+                                borrow.elements.len() as f64
+                            };
+                            let writable = !matches!(borrow.props.get("__readonly_length__"), Some(Value::Boolean(true)));
+                            make_desc(len.into(), writable, false, false)
+                        } else {
+                            let ro_key = format!("__readonly_{}__", key);
+                            let is_readonly = borrow.props.contains_key(&ro_key);
+                            let nc_key = format!("__nonconfigurable_{}__", key);
+                            let is_nonconfigurable = borrow.props.contains_key(&nc_key);
+                            let ne_key = format!("__nonenumerable_{}__", key);
+                            let is_nonenumerable = borrow.props.contains_key(&ne_key);
+
+                            if let Ok(idx) = key.parse::<usize>()
+                                && idx < borrow.elements.len()
+                                && !borrow.props.contains_key(&format!("__deleted_{}", idx))
+                            {
+                                make_desc(borrow.elements[idx].clone(), !is_readonly, !is_nonenumerable, !is_nonconfigurable)
+                            } else if let Some(val) = borrow.props.get(&key) {
+                                make_desc(val.clone(), !is_readonly, !is_nonenumerable, !is_nonconfigurable)
+                            } else {
+                                let getter_key = format!("__get_{}", key);
+                                let setter_key = format!("__set_{}", key);
+                                let has_getter = borrow.props.contains_key(&getter_key);
+                                let has_setter = borrow.props.contains_key(&setter_key);
+                                if has_getter || has_setter {
+                                    let mut desc = IndexMap::new();
+                                    desc.insert(
+                                        "get".to_string(),
+                                        borrow.props.get(&getter_key).cloned().unwrap_or(Value::Undefined),
+                                    );
+                                    desc.insert(
+                                        "set".to_string(),
+                                        borrow.props.get(&setter_key).cloned().unwrap_or(Value::Undefined),
+                                    );
+                                    desc.insert("enumerable".to_string(), Value::Boolean(!is_nonenumerable));
+                                    desc.insert("configurable".to_string(), Value::Boolean(!is_nonconfigurable));
+                                    Value::VmObject(Rc::new(RefCell::new(desc)))
+                                } else {
+                                    Value::Undefined
+                                }
+                            }
+                        }
+                    }
                     Some(Value::VmFunction(ip, arity)) | Some(Value::VmClosure(ip, arity, _)) => {
                         let fn_props = self.get_fn_props(*ip, *arity);
                         let borrow = fn_props.borrow();
@@ -10210,13 +10350,13 @@ impl<'gc> VM<'gc> {
                 let descs_val = args.get(1).cloned().unwrap_or(Value::Undefined);
 
                 // Step 1: first arg must be an object
-                let obj_rc = match &target {
-                    Value::VmObject(rc) => rc.clone(),
-                    _ => {
-                        self.throw_type_error("Object.defineProperties called on non-object");
-                        return Value::Undefined;
-                    }
-                };
+                if !matches!(
+                    target,
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(_, _) | Value::VmClosure(_, _, _)
+                ) {
+                    self.throw_type_error("Object.defineProperties called on non-object");
+                    return Value::Undefined;
+                }
 
                 // Step 2: second arg must be coercible to object (not null/undefined)
                 if matches!(descs_val, Value::Undefined | Value::Null) {
@@ -10246,9 +10386,27 @@ impl<'gc> VM<'gc> {
                         self.throw_type_error("Invalid property descriptor");
                         return Value::Undefined;
                     }
-                    self.apply_object_property_descriptor(&obj_rc, &key, &desc);
+                    match &target {
+                        Value::VmObject(obj_rc) => {
+                            if !self.apply_object_property_descriptor(obj_rc, &key, &desc) {
+                                return Value::Undefined;
+                            }
+                        }
+                        Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                            let props = self.get_fn_props(*ip, *arity);
+                            if !self.apply_object_property_descriptor(&props, &key, &desc) {
+                                return Value::Undefined;
+                            }
+                        }
+                        Value::VmArray(arr) => {
+                            if !self.apply_array_property_descriptor(arr, &key, &desc) {
+                                return Value::Undefined;
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
                 }
-                Value::VmObject(obj_rc)
+                target
             }
             // Object.getOwnPropertyNames(obj) → array of own property names (including non-enumerable)
             BUILTIN_OBJECT_GETOWNPROPERTYNAMES => {
@@ -12322,6 +12480,23 @@ impl<'gc> VM<'gc> {
                     let props = self.get_fn_props(*ip, *arity);
                     Value::Boolean(props.borrow().contains_key(&key))
                 }
+                Value::VmArray(arr) => {
+                    if key == "length" {
+                        return Value::Boolean(true);
+                    }
+                    let b = arr.borrow();
+                    let has = if let Ok(idx) = key.parse::<usize>() {
+                        (idx < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", idx)))
+                            || b.props.contains_key(&key)
+                            || b.props.contains_key(&format!("__get_{}", key))
+                            || b.props.contains_key(&format!("__set_{}", key))
+                    } else {
+                        b.props.contains_key(&key)
+                            || b.props.contains_key(&format!("__get_{}", key))
+                            || b.props.contains_key(&format!("__set_{}", key))
+                    };
+                    Value::Boolean(has)
+                }
                 _ => Value::Boolean(false),
             };
         }
@@ -13112,48 +13287,10 @@ impl<'gc> VM<'gc> {
                         .unwrap_or(0);
                     return Ok(format!("@@sym:{}", id));
                 }
-                let receiver = index.clone();
-                let to_string_fn = self.read_named_property(receiver.clone(), "toString");
-                let out = match to_string_fn {
-                    Value::VmFunction(ip, _) => {
-                        self.this_stack.push(receiver.clone());
-                        let result = self.call_vm_function_result(ip, &[], &[]);
-                        self.this_stack.pop();
-                        result?
-                    }
-                    Value::VmClosure(ip, _, upv) => {
-                        self.this_stack.push(receiver.clone());
-                        let uv = (*upv).clone();
-                        let result = self.call_vm_function_result(ip, &[], &uv);
-                        self.this_stack.pop();
-                        result?
-                    }
-                    Value::VmNativeFunction(id) => self.call_method_builtin(id, receiver.clone(), vec![]),
-                    _ => index.clone(),
-                };
-                Ok(value_to_string(&out))
+                self.vm_to_string_like_spec(index.clone())
             }
             Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
-                let receiver = index.clone();
-                let to_string_fn = self.read_named_property(receiver.clone(), "toString");
-                let out = match to_string_fn {
-                    Value::VmFunction(ip, _) => {
-                        self.this_stack.push(receiver.clone());
-                        let result = self.call_vm_function_result(ip, &[], &[]);
-                        self.this_stack.pop();
-                        result?
-                    }
-                    Value::VmClosure(ip, _, upv) => {
-                        self.this_stack.push(receiver.clone());
-                        let uv = (*upv).clone();
-                        let result = self.call_vm_function_result(ip, &[], &uv);
-                        self.this_stack.pop();
-                        result?
-                    }
-                    Value::VmNativeFunction(id) => self.call_method_builtin(id, receiver.clone(), vec![]),
-                    _ => index.clone(),
-                };
-                Ok(value_to_string(&out))
+                self.vm_to_string_like_spec(index.clone())
             }
             _ => Ok(value_to_string(index)),
         }
@@ -13172,6 +13309,92 @@ impl<'gc> VM<'gc> {
             }
         }
         self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+    }
+
+    fn throw_range_error(&mut self, message: &str) {
+        let mut err_map = IndexMap::new();
+        err_map.insert("__type__".to_string(), Value::from("RangeError"));
+        err_map.insert("name".to_string(), Value::from("RangeError"));
+        err_map.insert("message".to_string(), Value::from(message));
+        if let Some(ctor) = self.globals.get("RangeError").cloned() {
+            err_map.insert("constructor".to_string(), ctor.clone());
+            let proto = self.read_named_property(ctor, "prototype");
+            if !matches!(proto, Value::Undefined) {
+                err_map.insert("__proto__".to_string(), proto);
+            }
+        }
+        self.pending_throw = Some(Value::VmObject(Rc::new(RefCell::new(err_map))));
+    }
+
+    fn extract_number_with_coercion(&mut self, value: &Value<'gc>) -> Option<f64> {
+        if Self::is_symbol_value(value) {
+            self.throw_type_error("Cannot convert a Symbol value to a number");
+            return None;
+        }
+
+        let mut prim = self.try_to_primitive(value, "number");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+
+        let is_object_like = |v: &Value<'gc>| {
+            matches!(
+                v,
+                Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..)
+            )
+        };
+
+        if is_object_like(&prim) {
+            let value_of_fn = self.read_named_property(prim.clone(), "valueOf");
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            if self.is_value_callable(&value_of_fn) {
+                match self.vm_call_function_value(value_of_fn, prim.clone(), &[]) {
+                    Ok(v) => {
+                        if !is_object_like(&v) {
+                            prim = v;
+                        }
+                    }
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return None;
+                    }
+                }
+            }
+        }
+
+        if is_object_like(&prim) {
+            let to_string_fn = self.read_named_property(prim.clone(), "toString");
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            if self.is_value_callable(&to_string_fn) {
+                match self.vm_call_function_value(to_string_fn, prim.clone(), &[]) {
+                    Ok(v) => {
+                        if !is_object_like(&v) {
+                            prim = v;
+                        }
+                    }
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return None;
+                    }
+                }
+            }
+        }
+
+        if is_object_like(&prim) {
+            self.throw_type_error("Cannot convert object to primitive value");
+            return None;
+        }
+
+        if Self::is_symbol_value(&prim) {
+            self.throw_type_error("Cannot convert a Symbol value to a number");
+            return None;
+        }
+
+        Some(to_number(&prim))
     }
 
     fn is_value_callable(&self, value: &Value<'gc>) -> bool {
@@ -13315,8 +13538,8 @@ impl<'gc> VM<'gc> {
         let mut desc = IndexMap::new();
         let attrs = ["value", "writable", "get", "set", "enumerable", "configurable"];
         for attr in &attrs {
-            let v = self.read_named_property(desc_val.clone(), attr);
-            if !matches!(v, Value::Undefined) {
+            if self.has_property_in_chain(&desc_val, attr) {
+                let v = self.read_named_property(desc_val.clone(), attr);
                 // Spec 8.10.5: writable, enumerable, configurable must be ToBoolean-coerced
                 let stored = match *attr {
                     "writable" | "enumerable" | "configurable" => Value::Boolean(Self::value_is_truthy(&v)),
@@ -13326,6 +13549,86 @@ impl<'gc> VM<'gc> {
             }
         }
         desc
+    }
+
+    /// Spec-like HasProperty helper for descriptor extraction.
+    fn has_property_in_chain(&mut self, obj: &Value<'gc>, key: &str) -> bool {
+        match obj {
+            Value::VmObject(map) => {
+                let mut current = Some(Value::VmObject(map.clone()));
+                let mut depth = 0;
+                while let Some(cur) = current {
+                    if depth > 100 {
+                        break;
+                    }
+                    depth += 1;
+                    match cur {
+                        Value::VmObject(m) => {
+                            let b = m.borrow();
+                            if b.contains_key(key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key))
+                            {
+                                return true;
+                            }
+                            let mut next = b.get("__proto__").cloned();
+                            if next.is_none()
+                                && let Some(Value::String(type_name_u16)) = b.get("__type__")
+                            {
+                                let type_name = crate::unicode::utf16_to_utf8(type_name_u16);
+                                if let Some(Value::VmObject(ctor)) = self.globals.get(&type_name)
+                                    && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                                {
+                                    next = Some(proto);
+                                }
+                            }
+                            if next.is_none()
+                                && let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
+                                && let Some(Value::VmObject(obj_proto)) = object_ctor.borrow().get("prototype").cloned()
+                                && !Rc::ptr_eq(&m, &obj_proto)
+                            {
+                                next = Some(Value::VmObject(obj_proto));
+                            }
+                            current = next;
+                        }
+                        _ => break,
+                    }
+                }
+                false
+            }
+            Value::VmArray(arr) => {
+                let b = arr.borrow();
+                if b.props.contains_key(key)
+                    || b.props.contains_key(&format!("__get_{}", key))
+                    || b.props.contains_key(&format!("__set_{}", key))
+                {
+                    return true;
+                }
+                let proto = b.props.get("__proto__").cloned();
+                drop(b);
+                if let Some(p) = proto {
+                    let proto_opt = Some(p);
+                    self.lookup_proto_chain(&proto_opt.clone(), key).is_some()
+                        || self.lookup_proto_chain(&proto_opt.clone(), &format!("__get_{}", key)).is_some()
+                        || self.lookup_proto_chain(&proto_opt, &format!("__set_{}", key)).is_some()
+                } else {
+                    false
+                }
+            }
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                let props = self.get_fn_props(*ip, *arity);
+                let b = props.borrow();
+                if b.contains_key(key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key)) {
+                    true
+                } else {
+                    let proto = b.get("__proto__").cloned();
+                    drop(b);
+                    self.lookup_proto_chain(&proto.clone(), key).is_some()
+                        || self.lookup_proto_chain(&proto.clone(), &format!("__get_{}", key)).is_some()
+                        || self.lookup_proto_chain(&proto, &format!("__set_{}", key)).is_some()
+                }
+            }
+            Value::Object(o) => crate::core::object_get_key_value(o, key).is_some(),
+            _ => false,
+        }
     }
 
     /// JS ToBoolean: returns true for truthy values.
@@ -13371,13 +13674,81 @@ impl<'gc> VM<'gc> {
         obj: &Rc<RefCell<IndexMap<String, Value<'gc>>>>,
         key: &str,
         desc: &IndexMap<String, Value<'gc>>,
-    ) {
+    ) -> bool {
         let is_accessor = desc.contains_key("get") || desc.contains_key("set");
         let getter_key = format!("__get_{}", key);
         let setter_key = format!("__set_{}", key);
         let readonly_key = format!("__readonly_{}__", key);
         let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
         let nonenumerable_key = format!("__nonenumerable_{}__", key);
+
+        {
+            let borrow = obj.borrow();
+            let current_has_data = borrow.contains_key(key);
+            let current_has_getter = borrow.contains_key(&getter_key);
+            let current_has_setter = borrow.contains_key(&setter_key);
+            let current_exists = current_has_data || current_has_getter || current_has_setter;
+            let is_non_extensible = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
+            if !current_exists && is_non_extensible {
+                self.throw_type_error("Cannot add property, object is not extensible");
+                return false;
+            }
+            let current_is_accessor = current_has_getter || current_has_setter;
+            let current_configurable = !borrow.contains_key(&nonconfigurable_key);
+            let current_enumerable = !borrow.contains_key(&nonenumerable_key);
+            let current_writable = !borrow.contains_key(&readonly_key);
+            let current_value = borrow.get(key).cloned().unwrap_or(Value::Undefined);
+            let current_get = borrow.get(&getter_key).cloned().unwrap_or(Value::Undefined);
+            let current_set = borrow.get(&setter_key).cloned().unwrap_or(Value::Undefined);
+
+            if current_exists && !current_configurable {
+                if matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
+                    self.throw_type_error("Cannot redefine non-configurable property");
+                    return false;
+                }
+                if let Some(Value::Boolean(new_enumerable)) = desc.get("enumerable")
+                    && *new_enumerable != current_enumerable
+                {
+                    self.throw_type_error("Cannot redefine non-configurable property");
+                    return false;
+                }
+
+                let desc_is_accessor = desc.contains_key("get") || desc.contains_key("set");
+                let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
+                if (current_is_accessor && desc_is_data) || (!current_is_accessor && desc_is_accessor) {
+                    self.throw_type_error("Cannot redefine non-configurable property");
+                    return false;
+                }
+
+                if current_is_accessor && desc_is_accessor {
+                    if let Some(new_get) = desc.get("get")
+                        && !self.values_equal(new_get, &current_get)
+                    {
+                        self.throw_type_error("Cannot redefine non-configurable property");
+                        return false;
+                    }
+                    if let Some(new_set) = desc.get("set")
+                        && !self.values_equal(new_set, &current_set)
+                    {
+                        self.throw_type_error("Cannot redefine non-configurable property");
+                        return false;
+                    }
+                }
+
+                if !current_is_accessor && !current_writable {
+                    if matches!(desc.get("writable"), Some(Value::Boolean(true))) {
+                        self.throw_type_error("Cannot redefine non-configurable property");
+                        return false;
+                    }
+                    if let Some(new_value) = desc.get("value")
+                        && !self.values_equal(new_value, &current_value)
+                    {
+                        self.throw_type_error("Cannot redefine non-configurable property");
+                        return false;
+                    }
+                }
+            }
+        }
 
         {
             let mut borrow = obj.borrow_mut();
@@ -13425,6 +13796,257 @@ impl<'gc> VM<'gc> {
                 }
             }
         }
+        true
+    }
+
+    fn array_length_u64(&self, arr: &VmArrayData<'gc>) -> u64 {
+        if let Some(Value::Number(n)) = arr.props.get("__array_length__")
+            && *n >= 0.0
+        {
+            return *n as u64;
+        }
+        arr.elements.len() as u64
+    }
+
+    fn set_array_length_u64(&self, arr: &mut VmArrayData<'gc>, len: u64) {
+        arr.props.insert("__array_length__".to_string(), Value::Number(len as f64));
+    }
+
+    fn apply_array_property_descriptor(
+        &mut self,
+        arr: &Rc<RefCell<VmArrayData<'gc>>>,
+        key: &str,
+        desc: &IndexMap<String, Value<'gc>>,
+    ) -> bool {
+        let is_accessor = desc.contains_key("get") || desc.contains_key("set");
+
+        let mut b = arr.borrow_mut();
+        let is_non_extensible = matches!(b.props.get("__non_extensible__"), Some(Value::Boolean(true)));
+
+        if key == "length" {
+            let old_len = self.array_length_u64(&b);
+            let old_len_writable = !matches!(b.props.get("__readonly_length__"), Some(Value::Boolean(true)));
+
+            if is_accessor {
+                self.throw_type_error("Cannot redefine array length as accessor property");
+                return false;
+            }
+
+            if matches!(desc.get("configurable"), Some(Value::Boolean(true)))
+                || matches!(desc.get("enumerable"), Some(Value::Boolean(true)))
+            {
+                self.throw_type_error("Cannot redefine non-configurable property");
+                return false;
+            }
+
+            if matches!(desc.get("writable"), Some(Value::Boolean(true))) && !old_len_writable {
+                self.throw_type_error("Cannot redefine non-configurable property");
+                return false;
+            }
+
+            if !desc.contains_key("value") {
+                if matches!(desc.get("writable"), Some(Value::Boolean(false))) {
+                    b.props.insert("__readonly_length__".to_string(), Value::Boolean(true));
+                }
+                return true;
+            }
+
+            let n = match desc.get("value") {
+                Some(v) => match self.extract_number_with_coercion(v) {
+                    Some(n) => n,
+                    None => return false,
+                },
+                None => old_len as f64,
+            };
+
+            let new_len = to_uint32(n) as u64;
+            if n.is_nan() || n != new_len as f64 {
+                self.throw_range_error("Invalid array length");
+                return false;
+            }
+
+            if !old_len_writable && new_len != old_len {
+                self.throw_type_error("Cannot assign to read only property 'length' of array");
+                return false;
+            }
+
+            if new_len < old_len {
+                let mut i = old_len;
+                while i > new_len {
+                    i -= 1;
+                    let idx_key = i.to_string();
+                    let nc_key = format!("__nonconfigurable_{}__", idx_key);
+                    let own_exists = (i as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", i))
+                        || b.props.contains_key(&idx_key)
+                        || b.props.contains_key(&format!("__get_{}", idx_key))
+                        || b.props.contains_key(&format!("__set_{}", idx_key));
+                    if !own_exists {
+                        continue;
+                    }
+                    if b.props.contains_key(&nc_key) {
+                        self.set_array_length_u64(&mut b, i + 1);
+                        self.throw_type_error("Cannot redefine non-configurable property");
+                        return false;
+                    }
+
+                    if (i as usize) < b.elements.len() {
+                        b.elements[i as usize] = Value::Undefined;
+                        b.props.insert(format!("__deleted_{}", i), Value::Boolean(true));
+                    }
+                    b.props.shift_remove(&idx_key);
+                    b.props.shift_remove(&format!("__get_{}", idx_key));
+                    b.props.shift_remove(&format!("__set_{}", idx_key));
+                    b.props.shift_remove(&format!("__readonly_{}__", idx_key));
+                    b.props.shift_remove(&format!("__nonenumerable_{}__", idx_key));
+                    b.props.shift_remove(&format!("__nonconfigurable_{}__", idx_key));
+                }
+            }
+
+            self.set_array_length_u64(&mut b, new_len);
+            if let Some(Value::Boolean(w)) = desc.get("writable") {
+                if !*w {
+                    b.props.insert("__readonly_length__".to_string(), Value::Boolean(true));
+                } else {
+                    b.props.shift_remove("__readonly_length__");
+                }
+            }
+            return true;
+        }
+
+        if let Ok(idx_u64) = key.parse::<u64>() {
+            let is_array_index = idx_u64 < 4294967295;
+            if is_array_index {
+                let old_len = self.array_length_u64(&b);
+                let old_len_writable = !matches!(b.props.get("__readonly_length__"), Some(Value::Boolean(true)));
+                let idx_key = key.to_string();
+                let own_exists = (idx_u64 as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", idx_u64))
+                    || b.props.contains_key(&idx_key)
+                    || b.props.contains_key(&format!("__get_{}", idx_key))
+                    || b.props.contains_key(&format!("__set_{}", idx_key));
+                if !own_exists && is_non_extensible {
+                    self.throw_type_error("Cannot add property, object is not extensible");
+                    return false;
+                }
+                if idx_u64 >= old_len && !old_len_writable {
+                    self.throw_type_error("Cannot assign to read only property 'length' of array");
+                    return false;
+                }
+
+                let getter_key = format!("__get_{}", key);
+                let setter_key = format!("__set_{}", key);
+                let nonenumerable_key = format!("__nonenumerable_{}__", key);
+                let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
+                let readonly_key = format!("__readonly_{}__", key);
+
+                // Preserve non-configurable invariant (minimal checks used by current tests)
+                if b.props.contains_key(&nonconfigurable_key) && matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
+                    self.throw_type_error("Cannot redefine non-configurable property");
+                    return false;
+                }
+
+                b.props.shift_remove(&getter_key);
+                b.props.shift_remove(&setter_key);
+                b.props.shift_remove(&nonenumerable_key);
+                b.props.shift_remove(&nonconfigurable_key);
+                b.props.shift_remove(&readonly_key);
+
+                if is_accessor {
+                    if (idx_u64 as usize) < b.elements.len() {
+                        b.elements[idx_u64 as usize] = Value::Undefined;
+                        b.props.insert(format!("__deleted_{}", idx_u64), Value::Boolean(true));
+                    }
+                    b.props.shift_remove(key);
+                    if let Some(val) = desc.get("get") {
+                        b.props.insert(getter_key, val.clone());
+                    }
+                    if let Some(val) = desc.get("set") {
+                        b.props.insert(setter_key, val.clone());
+                    }
+                } else if let Some(val) = desc.get("value") {
+                    // Keep dense representation for small contiguous indices; sparse for large indices.
+                    if (idx_u64 as usize) <= b.elements.len() + 1024 && idx_u64 < 1_000_000 {
+                        while b.elements.len() <= idx_u64 as usize {
+                            b.elements.push(Value::Undefined);
+                        }
+                        b.elements[idx_u64 as usize] = val.clone();
+                        b.props.shift_remove(&format!("__deleted_{}", idx_u64));
+                    } else {
+                        b.props.insert(key.to_string(), val.clone());
+                    }
+                } else if !own_exists {
+                    b.props.insert(key.to_string(), Value::Undefined);
+                }
+
+                let enumerable = matches!(desc.get("enumerable"), Some(Value::Boolean(true)));
+                let configurable = matches!(desc.get("configurable"), Some(Value::Boolean(true)));
+                if !enumerable {
+                    b.props.insert(nonenumerable_key, Value::Boolean(true));
+                }
+                if !configurable {
+                    b.props.insert(nonconfigurable_key, Value::Boolean(true));
+                }
+                if !is_accessor {
+                    let writable = matches!(desc.get("writable"), Some(Value::Boolean(true)));
+                    if !writable {
+                        b.props.insert(readonly_key, Value::Boolean(true));
+                    }
+                }
+
+                if idx_u64 + 1 > old_len {
+                    self.set_array_length_u64(&mut b, idx_u64 + 1);
+                }
+                return true;
+            }
+        }
+
+        // Non-index string keys on arrays are regular object-like props.
+        let own_exists =
+            b.props.contains_key(key) || b.props.contains_key(&format!("__get_{}", key)) || b.props.contains_key(&format!("__set_{}", key));
+        if !own_exists && is_non_extensible {
+            self.throw_type_error("Cannot add property, object is not extensible");
+            return false;
+        }
+
+        let getter_key = format!("__get_{}", key);
+        let setter_key = format!("__set_{}", key);
+        let nonenumerable_key = format!("__nonenumerable_{}__", key);
+        let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
+        let readonly_key = format!("__readonly_{}__", key);
+        b.props.shift_remove(&getter_key);
+        b.props.shift_remove(&setter_key);
+        b.props.shift_remove(&nonenumerable_key);
+        b.props.shift_remove(&nonconfigurable_key);
+        b.props.shift_remove(&readonly_key);
+
+        if is_accessor {
+            b.props.shift_remove(key);
+            if let Some(v) = desc.get("get") {
+                b.props.insert(getter_key, v.clone());
+            }
+            if let Some(v) = desc.get("set") {
+                b.props.insert(setter_key, v.clone());
+            }
+        } else if let Some(v) = desc.get("value") {
+            b.props.insert(key.to_string(), v.clone());
+        } else if !b.props.contains_key(key) {
+            b.props.insert(key.to_string(), Value::Undefined);
+        }
+
+        let enumerable = matches!(desc.get("enumerable"), Some(Value::Boolean(true)));
+        let configurable = matches!(desc.get("configurable"), Some(Value::Boolean(true)));
+        if !enumerable {
+            b.props.insert(nonenumerable_key, Value::Boolean(true));
+        }
+        if !configurable {
+            b.props.insert(nonconfigurable_key, Value::Boolean(true));
+        }
+        if !is_accessor {
+            let writable = matches!(desc.get("writable"), Some(Value::Boolean(true)));
+            if !writable {
+                b.props.insert(readonly_key, Value::Boolean(true));
+            }
+        }
+        true
     }
 
     /// Call a proxy's [[OwnPropertyKeys]] trap (ownKeys) to get the list of
@@ -14121,18 +14743,24 @@ impl<'gc> VM<'gc> {
             Value::Null | Value::Undefined => "null".to_string(),
             Value::VmArray(arr) => {
                 let borrow = arr.borrow();
-                let parts: Vec<String> = borrow
-                    .elements
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        if borrow.props.contains_key(&format!("__deleted_{}", i)) {
-                            "null".to_string()
-                        } else {
-                            self.json_stringify(v)
-                        }
-                    })
-                    .collect();
+                let logical_len = if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
+                    if *n >= 0.0 { *n as usize } else { 0 }
+                } else {
+                    borrow.elements.len()
+                };
+                let mut parts: Vec<String> = Vec::with_capacity(logical_len);
+                for i in 0..logical_len {
+                    let idx_key = i.to_string();
+                    let deleted_key = format!("__deleted_{}", i);
+                    let part = if let Some(v) = borrow.props.get(&idx_key) {
+                        self.json_stringify(v)
+                    } else if i < borrow.elements.len() && !borrow.props.contains_key(&deleted_key) {
+                        self.json_stringify(&borrow.elements[i])
+                    } else {
+                        "null".to_string()
+                    };
+                    parts.push(part);
+                }
                 format!("[{}]", parts.join(","))
             }
             Value::VmObject(map) => {
@@ -16660,7 +17288,14 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         Value::VmArray(arr) => match key.as_str() {
-                            "length" => self.stack.push(Value::Number(arr.borrow().len() as f64)),
+                            "length" => {
+                                let b = arr.borrow();
+                                if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                                    self.stack.push(Value::Number(*n));
+                                } else {
+                                    self.stack.push(Value::Number(b.len() as f64));
+                                }
+                            }
                             "buffer" => {
                                 let v = arr.borrow().props.get("__typedarray_buffer__").cloned().unwrap_or(Value::Undefined);
                                 self.stack.push(v);
@@ -16743,9 +17378,51 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             _ => {
-                                // Check custom named properties
-                                let val = arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined);
-                                self.stack.push(val);
+                                let borrow = arr.borrow();
+                                if let Some(v) = borrow.props.get(&key).cloned() {
+                                    drop(borrow);
+                                    self.stack.push(v);
+                                } else {
+                                    let proto = borrow.props.get("__proto__").cloned().or_else(|| {
+                                        if let Some(Value::VmObject(array_ctor)) = self.globals.get("Array") {
+                                            array_ctor.borrow().get("prototype").cloned()
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    drop(borrow);
+                                    let getter_key = format!("__get_{}", key);
+                                    if let Some(getter_fn) = self.lookup_proto_chain(&proto.clone(), &getter_key) {
+                                        match getter_fn {
+                                            Value::VmFunction(ip, _) => {
+                                                self.this_stack.push(obj.clone());
+                                                let result = self.call_vm_function_result(ip, &[], &[]);
+                                                self.this_stack.pop();
+                                                self.stack.push(result?);
+                                            }
+                                            Value::VmClosure(ip, _, ups) => {
+                                                self.this_stack.push(obj.clone());
+                                                let result = self.call_vm_function_result(ip, &[], &ups);
+                                                self.this_stack.pop();
+                                                self.stack.push(result?);
+                                            }
+                                            Value::VmObject(getter_obj) => {
+                                                if let Some(Value::String(host_name_u16)) = getter_obj.borrow().get("__host_fn__").cloned()
+                                                {
+                                                    let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
+                                                    let getter_result = self.call_host_fn(&host_name, Some(obj.clone()), vec![]);
+                                                    self.stack.push(getter_result);
+                                                } else {
+                                                    self.stack.push(Value::Undefined);
+                                                }
+                                            }
+                                            _ => self.stack.push(Value::Undefined),
+                                        }
+                                    } else {
+                                        let found = self.lookup_proto_chain(&proto, &key).unwrap_or(Value::Undefined);
+                                        self.stack.push(found);
+                                    }
+                                }
                             }
                         },
                         Value::Object(obj_ref) => {
@@ -16886,6 +17563,7 @@ impl<'gc> VM<'gc> {
                                 "length" => {
                                     let len = match *id {
                                         BUILTIN_OBJECT_CREATE | BUILTIN_OBJECT_DEFINEPROPS => 2.0,
+                                        BUILTIN_OBJECT_DEFINEPROP => 3.0,
                                         _ => 1.0,
                                     };
                                     Value::Number(len)
@@ -17087,7 +17765,14 @@ impl<'gc> VM<'gc> {
                                         self.ip = ip;
                                     } else {
                                         if i < 0xFFFF_FFFF {
-                                            let val = arr.borrow().get(i).cloned().unwrap_or(Value::Undefined);
+                                            let val = {
+                                                let b = arr.borrow();
+                                                if i < b.elements.len() {
+                                                    b.get(i).cloned().unwrap_or(Value::Undefined)
+                                                } else {
+                                                    b.props.get(&coerced_key).cloned().unwrap_or(Value::Undefined)
+                                                }
+                                            };
                                             self.stack.push(val);
                                         } else {
                                             let val = arr.borrow().props.get(&coerced_key).cloned().unwrap_or(Value::Undefined);
@@ -17101,7 +17786,14 @@ impl<'gc> VM<'gc> {
                             } else {
                                 if let Ok(i) = coerced_key.parse::<usize>() {
                                     if i < 0xFFFF_FFFF {
-                                        let val = arr.borrow().get(i).cloned().unwrap_or(Value::Undefined);
+                                        let val = {
+                                            let b = arr.borrow();
+                                            if i < b.elements.len() {
+                                                b.get(i).cloned().unwrap_or(Value::Undefined)
+                                            } else {
+                                                b.props.get(&coerced_key).cloned().unwrap_or(Value::Undefined)
+                                            }
+                                        };
                                         self.stack.push(val);
                                     } else {
                                         // Non-array-index (>= 2^32-1): look up as string property
@@ -17366,6 +18058,7 @@ impl<'gc> VM<'gc> {
                             let a = arr.borrow();
                             let mut k: Vec<Value<'gc>> = (0..a.elements.len())
                                 .filter(|i| !a.props.contains_key(&format!("__deleted_{}", i)))
+                                .filter(|i| !a.props.contains_key(&format!("__nonenumerable_{}__", i)))
                                 .map(|i| Value::from(&i.to_string()))
                                 .collect();
                             for prop_key in a.props.keys() {
@@ -17574,7 +18267,7 @@ impl<'gc> VM<'gc> {
                             "findLast" => Value::VmNativeFunction(BUILTIN_ARRAY_FINDLAST),
                             "findLastIndex" => Value::VmNativeFunction(BUILTIN_ARRAY_FINDLASTINDEX),
                             "reduceRight" => Value::VmNativeFunction(BUILTIN_ARRAY_REDUCERIGHT),
-                            _ => Value::Undefined,
+                            _ => self.read_named_property(obj.clone(), &key),
                         },
                         Value::String(_) => match key.as_str() {
                             "split" => Value::VmNativeFunction(BUILTIN_STRING_SPLIT),
@@ -18291,6 +18984,11 @@ impl<'gc> VM<'gc> {
                                     ] {
                                         map.insert(format!("__nonenumerable_{}__", ne_key), Value::Boolean(true));
                                     }
+                                    if let Some(Value::VmObject(ctor)) = self.globals.get("RegExp")
+                                        && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                                    {
+                                        map.insert("__proto__".to_string(), proto);
+                                    }
                                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
                                 }
                                 BUILTIN_CTOR_DATE => {
@@ -18403,6 +19101,11 @@ impl<'gc> VM<'gc> {
                                     map.insert("getUTCHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS));
                                     map.insert("getUTCMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES));
                                     map.insert("getUTCSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS));
+                                    if let Some(Value::VmObject(ctor)) = self.globals.get("Date")
+                                        && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                                    {
+                                        map.insert("__proto__".to_string(), proto);
+                                    }
                                     self.stack.push(Value::VmObject(Rc::new(RefCell::new(map))));
                                 }
                                 BUILTIN_CTOR_NUMBER => {
@@ -18474,8 +19177,11 @@ impl<'gc> VM<'gc> {
                                     let is_async_ctor = matches!(borrow.get("__async_function_constructor__"), Some(Value::Boolean(true)));
                                     let is_async_gen_ctor =
                                         matches!(borrow.get("__async_generator_function_constructor__"), Some(Value::Boolean(true)));
-                                    let ctor_prototype = borrow.get("prototype").cloned();
                                     drop(borrow);
+                                    let ctor_prototype = {
+                                        let p = self.read_named_property(callee.clone(), "prototype");
+                                        if matches!(p, Value::Undefined) { None } else { Some(p) }
+                                    };
                                     let args: Vec<Value<'gc>> = (0..arg_count)
                                         .map(|_| self.stack.pop().expect("VM Stack underflow"))
                                         .collect::<Vec<_>>()
@@ -18608,6 +19314,71 @@ impl<'gc> VM<'gc> {
                                         m.insert("getUTCHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS));
                                         m.insert("getUTCMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES));
                                         m.insert("getUTCSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS));
+                                        if let Some(proto) = ctor_prototype.clone() {
+                                            m.insert("__proto__".to_string(), proto);
+                                        }
+                                        self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
+                                        continue;
+                                    }
+
+                                    if id == BUILTIN_CTOR_REGEXP {
+                                        let pattern = args.first().map(value_to_string).unwrap_or_default();
+                                        let flags = args.get(1).map(value_to_string).unwrap_or_default();
+                                        let mut m = IndexMap::new();
+                                        m.insert("__regex_pattern__".to_string(), Value::from(&pattern));
+                                        m.insert("__regex_flags__".to_string(), Value::from(&flags));
+                                        m.insert("__type__".to_string(), Value::from("RegExp"));
+                                        m.insert("__toStringTag__".to_string(), Value::from("RegExp"));
+                                        m.insert("source".to_string(), Value::from(&pattern));
+                                        m.insert("flags".to_string(), Value::from(&flags));
+                                        m.insert("global".to_string(), Value::Boolean(flags.contains('g')));
+                                        m.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
+                                        m.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
+                                        m.insert("dotAll".to_string(), Value::Boolean(flags.contains('s')));
+                                        m.insert("sticky".to_string(), Value::Boolean(flags.contains('y')));
+                                        m.insert("unicode".to_string(), Value::Boolean(flags.contains('u')));
+                                        m.insert("hasIndices".to_string(), Value::Boolean(flags.contains('d')));
+                                        m.insert("unicodeSets".to_string(), Value::Boolean(flags.contains('v')));
+                                        m.insert("lastIndex".to_string(), Value::Number(0.0));
+                                        for ne_key in [
+                                            "source",
+                                            "flags",
+                                            "global",
+                                            "ignoreCase",
+                                            "multiline",
+                                            "dotAll",
+                                            "sticky",
+                                            "unicode",
+                                            "hasIndices",
+                                            "unicodeSets",
+                                            "lastIndex",
+                                        ] {
+                                            m.insert(format!("__nonenumerable_{}__", ne_key), Value::Boolean(true));
+                                        }
+                                        if let Some(proto) = ctor_prototype.clone() {
+                                            m.insert("__proto__".to_string(), proto);
+                                        }
+                                        self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
+                                        continue;
+                                    }
+
+                                    if matches!(
+                                        id,
+                                        BUILTIN_CTOR_ERROR
+                                            | BUILTIN_CTOR_TYPEERROR
+                                            | BUILTIN_CTOR_SYNTAXERROR
+                                            | BUILTIN_CTOR_RANGEERROR
+                                            | BUILTIN_CTOR_REFERENCEERROR
+                                    ) {
+                                        let type_name = Self::error_type_name_from_builtin(id).unwrap_or("Error");
+                                        let msg = args.first().map(|v| self.vm_to_string(v)).unwrap_or_default();
+                                        let mut m = IndexMap::new();
+                                        m.insert("message".to_string(), Value::from(&msg));
+                                        m.insert("__type__".to_string(), Value::from(type_name));
+                                        m.insert("name".to_string(), Value::from(type_name));
+                                        if let Some(proto) = ctor_prototype.clone() {
+                                            m.insert("__proto__".to_string(), proto);
+                                        }
                                         self.stack.push(Value::VmObject(Rc::new(RefCell::new(m))));
                                         continue;
                                     }
@@ -18660,7 +19431,7 @@ impl<'gc> VM<'gc> {
                                             m.insert("__type__".to_string(), Value::from("Boolean"));
                                             let bool_value = bool_ctor_value.unwrap_or(false);
                                             m.insert("__value__".to_string(), Value::Boolean(bool_value));
-                                            if let Some(proto) = ctor_prototype {
+                                            if let Some(proto) = ctor_prototype.clone() {
                                                 m.insert("__proto__".to_string(), proto);
                                             }
                                             Value::VmObject(Rc::new(RefCell::new(m)))
@@ -18696,6 +19467,12 @@ impl<'gc> VM<'gc> {
                                         fn_b.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(fn_proto))));
                                         fn_b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
                                         fn_b.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+                                    }
+                                    if let Value::VmObject(obj) = &wrapped {
+                                        let has_proto = obj.borrow().contains_key("__proto__");
+                                        if !has_proto && let Some(proto) = ctor_prototype {
+                                            obj.borrow_mut().insert("__proto__".to_string(), proto);
+                                        }
                                     }
                                     self.stack.push(wrapped);
                                     if let Some(thrown) = self.pending_throw.take() {

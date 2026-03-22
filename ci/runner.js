@@ -20,8 +20,8 @@ let USE_VM = false;
 let FOCUS_LIST = [];
 let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 60;
 const envKeep = process.env.TEST262_KEEP_TMP;
-// Default: keep composed temporary files (set TEST262_KEEP_TMP=0 to disable)
-let KEEP_TMP = (envKeep === undefined) ? true : (envKeep === '1' || envKeep === 'true');
+// Default: delete composed temporary files (set TEST262_KEEP_TMP=1 to keep)
+let KEEP_TMP = (envKeep === undefined) ? false : (envKeep === '1' || envKeep === 'true');
 
 process.on('exit', (code) => {
   const elapsedMs = Number((process.hrtime.bigint() - SCRIPT_START_NS) / 1000000n);

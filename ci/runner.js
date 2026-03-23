@@ -87,7 +87,7 @@ function cleanupComposedArtifacts(tmpPath){
 }
 
 console.log(`Running Test262 tests (node runner)`);
-console.log(`Composed temporary files are kept by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=0 to disable.`);
+console.log(`Composed temporary files are deleted by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=0 to disable.`);
 console.log(`Execution jobs: ${JOBS}`);
 console.log(`Use VM mode: ${USE_VM}`);
 

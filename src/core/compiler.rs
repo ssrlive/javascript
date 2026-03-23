@@ -1360,6 +1360,7 @@ impl<'gc> Compiler<'gc> {
                 self.emit_hoisted_var_slots(body);
 
                 self.emit_parameter_default_initializers(params)?;
+                self.emit_parameter_pattern_bindings(params)?;
 
                 for (i, s) in body.iter().enumerate() {
                     self.compile_statement(s, i == body.len() - 1)?;
@@ -2715,6 +2716,8 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 self.emit_hoisted_var_slots(body);
+                self.emit_parameter_default_initializers(params)?;
+                self.emit_parameter_pattern_bindings(params)?;
 
                 if body.len() == 1 {
                     if let StatementKind::Expr(expr) = &*body[0].kind {
@@ -4134,6 +4137,7 @@ impl<'gc> Compiler<'gc> {
 
         self.emit_hoisted_var_slots(body);
         self.emit_parameter_default_initializers(params)?;
+        self.emit_parameter_pattern_bindings(params)?;
 
         for (i, s) in body.iter().enumerate() {
             self.compile_statement(s, i == body.len() - 1)?;
@@ -4206,15 +4210,87 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::Pop);
                     self.patch_jump(skip_default);
                 }
+                DestructuringElement::NestedArray(_, Some(default_expr)) | DestructuringElement::NestedObject(_, Some(default_expr)) => {
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(local_slot);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let skip_default = self.emit_jump(Opcode::JumpIfFalse);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    self.compile_expr(default_expr)?;
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(local_slot);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    self.patch_jump(skip_default);
+                }
                 DestructuringElement::Variable(_, None) => {}
                 _ => {}
             }
 
-            if matches!(param, DestructuringElement::Variable(..) | DestructuringElement::Rest(..)) {
+            if !matches!(param, DestructuringElement::Rest(_)) {
                 local_slot = local_slot.saturating_add(1);
             }
         }
         Ok(())
+    }
+
+    fn emit_parameter_pattern_bindings(&mut self, params: &[DestructuringElement]) -> Result<(), JSError> {
+        let mut binding_names: Vec<String> = Vec::new();
+        for param in params {
+            Self::collect_destructuring_binding_names(param, &mut binding_names);
+        }
+        for name in binding_names {
+            if !self.locals.iter().any(|l| l == &name) {
+                self.locals.push(name);
+            }
+        }
+
+        let mut local_slot: u8 = 0;
+        for param in params {
+            match param {
+                DestructuringElement::NestedArray(inner, _) => {
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(local_slot);
+                    self.compile_array_destructuring(inner)?;
+                }
+                DestructuringElement::NestedObject(inner, _) => {
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(local_slot);
+                    self.compile_object_destructuring_from_destr(inner)?;
+                }
+                _ => {}
+            }
+
+            if !matches!(param, DestructuringElement::Rest(_)) {
+                local_slot = local_slot.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_destructuring_binding_names(elem: &DestructuringElement, out: &mut Vec<String>) {
+        match elem {
+            DestructuringElement::Variable(name, _) | DestructuringElement::Rest(name) => {
+                if !out.iter().any(|n| n == name) {
+                    out.push(name.clone());
+                }
+            }
+            DestructuringElement::NestedArray(inner, _) | DestructuringElement::NestedObject(inner, _) => {
+                for item in inner {
+                    Self::collect_destructuring_binding_names(item, out);
+                }
+            }
+            DestructuringElement::Property(_, target) | DestructuringElement::ComputedProperty(_, target) => {
+                Self::collect_destructuring_binding_names(target, out);
+            }
+            DestructuringElement::RestPattern(inner) => {
+                Self::collect_destructuring_binding_names(inner, out);
+            }
+            DestructuringElement::Empty => {}
+        }
     }
 
     fn compile_async_generator_function_body(
@@ -4267,6 +4343,8 @@ impl<'gc> Compiler<'gc> {
         }
 
         self.emit_hoisted_var_slots(body);
+        self.emit_parameter_default_initializers(params)?;
+        self.emit_parameter_pattern_bindings(params)?;
 
         // Async generators are suspendable like generators, but the VM wraps
         // each resume result into Promise objects.
@@ -4376,6 +4454,7 @@ impl<'gc> Compiler<'gc> {
 
         self.emit_hoisted_var_slots(body);
         self.emit_parameter_default_initializers(params)?;
+        self.emit_parameter_pattern_bindings(params)?;
 
         // Generator body uses Opcode::Yield for yield expressions
         // and normal Opcode::Return for return statements.
@@ -4458,28 +4537,30 @@ impl<'gc> Compiler<'gc> {
         // Store RHS into a synthetic temp
         let temp = format!("__destr_arr_{}__", self.forin_counter);
         self.forin_counter += 1;
-        let temp_name = crate::unicode::utf8_to_utf16(&temp);
-        let temp_name_idx = self.chunk.add_constant(Value::String(temp_name));
-        self.chunk.write_opcode(Opcode::DefineGlobal);
-        self.chunk.write_u16(temp_name_idx);
+        if self.scope_depth > 0 {
+            let temp_slot = if let Some(pos) = self.locals.iter().position(|l| l == &temp) {
+                pos
+            } else {
+                self.locals.push(temp.clone());
+                self.locals.len() - 1
+            };
+            self.chunk.write_opcode(Opcode::SetLocal);
+            self.chunk.write_byte(temp_slot as u8);
+        } else {
+            let temp_name = crate::unicode::utf8_to_utf16(&temp);
+            let temp_name_idx = self.chunk.add_constant(Value::String(temp_name));
+            self.chunk.write_opcode(Opcode::DefineGlobal);
+            self.chunk.write_u16(temp_name_idx);
+        }
 
-        // runtime check: ensure iterator exists on the object (via prototype)
-        self.emit_helper_get(&temp); // push arr
-        let iter_key = self.chunk.add_constant(Value::from("@@sym:1"));
-        self.chunk.write_opcode(Opcode::GetProperty); // will traverse prototype
-        self.chunk.write_u16(iter_key);
-        let ok_jump = self.emit_jump(Opcode::JumpIfTrue);
-        // iterator missing → throw TypeError
-        // Use NewError special-case constructor used elsewhere
-        let type_idx = self.chunk.add_constant(Value::from("TypeError"));
-        self.chunk.write_opcode(Opcode::Constant);
-        self.chunk.write_u16(type_idx);
-        let msg_idx = self.chunk.add_constant(Value::from("iterator missing"));
-        self.chunk.write_opcode(Opcode::Constant);
-        self.chunk.write_u16(msg_idx);
-        self.chunk.write_opcode(Opcode::NewError);
-        self.chunk.write_opcode(Opcode::Throw);
-        self.patch_jump(ok_jump);
+        // Normalize RHS via shared for-of helper so iterator getter/call errors
+        // propagate with the same behavior as other iterable consumers.
+        self.compile_expr(&Expr::Call(
+            Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
+            vec![Expr::Var(temp.clone(), None, None)],
+        ))?;
+        self.emit_helper_set(&temp);
+        self.chunk.write_opcode(Opcode::Pop);
 
         for (i, elem) in elements.iter().enumerate() {
             match elem {
@@ -4835,7 +4916,18 @@ impl<'gc> Compiler<'gc> {
     fn compile_object_destructuring_from_destr(&mut self, elements: &[DestructuringElement]) -> Result<(), JSError> {
         let temp = format!("__destr_obj_{}__", self.forin_counter);
         self.forin_counter += 1;
-        self.emit_define_var(&temp);
+        if self.scope_depth > 0 {
+            let temp_slot = if let Some(pos) = self.locals.iter().position(|l| l == &temp) {
+                pos
+            } else {
+                self.locals.push(temp.clone());
+                self.locals.len() - 1
+            };
+            self.chunk.write_opcode(Opcode::SetLocal);
+            self.chunk.write_byte(temp_slot as u8);
+        } else {
+            self.emit_define_var(&temp);
+        }
 
         for elem in elements {
             match elem {

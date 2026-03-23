@@ -196,6 +196,7 @@ jobs:
             28)
               TITLE='"built-ins/Object"'
               FOCUS='built-ins/Object'
+              USE_VM='true'
               ;;
             29)
               TITLE='"built-ins/AbstractModuleSource" - "built-ins/Boolean"'

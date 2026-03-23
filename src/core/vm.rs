@@ -1008,31 +1008,27 @@ impl<'gc> VM<'gc> {
                 let realm_global = Rc::new(RefCell::new(IndexMap::new()));
                 let realm_global_val = Value::VmObject(realm_global.clone());
 
-                {
-                    let mut g = realm_global.borrow_mut();
-                    g.insert("globalThis".to_string(), realm_global_val.clone());
-                    g.insert("this".to_string(), realm_global_val.clone());
-                }
-
                 for name in [
                     "Object",
-                    "Array",
                     "Function",
-                    "TypeError",
-                    "RangeError",
-                    "ReferenceError",
-                    "SyntaxError",
-                    "Error",
-                    "AggregateError",
+                    "Array",
+                    "String",
+                    "Number",
+                    "Boolean",
                     "Date",
                     "RegExp",
                     "Math",
                     "JSON",
                     "Promise",
                     "Symbol",
-                    "Number",
-                    "String",
-                    "Boolean",
+                    "Error",
+                    "AggregateError",
+                    "TypeError",
+                    "SyntaxError",
+                    "RangeError",
+                    "ReferenceError",
+                    "EvalError",
+                    "URIError",
                     "ArrayBuffer",
                     "SharedArrayBuffer",
                     "DataView",
@@ -6997,6 +6993,13 @@ impl<'gc> VM<'gc> {
                     proto_for_lookup = Some(type_proto);
                 }
             }
+            if proto_for_lookup.is_none()
+                && let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
+                && let Some(Value::VmObject(obj_proto)) = object_ctor.borrow().get("prototype").cloned()
+                && !Rc::ptr_eq(map, &obj_proto)
+            {
+                proto_for_lookup = Some(Value::VmObject(obj_proto));
+            }
             let has_getter = borrow.get(&getter_key).is_some()
                 || proto_for_lookup
                     .as_ref()
@@ -8366,6 +8369,30 @@ impl<'gc> VM<'gc> {
             "Float64Array".to_string(),
             Value::VmObject(Rc::new(RefCell::new(float64_array_map))),
         );
+
+        let mut bigint64_array_map = IndexMap::new();
+        bigint64_array_map.insert("__host_fn__".to_string(), Value::from("typedarray.bigint64"));
+        bigint64_array_map.insert("__constructible__".to_string(), Value::Boolean(true));
+        bigint64_array_map.insert("name".to_string(), Value::from("BigInt64Array"));
+        bigint64_array_map.insert("length".to_string(), Value::Number(0.0));
+        bigint64_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
+        bigint64_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+        self.globals.insert(
+            "BigInt64Array".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(bigint64_array_map))),
+        );
+
+        let mut biguint64_array_map = IndexMap::new();
+        biguint64_array_map.insert("__host_fn__".to_string(), Value::from("typedarray.biguint64"));
+        biguint64_array_map.insert("__constructible__".to_string(), Value::Boolean(true));
+        biguint64_array_map.insert("name".to_string(), Value::from("BigUint64Array"));
+        biguint64_array_map.insert("length".to_string(), Value::Number(0.0));
+        biguint64_array_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
+        biguint64_array_map.insert("prototype".to_string(), Value::VmObject(Rc::new(RefCell::new(IndexMap::new()))));
+        self.globals.insert(
+            "BigUint64Array".to_string(),
+            Value::VmObject(Rc::new(RefCell::new(biguint64_array_map))),
+        );
         // Object constructor with static methods
         let mut object_map = IndexMap::new();
         let object_proto = Rc::new(RefCell::new(IndexMap::new()));
@@ -9406,32 +9433,38 @@ impl<'gc> VM<'gc> {
     fn vm_call_function_value(&mut self, func: &Value<'gc>, this_arg: &Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
         match func {
             Value::VmFunction(ip, arity) => {
-                let mut call_args = args.to_vec();
+                let mut stack_args = args.to_vec();
                 let target_arity = *arity as usize;
-                if call_args.len() < target_arity {
-                    call_args.resize(target_arity, Value::Undefined);
-                } else if call_args.len() > target_arity {
-                    call_args.truncate(target_arity);
+                let actual_arg_count = args.len();
+                let mut saved_args: Option<Vec<Value<'gc>>> = None;
+                if stack_args.len() < target_arity {
+                    stack_args.resize(target_arity, Value::Undefined);
+                } else if stack_args.len() > target_arity {
+                    saved_args = Some(stack_args.clone());
+                    stack_args.truncate(target_arity);
                 }
                 self.this_stack.push(this_arg.clone());
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
-                let out = self.call_vm_function_result(*ip, &call_args, &[]);
+                let out = self.call_vm_function_result_with_meta(*ip, &stack_args, actual_arg_count, saved_args, &[]);
                 self.try_stack = saved_try_stack;
                 self.this_stack.pop();
                 out
             }
             Value::VmClosure(ip, arity, upv) => {
-                let mut call_args = args.to_vec();
+                let mut stack_args = args.to_vec();
                 let target_arity = *arity as usize;
-                if call_args.len() < target_arity {
-                    call_args.resize(target_arity, Value::Undefined);
-                } else if call_args.len() > target_arity {
-                    call_args.truncate(target_arity);
+                let actual_arg_count = args.len();
+                let mut saved_args: Option<Vec<Value<'gc>>> = None;
+                if stack_args.len() < target_arity {
+                    stack_args.resize(target_arity, Value::Undefined);
+                } else if stack_args.len() > target_arity {
+                    saved_args = Some(stack_args.clone());
+                    stack_args.truncate(target_arity);
                 }
                 self.this_stack.push(this_arg.clone());
                 let uv = (*upv).clone();
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
-                let out = self.call_vm_function_result(*ip, &call_args, &uv);
+                let out = self.call_vm_function_result_with_meta(*ip, &stack_args, actual_arg_count, saved_args, &uv);
                 self.try_stack = saved_try_stack;
                 self.this_stack.pop();
                 out
@@ -16850,11 +16883,22 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
         upvalues: &[Rc<RefCell<Value<'gc>>>],
     ) -> Result<Value<'gc>, JSError> {
+        self.call_vm_function_result_with_meta(ip, args, args.len(), None, upvalues)
+    }
+
+    fn call_vm_function_result_with_meta(
+        &mut self,
+        ip: usize,
+        stack_args: &[Value<'gc>],
+        arg_count: usize,
+        saved_args: Option<Vec<Value<'gc>>>,
+        upvalues: &[Rc<RefCell<Value<'gc>>>],
+    ) -> Result<Value<'gc>, JSError> {
         // Push a dummy callee so Return's truncate(bp-1) removes it
         self.stack.push(Value::Undefined);
         let bp = self.stack.len();
         let saved_stack_depth = bp - 1; // before the dummy callee
-        for arg in args {
+        for arg in stack_args {
             self.stack.push(arg.clone());
         }
         let saved_ip = self.ip;
@@ -16863,11 +16907,11 @@ impl<'gc> VM<'gc> {
             return_ip: 0, // sentinel
             bp,
             is_method: false,
-            arg_count: args.len(),
+            arg_count,
             func_ip: ip,
             arguments_obj: None,
             upvalues: upvalues.to_vec(),
-            saved_args: None,
+            saved_args,
             local_cells: HashMap::new(),
         });
         self.ip = ip;
@@ -17455,13 +17499,13 @@ impl<'gc> VM<'gc> {
 
                 if current_is_accessor && desc_is_accessor {
                     if let Some(new_get) = desc.get("get")
-                        && !self.values_equal(new_get, &current_get)
+                        && !self.values_same(new_get, &current_get)
                     {
                         self.throw_type_error("Cannot redefine non-configurable property");
                         return false;
                     }
                     if let Some(new_set) = desc.get("set")
-                        && !self.values_equal(new_set, &current_set)
+                        && !self.values_same(new_set, &current_set)
                     {
                         self.throw_type_error("Cannot redefine non-configurable property");
                         return false;
@@ -17474,7 +17518,7 @@ impl<'gc> VM<'gc> {
                         return false;
                     }
                     if let Some(new_value) = desc.get("value")
-                        && !self.values_equal(new_value, &current_value)
+                        && !self.values_same(new_value, &current_value)
                     {
                         self.throw_type_error("Cannot redefine non-configurable property");
                         return false;
@@ -17687,9 +17731,39 @@ impl<'gc> VM<'gc> {
             }
 
             if new_len < old_len {
-                let mut i = old_len;
-                while i > new_len {
-                    i -= 1;
+                // Only visit existing own array indices when shrinking length.
+                // Iterating every integer between old_len and new_len can hang when
+                // old_len is very large but the array is sparse.
+                let mut candidates: Vec<u64> = Vec::new();
+                for i in 0..b.elements.len() {
+                    let i_u64 = i as u64;
+                    if i_u64 >= new_len && i_u64 < old_len && !b.props.contains_key(&format!("__deleted_{}", i_u64)) {
+                        candidates.push(i_u64);
+                    }
+                }
+                for prop_key in b.props.keys() {
+                    let parsed = if let Ok(idx) = prop_key.parse::<u64>() {
+                        Some(idx)
+                    } else if let Some(rest) = prop_key.strip_prefix("__get_") {
+                        rest.parse::<u64>().ok()
+                    } else if let Some(rest) = prop_key.strip_prefix("__set_") {
+                        rest.parse::<u64>().ok()
+                    } else if let Some(rest) = prop_key.strip_prefix("__nonconfigurable_").and_then(|s| s.strip_suffix("__")) {
+                        rest.parse::<u64>().ok()
+                    } else {
+                        None
+                    };
+                    if let Some(idx) = parsed
+                        && idx >= new_len
+                        && idx < old_len
+                    {
+                        candidates.push(idx);
+                    }
+                }
+                candidates.sort_unstable();
+                candidates.dedup();
+
+                for i in candidates.into_iter().rev() {
                     let idx_key = i.to_string();
                     let nc_key = format!("__nonconfigurable_{}__", idx_key);
                     let own_exists = (i as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", i))
@@ -17701,6 +17775,9 @@ impl<'gc> VM<'gc> {
                     }
                     if b.props.contains_key(&nc_key) {
                         self.set_array_length_u64(&mut b, i + 1);
+                        if matches!(desc.get("writable"), Some(Value::Boolean(false))) {
+                            b.props.insert("__readonly_length__".to_string(), Value::Boolean(true));
+                        }
                         self.throw_type_error("Cannot redefine non-configurable property");
                         return false;
                     }
@@ -17789,13 +17866,13 @@ impl<'gc> VM<'gc> {
 
                     if current_is_accessor && desc_is_accessor {
                         if let Some(new_get) = desc.get("get")
-                            && !self.values_equal(new_get, &current_get)
+                            && !self.values_same(new_get, &current_get)
                         {
                             self.throw_type_error("Cannot redefine non-configurable property");
                             return false;
                         }
                         if let Some(new_set) = desc.get("set")
-                            && !self.values_equal(new_set, &current_set)
+                            && !self.values_same(new_set, &current_set)
                         {
                             self.throw_type_error("Cannot redefine non-configurable property");
                             return false;
@@ -17808,7 +17885,7 @@ impl<'gc> VM<'gc> {
                             return false;
                         }
                         if let Some(new_value) = desc.get("value")
-                            && !self.values_equal(new_value, &current_value)
+                            && !self.values_same(new_value, &current_value)
                         {
                             self.throw_type_error("Cannot redefine non-configurable property");
                             return false;
@@ -17952,13 +18029,13 @@ impl<'gc> VM<'gc> {
 
             if current_is_accessor && desc_is_accessor {
                 if let Some(new_get) = desc.get("get")
-                    && !self.values_equal(new_get, &current_get)
+                    && !self.values_same(new_get, &current_get)
                 {
                     self.throw_type_error("Cannot redefine non-configurable property");
                     return false;
                 }
                 if let Some(new_set) = desc.get("set")
-                    && !self.values_equal(new_set, &current_set)
+                    && !self.values_same(new_set, &current_set)
                 {
                     self.throw_type_error("Cannot redefine non-configurable property");
                     return false;
@@ -17971,7 +18048,7 @@ impl<'gc> VM<'gc> {
                     return false;
                 }
                 if let Some(new_value) = desc.get("value")
-                    && !self.values_equal(new_value, &current_value)
+                    && !self.values_same(new_value, &current_value)
                 {
                     self.throw_type_error("Cannot redefine non-configurable property");
                     return false;
@@ -18523,6 +18600,22 @@ impl<'gc> VM<'gc> {
                                 let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                                 if host_name == "error.aggregate" {
                                     self.vm_construct_aggregate_error(args, new_target)
+                                } else if host_name == "typedarray.bigint64" || host_name == "typedarray.biguint64" {
+                                    let mut out = self.call_builtin(BUILTIN_CTOR_FLOAT64ARRAY, args);
+                                    if let Value::VmArray(arr) = &mut out {
+                                        let ta_name = if host_name == "typedarray.bigint64" {
+                                            "BigInt64Array"
+                                        } else {
+                                            "BigUint64Array"
+                                        };
+                                        arr.borrow_mut()
+                                            .props
+                                            .insert("__typedarray_name__".to_string(), Value::from(ta_name));
+                                        if let Some(proto) = b.get("prototype").cloned() {
+                                            arr.borrow_mut().props.insert("__proto__".to_string(), proto);
+                                        }
+                                    }
+                                    Ok(out)
                                 } else {
                                     Err(crate::raise_type_error!("Target is not a constructor"))
                                 }
@@ -18735,6 +18828,11 @@ impl<'gc> VM<'gc> {
             (Value::VmArray(a), Value::VmArray(b)) => Rc::ptr_eq(a, b),
             (Value::VmMap(a), Value::VmMap(b)) => Rc::ptr_eq(a, b),
             (Value::VmSet(a), Value::VmSet(b)) => Rc::ptr_eq(a, b),
+            (Value::VmFunction(a_ip, a_arity), Value::VmFunction(b_ip, b_arity)) => a_ip == b_ip && a_arity == b_arity,
+            (Value::VmClosure(a_ip, a_arity, a_uv), Value::VmClosure(b_ip, b_arity, b_uv)) => {
+                a_ip == b_ip && a_arity == b_arity && Rc::ptr_eq(a_uv, b_uv)
+            }
+            (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             (Value::Number(a), Value::Number(b)) => {
                 if a.is_nan() && b.is_nan() {
                     true
@@ -18744,6 +18842,7 @@ impl<'gc> VM<'gc> {
                     a == b
                 }
             }
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::Undefined, Value::Undefined) => true,
@@ -22088,7 +22187,7 @@ impl<'gc> VM<'gc> {
                                         }
                                     }
                                 } else {
-                                    let val = arr.borrow().props.get(&coerced_key).cloned().unwrap_or(Value::Undefined);
+                                    let val = self.read_named_property(&obj, &coerced_key);
                                     self.stack.push(val);
                                 }
                             } else {
@@ -22156,7 +22255,7 @@ impl<'gc> VM<'gc> {
                                 } else if coerced_key == "keys" {
                                     self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_ITERATOR));
                                 } else {
-                                    let val = arr.borrow().props.get(&coerced_key).cloned().unwrap_or(Value::Undefined);
+                                    let val = self.read_named_property(&obj, &coerced_key);
                                     self.stack.push(val);
                                 }
                             }
@@ -22862,8 +22961,12 @@ impl<'gc> VM<'gc> {
                             if let Ok(idx) = key.parse::<usize>() {
                                 let borrow = arr.borrow();
                                 if idx < borrow.len() {
-                                    // Check if the index was deleted (hole)
+                                    // A deleted dense slot is still considered present when an
+                                    // accessor/data property exists for the same index key.
                                     !borrow.props.contains_key(&format!("__deleted_{}", idx))
+                                        || borrow.props.contains_key(&key)
+                                        || borrow.props.contains_key(&format!("__get_{}", key))
+                                        || borrow.props.contains_key(&format!("__set_{}", key))
                                 } else {
                                     borrow.props.contains_key(&key)
                                         || borrow.props.contains_key(&format!("__get_{}", key))
@@ -23085,29 +23188,7 @@ impl<'gc> VM<'gc> {
                         self.stack.push(Value::Boolean(result));
                         continue;
                     }
-                    // Check if object is a built-in (non-deletable properties)
-                    let is_builtin = if let Value::VmObject(ref map) = obj {
-                        if let Some(Value::VmObject(math_ref)) = self.globals.get("Math") {
-                            Rc::ptr_eq(map, math_ref)
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    if is_builtin {
-                        // Non-configurable property: throw TypeError
-                        let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::from(&format!("Cannot delete property '{}' of #<Object>", key)),
-                        );
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        let err = Value::VmObject(Rc::new(RefCell::new(err_map)));
-                        self.handle_throw(&err)?;
-                        // After handle_throw, push undefined as placeholder on stack
-                        self.stack.push(Value::Boolean(false));
-                    } else if let Value::VmObject(map) = &obj {
+                    if let Value::VmObject(map) = &obj {
                         let nc_key = format!("__nonconfigurable_{}__", key);
                         if map.borrow().contains_key(&nc_key) {
                             let mut err_map = IndexMap::new();

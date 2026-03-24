@@ -2456,7 +2456,8 @@ impl<'gc> Compiler<'gc> {
             Expr::Array(elements) => {
                 let has_spread = elements.iter().any(|e| matches!(e, Some(Expr::Spread(_))));
                 let has_hole = elements.iter().any(|e| e.is_none());
-                if has_spread || has_hole {
+                let needs_incremental = has_spread || has_hole || elements.len() > u8::MAX as usize;
+                if needs_incremental {
                     // Build array incrementally: NewArray(0), then ArrayPush/ArraySpread/ArrayHole
                     self.chunk.write_opcode(Opcode::NewArray);
                     self.chunk.write_byte(0);

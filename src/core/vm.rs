@@ -712,6 +712,38 @@ impl<'gc> VM<'gc> {
         match id {
             BUILTIN_CTOR_WEAKREF => "WeakRef",
             BUILTIN_CTOR_FR => "FinalizationRegistry",
+            BUILTIN_ARRAY_PUSH => "push",
+            BUILTIN_ARRAY_POP => "pop",
+            BUILTIN_ARRAY_JOIN => "join",
+            BUILTIN_ARRAY_INDEXOF => "indexOf",
+            BUILTIN_ARRAY_SLICE => "slice",
+            BUILTIN_ARRAY_CONCAT => "concat",
+            BUILTIN_ARRAY_MAP => "map",
+            BUILTIN_ARRAY_FILTER => "filter",
+            BUILTIN_ARRAY_FOREACH => "forEach",
+            BUILTIN_ARRAY_ISARRAY => "isArray",
+            BUILTIN_ARRAY_REDUCE => "reduce",
+            BUILTIN_ARRAY_ITERATOR => "values",
+            BUILTIN_ARRAY_OF => "of",
+            BUILTIN_ARRAY_FROM => "from",
+            BUILTIN_ARRAY_SHIFT => "shift",
+            BUILTIN_ARRAY_UNSHIFT => "unshift",
+            BUILTIN_ARRAY_SPLICE => "splice",
+            BUILTIN_ARRAY_REVERSE => "reverse",
+            BUILTIN_ARRAY_SORT => "sort",
+            BUILTIN_ARRAY_FIND => "find",
+            BUILTIN_ARRAY_FINDINDEX => "findIndex",
+            BUILTIN_ARRAY_INCLUDES => "includes",
+            BUILTIN_ARRAY_FLAT => "flat",
+            BUILTIN_ARRAY_FLATMAP => "flatMap",
+            BUILTIN_ARRAY_AT => "at",
+            BUILTIN_ARRAY_EVERY => "every",
+            BUILTIN_ARRAY_SOME => "some",
+            BUILTIN_ARRAY_FILL => "fill",
+            BUILTIN_ARRAY_LASTINDEXOF => "lastIndexOf",
+            BUILTIN_ARRAY_FINDLAST => "findLast",
+            BUILTIN_ARRAY_FINDLASTINDEX => "findLastIndex",
+            BUILTIN_ARRAY_REDUCERIGHT => "reduceRight",
             BUILTIN_OBJ_HASOWNPROPERTY => "hasOwnProperty",
             BUILTIN_OBJ_TOSTRING => "toString",
             BUILTIN_OBJECT_CREATE => "create",
@@ -735,6 +767,37 @@ impl<'gc> VM<'gc> {
 
     fn native_function_length(id: u8) -> f64 {
         match id {
+            BUILTIN_ARRAY_POP => 0.0,
+            BUILTIN_ARRAY_JOIN => 1.0,
+            BUILTIN_ARRAY_INDEXOF => 2.0,
+            BUILTIN_ARRAY_SLICE => 2.0,
+            BUILTIN_ARRAY_CONCAT => 1.0,
+            BUILTIN_ARRAY_MAP => 1.0,
+            BUILTIN_ARRAY_FILTER => 1.0,
+            BUILTIN_ARRAY_FOREACH => 1.0,
+            BUILTIN_ARRAY_ISARRAY => 1.0,
+            BUILTIN_ARRAY_REDUCE => 1.0,
+            BUILTIN_ARRAY_ITERATOR => 0.0,
+            BUILTIN_ARRAY_OF => 0.0,
+            BUILTIN_ARRAY_FROM => 1.0,
+            BUILTIN_ARRAY_SHIFT => 0.0,
+            BUILTIN_ARRAY_UNSHIFT => 1.0,
+            BUILTIN_ARRAY_SPLICE => 2.0,
+            BUILTIN_ARRAY_REVERSE => 0.0,
+            BUILTIN_ARRAY_SORT => 1.0,
+            BUILTIN_ARRAY_FIND => 1.0,
+            BUILTIN_ARRAY_FINDINDEX => 1.0,
+            BUILTIN_ARRAY_INCLUDES => 1.0,
+            BUILTIN_ARRAY_FLAT => 0.0,
+            BUILTIN_ARRAY_FLATMAP => 1.0,
+            BUILTIN_ARRAY_AT => 1.0,
+            BUILTIN_ARRAY_EVERY => 1.0,
+            BUILTIN_ARRAY_SOME => 1.0,
+            BUILTIN_ARRAY_FILL => 1.0,
+            BUILTIN_ARRAY_LASTINDEXOF => 1.0,
+            BUILTIN_ARRAY_FINDLAST => 1.0,
+            BUILTIN_ARRAY_FINDLASTINDEX => 1.0,
+            BUILTIN_ARRAY_REDUCERIGHT => 1.0,
             BUILTIN_OBJECT_GETOWNPROPDESC => 2.0,
             BUILTIN_OBJ_TOSTRING => 0.0,
             BUILTIN_OBJ_HASOWNPROPERTY => 1.0,
@@ -4735,16 +4798,19 @@ impl<'gc> VM<'gc> {
             }
             "reflect.get" => {
                 let target = args.first().unwrap_or(&Value::Undefined);
-                let key = args.get(1).map(value_to_string).unwrap_or_default();
+                let key = match args.get(1) {
+                    Some(v) => match self.as_property_key_string(v) {
+                        Ok(k) => k,
+                        Err(_) => return Value::Undefined,
+                    },
+                    None => String::new(),
+                };
+                let receiver = args.get(2).unwrap_or(target);
                 match target {
-                    Value::VmObject(_) => self.read_named_property(target, &key),
-                    Value::VmArray(arr) => {
-                        if let Ok(i) = key.parse::<usize>() {
-                            arr.borrow().get(i).cloned().unwrap_or(Value::Undefined)
-                        } else {
-                            arr.borrow().props.get(&key).cloned().unwrap_or(Value::Undefined)
-                        }
+                    Value::VmObject(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
+                        self.read_named_property_with_receiver(target, &key, receiver)
                     }
+                    Value::VmArray(_) => self.read_named_property(target, &key),
                     _ => Value::Undefined,
                 }
             }
@@ -5807,7 +5873,15 @@ impl<'gc> VM<'gc> {
             }
             "array.toString" => {
                 if let Some(Value::VmArray(arr)) = receiver {
-                    let joined = arr.borrow().iter().map(value_to_string).collect::<Vec<_>>().join(",");
+                    let joined = arr
+                        .borrow()
+                        .iter()
+                        .map(|v| match v {
+                            Value::Undefined | Value::Null => String::new(),
+                            other => value_to_string(other),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
                     Value::from(&joined)
                 } else {
                     Value::from("")
@@ -5853,16 +5927,122 @@ impl<'gc> VM<'gc> {
                 }
             }
             "array.entries" => {
-                if let Some(Value::VmArray(arr)) = receiver {
-                    let entries = arr
-                        .borrow()
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![Value::Number(i as f64), v.clone()])))))
-                        .collect::<Vec<_>>();
-                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(entries))))
+                let Some(recv) = receiver else {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                };
+                let target = match recv {
+                    Value::Undefined | Value::Null => {
+                        self.throw_type_error("Cannot convert undefined or null to object");
+                        return Value::Undefined;
+                    }
+                    Value::VmObject(_)
+                    | Value::VmArray(_)
+                    | Value::VmFunction(..)
+                    | Value::VmClosure(..)
+                    | Value::VmNativeFunction(_)
+                    | Value::Object(_) => recv.clone(),
+                    _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(recv)),
+                };
+
+                if let Value::VmArray(arr) = &target {
+                    let mut obj = IndexMap::new();
+                    obj.insert("__iter_target__".to_string(), Value::VmArray(arr.clone()));
+                    obj.insert("__index__".to_string(), Value::Number(0.0));
+                    obj.insert("__iter_kind__".to_string(), Value::from("entry"));
+                    if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
+                        obj.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmObject(Rc::new(RefCell::new(obj)))
                 } else {
-                    Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(Vec::new()))))
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    let len = if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        usize::MAX
+                    } else {
+                        n.floor() as usize
+                    };
+                    let mut items = Vec::new();
+                    for idx in 0..len {
+                        let key = idx.to_string();
+                        let value = self.read_named_property(&target, &key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        items.push(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![
+                            Value::Number(idx as f64),
+                            value,
+                        ])))));
+                    }
+                    let arr = Rc::new(RefCell::new(VmArrayData::new(items)));
+                    let mut obj = IndexMap::new();
+                    obj.insert("__items__".to_string(), Value::VmArray(arr));
+                    obj.insert("__index__".to_string(), Value::Number(0.0));
+                    if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
+                        obj.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmObject(Rc::new(RefCell::new(obj)))
+                }
+            }
+            "array.values" => {
+                let Some(recv) = receiver else {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                };
+                let target = match recv {
+                    Value::Undefined | Value::Null => {
+                        self.throw_type_error("Cannot convert undefined or null to object");
+                        return Value::Undefined;
+                    }
+                    Value::VmObject(_)
+                    | Value::VmArray(_)
+                    | Value::VmFunction(..)
+                    | Value::VmClosure(..)
+                    | Value::VmNativeFunction(_)
+                    | Value::Object(_) => recv.clone(),
+                    _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(recv)),
+                };
+
+                if let Value::VmArray(arr) = &target {
+                    let mut obj = IndexMap::new();
+                    obj.insert("__iter_target__".to_string(), Value::VmArray(arr.clone()));
+                    obj.insert("__index__".to_string(), Value::Number(0.0));
+                    if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
+                        obj.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmObject(Rc::new(RefCell::new(obj)))
+                } else {
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    let len = if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        usize::MAX
+                    } else {
+                        n.floor() as usize
+                    };
+                    let mut items = Vec::new();
+                    for idx in 0..len {
+                        let key = idx.to_string();
+                        items.push(self.read_named_property(&target, &key));
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                    }
+                    let arr = Rc::new(RefCell::new(VmArrayData::new(items)));
+                    let mut obj = IndexMap::new();
+                    obj.insert("__items__".to_string(), Value::VmArray(arr));
+                    obj.insert("__index__".to_string(), Value::Number(0.0));
+                    if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
+                        obj.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmObject(Rc::new(RefCell::new(obj)))
                 }
             }
             "array.symbolIterator" => {
@@ -5916,9 +6096,32 @@ impl<'gc> VM<'gc> {
                 if let Some(Value::VmArray(arr)) = receiver {
                     let len = arr.borrow().len() as i64;
                     let norm = |n: i64| if n < 0 { (len + n).max(0) } else { n.min(len) } as usize;
-                    let target = norm(args.first().map(to_number).unwrap_or(0.0) as i64);
-                    let start = norm(args.get(1).map(to_number).unwrap_or(0.0) as i64);
-                    let end = norm(args.get(2).map(to_number).unwrap_or(len as f64) as i64);
+                    let target_num = if let Some(v) = args.first() {
+                        match self.extract_number_with_coercion(v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        }
+                    } else {
+                        0.0
+                    };
+                    let start_num = if let Some(v) = args.get(1) {
+                        match self.extract_number_with_coercion(v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        }
+                    } else {
+                        0.0
+                    };
+                    let end_num = match args.get(2) {
+                        None | Some(Value::Undefined) => len as f64,
+                        Some(v) => match self.extract_number_with_coercion(v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
+                    };
+                    let target = norm(target_num.trunc() as i64);
+                    let start = norm(start_num.trunc() as i64);
+                    let end = norm(end_num.trunc() as i64);
                     let mut borrow = arr.borrow_mut();
                     let src: Vec<Value<'gc>> = borrow.elements.clone();
                     let mut t = target;
@@ -7859,12 +8062,19 @@ impl<'gc> VM<'gc> {
         {
             arr_proto.insert("__proto__".to_string(), obj_proto);
         }
-        arr_proto.insert("@@sym:1".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ITERATOR));
+        let array_values_fn = Self::make_host_fn_with_name_len("array.values", "values", 0.0, false);
+        let array_entries_fn = Self::make_host_fn_with_name_len("array.entries", "entries", 0.0, false);
+        let array_copy_within_fn = Self::make_host_fn_with_name_len("array.copyWithin", "copyWithin", 2.0, false);
+        let array_to_string_fn = Self::make_host_fn_with_name_len("array.toString", "toString", 0.0, false);
+        let array_to_locale_string_fn = Self::make_host_fn_with_name_len("array.toString", "toLocaleString", 0.0, false);
+        arr_proto.insert("@@sym:1".to_string(), array_values_fn.clone());
         arr_proto.insert("push".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_PUSH));
         arr_proto.insert("pop".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_POP));
         arr_proto.insert("join".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_JOIN));
-        arr_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_JOIN));
-        arr_proto.insert("toLocaleString".to_string(), Self::make_host_fn("array.toString"));
+        arr_proto.insert("toString".to_string(), array_to_string_fn);
+        arr_proto.insert("toLocaleString".to_string(), array_to_locale_string_fn);
+        arr_proto.insert("values".to_string(), array_values_fn);
+        arr_proto.insert("entries".to_string(), array_entries_fn);
         arr_proto.insert("indexOf".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_INDEXOF));
         arr_proto.insert("slice".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_SLICE));
         arr_proto.insert("concat".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_CONCAT));
@@ -7882,6 +8092,7 @@ impl<'gc> VM<'gc> {
         arr_proto.insert("includes".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_INCLUDES));
         arr_proto.insert("flat".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_FLAT));
         arr_proto.insert("flatMap".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_FLATMAP));
+        arr_proto.insert("copyWithin".to_string(), array_copy_within_fn);
         arr_proto.insert("at".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_AT));
         arr_proto.insert("every".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_EVERY));
         arr_proto.insert("some".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_SOME));
@@ -7892,6 +8103,8 @@ impl<'gc> VM<'gc> {
         arr_proto.insert("reduceRight".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_REDUCERIGHT));
         for key in [
             "@@sym:1",
+            "values",
+            "entries",
             "push",
             "pop",
             "join",
@@ -7914,6 +8127,7 @@ impl<'gc> VM<'gc> {
             "includes",
             "flat",
             "flatMap",
+            "copyWithin",
             "at",
             "every",
             "some",
@@ -9665,11 +9879,14 @@ impl<'gc> VM<'gc> {
         self.script_source.as_ref().map(|source| source.split('\n').collect())
     }
 
-    fn current_frame_names(&self) -> Vec<String> {
+    fn current_named_frames(&self) -> Vec<(usize, String)> {
         self.frames
             .iter()
-            .filter_map(|frame| self.chunk.fn_names.get(&frame.func_ip).cloned())
-            .filter(|name| !name.is_empty())
+            .enumerate()
+            .filter_map(|(idx, frame)| {
+                let name = self.chunk.fn_names.get(&frame.func_ip)?;
+                if name.is_empty() { None } else { Some((idx, name.clone())) }
+            })
             .collect()
     }
 
@@ -9740,11 +9957,47 @@ impl<'gc> VM<'gc> {
         None
     }
 
+    fn infer_callsite_from_call_ip(&self, call_ip: usize) -> Option<(usize, usize)> {
+        let callee_name = self.chunk.call_callee_names.get(&call_ip)?;
+        let mut ips_for_name: Vec<usize> = self
+            .chunk
+            .call_callee_names
+            .iter()
+            .filter_map(|(ip, name)| if name == callee_name { Some(*ip) } else { None })
+            .collect();
+        ips_for_name.sort_unstable();
+        let ordinal = ips_for_name.iter().position(|ip| *ip == call_ip)?;
+
+        let lines = self.source_lines()?;
+        let call_patterns = [format!("{}(", callee_name), format!(".{}(", callee_name)];
+        let mut seen = 0usize;
+        for (idx, line) in lines.iter().enumerate() {
+            if line.contains(&format!("function {}(", callee_name)) {
+                continue;
+            }
+            if let Some(column) = line.find(&call_patterns[1]) {
+                if seen == ordinal {
+                    return Some((idx + 1, column + 2));
+                }
+                seen += 1;
+                continue;
+            }
+            if let Some(column) = line.find(&call_patterns[0]) {
+                if seen == ordinal {
+                    return Some((idx + 1, column + 1));
+                }
+                seen += 1;
+            }
+        }
+
+        None
+    }
+
     fn build_error_stack(&self, error_name: &str, message: &str) -> (Option<(usize, usize)>, Vec<String>) {
         let mut lines = vec![Self::format_error_name_message(error_name, message)];
-        let frame_names = self.current_frame_names();
+        let named_frames = self.current_named_frames();
 
-        if frame_names.is_empty() {
+        if named_frames.is_empty() {
             if let Some((line, column)) = self.infer_throw_site(None) {
                 lines.push(format!("    at <anonymous> ({}:{}:{})", self.current_script_file(), line, column));
                 return (Some((line, column)), lines);
@@ -9752,7 +10005,7 @@ impl<'gc> VM<'gc> {
             return (None, lines);
         }
 
-        let current_function = frame_names.last().map(String::as_str);
+        let current_function = named_frames.last().map(|(_, name)| name.as_str());
         let throw_site = self.infer_throw_site(current_function);
         if let Some((line, column)) = throw_site {
             let function_name = current_function.unwrap_or("<anonymous>");
@@ -9765,10 +10018,15 @@ impl<'gc> VM<'gc> {
             ));
         }
 
-        for pair in frame_names.windows(2).rev() {
-            let caller_name = &pair[0];
-            let callee_name = &pair[1];
-            if let Some((line, column)) = self.infer_callsite(callee_name, Some(caller_name)) {
+        for pair in named_frames.windows(2).rev() {
+            let caller_name = &pair[0].1;
+            let callee_name = &pair[1].1;
+            let callee_frame_idx = pair[1].0;
+            let call_ip = self.frames[callee_frame_idx].return_ip.saturating_sub(2);
+            let call_site = self
+                .infer_callsite_from_call_ip(call_ip)
+                .or_else(|| self.infer_callsite(callee_name, Some(caller_name)));
+            if let Some((line, column)) = call_site {
                 lines.push(format!(
                     "    at {} ({}:{}:{})",
                     caller_name,
@@ -9779,10 +10037,14 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        if let Some(outermost_name) = frame_names.first()
-            && let Some((line, column)) = self.infer_callsite(outermost_name, None)
-        {
-            lines.push(format!("    at <anonymous> ({}:{}:{})", self.current_script_file(), line, column));
+        if let Some((outer_idx, outermost_name)) = named_frames.first() {
+            let outer_call_ip = self.frames[*outer_idx].return_ip.saturating_sub(2);
+            if let Some((line, column)) = self
+                .infer_callsite_from_call_ip(outer_call_ip)
+                .or_else(|| self.infer_callsite(outermost_name, None))
+            {
+                lines.push(format!("    at <anonymous> ({}:{}:{})", self.current_script_file(), line, column));
+            }
         }
 
         (throw_site, lines)
@@ -11414,6 +11676,21 @@ impl<'gc> VM<'gc> {
             BUILTIN_ARRAY_PUSH => Value::Undefined,
             BUILTIN_ARRAY_ISARRAY => match args.first() {
                 Some(Value::VmArray(_)) => Value::Boolean(true),
+                Some(Value::VmObject(obj)) => {
+                    let borrow = obj.borrow();
+                    if let Some(target) = borrow.get("__proxy_target__").cloned() {
+                        if matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))) {
+                            drop(borrow);
+                            self.throw_type_error("Cannot perform 'IsArray' on a revoked proxy");
+                            Value::Undefined
+                        } else {
+                            drop(borrow);
+                            self.call_builtin(BUILTIN_ARRAY_ISARRAY, &[target])
+                        }
+                    } else {
+                        Value::Boolean(false)
+                    }
+                }
                 _ => Value::Boolean(false),
             },
             BUILTIN_ARRAY_OF => {
@@ -11448,16 +11725,51 @@ impl<'gc> VM<'gc> {
                     }
                     Value::VmObject(map) => {
                         let borrow = map.borrow();
-                        if let Some(Value::Number(n)) = borrow.get("length") {
-                            let len = *n as usize;
-                            drop(borrow);
-                            for i in 0..len {
-                                let key = i.to_string();
-                                let val = map.borrow().get(&key).cloned().unwrap_or(Value::Undefined);
-                                result.push(val);
+                        let is_vm_iterator = borrow.contains_key("__iter_target__") || borrow.contains_key("__items__");
+                        drop(borrow);
+
+                        if is_vm_iterator {
+                            loop {
+                                let step = self.call_method_builtin(BUILTIN_ITERATOR_NEXT, &source, &[]);
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                let Value::VmObject(step_obj) = step else {
+                                    break;
+                                };
+                                let done = self.read_named_property(&Value::VmObject(step_obj.clone()), "done");
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                if done.to_truthy() {
+                                    break;
+                                }
+                                let value = self.read_named_property(&Value::VmObject(step_obj), "value");
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                result.push(value);
                             }
                         } else {
-                            drop(borrow);
+                            let len_v = self.read_named_property(&source, "length");
+                            let Some(len_n) = self.extract_number_with_coercion(&len_v) else {
+                                return Value::Undefined;
+                            };
+                            let len = if len_n.is_nan() || len_n <= 0.0 {
+                                0usize
+                            } else if !len_n.is_finite() {
+                                usize::MAX
+                            } else {
+                                len_n.floor() as usize
+                            };
+                            for i in 0..len {
+                                let key = i.to_string();
+                                let val = self.read_named_property(&source, &key);
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                result.push(val);
+                            }
                         }
                     }
                     _ => {}
@@ -14159,6 +14471,45 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        // Array.prototype methods must throw on revoked proxy receivers.
+        if matches!(
+            id,
+            BUILTIN_ARRAY_PUSH
+                | BUILTIN_ARRAY_POP
+                | BUILTIN_ARRAY_JOIN
+                | BUILTIN_ARRAY_INDEXOF
+                | BUILTIN_ARRAY_SLICE
+                | BUILTIN_ARRAY_CONCAT
+                | BUILTIN_ARRAY_MAP
+                | BUILTIN_ARRAY_FILTER
+                | BUILTIN_ARRAY_FOREACH
+                | BUILTIN_ARRAY_REDUCE
+                | BUILTIN_ARRAY_SHIFT
+                | BUILTIN_ARRAY_UNSHIFT
+                | BUILTIN_ARRAY_SPLICE
+                | BUILTIN_ARRAY_REVERSE
+                | BUILTIN_ARRAY_SORT
+                | BUILTIN_ARRAY_FIND
+                | BUILTIN_ARRAY_FINDINDEX
+                | BUILTIN_ARRAY_INCLUDES
+                | BUILTIN_ARRAY_FLAT
+                | BUILTIN_ARRAY_FLATMAP
+                | BUILTIN_ARRAY_AT
+                | BUILTIN_ARRAY_EVERY
+                | BUILTIN_ARRAY_SOME
+                | BUILTIN_ARRAY_FILL
+                | BUILTIN_ARRAY_LASTINDEXOF
+                | BUILTIN_ARRAY_FINDLAST
+                | BUILTIN_ARRAY_FINDLASTINDEX
+                | BUILTIN_ARRAY_REDUCERIGHT
+        ) && let Value::VmObject(obj) = receiver
+            && obj.borrow().contains_key("__proxy_target__")
+            && matches!(obj.borrow().get("__proxy_revoked__"), Some(Value::Boolean(true)))
+        {
+            self.throw_type_error("Cannot perform operation on a revoked proxy");
+            return Value::Undefined;
+        }
+
         // Date instance methods
         if let Value::VmObject(obj) = receiver {
             let date_ms = {
@@ -14303,6 +14654,171 @@ impl<'gc> VM<'gc> {
         }
 
         // Array methods that are generic over array-like receivers
+        if id == BUILTIN_ARRAY_SORT
+            && let Some(compare_fn) = args.first()
+            && !matches!(compare_fn, Value::Undefined)
+            && !self.is_value_callable(compare_fn)
+        {
+            self.throw_type_error("The comparison function must be either a function or undefined");
+            return Value::Undefined;
+        }
+
+        if id == BUILTIN_ARRAY_SLICE {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let max_safe_len: u64 = 9_007_199_254_740_991;
+            let len_u64 = match &target {
+                Value::VmArray(arr) => {
+                    let b = arr.borrow();
+                    let mut len = if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                        (*n).max(0.0) as u64
+                    } else {
+                        b.elements.len() as u64
+                    };
+                    for prop_key in b.props.keys() {
+                        let idx_opt = prop_key
+                            .strip_prefix("__deleted_")
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .or_else(|| prop_key.parse::<u64>().ok())
+                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<u64>().ok()))
+                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<u64>().ok()));
+                        if let Some(idx) = idx_opt {
+                            len = len.max(idx.saturating_add(1));
+                        }
+                    }
+                    len.min(max_safe_len)
+                }
+                _ => {
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        max_safe_len
+                    } else {
+                        n.floor().min(max_safe_len as f64) as u64
+                    }
+                }
+            };
+
+            let len_i = len_u64 as i128;
+            let to_int_or_inf = |n: f64| -> i128 {
+                if n.is_nan() {
+                    0
+                } else if n.is_infinite() {
+                    if n.is_sign_negative() { i128::MIN } else { i128::MAX }
+                } else {
+                    n.trunc() as i128
+                }
+            };
+
+            let relative_start = match args.first() {
+                Some(v) => {
+                    let Some(n) = self.extract_number_with_coercion(v) else {
+                        return Value::Undefined;
+                    };
+                    to_int_or_inf(n)
+                }
+                None => 0,
+            };
+            let k = if relative_start < 0 {
+                (len_i + relative_start).max(0)
+            } else {
+                relative_start.min(len_i)
+            };
+
+            let relative_end = match args.get(1) {
+                None | Some(Value::Undefined) => len_i,
+                Some(v) => {
+                    let Some(n) = self.extract_number_with_coercion(v) else {
+                        return Value::Undefined;
+                    };
+                    to_int_or_inf(n)
+                }
+            };
+            let final_i = if relative_end < 0 {
+                (len_i + relative_end).max(0)
+            } else {
+                relative_end.min(len_i)
+            };
+
+            let count = final_i.saturating_sub(k) as u64;
+            // ArraySpeciesCreate(O, count) performs ArrayCreate(count), which
+            // must throw RangeError when count > 2^32 - 1.
+            if count > 4_294_967_295 {
+                self.throw_range_error("Invalid array length");
+                return Value::Undefined;
+            }
+            let mut out = VmArrayData::new(Vec::new());
+            let target_is_proxy = matches!(&target, Value::VmObject(obj) if obj.borrow().contains_key("__proxy_target__"));
+            let mut from = k as u64;
+            let mut to = 0u64;
+            while to < count {
+                if (to as usize) == usize::MAX {
+                    break;
+                }
+                let key = from.to_string();
+                let to_idx = to as usize;
+                if target_is_proxy {
+                    let v = self.read_named_property(&target, &key);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if !matches!(v, Value::Undefined) {
+                        if out.elements.len() == to_idx {
+                            out.elements.push(v);
+                        } else if out.elements.len() > to_idx {
+                            out.elements[to_idx] = v;
+                        } else {
+                            out.elements.resize(to_idx + 1, Value::Undefined);
+                            out.elements[to_idx] = v;
+                        }
+                    } else {
+                        if out.elements.len() == to_idx {
+                            out.elements.push(Value::Undefined);
+                        } else if out.elements.len() < to_idx + 1 {
+                            out.elements.resize(to_idx + 1, Value::Undefined);
+                        }
+                        out.props.insert(format!("__deleted_{}", to_idx), Value::Boolean(true));
+                    }
+                } else if self.has_property_in_chain(&target, &key) {
+                    let v = self.read_named_property(&target, &key);
+                    if out.elements.len() == to_idx {
+                        out.elements.push(v);
+                    } else if out.elements.len() > to_idx {
+                        out.elements[to_idx] = v;
+                    } else {
+                        out.elements.resize(to_idx + 1, Value::Undefined);
+                        out.elements[to_idx] = v;
+                    }
+                } else {
+                    if out.elements.len() == to_idx {
+                        out.elements.push(Value::Undefined);
+                    } else if out.elements.len() < to_idx + 1 {
+                        out.elements.resize(to_idx + 1, Value::Undefined);
+                    }
+                    out.props.insert(format!("__deleted_{}", to_idx), Value::Boolean(true));
+                }
+                from = from.saturating_add(1);
+                to = to.saturating_add(1);
+            }
+            return Value::VmArray(Rc::new(RefCell::new(out)));
+        }
+
         if id == BUILTIN_ARRAY_INDEXOF {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
@@ -14537,6 +15053,1019 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         }
 
+        if id == BUILTIN_ARRAY_FILTER {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let len = match &target {
+                Value::VmArray(arr) => {
+                    let b = arr.borrow();
+                    let mut len = if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                        (*n).max(0.0) as usize
+                    } else {
+                        b.elements.len()
+                    };
+                    for prop_key in b.props.keys() {
+                        let idx_opt = prop_key
+                            .strip_prefix("__deleted_")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .or_else(|| prop_key.parse::<usize>().ok())
+                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                        if let Some(idx) = idx_opt {
+                            len = len.max(idx.saturating_add(1));
+                        }
+                    }
+                    len
+                }
+                _ => {
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        usize::MAX
+                    } else {
+                        n.floor() as usize
+                    }
+                }
+            };
+
+            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+            if !self.is_value_callable(&callback) {
+                self.throw_type_error("Value is not a function");
+                return Value::Undefined;
+            }
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            let mut result = Vec::new();
+            for k in 0..len {
+                let key = k.to_string();
+                let present = match &target {
+                    Value::VmArray(arr) => {
+                        let b = arr.borrow();
+                        let dense_present = if k < b.elements.len() {
+                            !b.props.contains_key(&format!("__deleted_{}", k))
+                                || b.props.contains_key(&key)
+                                || b.props.contains_key(&format!("__get_{}", key))
+                                || b.props.contains_key(&format!("__set_{}", key))
+                        } else {
+                            false
+                        };
+                        let own_prop_present = b.props.contains_key(&key)
+                            || b.props.contains_key(&format!("__get_{}", key))
+                            || b.props.contains_key(&format!("__set_{}", key));
+                        if dense_present || own_prop_present {
+                            true
+                        } else {
+                            let proto = b.props.get("__proto__").cloned();
+                            drop(b);
+                            self.lookup_proto_chain(proto.as_ref(), &key).is_some()
+                                || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                                || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                        }
+                    }
+                    Value::VmObject(_) => match self.try_proxy_has(&target, &key) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => self.has_property_in_chain(&target, &key),
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    },
+                    _ => self.has_property_in_chain(&target, &key),
+                };
+                if !present {
+                    continue;
+                }
+
+                let value = self.read_named_property(&target, &key);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                let selected =
+                    match self.vm_call_function_value(&callback, &this_arg, &[value.clone(), Value::Number(k as f64), target.clone()]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                if selected.to_truthy() {
+                    result.push(value);
+                }
+            }
+
+            return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
+        }
+
+        if id == BUILTIN_ARRAY_INCLUDES {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let max_safe_len: u64 = 9_007_199_254_740_991;
+            let len = match &target {
+                Value::VmArray(arr) => {
+                    let b = arr.borrow();
+                    let mut len = if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                        (*n).max(0.0) as u64
+                    } else {
+                        b.elements.len() as u64
+                    };
+                    for prop_key in b.props.keys() {
+                        let idx_opt = prop_key
+                            .strip_prefix("__deleted_")
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .or_else(|| prop_key.parse::<u64>().ok())
+                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<u64>().ok()))
+                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<u64>().ok()));
+                        if let Some(idx) = idx_opt {
+                            len = len.max(idx.saturating_add(1));
+                        }
+                    }
+                    len.min(max_safe_len)
+                }
+                _ => {
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        max_safe_len
+                    } else {
+                        n.floor().min(max_safe_len as f64) as u64
+                    }
+                }
+            };
+
+            if len == 0 {
+                return Value::Boolean(false);
+            }
+
+            let search_element = args.first().cloned().unwrap_or(Value::Undefined);
+            let from_index = match args.get(1) {
+                None | Some(Value::Undefined) => 0.0,
+                Some(v) => match self.extract_number_with_coercion(v) {
+                    Some(n) => n,
+                    None => return Value::Undefined,
+                },
+            };
+
+            let n = if from_index.is_nan() {
+                0i128
+            } else if from_index.is_infinite() {
+                if from_index.is_sign_positive() { i128::MAX } else { i128::MIN }
+            } else {
+                from_index.trunc() as i128
+            };
+
+            let len_i = len as i128;
+            let mut k = if n >= 0 { n.min(len_i) } else { (len_i + n).max(0) } as u64;
+
+            while k < len {
+                let element = self.read_named_property(&target, &k.to_string());
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                let is_match = match (&search_element, &element) {
+                    (Value::Number(a), Value::Number(b)) => (a.is_nan() && b.is_nan()) || a == b,
+                    _ => self.strict_equal(&search_element, &element),
+                };
+                if is_match {
+                    return Value::Boolean(true);
+                }
+                k = k.saturating_add(1);
+            }
+
+            return Value::Boolean(false);
+        }
+
+        if id == BUILTIN_ARRAY_REDUCE {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let len = match &target {
+                Value::VmArray(arr) => {
+                    let b = arr.borrow();
+                    let mut len = if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                        (*n).max(0.0) as usize
+                    } else {
+                        b.elements.len()
+                    };
+                    for prop_key in b.props.keys() {
+                        let idx_opt = prop_key
+                            .strip_prefix("__deleted_")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .or_else(|| prop_key.parse::<usize>().ok())
+                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                        if let Some(idx) = idx_opt {
+                            len = len.max(idx.saturating_add(1));
+                        }
+                    }
+                    len
+                }
+                _ => {
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        usize::MAX
+                    } else {
+                        n.floor() as usize
+                    }
+                }
+            };
+
+            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+            if !self.is_value_callable(&callback) {
+                self.throw_type_error("Value is not a function");
+                return Value::Undefined;
+            }
+
+            let is_present = |vm: &mut Self, target: &Value<'gc>, key: &str, index: usize| -> Result<bool, Value<'gc>> {
+                let present = match target {
+                    Value::VmArray(arr) => {
+                        let b = arr.borrow();
+                        let dense_present = if index < b.elements.len() {
+                            !b.props.contains_key(&format!("__deleted_{}", index))
+                                || b.props.contains_key(key)
+                                || b.props.contains_key(&format!("__get_{}", key))
+                                || b.props.contains_key(&format!("__set_{}", key))
+                        } else {
+                            false
+                        };
+                        let own_prop_present = b.props.contains_key(key)
+                            || b.props.contains_key(&format!("__get_{}", key))
+                            || b.props.contains_key(&format!("__set_{}", key));
+                        if dense_present || own_prop_present {
+                            true
+                        } else {
+                            let proto = b.props.get("__proto__").cloned();
+                            drop(b);
+                            vm.lookup_proto_chain(proto.as_ref(), key).is_some()
+                                || vm.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                                || vm.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                        }
+                    }
+                    Value::VmObject(_) => match vm.try_proxy_has(target, key) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => vm.has_property_in_chain(target, key),
+                        Err(err) => {
+                            vm.set_pending_throw_from_error(&err);
+                            return Err(Value::Undefined);
+                        }
+                    },
+                    _ => vm.has_property_in_chain(target, key),
+                };
+                Ok(present)
+            };
+
+            let mut k = 0usize;
+            let mut accumulator = if args.len() > 1 {
+                args[1].clone()
+            } else {
+                let mut found = None;
+                while k < len {
+                    let key = k.to_string();
+                    let present = match is_present(self, &target, &key, k) {
+                        Ok(v) => v,
+                        Err(v) => return v,
+                    };
+                    if present {
+                        let value = self.read_named_property(&target, &key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        found = Some(value);
+                        k += 1;
+                        break;
+                    }
+                    k += 1;
+                }
+                let Some(acc) = found else {
+                    self.throw_type_error("Reduce of empty array with no initial value");
+                    return Value::Undefined;
+                };
+                acc
+            };
+
+            while k < len {
+                let key = k.to_string();
+                let present = match is_present(self, &target, &key, k) {
+                    Ok(v) => v,
+                    Err(v) => return v,
+                };
+                if present {
+                    let value = self.read_named_property(&target, &key);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    accumulator = match self.vm_call_function_value(
+                        &callback,
+                        &Value::Undefined,
+                        &[accumulator, value, Value::Number(k as f64), target.clone()],
+                    ) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                }
+                k += 1;
+            }
+
+            return accumulator;
+        }
+
+        if id == BUILTIN_ARRAY_FLAT {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let depth = match args.first() {
+                None => 1usize,
+                Some(v) => {
+                    let Some(n) = self.extract_number_with_coercion(v) else {
+                        return Value::Undefined;
+                    };
+                    if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if n.is_infinite() {
+                        usize::MAX
+                    } else {
+                        n.trunc() as usize
+                    }
+                }
+            };
+
+            let Some(len_u64) = self.array_like_length_u64(&target) else {
+                return Value::Undefined;
+            };
+            let is_array_target = matches!(
+                self.call_builtin(BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(&target)),
+                Value::Boolean(true)
+            );
+            if is_array_target {
+                let _ = self.read_named_property(&target, "constructor");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+            }
+            let len = len_u64.min(usize::MAX as u64) as usize;
+            let mut result = Vec::new();
+            for index in 0..len {
+                let key = index.to_string();
+                let present = match self.array_like_has_index(&target, &key, index) {
+                    Ok(v) => v,
+                    Err(v) => return v,
+                };
+                if !present {
+                    continue;
+                }
+                let element = self.read_named_property(&target, &key);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if !self.flatten_into_array_values(&element, depth, &mut result) {
+                    return Value::Undefined;
+                }
+            }
+            return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
+        }
+
+        if id == BUILTIN_ARRAY_FLATMAP {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+            if !self.is_value_callable(&callback) {
+                self.throw_type_error("Value is not a function");
+                return Value::Undefined;
+            }
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            let Some(len_u64) = self.array_like_length_u64(&target) else {
+                return Value::Undefined;
+            };
+            let is_array_target = matches!(
+                self.call_builtin(BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(&target)),
+                Value::Boolean(true)
+            );
+            if is_array_target {
+                let _ = self.read_named_property(&target, "constructor");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+            }
+            let len = len_u64.min(usize::MAX as u64) as usize;
+            let mut result = Vec::new();
+            for index in 0..len {
+                let key = index.to_string();
+                let present = match self.array_like_has_index(&target, &key, index) {
+                    Ok(v) => v,
+                    Err(v) => return v,
+                };
+                if !present {
+                    continue;
+                }
+
+                let element = self.read_named_property(&target, &key);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mapped =
+                    match self.vm_call_function_value(&callback, &this_arg, &[element, Value::Number(index as f64), target.clone()]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                if !self.flatten_into_array_values(&mapped, 1, &mut result) {
+                    return Value::Undefined;
+                }
+            }
+            return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(result))));
+        }
+
+        if id == BUILTIN_ARRAY_MAP {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+            if !self.is_value_callable(&callback) {
+                self.throw_type_error("Value is not a function");
+                return Value::Undefined;
+            }
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            let Some(len_u64) = self.array_like_length_u64(&target) else {
+                return Value::Undefined;
+            };
+            if len_u64 > 4_294_967_295 {
+                self.throw_range_error("Invalid array length");
+                return Value::Undefined;
+            }
+
+            let is_array_target = matches!(
+                self.call_builtin(BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(&target)),
+                Value::Boolean(true)
+            );
+            if is_array_target {
+                let _ = self.read_named_property(&target, "constructor");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+            }
+
+            let len = len_u64 as usize;
+            let mut result_data = VmArrayData::new(Vec::new());
+            result_data.props.insert("__array_length__".to_string(), Value::Number(len as f64));
+            for index in 0..len {
+                result_data.elements.push(Value::Undefined);
+                result_data.props.insert(format!("__deleted_{}", index), Value::Boolean(true));
+            }
+
+            for index in 0..len {
+                let key = index.to_string();
+                let present = match self.array_like_has_index(&target, &key, index) {
+                    Ok(v) => v,
+                    Err(v) => return v,
+                };
+                if !present {
+                    continue;
+                }
+
+                let element = self.read_named_property(&target, &key);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mapped =
+                    match self.vm_call_function_value(&callback, &this_arg, &[element, Value::Number(index as f64), target.clone()]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                result_data.elements[index] = mapped;
+                result_data.props.shift_remove(&format!("__deleted_{}", index));
+            }
+
+            return Value::VmArray(Rc::new(RefCell::new(result_data)));
+        }
+
+        if id == BUILTIN_ARRAY_UNSHIFT && !matches!(receiver, Value::VmArray(_)) {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let len_v = self.read_named_property(&target, "length");
+            let Some(len_num) = self.extract_number_with_coercion(&len_v) else {
+                return Value::Undefined;
+            };
+            let max_len: u64 = 9_007_199_254_740_991;
+            let len = if len_num.is_nan() || len_num <= 0.0 {
+                0
+            } else if !len_num.is_finite() || len_num >= max_len as f64 {
+                max_len
+            } else {
+                len_num.floor() as u64
+            };
+
+            let arg_count = args.len() as u64;
+            if arg_count > 0 && len.saturating_add(arg_count) > max_len {
+                self.throw_type_error("Invalid array length");
+                return Value::Undefined;
+            }
+
+            let new_len = len.saturating_add(arg_count);
+            if arg_count > 0
+                && let Value::VmObject(obj) = &target
+            {
+                // Avoid O(len) work for huge array-like lengths: only process
+                // numeric own-property neighborhoods that can affect observable state.
+                let own_indices: std::collections::HashSet<u64> = {
+                    let b = obj.borrow();
+                    b.keys()
+                        .filter_map(|k| {
+                            k.parse::<u64>()
+                                .ok()
+                                .or_else(|| k.strip_prefix("__get_").and_then(|s| s.parse::<u64>().ok()))
+                                .or_else(|| k.strip_prefix("__set_").and_then(|s| s.parse::<u64>().ok()))
+                        })
+                        .collect()
+                };
+
+                let mut k_candidates: std::collections::HashSet<u64> = std::collections::HashSet::new();
+                for idx in &own_indices {
+                    if *idx < len {
+                        // from = k-1 => k = from+1
+                        k_candidates.insert(idx.saturating_add(1));
+                    }
+                    if let Some(sum) = idx.checked_add(1)
+                        && sum >= arg_count
+                    {
+                        // to = k+argCount-1 => k = to-argCount+1
+                        let k = sum - arg_count;
+                        if k >= 1 && k <= len {
+                            k_candidates.insert(k);
+                        }
+                    }
+                }
+
+                let mut k_list: Vec<u64> = k_candidates.into_iter().collect();
+                k_list.sort_unstable_by(|a, b| b.cmp(a));
+
+                for k in k_list {
+                    if k == 0 || k > len {
+                        continue;
+                    }
+                    let from_idx = k - 1;
+                    let to_idx = k + arg_count - 1;
+                    let from_key = from_idx.to_string();
+                    let to_key = to_idx.to_string();
+
+                    let from_present = match self.try_proxy_has(&target, &from_key) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => self.has_property_in_chain(&target, &from_key),
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+
+                    if from_present {
+                        let from_value = self.read_named_property(&target, &from_key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if let Err(err) = self.assign_named_property(&target, &to_key, &from_value) {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    } else {
+                        if let Ok(Some(deleted)) = self.try_proxy_delete(&target, &to_key) {
+                            if !deleted {
+                                self.throw_type_error("Cannot delete property");
+                                return Value::Undefined;
+                            }
+                            continue;
+                        }
+                        if let Value::VmObject(map) = &target {
+                            let mut b = map.borrow_mut();
+                            b.shift_remove(&to_key);
+                            b.shift_remove(&format!("__get_{}", to_key));
+                            b.shift_remove(&format!("__set_{}", to_key));
+                            b.shift_remove(&format!("__readonly_{}__", to_key));
+                            b.shift_remove(&format!("__nonenumerable_{}__", to_key));
+                            b.shift_remove(&format!("__nonconfigurable_{}__", to_key));
+                        }
+                    }
+                }
+            }
+
+            if let Value::VmObject(obj) = &target {
+                for (i, arg) in args.iter().enumerate() {
+                    let key = i.to_string();
+                    if let Err(err) = self.assign_named_property(&target, &key, arg) {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                }
+                obj.borrow_mut().insert("length".to_string(), Value::Number(new_len as f64));
+            }
+            return Value::Number(new_len as f64);
+        }
+
+        if id == BUILTIN_ARRAY_AT {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let len = match &target {
+                Value::VmArray(arr) => {
+                    let b = arr.borrow();
+                    let mut len = if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                        (*n).max(0.0) as usize
+                    } else {
+                        b.elements.len()
+                    };
+                    for prop_key in b.props.keys() {
+                        let idx_opt = prop_key
+                            .strip_prefix("__deleted_")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .or_else(|| prop_key.parse::<usize>().ok())
+                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                        if let Some(idx) = idx_opt {
+                            len = len.max(idx.saturating_add(1));
+                        }
+                    }
+                    len
+                }
+                _ => {
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        usize::MAX
+                    } else {
+                        n.floor() as usize
+                    }
+                }
+            };
+
+            let relative_index = if let Some(index_v) = args.first() {
+                let Some(n) = self.extract_number_with_coercion(index_v) else {
+                    return Value::Undefined;
+                };
+                if n.is_nan() {
+                    0i128
+                } else if n.is_infinite() {
+                    if n.is_sign_positive() { i128::MAX } else { i128::MIN }
+                } else {
+                    n.trunc() as i128
+                }
+            } else {
+                0i128
+            };
+
+            let actual_index = if relative_index < 0 {
+                (len as i128) + relative_index
+            } else {
+                relative_index
+            };
+            if actual_index < 0 || actual_index >= len as i128 {
+                return Value::Undefined;
+            }
+            let key = actual_index.to_string();
+            let value = self.read_named_property(&target, &key);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            return value;
+        }
+
+        if id == BUILTIN_ARRAY_SPLICE && !matches!(receiver, Value::VmArray(_)) {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let len_v = self.read_named_property(&target, "length");
+            let Some(len_num) = self.extract_number_with_coercion(&len_v) else {
+                return Value::Undefined;
+            };
+            let max_len: u64 = 9_007_199_254_740_991;
+            let len = if len_num.is_nan() || len_num <= 0.0 {
+                0
+            } else if !len_num.is_finite() || len_num >= max_len as f64 {
+                max_len
+            } else {
+                len_num.floor() as u64
+            };
+
+            let start_num = match args.first() {
+                Some(v) => match self.extract_number_with_coercion(v) {
+                    Some(n) => n,
+                    None => return Value::Undefined,
+                },
+                None => 0.0,
+            };
+            let start_i = if start_num.is_nan() {
+                0i128
+            } else if start_num.is_infinite() {
+                if start_num.is_sign_positive() { i128::MAX } else { i128::MIN }
+            } else {
+                start_num.trunc() as i128
+            };
+            let actual_start = if start_i < 0 {
+                ((len as i128) + start_i).max(0) as u64
+            } else {
+                (start_i as u64).min(len)
+            };
+
+            let insert_count = args.len().saturating_sub(2) as u64;
+            let actual_delete_count = if args.is_empty() {
+                0
+            } else if args.len() == 1 {
+                len.saturating_sub(actual_start)
+            } else {
+                let dc_num = match self.extract_number_with_coercion(&args[1]) {
+                    Some(n) => n,
+                    None => return Value::Undefined,
+                };
+                let dc_i = if dc_num.is_nan() {
+                    0i128
+                } else if dc_num.is_infinite() {
+                    if dc_num.is_sign_positive() { i128::MAX } else { i128::MIN }
+                } else {
+                    dc_num.trunc() as i128
+                };
+                let clamped = dc_i.max(0).min((len - actual_start) as i128);
+                clamped as u64
+            };
+
+            // ArraySpeciesCreate(O, actualDeleteCount) -> ArrayCreate(length)
+            // throws if length > 2^32 - 1.
+            if actual_delete_count > 4_294_967_295 {
+                self.throw_range_error("Invalid array length");
+                return Value::Undefined;
+            }
+
+            if len.saturating_add(insert_count).saturating_sub(actual_delete_count) > max_len {
+                self.throw_type_error("Invalid array length");
+                return Value::Undefined;
+            }
+
+            let new_len = len.saturating_add(insert_count).saturating_sub(actual_delete_count);
+            let mut removed: Vec<Value<'gc>> = Vec::new();
+            if actual_delete_count > 0 {
+                for k in 0..actual_delete_count {
+                    let from_idx = actual_start.saturating_add(k);
+                    let from_key = from_idx.to_string();
+                    let present = match self.try_proxy_has(&target, &from_key) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => self.has_property_in_chain(&target, &from_key),
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    if present {
+                        let v = self.read_named_property(&target, &from_key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        removed.push(v);
+                    }
+                }
+            }
+
+            if let Value::VmObject(obj) = &target {
+                if insert_count < actual_delete_count {
+                    let delta = actual_delete_count - insert_count;
+                    let own_indices: std::collections::HashSet<u64> = {
+                        let b = obj.borrow();
+                        b.keys().filter_map(|k| k.parse::<u64>().ok()).collect()
+                    };
+
+                    // Move existing source indices left by `delta`.
+                    let mut moves: Vec<(u64, u64)> = own_indices
+                        .iter()
+                        .filter_map(|idx| {
+                            if *idx >= actual_start.saturating_add(actual_delete_count) && *idx < len {
+                                Some((*idx, idx.saturating_sub(delta)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    moves.sort_unstable_by_key(|(from, _)| *from);
+                    for (from_idx, to_idx) in moves {
+                        let from_key = from_idx.to_string();
+                        let to_key = to_idx.to_string();
+                        let v = self.read_named_property(&target, &from_key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if let Err(err) = self.assign_named_property(&target, &to_key, &v) {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                        if from_idx != to_idx {
+                            let mut b = obj.borrow_mut();
+                            b.shift_remove(&from_key);
+                            b.shift_remove(&format!("__get_{}", from_key));
+                            b.shift_remove(&format!("__set_{}", from_key));
+                            b.shift_remove(&format!("__readonly_{}__", from_key));
+                            b.shift_remove(&format!("__nonenumerable_{}__", from_key));
+                            b.shift_remove(&format!("__nonconfigurable_{}__", from_key));
+                        }
+                    }
+
+                    // Delete leftover tail keys in [new_len, len).
+                    for idx in new_len..len {
+                        let key = idx.to_string();
+                        if let Ok(Some(deleted)) = self.try_proxy_delete(&target, &key) {
+                            if !deleted {
+                                self.throw_type_error("Cannot delete property");
+                                return Value::Undefined;
+                            }
+                            continue;
+                        }
+                        let mut b = obj.borrow_mut();
+                        b.shift_remove(&key);
+                        b.shift_remove(&format!("__get_{}", key));
+                        b.shift_remove(&format!("__set_{}", key));
+                        b.shift_remove(&format!("__readonly_{}__", key));
+                        b.shift_remove(&format!("__nonenumerable_{}__", key));
+                        b.shift_remove(&format!("__nonconfigurable_{}__", key));
+                    }
+                } else if insert_count > actual_delete_count {
+                    let delta = insert_count - actual_delete_count;
+                    let own_indices: std::collections::HashSet<u64> = {
+                        let b = obj.borrow();
+                        b.keys().filter_map(|k| k.parse::<u64>().ok()).collect()
+                    };
+
+                    let mut moves: Vec<(u64, u64)> = own_indices
+                        .iter()
+                        .filter_map(|idx| {
+                            if *idx >= actual_start.saturating_add(actual_delete_count) && *idx < len {
+                                Some((*idx, idx.saturating_add(delta)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    moves.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+                    for (from_idx, to_idx) in moves {
+                        let from_key = from_idx.to_string();
+                        let to_key = to_idx.to_string();
+                        let v = self.read_named_property(&target, &from_key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if let Err(err) = self.assign_named_property(&target, &to_key, &v) {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                        if from_idx != to_idx {
+                            let mut b = obj.borrow_mut();
+                            b.shift_remove(&from_key);
+                            b.shift_remove(&format!("__get_{}", from_key));
+                            b.shift_remove(&format!("__set_{}", from_key));
+                            b.shift_remove(&format!("__readonly_{}__", from_key));
+                            b.shift_remove(&format!("__nonenumerable_{}__", from_key));
+                            b.shift_remove(&format!("__nonconfigurable_{}__", from_key));
+                        }
+                    }
+                }
+
+                for (j, item) in args.iter().skip(2).enumerate() {
+                    let key = actual_start.saturating_add(j as u64).to_string();
+                    if let Err(err) = self.assign_named_property(&target, &key, item) {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                }
+
+                obj.borrow_mut().insert("length".to_string(), Value::Number(new_len as f64));
+            }
+
+            return Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(removed))));
+        }
+
         // Array methods
         if let Value::VmArray(arr) = receiver {
             match id {
@@ -14605,6 +16134,17 @@ impl<'gc> VM<'gc> {
                     for arg in args {
                         if let Value::VmArray(other) = arg {
                             result.extend(other.borrow().iter().cloned());
+                        } else if let Value::VmObject(obj) = arg {
+                            let borrow = obj.borrow();
+                            if borrow.contains_key("__proxy_target__")
+                                && matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true)))
+                            {
+                                drop(borrow);
+                                self.throw_type_error("Cannot perform operation on a revoked proxy");
+                                return Value::Undefined;
+                            }
+                            drop(borrow);
+                            result.push(arg.clone());
                         } else {
                             result.push(arg.clone());
                         }
@@ -14762,12 +16302,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 BUILTIN_ARRAY_REDUCE => {
-                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
+                    if let Some(callback @ (Value::VmFunction(_, _) | Value::VmClosure(_, _, _))) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
@@ -14778,7 +16313,14 @@ impl<'gc> VM<'gc> {
                         };
                         let start_i = if args.len() > 1 { 0 } else { 1 };
                         for (i, element) in elements.iter().enumerate().skip(start_i) {
-                            acc = self.call_vm_function(*ip, &[acc, element.clone(), Value::Number(i as f64)], &__cb_uv);
+                            acc = match self.vm_call_function_value(
+                                callback,
+                                &Value::Undefined,
+                                &[acc, element.clone(), Value::Number(i as f64)],
+                            ) {
+                                Ok(v) => v,
+                                Err(_) => Value::Undefined,
+                            };
                         }
                         return acc;
                     }
@@ -14878,6 +16420,13 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_SORT => {
                     let cmp_fn = args.first().cloned();
+                    if let Some(ref cmp) = cmp_fn
+                        && !matches!(cmp, Value::Undefined)
+                        && !self.is_value_callable(cmp)
+                    {
+                        self.throw_type_error("The comparison function must be either a function or undefined");
+                        return Value::Undefined;
+                    }
                     let mut elems = arr.borrow().elements.clone();
                     if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = &cmp_fn {
                         let __cb_uv = if let Value::VmClosure(_, _, u) = cmp_fn.as_ref().unwrap() {
@@ -15085,26 +16634,32 @@ impl<'gc> VM<'gc> {
                 BUILTIN_ARRAY_FILL => {
                     let fill_val = args.first().cloned().unwrap_or(Value::Undefined);
                     let len = arr.borrow().elements.len() as i64;
-                    let start = args
-                        .get(1)
-                        .map(|v| match v {
-                            Value::Number(n) => {
-                                let s = *n as i64;
-                                if s < 0 { (len + s).max(0) as usize } else { s.min(len) as usize }
-                            }
-                            _ => 0,
-                        })
-                        .unwrap_or(0);
-                    let end = args
-                        .get(2)
-                        .map(|v| match v {
-                            Value::Number(n) => {
-                                let e = *n as i64;
-                                if e < 0 { (len + e).max(0) as usize } else { e.min(len) as usize }
-                            }
-                            _ => len as usize,
-                        })
-                        .unwrap_or(len as usize);
+                    let start_num = match args.get(1) {
+                        Some(v) => match self.extract_number_with_coercion(v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
+                        None => 0.0,
+                    };
+                    let end_num = match args.get(2) {
+                        None | Some(Value::Undefined) => len as f64,
+                        Some(v) => match self.extract_number_with_coercion(v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
+                    };
+                    let start_i = start_num.trunc() as i64;
+                    let end_i = end_num.trunc() as i64;
+                    let start = if start_i < 0 {
+                        (len + start_i).max(0) as usize
+                    } else {
+                        start_i.min(len) as usize
+                    };
+                    let end = if end_i < 0 {
+                        (len + end_i).max(0) as usize
+                    } else {
+                        end_i.min(len) as usize
+                    };
                     let mut a = arr.borrow_mut();
                     for i in start..end {
                         a.elements[i] = fill_val.clone();
@@ -15136,12 +16691,7 @@ impl<'gc> VM<'gc> {
                     return Value::Number(-1.0);
                 }
                 BUILTIN_ARRAY_REDUCERIGHT => {
-                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
+                    if let Some(callback @ (Value::VmFunction(_, _) | Value::VmClosure(_, _, _))) = args.first() {
                         let elements = arr.borrow().elements.clone();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
@@ -15153,7 +16703,14 @@ impl<'gc> VM<'gc> {
                         let skip_last = if args.len() <= 1 { 1 } else { 0 };
                         let end = elements.len().saturating_sub(skip_last);
                         for i in (0..end).rev() {
-                            acc = self.call_vm_function(*ip, &[acc, elements[i].clone(), Value::Number(i as f64)], &__cb_uv);
+                            acc = match self.vm_call_function_value(
+                                callback,
+                                &Value::Undefined,
+                                &[acc, elements[i].clone(), Value::Number(i as f64)],
+                            ) {
+                                Ok(v) => v,
+                                Err(_) => Value::Undefined,
+                            };
                         }
                         return acc;
                     }
@@ -15878,8 +17435,17 @@ impl<'gc> VM<'gc> {
                             &iter_kind,
                             Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "key"
                         );
+                        let is_entry_iter = matches!(
+                            &iter_kind,
+                            Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "entry"
+                        );
                         if is_key_iter {
                             Some(Value::Number(idx as f64))
+                        } else if is_entry_iter {
+                            Some(Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(vec![
+                                Value::Number(idx as f64),
+                                arr_borrow.get(idx).cloned().unwrap_or(Value::Undefined),
+                            ])))))
                         } else {
                             Some(arr_borrow.get(idx).cloned().unwrap_or(Value::Undefined))
                         }
@@ -17971,6 +19537,29 @@ impl<'gc> VM<'gc> {
     ) -> bool {
         let is_accessor = desc.contains_key("get") || desc.contains_key("set");
 
+        // Coerce length descriptor value before mutably borrowing the array object.
+        // Coercion can execute user code (valueOf/toString) and re-enter property access.
+        let coerced_length_value = if key == "length" && desc.contains_key("value") {
+            match desc.get("value") {
+                Some(v) => {
+                    // ArraySetLength step order: ToUint32(value), then ToNumber(value).
+                    // Keep both coercions distinct because observable side effects may differ.
+                    let first_num = match self.extract_number_with_coercion(v) {
+                        Some(n) => n,
+                        None => return false,
+                    };
+                    let second_num = match self.extract_number_with_coercion(v) {
+                        Some(n) => n,
+                        None => return false,
+                    };
+                    Some((to_uint32(first_num) as u64, second_num))
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
         let mut b = arr.borrow_mut();
         let is_non_extensible = matches!(b.props.get("__non_extensible__"), Some(Value::Boolean(true)));
 
@@ -18002,16 +19591,8 @@ impl<'gc> VM<'gc> {
                 return true;
             }
 
-            let n = match desc.get("value") {
-                Some(v) => match self.extract_number_with_coercion(v) {
-                    Some(n) => n,
-                    None => return false,
-                },
-                None => old_len as f64,
-            };
-
-            let new_len = to_uint32(n) as u64;
-            if n.is_nan() || n != new_len as f64 {
+            let (new_len, number_len) = coerced_length_value.unwrap_or((old_len, old_len as f64));
+            if number_len.is_nan() || number_len != new_len as f64 {
                 self.throw_range_error("Invalid array length");
                 return false;
             }
@@ -18583,11 +20164,16 @@ impl<'gc> VM<'gc> {
             }
             Value::VmArray(arr) => {
                 if key == "length" {
-                    Value::Number(arr.borrow().len() as f64)
-                } else if let Ok(i) = key.parse::<usize>() {
-                    arr.borrow().get(i).cloned().unwrap_or(Value::Undefined)
+                    let b = arr.borrow();
+                    if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                        Value::Number(*n)
+                    } else {
+                        Value::Number(b.len() as f64)
+                    }
                 } else {
-                    arr.borrow().props.get(key).cloned().unwrap_or(Value::Undefined)
+                    // Delegate to normal property read so large numeric-like
+                    // keys (>= dense length) still resolve from array props.
+                    self.read_named_property_with_receiver(&target, key, obj)
                 }
             }
             _ => Value::Undefined,
@@ -19364,6 +20950,115 @@ impl<'gc> VM<'gc> {
         result
     }
 
+    fn array_like_length_u64(&mut self, target: &Value<'gc>) -> Option<u64> {
+        let max_safe_len: u64 = 9_007_199_254_740_991;
+        Some(match target {
+            Value::VmArray(arr) => {
+                let b = arr.borrow();
+                let mut len = if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                    (*n).max(0.0) as u64
+                } else {
+                    b.elements.len() as u64
+                };
+                for prop_key in b.props.keys() {
+                    let idx_opt = prop_key
+                        .strip_prefix("__deleted_")
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .or_else(|| prop_key.parse::<u64>().ok())
+                        .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<u64>().ok()))
+                        .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<u64>().ok()));
+                    if let Some(idx) = idx_opt {
+                        len = len.max(idx.saturating_add(1));
+                    }
+                }
+                len.min(max_safe_len)
+            }
+            _ => {
+                let len_v = self.read_named_property(target, "length");
+                let n = self.extract_number_with_coercion(&len_v)?;
+                if n.is_nan() || n <= 0.0 {
+                    0
+                } else if !n.is_finite() {
+                    max_safe_len
+                } else {
+                    n.floor().min(max_safe_len as f64) as u64
+                }
+            }
+        })
+    }
+
+    fn array_like_has_index(&mut self, target: &Value<'gc>, key: &str, index: usize) -> Result<bool, Value<'gc>> {
+        let present = match target {
+            Value::VmArray(arr) => {
+                let b = arr.borrow();
+                let dense_present = if index < b.elements.len() {
+                    !b.props.contains_key(&format!("__deleted_{}", index))
+                        || b.props.contains_key(key)
+                        || b.props.contains_key(&format!("__get_{}", key))
+                        || b.props.contains_key(&format!("__set_{}", key))
+                } else {
+                    false
+                };
+                let own_prop_present = b.props.contains_key(key)
+                    || b.props.contains_key(&format!("__get_{}", key))
+                    || b.props.contains_key(&format!("__set_{}", key));
+                if dense_present || own_prop_present {
+                    true
+                } else {
+                    let proto = b.props.get("__proto__").cloned();
+                    drop(b);
+                    self.lookup_proto_chain(proto.as_ref(), key).is_some()
+                        || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                        || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                }
+            }
+            Value::VmObject(_) => match self.try_proxy_has(target, key) {
+                Ok(Some(v)) => v,
+                Ok(None) => self.has_property_in_chain(target, key),
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    return Err(Value::Undefined);
+                }
+            },
+            _ => self.has_property_in_chain(target, key),
+        };
+        Ok(present)
+    }
+
+    fn flatten_into_array_values(&mut self, source: &Value<'gc>, depth: usize, out: &mut Vec<Value<'gc>>) -> bool {
+        let is_array = matches!(
+            self.call_builtin(BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(source)),
+            Value::Boolean(true)
+        );
+        if !is_array || depth == 0 {
+            out.push(source.clone());
+            return true;
+        }
+
+        let Some(len_u64) = self.array_like_length_u64(source) else {
+            return false;
+        };
+        let len = len_u64.min(usize::MAX as u64) as usize;
+        for index in 0..len {
+            let key = index.to_string();
+            let present = match self.array_like_has_index(source, &key, index) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            if !present {
+                continue;
+            }
+            let element = self.read_named_property(source, &key);
+            if self.pending_throw.is_some() {
+                return false;
+            }
+            if !self.flatten_into_array_values(&element, depth.saturating_sub(1), out) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// JSON.stringify helper
     fn json_stringify(&self, val: &Value<'gc>) -> String {
         match val {
@@ -19627,6 +21322,7 @@ impl<'gc> VM<'gc> {
         });
 
         // Bind this
+
         self.this_stack.push(state.this_val);
 
         // If this is a next() call (not the initial call), push the resume value

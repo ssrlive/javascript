@@ -6,7 +6,7 @@ const {composeTest, extractMeta, parseList, hasFlag, referencesAssert} = require
 
 const SCRIPT_START_NS = process.hrtime.bigint();
 
-const REPO_DIR = path.resolve(__dirname, '..', '..', 'test262');
+const TEST262_ROOT_DIR = path.resolve(__dirname, '..', '..', 'test262');
 const RESULTS_FILE = 'test262-results.log';
 fs.writeFileSync(RESULTS_FILE, '');
 
@@ -134,9 +134,9 @@ function runCommandAsync(cmd, args, options = {}) {
   });
 }
 
-if (!fs.existsSync(REPO_DIR)){
+if (!fs.existsSync(TEST262_ROOT_DIR)){
   console.log('Cloning test262...');
-  spawnSync('git', ['clone', '--depth', '1', 'https://github.com/tc39/test262.git', REPO_DIR], {stdio:'inherit'});
+  spawnSync('git', ['clone', '--depth', '1', 'https://github.com/tc39/test262.git', TEST262_ROOT_DIR], {stdio:'inherit'});
 }
 
 // Build engine
@@ -180,7 +180,7 @@ function walkDir(dir){
   // Return sorted list of paths to ensure caller sees deterministic order
   return out.sort((a,b)=>a.localeCompare(b, 'en', {numeric:true}));
 }
-for (const p of walkDir(path.join(REPO_DIR,'harness'))){
+for (const p of walkDir(path.join(TEST262_ROOT_DIR,'harness'))){
   const b = path.basename(p);
   HARNESS_INDEX[b] = p;
 }
@@ -207,15 +207,15 @@ if (FOCUS_LIST.length){
   for (const tokRaw of toks){
     const {text: tok, filesOnly} = stripFilesOnlyMarker(tokRaw);
     if (!tok) continue;
-    if (tok === 'language') SEARCH_DIRS.push({path: path.join(REPO_DIR,'test','language'), filesOnly});
-    else if (tok === 'built-ins' || tok === 'builtins') SEARCH_DIRS.push({path: path.join(REPO_DIR,'test','built-ins'), filesOnly});
-    else if (tok === 'intl') SEARCH_DIRS.push({path: path.join(REPO_DIR,'test','intl402'), filesOnly});
-    else if (tok === 'all') SEARCH_DIRS.push({path: path.join(REPO_DIR,'test'), filesOnly});
-    else if (fs.existsSync(path.join(REPO_DIR,'test',tok))) SEARCH_DIRS.push({path: path.join(REPO_DIR,'test',tok), filesOnly});
+    if (tok === 'language') SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test','language'), filesOnly});
+    else if (tok === 'built-ins' || tok === 'builtins') SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test','built-ins'), filesOnly});
+    else if (tok === 'intl') SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test','intl402'), filesOnly});
+    else if (tok === 'all') SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test'), filesOnly});
+    else if (fs.existsSync(path.join(TEST262_ROOT_DIR,'test',tok))) SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test',tok), filesOnly});
     else if (fs.existsSync(tok)) SEARCH_DIRS.push({path: tok, filesOnly});
   }
 } else {
-  SEARCH_DIRS.push({path: path.join(REPO_DIR,'test'), filesOnly: false});
+  SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test'), filesOnly: false});
 }
 
 const CAP = LIMIT * CAP_MULTIPLIER;
@@ -544,7 +544,7 @@ async function runAll(){
         // try resolving it relative to the harness directory first, then fall
         // back to matching by the trailing basename component.
         if (!incPath && inc.includes('/')) {
-          const rel = path.join(REPO_DIR, 'harness', inc);
+          const rel = path.join(TEST262_ROOT_DIR, 'harness', inc);
           if (fs.existsSync(rel)) { incPath = rel; }
           if (!incPath) {
             const bn = path.basename(inc);
@@ -585,7 +585,7 @@ async function runAll(){
     // not inject a global "use strict" which can change eval semantics.
     const isModule = hasFlag(meta, 'module');
     const needStrict = !isModule && hasFlag(meta, 'onlyStrict');
-    const {testToRun, tmpPath, cleanupTmp} = composeTest({testPath: f, repoDir: REPO_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict, needsAgent});
+    const {testToRun, tmpPath, cleanupTmp} = composeTest({testPath: f, repoDir: TEST262_ROOT_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict, needsAgent});
 
     // Set cwd to the directory of the composed test file so that relative
     // module specifiers (e.g. './import-value_FIXTURE.js' in ShadowRealm

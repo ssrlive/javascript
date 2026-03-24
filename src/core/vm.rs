@@ -9477,6 +9477,19 @@ impl<'gc> VM<'gc> {
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     drop(borrow);
                     Ok(self.call_host_fn(&host_name, Some(this_arg), args))
+                } else if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
+                    let bound_this = borrow.get("__bound_this__").cloned().unwrap_or(Value::Undefined);
+                    let mut final_args: Vec<Value<'gc>> = match borrow.get("__bound_args__") {
+                        Some(Value::VmArray(arr)) => arr.borrow().iter().cloned().collect(),
+                        _ => Vec::new(),
+                    };
+                    final_args.extend_from_slice(args);
+                    drop(borrow);
+                    self.vm_call_function_value(&bound_target, &bound_this, &final_args)
+                } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
+                    let id = *native_id as u8;
+                    drop(borrow);
+                    Ok(self.call_method_builtin(id, this_arg, args))
                 } else {
                     Err(crate::raise_type_error!("Value is not a function"))
                 }
@@ -14289,6 +14302,241 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        // Array methods that are generic over array-like receivers
+        if id == BUILTIN_ARRAY_INDEXOF {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let len = match &target {
+                Value::VmArray(arr) => {
+                    let b = arr.borrow();
+                    let mut len = if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                        (*n).max(0.0) as usize
+                    } else {
+                        b.elements.len()
+                    };
+                    for prop_key in b.props.keys() {
+                        let idx_opt = prop_key
+                            .strip_prefix("__deleted_")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .or_else(|| prop_key.parse::<usize>().ok())
+                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                        if let Some(idx) = idx_opt {
+                            len = len.max(idx.saturating_add(1));
+                        }
+                    }
+                    len
+                }
+                _ => {
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        usize::MAX
+                    } else {
+                        n.floor() as usize
+                    }
+                }
+            };
+
+            let needle = args.first().cloned().unwrap_or(Value::Undefined);
+            let n = if let Some(v) = args.get(1) {
+                let Some(nv) = self.extract_number_with_coercion(v) else {
+                    return Value::Undefined;
+                };
+                nv
+            } else {
+                0.0
+            };
+            if n.is_infinite() && n.is_sign_positive() {
+                return Value::Number(-1.0);
+            }
+            let n_int = if n.is_nan() { 0.0 } else { n.trunc() };
+            let mut k = if n_int >= 0.0 {
+                n_int as usize
+            } else {
+                let idx = (len as i128) + (n_int as i128);
+                if idx <= 0 { 0 } else { idx as usize }
+            };
+
+            while k < len {
+                let key = k.to_string();
+                let present = match &target {
+                    Value::VmArray(arr) => {
+                        let b = arr.borrow();
+                        let dense_present = if k < b.elements.len() {
+                            !b.props.contains_key(&format!("__deleted_{}", k))
+                                || b.props.contains_key(&key)
+                                || b.props.contains_key(&format!("__get_{}", key))
+                                || b.props.contains_key(&format!("__set_{}", key))
+                        } else {
+                            false
+                        };
+                        let own_prop_present = b.props.contains_key(&key)
+                            || b.props.contains_key(&format!("__get_{}", key))
+                            || b.props.contains_key(&format!("__set_{}", key));
+                        if dense_present || own_prop_present {
+                            true
+                        } else {
+                            let proto = b.props.get("__proto__").cloned();
+                            drop(b);
+                            self.lookup_proto_chain(proto.as_ref(), &key).is_some()
+                                || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                                || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                        }
+                    }
+                    Value::VmObject(_) => match self.try_proxy_has(&target, &key) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => self.has_property_in_chain(&target, &key),
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    },
+                    _ => self.has_property_in_chain(&target, &key),
+                };
+
+                if present {
+                    let v = self.read_named_property(&target, &key);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if self.values_equal(&v, &needle) {
+                        return Value::Number(k as f64);
+                    }
+                }
+                k += 1;
+            }
+            return Value::Number(-1.0);
+        }
+
+        if id == BUILTIN_ARRAY_FOREACH {
+            let target = match receiver {
+                Value::Undefined | Value::Null => {
+                    self.throw_type_error("Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+                | Value::Object(_) => receiver.clone(),
+                _ => self.call_builtin(BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            };
+
+            let len = match &target {
+                Value::VmArray(arr) => {
+                    let b = arr.borrow();
+                    let mut len = if let Some(Value::Number(n)) = b.props.get("__array_length__") {
+                        (*n).max(0.0) as usize
+                    } else {
+                        b.elements.len()
+                    };
+                    for prop_key in b.props.keys() {
+                        let idx_opt = prop_key
+                            .strip_prefix("__deleted_")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .or_else(|| prop_key.parse::<usize>().ok())
+                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                        if let Some(idx) = idx_opt {
+                            len = len.max(idx.saturating_add(1));
+                        }
+                    }
+                    len
+                }
+                _ => {
+                    let len_v = self.read_named_property(&target, "length");
+                    let Some(n) = self.extract_number_with_coercion(&len_v) else {
+                        return Value::Undefined;
+                    };
+                    if n.is_nan() || n <= 0.0 {
+                        0
+                    } else if !n.is_finite() {
+                        usize::MAX
+                    } else {
+                        n.floor() as usize
+                    }
+                }
+            };
+            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+            if !self.is_value_callable(&callback) {
+                self.throw_type_error("Value is not a function");
+                return Value::Undefined;
+            }
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            for k in 0..len {
+                let key = k.to_string();
+                let present = match &target {
+                    Value::VmArray(arr) => {
+                        let b = arr.borrow();
+                        let dense_present = if k < b.elements.len() {
+                            !b.props.contains_key(&format!("__deleted_{}", k))
+                                || b.props.contains_key(&key)
+                                || b.props.contains_key(&format!("__get_{}", key))
+                                || b.props.contains_key(&format!("__set_{}", key))
+                        } else {
+                            false
+                        };
+                        let own_prop_present = b.props.contains_key(&key)
+                            || b.props.contains_key(&format!("__get_{}", key))
+                            || b.props.contains_key(&format!("__set_{}", key));
+                        if dense_present || own_prop_present {
+                            true
+                        } else {
+                            let proto = b.props.get("__proto__").cloned();
+                            drop(b);
+                            self.lookup_proto_chain(proto.as_ref(), &key).is_some()
+                                || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                                || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                        }
+                    }
+                    Value::VmObject(_) => match self.try_proxy_has(&target, &key) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => self.has_property_in_chain(&target, &key),
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    },
+                    _ => self.has_property_in_chain(&target, &key),
+                };
+                if !present {
+                    continue;
+                }
+
+                let value = self.read_named_property(&target, &key);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                match self.vm_call_function_value(&callback, &this_arg, &[value, Value::Number(k as f64), target.clone()]) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                }
+            }
+            return Value::Undefined;
+        }
+
         // Array methods
         if let Value::VmArray(arr) = receiver {
             match id {
@@ -17313,6 +17561,19 @@ impl<'gc> VM<'gc> {
                     match cur {
                         Value::VmObject(m) => {
                             let b = m.borrow();
+                            if let Some(Value::String(type_name_u16)) = b.get("__type__")
+                                && crate::unicode::utf16_to_utf8(type_name_u16) == "String"
+                            {
+                                if key == "length" {
+                                    return true;
+                                }
+                                if let Ok(idx) = key.parse::<usize>()
+                                    && let Some(Value::String(s)) = b.get("__value__")
+                                    && idx < s.len()
+                                {
+                                    return true;
+                                }
+                            }
                             if b.contains_key(key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key))
                             {
                                 return true;
@@ -17337,28 +17598,58 @@ impl<'gc> VM<'gc> {
                             }
                             current = next;
                         }
+                        Value::VmArray(arr) => {
+                            let b = arr.borrow();
+                            if key == "length" {
+                                return true;
+                            }
+                            if let Ok(idx) = key.parse::<usize>()
+                                && idx < b.len()
+                                && (!b.props.contains_key(&format!("__deleted_{}", idx))
+                                    || b.props.contains_key(key)
+                                    || b.props.contains_key(&format!("__get_{}", key))
+                                    || b.props.contains_key(&format!("__set_{}", key)))
+                            {
+                                return true;
+                            }
+                            if b.props.contains_key(key)
+                                || b.props.contains_key(&format!("__get_{}", key))
+                                || b.props.contains_key(&format!("__set_{}", key))
+                            {
+                                return true;
+                            }
+                            current = b.props.get("__proto__").cloned();
+                        }
                         _ => break,
                     }
                 }
                 false
             }
             Value::VmArray(arr) => {
+                if key == "length" {
+                    return true;
+                }
                 let b = arr.borrow();
+                if let Ok(idx) = key.parse::<usize>()
+                    && idx < b.len()
+                    && (!b.props.contains_key(&format!("__deleted_{}", idx))
+                        || b.props.contains_key(key)
+                        || b.props.contains_key(&format!("__get_{}", key))
+                        || b.props.contains_key(&format!("__set_{}", key)))
+                {
+                    return true;
+                }
                 if b.props.contains_key(key)
                     || b.props.contains_key(&format!("__get_{}", key))
                     || b.props.contains_key(&format!("__set_{}", key))
                 {
-                    return true;
-                }
-                let proto = b.props.get("__proto__").cloned();
-                drop(b);
-                if let Some(p) = proto {
-                    let proto_opt = Some(p);
-                    self.lookup_proto_chain(proto_opt.as_ref(), key).is_some()
-                        || self.lookup_proto_chain(proto_opt.as_ref(), &format!("__get_{}", key)).is_some()
-                        || self.lookup_proto_chain(proto_opt.as_ref(), &format!("__set_{}", key)).is_some()
+                    true
                 } else {
-                    false
+                    let proto = b.props.get("__proto__").cloned();
+                    drop(b);
+                    self.lookup_proto_chain(proto.as_ref(), key).is_some()
+                        || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                        || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
                 }
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {

@@ -1,21 +1,16 @@
-use crate::core::new_gc_cell_ptr;
 use crate::{
     JSError,
-    core::{
-        EvalError, JsArena, JsRoot, Value, env_set, evaluate_statements, initialize_global_constructors, new_js_object_data,
-        parse_statements, tokenize,
-    },
+    core::{Chunk, VM, Value, value_to_compact_result_string, value_to_string},
 };
-use std::collections::HashMap;
+use std::cell::RefCell;
 
 /// A small persistent REPL environment wrapper.
 ///
 /// Notes:
-/// - `Repl::new()` creates a persistent environment and initializes built-ins.
-/// - `Repl::eval(&self, code)` evaluates the provided code in the persistent env
-///   so variables, functions and imports persist between calls.
+/// - `Repl::new()` uses the Bytecode VM backend.
+/// - `Repl::eval(&self, code)` evaluates each submission in the same VM instance.
 pub struct Repl {
-    arena: JsArena,
+    vm: RefCell<VM<'static>>,
 }
 
 impl Default for Repl {
@@ -25,109 +20,31 @@ impl Default for Repl {
 }
 
 impl Repl {
-    /// Create a new persistent REPL environment (with built-ins initialized).
+    /// Create a VM-backed REPL handle.
     pub fn new() -> Self {
-        let arena = JsArena::new(|mc| {
-            let global_env = new_js_object_data(mc);
-            global_env.borrow_mut(mc).is_function_scope = true;
-
-            JsRoot {
-                global_env,
-                well_known_symbols: new_gc_cell_ptr(mc, HashMap::new()),
-            }
-        });
-
-        // Initialize global constructors
-        arena.mutate(|mc, root| {
-            initialize_global_constructors(mc, &root.global_env).unwrap();
-            env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env)).unwrap();
-            root.global_env.borrow_mut(mc).set_non_enumerable("globalThis");
-        });
-
-        Repl { arena }
+        Repl {
+            vm: RefCell::new(VM::new(Chunk::new())),
+        }
     }
 
-    /// Evaluate a script in the persistent environment.
+    /// Evaluate a script using the VM backend.
     /// Returns the evaluation result as a string or an error.
     pub fn eval<T: AsRef<str>>(&self, script: T) -> Result<String, JSError> {
         let script = script.as_ref();
+        let mut vm = self.vm.borrow_mut();
+        let v = vm.eval_repl_snippet(script)?;
 
-        // Parse tokens and statements
-        let tokens = tokenize(script)?;
-        let mut index = 0;
-        let statements = parse_statements(&tokens, &mut index)?;
-        // If the last statement is a declaration, the REPL should return `undefined`
-        // (declaration statements evaluate to undefined in JS). Compute this now
-        // and pass it into the execution closure.
-        let last_is_declaration = statements
-            .last()
-            .map(|s| {
-                matches!(
-                    *s.kind,
-                    crate::core::StatementKind::Let(..)
-                        | crate::core::StatementKind::Var(..)
-                        | crate::core::StatementKind::Const(..)
-                        | crate::core::StatementKind::FunctionDeclaration(..)
-                        | crate::core::StatementKind::Class(..)
-                        | crate::core::StatementKind::Import(..)
-                        | crate::core::StatementKind::Export(..)
-                )
-            })
-            .unwrap_or(false);
-
-        self.arena
-            .mutate(move |mc, root| match evaluate_statements(mc, &root.global_env, &statements) {
-                Ok(val) => {
-                    if last_is_declaration {
-                        Ok(crate::core::value_to_string(&crate::core::Value::Undefined))
-                    } else {
-                        Ok(crate::core::value_to_string(&val))
-                    }
+        match v {
+            Value::String(s) => {
+                let s_utf8 = crate::unicode::utf16_to_utf8(&s);
+                match serde_json::to_string(&s_utf8) {
+                    Ok(quoted) => Ok(quoted),
+                    Err(_) => Ok(format!("\"{}\"", s_utf8)),
                 }
-                Err(e) => match e {
-                    EvalError::Js(js_err) => Err(js_err),
-                    EvalError::Throw(val, line, column) => {
-                        let mut err = crate::raise_throw_error!(val);
-                        if let Some((l, c)) = line.zip(column) {
-                            err.set_js_location(l, c);
-                        }
-                        Err(err)
-                    }
-                },
-            })
-        /*
-        match evaluate_statements(mc, &self.env, &statements) {
-            Ok(v) => {
-                // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
-                if let Value::Object(obj) = &v
-                    && let Some(promise_val_rc) = slot_get(obj, &InternalSlot::Promise)
-                    && let Value::Promise(promise) = &*promise_val_rc.borrow()
-                {
-                    // Run the event loop until the promise is resolved
-                    loop {
-                        drain_event_loop()?;
-                        let promise_borrow = promise.borrow();
-                        match &promise_borrow.state {
-                            PromiseState::Fulfilled(val) => return Ok(val.clone()),
-                            PromiseState::Rejected(reason) => {
-                                // Preserve the original rejected JS value instead of
-                                // converting it to a string so callers can inspect
-                                // the rejection reason (e.g., error objects).
-                                return Err(raise_throw_error!(reason.clone()));
-                            }
-                            PromiseState::Pending => {
-                                // Continue running the event loop
-                            }
-                        }
-                    }
-                }
-                // Run event loop once to process any queued asynchronous tasks
-                drain_event_loop()?;
-                Ok(v)
             }
-            Err(e) => Err(e),
+            Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
+            _ => Ok(value_to_string(&v)),
         }
-        // */
     }
 
     /// Returns true when the given `input` looks like a complete JavaScript

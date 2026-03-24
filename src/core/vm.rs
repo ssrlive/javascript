@@ -21194,6 +21194,54 @@ impl<'gc> VM<'gc> {
         Ok(result)
     }
 
+    /// Evaluate a REPL snippet against the current VM global state.
+    ///
+    /// This uses the VM's `eval` builtin so globals survive between calls.
+    pub fn eval_repl_snippet(&mut self, code: &str) -> Result<Value<'gc>, JSError> {
+        // REPL submissions are independent top-level snippets, not direct eval calls.
+        self.direct_eval = false;
+        let out = self.call_builtin(BUILTIN_EVAL, &[Value::from(code)]);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(&thrown));
+        }
+
+        // Functions declared inside eval snippets are compiled in a temporary VM chunk.
+        // Replace them with source-backed wrappers so they stay callable across REPL inputs.
+        if let Ok(tokens) = crate::core::tokenize(code) {
+            let mut index = 0usize;
+            if let Ok(statements) = crate::core::parse_statements(&tokens, &mut index) {
+                let trimmed_code = code.trim();
+                for stmt in &statements {
+                    if let crate::core::StatementKind::FunctionDeclaration(name, _params, _body, _is_generator, _is_async) = &*stmt.kind
+                        && let Some(existing) = self.globals.get(name).cloned()
+                        && matches!(existing, Value::VmFunction(..) | Value::VmClosure(..))
+                    {
+                        // Build a callable expression that recreates and returns the declared function.
+                        let callable_expr = format!("(() => {{ {}; return {}; }})()", trimmed_code, name);
+                        let mut map = IndexMap::new();
+                        map.insert("__fn_body__".to_string(), Value::from(&callable_expr));
+                        map.insert("__type__".to_string(), Value::from("Function"));
+                        map.insert("__repl_persistent_fn__".to_string(), Value::Boolean(true));
+                        map.insert("name".to_string(), Value::from(name.as_str()));
+                        map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+                        if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
+                            && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
+                        {
+                            map.insert("__proto__".to_string(), fn_proto);
+                        }
+                        let wrapped = Value::VmObject(Rc::new(RefCell::new(map)));
+                        self.globals.insert(name.clone(), wrapped.clone());
+                        self.global_this.borrow_mut().insert(name.clone(), wrapped);
+                    }
+                }
+            }
+        }
+
+        self.drain_microtasks();
+        self.drain_timers()?;
+        Ok(out)
+    }
+
     /// Create a generator object for a suspendable generator function.
     /// The generator body is not executed yet; it will be run lazily via .next().
     fn create_generator_object(
@@ -22272,6 +22320,11 @@ impl<'gc> VM<'gc> {
                                 }
                             } else if let Some(Value::String(body_u16)) = borrow.get("__fn_body__") {
                                 let body = crate::unicode::utf16_to_utf8(body_u16);
+                                let repl_persistent_name = if matches!(borrow.get("__repl_persistent_fn__"), Some(Value::Boolean(true))) {
+                                    borrow.get("name").map(value_to_string)
+                                } else {
+                                    None
+                                };
                                 let params_src = borrow
                                     .get("__fn_params__")
                                     .and_then(|v| match v {
@@ -22342,20 +22395,80 @@ impl<'gc> VM<'gc> {
                                     self.stack.push(this_val);
                                     continue;
                                 }
-                                // Eval the body: try with "return" first, then without
-                                let code_with_return = if body.trim_start().starts_with("return") {
-                                    body.clone()
+                                if repl_persistent_name.is_some() {
+                                    // REPL persistent wrappers must run in the current VM so
+                                    // they can consume current globals and call-time args.
+                                    let callable_expr = if params_src.trim().is_empty() {
+                                        body.trim().to_string()
+                                    } else {
+                                        format!("function({}){{{}}}", params_src, body)
+                                    };
+
+                                    let saved_args = self.globals.get("__repl_call_args__").cloned();
+                                    let saved_this = self.globals.get("__repl_call_this__").cloned();
+                                    let args_array = Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(args_collected.clone()))));
+                                    self.globals.insert("__repl_call_args__".to_string(), args_array.clone());
+                                    self.globals.insert("__repl_call_this__".to_string(), this_val.clone());
+                                    {
+                                        let mut gt = self.global_this.borrow_mut();
+                                        gt.insert("__repl_call_args__".to_string(), args_array);
+                                        gt.insert("__repl_call_this__".to_string(), this_val.clone());
+                                    }
+
+                                    let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
+                                    let result = self.call_builtin(BUILTIN_EVAL, &[Value::from(&eval_code)]);
+
+                                    match saved_args {
+                                        Some(v) => {
+                                            self.globals.insert("__repl_call_args__".to_string(), v.clone());
+                                            self.global_this.borrow_mut().insert("__repl_call_args__".to_string(), v);
+                                        }
+                                        None => {
+                                            self.globals.shift_remove("__repl_call_args__");
+                                            self.global_this.borrow_mut().shift_remove("__repl_call_args__");
+                                        }
+                                    }
+                                    match saved_this {
+                                        Some(v) => {
+                                            self.globals.insert("__repl_call_this__".to_string(), v.clone());
+                                            self.global_this.borrow_mut().insert("__repl_call_this__".to_string(), v);
+                                        }
+                                        None => {
+                                            self.globals.shift_remove("__repl_call_this__");
+                                            self.global_this.borrow_mut().shift_remove("__repl_call_this__");
+                                        }
+                                    }
+
+                                    if let Some(name) = repl_persistent_name
+                                        && !name.is_empty()
+                                    {
+                                        let persistent_fn = Value::VmObject(map.clone());
+                                        self.globals.insert(name.clone(), persistent_fn.clone());
+                                        self.global_this.borrow_mut().insert(name, persistent_fn);
+                                    }
+
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(&thrown)?;
+                                        continue;
+                                    }
+                                    self.stack.push(result);
                                 } else {
-                                    format!("return {}", body)
-                                };
-                                let result = match crate::core::compile_and_run_vm_snippet(&code_with_return) {
-                                    Ok(v) => crate::core::static_to_gc(v),
-                                    Err(_) => match crate::core::compile_and_run_vm_snippet(&body) {
+                                    // Non-REPL __fn_body__ wrappers keep legacy behavior.
+                                    // Eval the body: try with "return" first, then without
+                                    let code_with_return = if body.trim_start().starts_with("return") {
+                                        body.clone()
+                                    } else {
+                                        format!("return {}", body)
+                                    };
+                                    let result = match crate::core::compile_and_run_vm_snippet(&code_with_return) {
                                         Ok(v) => crate::core::static_to_gc(v),
-                                        Err(_) => Value::Undefined,
-                                    },
-                                };
-                                self.stack.push(result);
+                                        Err(_) => match crate::core::compile_and_run_vm_snippet(&body) {
+                                            Ok(v) => crate::core::static_to_gc(v),
+                                            Err(_) => Value::Undefined,
+                                        },
+                                    };
+                                    self.stack.push(result);
+                                }
                             } else {
                                 log::warn!("Attempted to call non-function object");
                                 let callee_name = self.resolve_callee_name(callee_idx);

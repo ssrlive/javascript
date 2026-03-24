@@ -60,9 +60,8 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
             }
         }
     } else {
-        // No script argument -> start the interactive, persistent REPL
-        run_persistent_repl()?;
-        return Ok(());
+        // No script argument -> start the interactive REPL (VM-backed)
+        return Ok(run_persistent_repl()?);
     };
 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
@@ -136,7 +135,7 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
     use std::path::PathBuf;
 
     let ver = clap::crate_version!();
-    println!("JavaScript Interpreter REPL (persistent environment) v{ver}. Type 'exit' or Ctrl-D to quit.");
+    println!("JavaScript Interpreter REPL (VM mode) v{ver}. Type 'exit' or Ctrl-D to quit.");
 
     let mut rl = match Editor::<(), rustyline::history::FileHistory>::new() {
         Ok(e) => e,

@@ -1,4 +1,4 @@
-use crate::core::MutationContext;
+use crate::core::GcContext;
 use crate::core::{
     InternalSlot, JSObjectDataPtr, PropertyDescriptor, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value,
     prepare_function_call_env, slot_get, slot_get_chained,
@@ -8,7 +8,7 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use crate::{JSError, core::EvalError};
 
 /// Initialize the Reflect object with all reflection methods
-pub fn initialize_reflect<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_reflect<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let reflect_obj = new_js_object_data(mc);
 
     // Set [[Prototype]] to Object.prototype (spec §26.1)
@@ -55,11 +55,7 @@ pub fn initialize_reflect<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     Ok(())
 }
 
-fn to_property_key<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    value: Value<'gc>,
-) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
+fn to_property_key<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, value: Value<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
     let key = match value {
         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
@@ -83,7 +79,7 @@ fn to_property_key<'gc>(
 /// OrdinaryGet with a receiver: walk the prototype chain starting from `obj`,
 /// and when an accessor getter is found, call it with `receiver` as `this`.
 fn reflect_get_with_receiver<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
@@ -183,7 +179,7 @@ fn reflect_get_with_receiver<'gc>(
 /// This is needed for Reflect.defineProperty where the attributes object may
 /// have accessor-defined properties like `enumerable` or `writable`.
 fn to_property_descriptor_with_accessors<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<PropertyDescriptor<'gc>, EvalError<'gc>> {
@@ -239,7 +235,7 @@ fn to_property_descriptor_with_accessors<'gc>(
 /// If argumentsList is not an Object, throw TypeError.
 /// Get its "length" property (may throw), then iterate 0..len collecting elements.
 fn create_list_from_array_like<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_val: &Value<'gc>,
     context: &str,
@@ -287,7 +283,7 @@ fn create_list_from_array_like<'gc>(
 
 /// Handle Reflect object method calls
 pub fn handle_reflect_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,

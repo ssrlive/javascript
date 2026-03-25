@@ -4,7 +4,7 @@ use crate::core::{
     DestructuringElement, EvalError, InternalSlot, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, PropertyKey, Value,
     new_js_object_data, object_get_key_value, object_set_key_value, slot_get_chained,
 };
-use crate::core::{Gc, GcCell, GcPtr, MutationContext};
+use crate::core::{Gc, GcCell, GcContext, GcPtr};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array};
 // use crate::js_promise;
@@ -12,7 +12,7 @@ use crate::unicode::utf16_to_utf8;
 use std::collections::HashSet;
 
 /// Create the console object with logging functions
-pub fn initialize_console_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn initialize_console_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let console_obj = new_js_object_data(mc);
     object_set_key_value(mc, &console_obj, "log", &Value::Function("console.log".to_string()))?;
     // Provide `console.error` as an alias to `console.log` for now
@@ -21,7 +21,7 @@ pub fn initialize_console_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObj
 }
 
 fn format_console_value<'gc>(
-    mc: &MutationContext<'gc>, // added mc
+    mc: &GcContext<'gc>, // added mc
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<String, JSError> {
@@ -30,7 +30,7 @@ fn format_console_value<'gc>(
 }
 
 fn format_value_pretty<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     val: &Value<'gc>,
     _env: &JSObjectDataPtr<'gc>,
     _depth: usize,
@@ -287,7 +287,7 @@ fn format_value_pretty<'gc>(
 
 // Helper to format a Promise (or an GcPtr<RefCell<JSPromise>>) in Node-like style.
 fn format_promise<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     p_rc: &GcPtr<'gc, JSPromise<'gc>>,
     _env: &JSObjectDataPtr<'gc>,
     depth: usize,
@@ -309,7 +309,7 @@ fn format_promise<'gc>(
 
 /// Handle console object method calls
 pub fn handle_console_method<'gc>(
-    mc: &MutationContext<'gc>, // added mc
+    mc: &GcContext<'gc>, // added mc
     method: &str,
     values: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -417,7 +417,7 @@ pub fn handle_console_method<'gc>(
 
 /// Print additional own non-index properties of an array object
 /// Not enabled by default; can be called from handle_console_method if desired
-fn _print_additional_info_for_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<(), crate::core::EvalError<'gc>> {
+fn _print_additional_info_for_array<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<(), crate::core::EvalError<'gc>> {
     // Collect and print own non-index properties.
     // Print common RegExp-related props in a stable order for readability.
 

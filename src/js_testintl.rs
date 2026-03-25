@@ -1,4 +1,4 @@
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
+use crate::core::{Collect, Gc, GcCell, GcPtr, GcContext, Trace};
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, extract_closure_from_value};
 use crate::core::{InternalSlot, new_js_object_data, object_get_key_value, object_set_key_value, slot_get, slot_set};
 use crate::error::JSError;
@@ -6,7 +6,7 @@ use crate::js_array::get_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 /// Create the testIntl object with testing functions
-pub fn make_testintl_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_testintl_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let testintl_obj = new_js_object_data(mc);
     object_set_key_value(
         mc,
@@ -18,14 +18,14 @@ pub fn make_testintl_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDa
 }
 
 /// Create a mock Intl constructor that can be instantiated
-pub fn create_mock_intl_constructor<'gc>(mc: &MutationContext<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn create_mock_intl_constructor<'gc>(mc: &GcContext<'gc>) -> Result<Value<'gc>, JSError> {
     // Create a special constructor function that will be recognized by evaluate_new
     Ok(Value::Function("MockIntlConstructor".to_string()))
 }
 
 /// Create a mock Intl instance with resolvedOptions method
 pub fn create_mock_intl_instance<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     locale_arg: Option<String>,
     env: &crate::core::JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -302,7 +302,7 @@ pub fn handle_resolved_options(instance: &JSObjectDataPtr) -> Result<Value, JSEr
 
 /// Handle testIntl object method calls
 pub fn handle_testintl_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Expr],
     env: &JSObjectDataPtr,
@@ -335,7 +335,7 @@ pub fn handle_testintl_method<'gc>(
 
 /// Handle static methods exposed on the mock Intl constructor
 pub fn handle_mock_intl_static_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Expr],
     env: &JSObjectDataPtr,

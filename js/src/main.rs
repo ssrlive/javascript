@@ -76,14 +76,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         .unwrap_or(false);
     let run_as_module = cli.module || file_ext_is_mjs;
 
-    let result = if cli.use_vm {
-        // Experimental VM evaluation
-        evaluate_script_with_vm(&script_content, run_as_module, script_path.as_ref())
-    } else if run_as_module {
-        evaluate_module(&script_content, script_path.as_ref())
-    } else {
-        evaluate_script(&script_content, script_path.as_ref())
-    };
+    let result = evaluate_script_with_vm(&script_content, run_as_module, script_path.as_ref());
 
     match result {
         Ok(result) => {
@@ -151,7 +144,7 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
         rl.load_history(p)?;
     }
 
-    let repl = Repl::new();
+    let mut repl = Repl::new();
 
     let mut buffer = String::new();
 

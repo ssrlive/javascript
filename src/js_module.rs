@@ -2,8 +2,8 @@ use crate::core::{InternalSlot, slot_get_chained, slot_set};
 use crate::{
     JSError, Value,
     core::{
-        ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, Gc, JSObjectDataPtr, MutationContext, Statement,
-        StatementKind, create_descriptor_object, new_gc_cell_ptr, object_get_key_value, object_set_key_value,
+        ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, Gc, GcContext, JSObjectDataPtr, Statement, StatementKind,
+        create_descriptor_object, new_gc_cell_ptr, object_get_key_value, object_set_key_value,
     },
     new_js_object_data,
 };
@@ -11,7 +11,7 @@ use serde_json::Value as JsonValue;
 use std::path::Path;
 
 pub fn load_module<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
@@ -74,7 +74,7 @@ pub fn load_module<'gc>(
 }
 
 pub fn load_module_for_dynamic_import<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: &JSObjectDataPtr<'gc>,
@@ -552,7 +552,7 @@ pub(crate) fn deferred_preload_ready_now<'gc>(module_path: &str, env: &JSObjectD
 }
 
 fn load_module_from_file<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
@@ -561,7 +561,7 @@ fn load_module_from_file<'gc>(
 }
 
 fn load_module_from_file_with_mode<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
@@ -655,7 +655,7 @@ fn load_module_from_file_with_mode<'gc>(
 
 #[allow(dead_code)]
 pub fn preload_async_transitive_module<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
@@ -664,7 +664,7 @@ pub fn preload_async_transitive_module<'gc>(
 }
 
 fn json_to_js_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     json: &JsonValue,
     caller_env: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1087,7 +1087,7 @@ fn validate_module_declarations(statements: &[Statement]) -> Result<(), JSError>
 }
 
 fn execute_module<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     content: &str,
     module_path: &str,
     caller_env: Option<JSObjectDataPtr<'gc>>,
@@ -1226,10 +1226,7 @@ pub fn import_from_module<'gc>(module_value: &Value<'gc>, specifier: &str) -> Re
     }
 }
 
-pub(crate) fn get_or_create_module_cache<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub(crate) fn get_or_create_module_cache<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleCache)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
@@ -1241,10 +1238,7 @@ pub(crate) fn get_or_create_module_cache<'gc>(
     Ok(cache)
 }
 
-pub(crate) fn get_or_create_module_loading<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub(crate) fn get_or_create_module_loading<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleLoading)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
@@ -1256,7 +1250,7 @@ pub(crate) fn get_or_create_module_loading<'gc>(
     Ok(loading)
 }
 
-fn get_or_create_module_eval_errors<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn get_or_create_module_eval_errors<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleEvalErrors)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
@@ -1268,7 +1262,7 @@ fn get_or_create_module_eval_errors<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     Ok(errors)
 }
 
-fn get_or_create_module_async_pending<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn get_or_create_module_async_pending<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleAsyncPending)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
@@ -1281,7 +1275,7 @@ fn get_or_create_module_async_pending<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 }
 
 fn get_or_create_module_deferred_namespace_cache<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleDeferredNsCache)
@@ -1295,10 +1289,7 @@ fn get_or_create_module_deferred_namespace_cache<'gc>(
     Ok(cache)
 }
 
-fn get_or_create_module_namespace_cache<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn get_or_create_module_namespace_cache<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleNamespaceCache)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
@@ -1311,7 +1302,7 @@ fn get_or_create_module_namespace_cache<'gc>(
 
 #[allow(dead_code)]
 fn get_or_create_module_defer_pending_preloads<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleDeferPendingPreloads)
@@ -1327,7 +1318,7 @@ fn get_or_create_module_defer_pending_preloads<'gc>(
 
 #[allow(dead_code)]
 pub fn queue_deferred_async_preload_module<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     module_path: &str,
 ) -> Result<(), EvalError<'gc>> {
@@ -1356,7 +1347,7 @@ pub fn queue_deferred_async_preload_module<'gc>(
 }
 
 #[allow(dead_code)]
-fn drain_microtasks<'gc>(mc: &MutationContext<'gc>) {
+fn drain_microtasks<'gc>(mc: &GcContext<'gc>) {
     for _ in 0..1024 {
         match crate::js_promise::run_event_loop(mc) {
             Ok(crate::js_promise::PollResult::Executed) => continue,
@@ -1371,7 +1362,7 @@ fn drain_microtasks<'gc>(mc: &MutationContext<'gc>) {
 }
 
 #[allow(dead_code)]
-pub fn flush_deferred_async_preload_modules<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
+pub fn flush_deferred_async_preload_modules<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
     let cache_env = resolve_cache_env(Some(*env)).unwrap_or(*env);
     let pending = get_or_create_module_defer_pending_preloads(mc, &cache_env).map_err(EvalError::from)?;
     let async_pending = get_or_create_module_async_pending(mc, &cache_env).map_err(EvalError::from)?;
@@ -1463,7 +1454,7 @@ fn get_symbol_to_string_tag<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<Value<'gc
 }
 
 pub fn make_module_namespace_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     exports_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1773,7 +1764,7 @@ fn module_has_local_export_name(module_path: &str, export_name: &str) -> Result<
 }
 
 pub fn load_module_deferred_namespace<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
@@ -1848,7 +1839,7 @@ pub fn load_module_deferred_namespace<'gc>(
 }
 
 pub fn ensure_deferred_namespace_evaluated<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key_hint: Option<&str>,

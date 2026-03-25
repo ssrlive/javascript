@@ -2,13 +2,13 @@ use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, InternalSlot, JSGenerator, JSObjectDataPtr, Value, object_get_key_value,
     slot_get_chained, slot_set,
 };
-use crate::core::{Gc, GcPtr, MutationContext};
+use crate::core::{Gc, GcContext, GcPtr};
 use crate::error::JSError;
 use crate::js_promise::{call_function_with_this, make_promise_js_object, queue_async_step};
 use crate::unicode::utf8_to_utf16;
 
 pub fn handle_async_closure_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     closure: &ClosureData<'gc>,
     _this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
@@ -64,7 +64,7 @@ pub fn handle_async_closure_call<'gc>(
 }
 
 fn step<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
     resolve: &Value<'gc>,
     reject: &Value<'gc>,
@@ -167,7 +167,7 @@ fn step<'gc>(
 }
 
 fn create_async_step_callback<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
     resolve: &Value<'gc>,
     reject: &Value<'gc>,
@@ -199,7 +199,7 @@ fn create_async_step_callback<'gc>(
 }
 
 pub fn __internal_async_step_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -212,7 +212,7 @@ pub fn __internal_async_step_resolve<'gc>(
 }
 
 pub fn __internal_async_step_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -222,7 +222,7 @@ pub fn __internal_async_step_reject<'gc>(
 }
 
 fn queue_async_step_from_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
     is_reject: bool,
@@ -239,7 +239,7 @@ fn queue_async_step_from_env<'gc>(
 }
 
 pub fn continue_async_step_direct<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
     resolve: &Value<'gc>,
     reject: &Value<'gc>,

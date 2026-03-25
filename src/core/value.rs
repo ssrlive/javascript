@@ -1,4 +1,4 @@
-use crate::core::{Collect, Gc, GcCell, GcPtr, GcTrace, GcWeak, MutationContext, new_gc_cell_ptr};
+use crate::core::{Collect, Gc, GcCell, GcContext, GcPtr, GcTrace, GcWeak, new_gc_cell_ptr};
 use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
@@ -11,25 +11,26 @@ use crate::{
 use indexmap::IndexMap;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// VM Map storage (simple Vec of key-value pairs).
-#[derive(Clone)]
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
 pub struct VmMapData<'gc> {
     pub entries: Vec<(Value<'gc>, Value<'gc>)>,
     pub is_weak: bool,
 }
 
 /// VM Set storage (simple Vec of values).
-#[derive(Clone)]
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
 pub struct VmSetData<'gc> {
     pub values: Vec<Value<'gc>>,
     pub is_weak: bool,
 }
 
 /// Array storage with optional named properties (e.g. `arr.foo = "bar"`).
-#[derive(Clone)]
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
 pub struct VmArrayData<'gc> {
     pub elements: Vec<Value<'gc>>,
     pub props: IndexMap<String, Value<'gc>>,
@@ -80,7 +81,7 @@ pub enum WeakKey<'gc> {
 
 impl<'gc> WeakKey<'gc> {
     /// Check if this weak key is still alive and matches the given value.
-    pub fn matches(&self, mc: &crate::core::MutationContext<'gc>, val: &Value<'gc>) -> bool {
+    pub fn matches(&self, mc: &crate::core::GcContext<'gc>, val: &Value<'gc>) -> bool {
         match (self, val) {
             (WeakKey::Object(weak), Value::Object(obj)) => weak.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *obj)),
             (WeakKey::Symbol(weak), Value::Symbol(sym)) => weak.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *sym)),
@@ -89,7 +90,7 @@ impl<'gc> WeakKey<'gc> {
     }
 
     /// Check if this weak key is still alive.
-    pub fn is_alive(&self, mc: &crate::core::MutationContext<'gc>) -> bool {
+    pub fn is_alive(&self, mc: &crate::core::GcContext<'gc>) -> bool {
         match self {
             WeakKey::Object(weak) => weak.upgrade(mc).is_some(),
             WeakKey::Symbol(weak) => weak.upgrade(mc).is_some(),
@@ -302,7 +303,7 @@ pub type JSObjectDataPtr<'gc> = GcPtr<'gc, JSObjectData<'gc>>;
 // pub type JSObjectDataWeakPtr<'gc> = Gc<'gc, GcCell<JSObjectData<'gc>>>;
 
 #[inline]
-pub fn new_js_object_data<'gc>(mc: &MutationContext<'gc>) -> JSObjectDataPtr<'gc> {
+pub fn new_js_object_data<'gc>(mc: &GcContext<'gc>) -> JSObjectDataPtr<'gc> {
     new_gc_cell_ptr(mc, JSObjectData::new())
 }
 
@@ -915,7 +916,7 @@ impl<'gc> JSObjectData<'gc> {
         self.constants.contains(key)
     }
 
-    pub fn set_property(&mut self, mc: &MutationContext<'gc>, key: impl Into<PropertyKey<'gc>>, val: Value<'gc>) {
+    pub fn set_property(&mut self, mc: &GcContext<'gc>, key: impl Into<PropertyKey<'gc>>, val: Value<'gc>) {
         let pk = key.into();
         // Intercept internal-only key "__definition_env" to store it in an internal slot
         // instead of creating a visible own property.
@@ -977,7 +978,7 @@ impl<'gc> JSObjectData<'gc> {
         None
     }
 
-    pub fn set_line(&mut self, line: usize, mc: &MutationContext<'gc>) -> Result<(), JSError> {
+    pub fn set_line(&mut self, line: usize, mc: &GcContext<'gc>) -> Result<(), JSError> {
         let key = PropertyKey::Internal(InternalSlot::Line);
         self.properties
             .entry(key)
@@ -995,7 +996,7 @@ impl<'gc> JSObjectData<'gc> {
         None
     }
 
-    pub fn set_column(&mut self, column: usize, mc: &MutationContext<'gc>) -> Result<(), JSError> {
+    pub fn set_column(&mut self, column: usize, mc: &GcContext<'gc>) -> Result<(), JSError> {
         let key = PropertyKey::Internal(InternalSlot::Column);
         self.properties
             .entry(key)
@@ -1203,12 +1204,12 @@ pub enum Value<'gc> {
     Object(JSObjectDataPtr<'gc>),
     Function(String),
     VmFunction(usize, u8),                                  // (ip, arg_count)
-    VmClosure(usize, u8, Rc<Vec<Rc<RefCell<Value<'gc>>>>>), // (ip, arg_count, captured upvalue cells)
-    VmArray(Rc<RefCell<VmArrayData<'gc>>>),
-    VmObject(Rc<RefCell<IndexMap<String, Value<'gc>>>>),
+    VmClosure(usize, u8, crate::core::VmUpvalueCells<'gc>), // (ip, arg_count, captured upvalue cells)
+    VmArray(crate::core::VmArrayHandle<'gc>),
+    VmObject(crate::core::VmObjectHandle<'gc>),
     VmNativeFunction(u8), // builtin ID
-    VmMap(Rc<RefCell<VmMapData<'gc>>>),
-    VmSet(Rc<RefCell<VmSetData<'gc>>>),
+    VmMap(crate::core::VmMapHandle<'gc>),
+    VmSet(crate::core::VmSetHandle<'gc>),
 
     Closure(Gc<'gc, ClosureData<'gc>>),
     AsyncClosure(Gc<'gc, ClosureData<'gc>>),
@@ -1276,7 +1277,7 @@ impl<'gc> Value<'gc> {
         }
     }
 
-    pub fn to_property_key(&self, mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
+    pub fn to_property_key(&self, mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
         match self {
             Value::String(s) => Ok(PropertyKey::String(utf16_to_utf8(s))),
             Value::BigInt(b) => Ok(PropertyKey::String(b.to_string())),
@@ -1402,7 +1403,7 @@ impl<'gc> std::fmt::Debug for Value<'gc> {
 // Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default').
 // This is a simplified implementation that supports user-defined `valueOf` / `toString`.
 pub fn to_primitive<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     val: &Value<'gc>,
     hint: &str,
     env: &JSObjectDataPtr<'gc>,
@@ -1577,7 +1578,7 @@ pub fn to_primitive<'gc>(
 
 // Helper to call toString without fallback
 fn call_to_string_strict<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_ptr: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1610,7 +1611,7 @@ fn call_to_string_strict<'gc>(
 // Uses get_property_with_accessors to trigger getter descriptors (e.g. when
 // valueOf has been overridden via Object.defineProperty with a getter).
 fn call_value_of_strict<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_ptr: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1956,7 +1957,7 @@ pub fn value_to_sort_string<'gc>(val: &Value<'gc>) -> String {
     }
 }
 
-pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value<'gc>) -> bool {
+pub fn values_equal<'gc>(_mc: &GcContext<'gc>, v1: &Value<'gc>, v2: &Value<'gc>) -> bool {
     match (v1, v2) {
         (Value::Number(n1), Value::Number(n2)) => {
             if n1.is_nan() && n2.is_nan() {
@@ -2154,7 +2155,7 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
 /// when the object is a proxy wrapper (stores `__proxy__`). Returns a
 /// Result because invoking proxy traps can trigger user code and therefore
 /// can fail with an exception.
-pub fn ordinary_own_property_keys_mc<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<PropertyKey<'gc>>, JSError> {
+pub fn ordinary_own_property_keys_mc<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<PropertyKey<'gc>>, JSError> {
     let obj_ptr = obj.as_ptr();
     let has_proxy = slot_has(obj, &InternalSlot::Proxy);
     log::trace!("ordinary_own_property_keys_mc: obj_ptr={:p} has_proxy={}", obj_ptr, has_proxy);
@@ -2185,7 +2186,7 @@ pub fn has_property_key<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<Property
 }
 
 pub fn object_set_key_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
     val: &Value<'gc>,
@@ -2515,7 +2516,7 @@ pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, 
     None
 }
 
-pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
+pub fn env_set<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
     if (*env.borrow()).is_const(key) {
         log::trace!(
             "env_set: assignment to const detected: env_ptr={:p} key={} constants={:?} lexical_decls={:?} own_props={:?}",
@@ -2581,7 +2582,7 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
 /// Store a value in an object's internal slot.  The key must start with `__`.
 #[inline]
 #[allow(dead_code)]
-pub fn set_internal_slot<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str, value: &Value<'gc>) {
+pub fn set_internal_slot<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str, value: &Value<'gc>) {
     let slot = str_to_internal_slot(key).unwrap_or_else(|| panic!("set_internal_slot: unknown key '{}'", key));
     slot_set(mc, obj, slot, value);
 }
@@ -2611,7 +2612,7 @@ pub fn has_internal_slot(obj: &JSObjectDataPtr, key: &str) -> bool {
 
 /// Store a value in an internal slot using a typed `InternalSlot` key.
 #[inline]
-pub fn slot_set<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: InternalSlot, value: &Value<'gc>) {
+pub fn slot_set<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: InternalSlot, value: &Value<'gc>) {
     let gc_val = new_gc_cell_ptr(mc, value.clone());
     let key = PropertyKey::Internal(slot);
     obj.borrow_mut(mc).properties.insert(key, gc_val);
@@ -2635,7 +2636,7 @@ pub fn slot_has(obj: &JSObjectDataPtr, slot: &InternalSlot) -> bool {
 /// Remove an internal slot using a typed `InternalSlot` key.
 #[inline]
 #[allow(dead_code)]
-pub fn slot_remove<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Option<GcPtr<'gc, Value<'gc>>> {
+pub fn slot_remove<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Option<GcPtr<'gc, Value<'gc>>> {
     let key = PropertyKey::Internal(slot.clone());
     obj.borrow_mut(mc).properties.shift_remove(&key)
 }
@@ -2675,7 +2676,7 @@ pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
     false
 }
 
-pub fn env_set_strictness<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
+pub fn env_set_strictness<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
     slot_set(mc, env, InternalSlot::IsStrict, &Value::Boolean(is_strict));
     Ok(())
 }
@@ -2699,7 +2700,7 @@ pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'
     }
 }
 
-pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
+pub fn env_set_recursive<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
     let pk = if let Some(slot) = str_to_internal_slot(key) {
         PropertyKey::Internal(slot)
     } else {
@@ -2780,7 +2781,7 @@ pub fn object_get_length<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
     None
 }
 
-pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
+pub fn object_set_length<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
     if crate::js_array::is_array(mc, obj) && length > u32::MAX as usize {
         return Err(raise_range_error!("Invalid array length"));
     }

@@ -1,5 +1,5 @@
 use crate::core::{
-    InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, create_descriptor_object, new_js_object_data, object_get_key_value,
+    GcContext, InternalSlot, JSObjectDataPtr, PropertyKey, Value, create_descriptor_object, new_js_object_data, object_get_key_value,
     object_set_key_value, slot_set,
 };
 use crate::error::JSError;
@@ -20,7 +20,7 @@ fn lookup_abstract_module_source_ctor<'gc>(env: &JSObjectDataPtr<'gc>) -> Option
     None
 }
 
-pub fn initialize_abstract_module_source<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_abstract_module_source<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let ctor = new_js_object_data(mc);
     slot_set(mc, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -71,7 +71,7 @@ pub fn initialize_abstract_module_source<'gc>(mc: &MutationContext<'gc>, env: &J
     Ok(())
 }
 
-pub fn create_module_source_placeholder<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn create_module_source_placeholder<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
     if let Some(ctor_obj) = lookup_abstract_module_source_ctor(env)

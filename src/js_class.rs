@@ -3,7 +3,7 @@ use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Value, create_descriptor_object, env_get, evaluate_expr,
     evaluate_statements, new_js_object_data,
 };
-use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
+use crate::core::{Gc, GcCell, GcContext, new_gc_cell_ptr};
 use crate::core::{PropertyKey, object_get_key_value, object_set_key_value, remove_private_identifier_prefix, value_to_string};
 use crate::js_boolean::handle_boolean_constructor;
 use crate::unicode::utf16_to_utf8;
@@ -178,7 +178,7 @@ fn lookup_intrinsic_prototype<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Op
 /// Uses `get_property_with_accessors` so Proxy traps and accessor getters on
 /// `newTarget.prototype` are properly invoked (spec: `? Get(constructor, "prototype")`).
 pub(crate) fn get_prototype_from_constructor<'gc>(
-    mc: &crate::core::MutationContext<'gc>,
+    mc: &crate::core::GcContext<'gc>,
     new_target_obj: &JSObjectDataPtr<'gc>,
     fallback_env: &JSObjectDataPtr<'gc>,
     intrinsic_name: &str,
@@ -324,7 +324,7 @@ fn value_has_construct<'gc>(value: &Value<'gc>) -> bool {
 }
 
 fn create_class_method_function_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     params: &[DestructuringElement],
     body: &[crate::core::Statement],
@@ -356,7 +356,7 @@ fn create_class_method_function_object<'gc>(
 }
 
 fn create_class_async_method_function_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     params: &[DestructuringElement],
     body: &[crate::core::Statement],
@@ -388,7 +388,7 @@ fn create_class_async_method_function_object<'gc>(
 }
 
 fn create_class_generator_method_function_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     params: &[DestructuringElement],
     body: &[crate::core::Statement],
@@ -448,7 +448,7 @@ fn create_class_generator_method_function_object<'gc>(
 }
 
 fn create_class_async_generator_method_function_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     params: &[DestructuringElement],
     body: &[crate::core::Statement],
@@ -507,7 +507,7 @@ fn create_class_async_generator_method_function_object<'gc>(
     Ok(Value::Object(func_obj))
 }
 
-pub(crate) fn evaluate_this<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn evaluate_this<'gc>(_mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Walk the environment/prototype (scope) chain looking for a bound
     // `this` value. Some nested/temporarily created environments (e.g.
     // catch-block envs) do not bind `this` themselves but inherit the
@@ -533,10 +533,7 @@ pub(crate) fn evaluate_this<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataP
     Ok(Value::Object(last_seen))
 }
 
-pub(crate) fn evaluate_this_allow_uninitialized<'gc>(
-    _mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+pub(crate) fn evaluate_this_allow_uninitialized<'gc>(_mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Like evaluate_this, but do not throw on uninitialized `this`.
     // This is used for arrow function calls in derived constructors so
     // `super()` can run before `this` is initialized.
@@ -640,7 +637,7 @@ fn find_binding_env<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Option<JSObj
 }
 
 pub fn create_arguments_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     func_env: &JSObjectDataPtr<'gc>,
     evaluated_args: &[Value<'gc>],
     callee: Option<&Value<'gc>>,
@@ -724,7 +721,7 @@ fn is_anonymous_expr(expr: &Expr) -> bool {
     ) || matches!(expr, Expr::Class(def) if def.name.is_empty())
 }
 
-fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr: &Expr, key: &PropertyKey<'gc>) -> Result<(), JSError> {
+fn set_name_if_anonymous<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, expr: &Expr, key: &PropertyKey<'gc>) -> Result<(), JSError> {
     if is_anonymous_expr(expr)
         && let Value::Object(func_obj) = val
     {
@@ -763,7 +760,7 @@ fn property_key_to_name_string<'gc>(key: &PropertyKey<'gc>) -> String {
 }
 
 fn initialize_instance_elements<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     instance: &JSObjectDataPtr<'gc>,
     constructor: &JSObjectDataPtr<'gc>,
 ) -> Result<(), EvalError<'gc>> {
@@ -1147,7 +1144,7 @@ fn initialize_instance_elements<'gc>(
 }
 
 pub(crate) fn evaluate_new<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     constructor_val: &Value<'gc>,
     evaluated_args: &[Value<'gc>],
@@ -2258,7 +2255,7 @@ pub(crate) fn evaluate_new<'gc>(
 }
 
 pub(crate) fn create_class_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     name: &str,
     extends: &Option<Expr>,
     members: &[ClassMember],
@@ -3367,7 +3364,7 @@ pub(crate) fn create_class_object<'gc>(
 
 #[allow(dead_code)]
 pub(crate) fn call_static_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     class_obj: &JSObjectDataPtr<'gc>,
     method: &str,
     evaluated_args: &[Value<'gc>],
@@ -3407,7 +3404,7 @@ pub(crate) fn call_static_method<'gc>(
 
 #[allow(dead_code)]
 pub(crate) fn call_class_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     evaluated_args: &[Value<'gc>],
@@ -3477,7 +3474,7 @@ pub(crate) fn call_class_method<'gc>(
     Err(raise_eval_error!(format!("Method '{method}' not found on class instance")))
 }
 
-pub(crate) fn evaluate_super<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn evaluate_super<'gc>(_mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Per spec: GetThisEnvironment — walk the environment chain until we find
     // a record that *owns* a 'this' binding. That environment is used for
     // HasSuperBinding/GetThisBinding/GetSuperBase semantics.
@@ -3518,7 +3515,7 @@ pub(crate) fn evaluate_super<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectData
 }
 
 pub(crate) fn evaluate_super_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     evaluated_args: &[Value<'gc>],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3610,25 +3607,24 @@ pub(crate) fn evaluate_super_call<'gc>(
         false
     };
 
-    let bind_this_after_super =
-        |mc: &MutationContext<'gc>, this_to_bind: Option<crate::core::JSObjectDataPtr<'gc>>| -> Result<(), JSError> {
-            let to_set = this_to_bind.unwrap_or(instance);
-            crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(to_set))?;
-            crate::core::slot_set(mc, &lexical_env, InternalSlot::ThisInitialized, &Value::Boolean(true));
+    let bind_this_after_super = |mc: &GcContext<'gc>, this_to_bind: Option<crate::core::JSObjectDataPtr<'gc>>| -> Result<(), JSError> {
+        let to_set = this_to_bind.unwrap_or(instance);
+        crate::core::object_set_key_value(mc, &lexical_env, "this", &Value::Object(to_set))?;
+        crate::core::slot_set(mc, &lexical_env, InternalSlot::ThisInitialized, &Value::Boolean(true));
 
-            let mut cur = Some(*env);
-            while let Some(env_ptr) = cur {
-                crate::core::slot_set(mc, &env_ptr, InternalSlot::ThisInitialized, &Value::Boolean(true));
-                crate::core::object_set_key_value(mc, &env_ptr, "this", &Value::Object(to_set))?;
+        let mut cur = Some(*env);
+        while let Some(env_ptr) = cur {
+            crate::core::slot_set(mc, &env_ptr, InternalSlot::ThisInitialized, &Value::Boolean(true));
+            crate::core::object_set_key_value(mc, &env_ptr, "this", &Value::Object(to_set))?;
 
-                if Gc::ptr_eq(env_ptr, lexical_env) {
-                    break;
-                }
-                cur = env_ptr.borrow().prototype;
+            if Gc::ptr_eq(env_ptr, lexical_env) {
+                break;
             }
+            cur = env_ptr.borrow().prototype;
+        }
 
-            Ok(())
-        };
+        Ok(())
+    };
 
     if let Value::Object(parent_class_obj) = parent_class {
         if current_extends_null {
@@ -3927,7 +3923,7 @@ pub(crate) fn evaluate_super_call<'gc>(
 }
 
 pub(crate) fn evaluate_super_computed_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
 ) -> Result<Value<'gc>, JSError> {
@@ -4121,7 +4117,7 @@ pub(crate) fn evaluate_super_computed_property<'gc>(
 }
 
 pub(crate) fn evaluate_super_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     method: &str,
     evaluated_args: &[Value<'gc>],
@@ -4405,7 +4401,7 @@ pub(crate) fn evaluate_super_method<'gc>(
 
 /// Handle Object constructor calls
 pub(crate) fn handle_object_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -4479,7 +4475,7 @@ pub(crate) fn handle_object_constructor<'gc>(
 }
 
 pub(crate) fn handle_number_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -4500,7 +4496,7 @@ pub(crate) fn handle_number_constructor<'gc>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_call_env_with_this<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     captured_env: Option<&JSObjectDataPtr<'gc>>,
     this_val: Option<&Value<'gc>>,
     params: Option<&[DestructuringElement]>,

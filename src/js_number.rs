@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
-use crate::core::MutationContext;
+use crate::core::GcContext;
 use crate::core::js_error::EvalError;
 use crate::core::{
     InternalSlot, JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value, slot_get_chained, slot_set,
@@ -34,7 +34,7 @@ pub(crate) fn es_trim(s: &str) -> &str {
 }
 
 /// ToIntegerOrInfinity on a JS value, propagating errors for BigInt/Symbol/objects.
-fn to_integer_or_infinity<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
+fn to_integer_or_infinity<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     let n = to_number_with_env(mc, env, val)?;
     if n.is_nan() || n == 0.0 {
         Ok(0.0)
@@ -49,14 +49,14 @@ fn to_integer_or_infinity<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 // Initialization
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_number_module<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let number_obj = make_number_object(mc, env)?;
     env_set(mc, env, "Number", &Value::Object(number_obj))?;
     Ok(())
 }
 
 /// Create the Number object with all number constants and functions
-fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn make_number_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let number_obj = new_js_object_data(mc);
     slot_set(mc, &number_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &number_obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Number")));
@@ -149,7 +149,7 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub(crate) fn number_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -276,7 +276,7 @@ pub fn handle_number_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Re
 
 /// Core instance-method dispatch. `n` is the resolved thisNumberValue.
 fn handle_number_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     n: f64,
     method: &str,
@@ -555,7 +555,7 @@ fn number_to_radix_string(n: f64, radix: u32) -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn handle_number_prototype_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     this: Option<&Value<'gc>>,
     method: &str,

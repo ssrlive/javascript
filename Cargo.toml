@@ -23,7 +23,9 @@ std = []
 [dependencies]
 chrono = { version = "0.4.44", features = ["serde"] }
 crossbeam-channel = "0.5.15"
-gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae" }
+gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae", features = [
+    "indexmap",
+] }
 indexmap = "2.13.0"
 log = "0.4.29"
 num-bigint = "0.4.6"

@@ -19,7 +19,7 @@ use crate::js_weakset::initialize_weakset;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 pub(crate) use gc_arena::GcWeak;
-pub(crate) use gc_arena::Mutation as MutationContext;
+pub(crate) use gc_arena::Mutation as GcContext;
 pub(crate) use gc_arena::collect::Trace as GcTrace;
 pub(crate) use gc_arena::lock::RefLock as GcCell;
 pub(crate) use gc_arena::{Collect, Gc};
@@ -27,7 +27,7 @@ pub(crate) type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
 use std::collections::HashMap;
 
 #[inline]
-pub fn new_gc_cell_ptr<'gc, T: 'gc + Collect<'gc>>(mc: &MutationContext<'gc>, value: T) -> GcPtr<'gc, T> {
+pub fn new_gc_cell_ptr<'gc, T: 'gc + Collect<'gc>>(mc: &GcContext<'gc>, value: T) -> GcPtr<'gc, T> {
     Gc::new(mc, GcCell::new(value))
 }
 
@@ -78,12 +78,14 @@ pub struct JsRoot<'gc> {
 
 pub type JsArena = gc_arena::Arena<gc_arena::Rootable!['gc => JsRoot<'gc>]>;
 
-pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub type JsArenaVm = gc_arena::Arena<gc_arena::Rootable!['gc => VM<'gc>]>;
+
+pub fn initialize_global_constructors<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     initialize_global_constructors_with_parent(mc, env, None)
 }
 
 pub fn initialize_global_constructors_with_parent<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     parent_env: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<(), JSError> {
@@ -397,7 +399,7 @@ pub fn initialize_global_constructors_with_parent<'gc>(
 /// Create a new Realm: a fresh global environment with its own set of built-in
 /// intrinsics.  Returns the new global-env object (the "global" property
 /// expected by the `$262.createRealm()` harness).
-pub fn create_new_realm<'gc>(mc: &MutationContext<'gc>, _parent_env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn create_new_realm<'gc>(mc: &GcContext<'gc>, _parent_env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let new_env = new_js_object_data(mc);
     new_env.borrow_mut(mc).is_function_scope = true;
 
@@ -429,45 +431,47 @@ fn extract_injected_module_filepath(script: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+fn script_declares_await_identifier(s: &str) -> bool {
+    s.contains("function await")
+        || s.contains("function await(")
+        || s.contains("var await")
+        || s.contains("let await")
+        || s.contains("const await")
+        || s.contains("class await")
+}
+
+fn parse_program_statements(script: &str, kind: ProgramKind) -> Result<Vec<Statement>, JSError> {
+    let mut tokens = tokenize(script)?;
+    if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
+        tokens.pop();
+    }
+
+    let mut index = 0;
+    if kind == ProgramKind::Script {
+        let enable_top_level_await = !script_declares_await_identifier(script);
+        if enable_top_level_await {
+            crate::core::parser::push_await_context();
+            let res = parse_statements(&tokens, &mut index);
+            crate::core::parser::pop_await_context();
+            res
+        } else {
+            parse_statements(&tokens, &mut index)
+        }
+    } else {
+        crate::core::parser::push_await_context();
+        let res = parse_statements(&tokens, &mut index);
+        crate::core::parser::pop_await_context();
+        res
+    }
+}
+
 fn evaluate_program<T, P>(script: T, script_path: Option<P>, kind: ProgramKind) -> Result<String, JSError>
 where
     T: AsRef<str>,
     P: AsRef<std::path::Path>,
 {
     let script = script.as_ref();
-    let mut tokens = tokenize(script)?;
-    if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
-        tokens.pop();
-    }
-    let mut index = 0;
-    // Allow top-level `await` in script evaluations to support tests and test262 harnesses
-    // but avoid enabling it when the script declares an identifier named `await` (e.g., `function await`, `var await`)
-    // so that `await(...)` can still be a call to a user-defined identifier when present.
-    fn script_declares_await_identifier(s: &str) -> bool {
-        s.contains("function await")
-            || s.contains("function await(")
-            || s.contains("var await")
-            || s.contains("let await")
-            || s.contains("const await")
-            || s.contains("class await")
-    }
-
-    let statements = if kind == ProgramKind::Script {
-        let enable_top_level_await = !script_declares_await_identifier(script);
-        if enable_top_level_await {
-            crate::core::parser::push_await_context();
-            let res = parse_statements(&tokens, &mut index);
-            crate::core::parser::pop_await_context();
-            res?
-        } else {
-            parse_statements(&tokens, &mut index)?
-        }
-    } else {
-        crate::core::parser::push_await_context();
-        let res = parse_statements(&tokens, &mut index);
-        crate::core::parser::pop_await_context();
-        res?
-    };
+    let statements = parse_program_statements(script, kind)?;
 
     // In script mode, reject import/export declarations (they are only valid in module code).
     if kind == ProgramKind::Script {
@@ -1039,7 +1043,7 @@ where
 
 // Helper to resolve a constructor's prototype object if present in `env`.
 pub fn get_constructor_prototype<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &str,
 ) -> Result<Option<JSObjectDataPtr<'gc>>, JSError> {
@@ -1071,7 +1075,7 @@ pub fn get_constructor_prototype<'gc>(
 // to that object. This consolidates the common pattern used when boxing
 // primitives and creating instances.
 pub fn set_internal_prototype_from_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor_name: &str,
@@ -1134,90 +1138,106 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
     script_path: Option<P>,
 ) -> Result<String, JSError> {
     let script_str = script.as_ref();
-    let tokens = tokenize(script_str)?;
-    let mut index = 0;
+    let kind = if run_as_module { ProgramKind::Module } else { ProgramKind::Script };
+    let statements = parse_program_statements(script_str, kind)?;
+    let script_path_buf = script_path.as_ref().map(|p| p.as_ref().to_path_buf());
 
-    // allow_top_level_await hacky bypass if needed, omit for vm demo over engineering
-    // Just parse right away
-    let statements = parse_statements(&tokens, &mut index)?;
+    let arena = JsArena::new(|mc| {
+        let global_env = new_js_object_data(mc);
+        global_env.borrow_mut(mc).is_function_scope = true;
 
-    // We can't really do string output exactly easily without gc for strings,
-    // but we can compile and run to get a primitive value string.
-    let compiler = Compiler::new();
-    let chunk = compiler.compile(&statements)?;
-    let _ = run_as_module; // For now we ignore the module/script distinction in the VM, but we may want to use it for different scoping or error messages later.
+        JsRoot {
+            global_env,
+            well_known_symbols: new_gc_cell_ptr(mc, HashMap::new()),
+        }
+    });
 
-    let mut vm = VM::new(chunk);
-    vm.set_source_context(script_str, script_path.as_ref().map(|path| path.as_ref()));
-    let mut v = vm.run()?;
+    arena.mutate(|mc, root| {
+        initialize_global_constructors(mc, &root.global_env)?;
 
-    // VM helper behavior: if top-level result is a settled Promise, expose its
-    // resolved/rejected payload so tests can assert final values directly.
-    for _ in 0..8 {
-        let step = if let Value::VmObject(obj) = &v {
-            let b = obj.borrow();
-            let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
-            if is_promise {
-                let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
-                let next = b.get("__promise_value__").cloned();
-                Some((rejected, next))
+        if !crate::js_agent::is_agent_thread() {
+            crate::js_agent::reset_agent_state();
+        }
+
+        env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
+        root.global_env.borrow_mut(mc).set_non_enumerable("globalThis");
+        object_set_key_value(mc, &root.global_env, "this", &Value::Object(root.global_env))?;
+
+        crate::js_promise::reset_global_state();
+
+        if let Some(p) = script_path_buf.as_ref() {
+            let mut p_str = p.to_string_lossy().to_string();
+            if kind == ProgramKind::Module
+                && let Some(injected_path) = extract_injected_module_filepath(script_str)
+            {
+                p_str = injected_path;
+            }
+            slot_set(mc, &root.global_env, InternalSlot::Filepath, &Value::String(utf8_to_utf16(&p_str)));
+        }
+
+        if kind == ProgramKind::Script {
+            slot_set(
+                mc,
+                &root.global_env,
+                InternalSlot::SuppressDynamicImportResult,
+                &Value::Boolean(true),
+            );
+        }
+
+        let compiler = Compiler::new();
+        let chunk = compiler.compile(&statements)?;
+
+        let mut vm = VM::new(chunk, mc);
+        vm.set_source_context(script_str, script_path_buf.as_deref());
+        let mut v = vm.run(mc)?;
+
+        // VM helper behavior: if top-level result is a settled Promise, expose its
+        // resolved/rejected payload so tests can assert final values directly.
+        for _ in 0..8 {
+            let step = if let Value::VmObject(obj) = &v {
+                let b = obj.borrow();
+                let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                if is_promise {
+                    let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                    let next = b.get("__promise_value__").cloned();
+                    Some((rejected, next))
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
-        let Some((rejected, next)) = step else {
-            break;
-        };
-        let Some(next) = next else {
-            break;
-        };
+            let Some((rejected, next)) = step else {
+                break;
+            };
+            let Some(next) = next else {
+                break;
+            };
 
-        if rejected && let Value::VmObject(obj) = &next {
-            let b = obj.borrow();
-            if let Some(Value::String(t)) = b.get("__type__") {
-                let tn = crate::unicode::utf16_to_utf8(t);
-                if tn == "Error" || tn.ends_with("Error") {
-                    drop(b);
-                    return Err(vm.vm_error_to_js_error(&next));
+            if rejected && let Value::VmObject(obj) = &next {
+                let b = obj.borrow();
+                if let Some(Value::String(t)) = b.get("__type__") {
+                    let tn = crate::unicode::utf16_to_utf8(t);
+                    if tn == "Error" || tn.ends_with("Error") {
+                        drop(b);
+                        return Err(vm.vm_error_to_js_error(mc, &next));
+                    }
                 }
             }
+            v = next;
         }
-        v = next;
-    }
 
-    match v {
-        Value::String(s) => {
-            let s_utf8 = crate::unicode::utf16_to_utf8(&s);
-            match serde_json::to_string(&s_utf8) {
-                Ok(quoted) => Ok(quoted),
-                Err(_) => Ok(format!("\"{}\"", s_utf8)),
+        match v {
+            Value::String(s) => {
+                let s_utf8 = crate::unicode::utf16_to_utf8(&s);
+                match serde_json::to_string(&s_utf8) {
+                    Ok(quoted) => Ok(quoted),
+                    Err(_) => Ok(format!("\"{}\"", s_utf8)),
+                }
             }
+            Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
+            _ => Ok(value_to_string(&v)),
         }
-        Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
-        _ => Ok(value_to_string(&v)),
-    }
-}
-
-/// Compile and run a snippet of JS code in a fresh VM, returning the resulting Value.
-/// Used by eval() in the VM.
-pub fn compile_and_run_vm_snippet(code: &str) -> Result<Value<'static>, JSError> {
-    let tokens = tokenize(code)?;
-    let mut index = 0;
-    let statements = parse_statements(&tokens, &mut index)?;
-    let compiler = Compiler::new();
-    let chunk = compiler.compile(&statements)?;
-    let mut vm = VM::new(chunk);
-    vm.set_source_context(code, None);
-    vm.run()
-}
-
-/// Convert a Value<'static> to Value<'gc> (safe because VM values don't use Gc)
-pub fn static_to_gc<'gc>(v: Value<'static>) -> Value<'gc> {
-    // SAFETY: VM-produced Value variants (Number, String, Boolean, Null, Undefined,
-    // VmFunction, VmNativeFunction, VmArray, VmObject) never contain Gc pointers.
-    // The lifetime parameter is only relevant for tree-walker Gc-managed variants.
-    unsafe { std::mem::transmute(v) }
+    })
 }

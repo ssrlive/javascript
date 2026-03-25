@@ -2,7 +2,7 @@ use crate::core::{
     ClosureData, Gc, InternalSlot, Value, new_gc_cell_ptr, object_get_key_value, object_set_key_value, slot_get, slot_get_chained,
     slot_set, value_to_sort_string, values_equal,
 };
-use crate::core::{MutationContext, object_get_length, object_set_length};
+use crate::core::{GcContext, object_get_length, object_set_length};
 use crate::js_proxy::proxy_set_property_with_receiver;
 use crate::{
     core::{EvalError, JSObjectDataPtr, PropertyKey, env_get, env_set, evaluate_call_dispatch, new_js_object_data},
@@ -14,7 +14,7 @@ use crate::{
 /// {value: V, writable: true, enumerable: true, configurable: true}.
 /// Throws TypeError if the define fails (non-extensible or non-configurable property).
 pub(crate) fn create_data_property_or_throw<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
     val: &Value<'gc>,
@@ -50,7 +50,7 @@ fn is_constructor_val<'gc>(v: &Value<'gc>) -> bool {
 
 /// IsArray(argument) — spec 7.2.2, with recursive Proxy support.
 /// Returns true if argument is an Array (directly or through proxy chain).
-fn is_array_spec<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
+fn is_array_spec<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
     // Direct array?
     if is_array(mc, obj) {
         return Ok(true);
@@ -73,7 +73,7 @@ fn is_array_spec<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> 
 /// Returns a new array-like object created via the array's @@species constructor,
 /// falling back to a plain Array if no species is found.
 pub(crate) fn array_species_create_impl<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     receiver: &JSObjectDataPtr<'gc>,
     length: f64,
@@ -162,7 +162,7 @@ pub(crate) fn array_species_create_impl<'gc>(
     }
 }
 
-pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let array_ctor = new_js_object_data(mc);
     slot_set(mc, &array_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &array_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Array")));
@@ -465,7 +465,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
 
 /// Handle Array static method calls (Array.isArray, Array.from, Array.of)
 pub(crate) fn handle_array_static_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
@@ -777,7 +777,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             let mut used_iterator_or_string = false;
 
             fn map_value<'gc>(
-                mc: &MutationContext<'gc>,
+                mc: &GcContext<'gc>,
                 env: &JSObjectDataPtr<'gc>,
                 mapper: &Option<Value<'gc>>,
                 this_arg: &Value<'gc>,
@@ -1311,7 +1311,7 @@ pub(crate) fn handle_array_static_method<'gc>(
 }
 
 pub(crate) fn handle_array_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -1377,7 +1377,7 @@ pub(crate) fn handle_array_constructor<'gc>(
 
 /// Handle Array instance method calls
 pub(crate) fn handle_array_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -5287,11 +5287,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
 // Helper functions for array flattening
 /// ToIntegerOrInfinity (local helper for array methods)
-fn to_integer_or_infinity_local<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    val: &Value<'gc>,
-) -> Result<f64, EvalError<'gc>> {
+fn to_integer_or_infinity_local<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     let n = crate::core::to_number_with_env(mc, env, val)?;
     if n.is_nan() || n == 0.0 {
         Ok(0.0)
@@ -5304,17 +5300,13 @@ fn to_integer_or_infinity_local<'gc>(
 
 /// LengthOfArrayLike(obj) — spec 7.3.2
 /// Returns ℝ(ToLength(Get(obj, "length"))).
-fn length_of_array_like<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    obj: &JSObjectDataPtr<'gc>,
-) -> Result<usize, EvalError<'gc>> {
+fn length_of_array_like<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
     let len_val = crate::core::get_property_with_accessors(mc, env, obj, "length")?;
     to_length(mc, env, &len_val)
 }
 
 /// ToLength(argument) — spec 7.1.20
-fn to_length<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
+fn to_length<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
     let len = to_integer_or_infinity_local(mc, env, val)?;
     if len <= 0.0 {
         Ok(0)
@@ -5343,7 +5335,7 @@ fn is_callable_val<'gc>(val: &Value<'gc>) -> bool {
 }
 
 /// HasProperty through proxy / TypedArray if needed
-fn has_property_spec<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
+fn has_property_spec<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
     if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
     {
@@ -5373,7 +5365,7 @@ fn has_property_spec<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>,
 /// Returns: the next target index after insertion
 #[allow(clippy::too_many_arguments)]
 fn flatten_into_array_spec<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &JSObjectDataPtr<'gc>,
     source: &JSObjectDataPtr<'gc>,
@@ -5439,7 +5431,7 @@ fn flatten_into_array_spec<'gc>(
 }
 
 /// Check if an object is an Array
-pub(crate) fn is_array<'gc>(_mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
+pub(crate) fn is_array<'gc>(_mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
     if let Some(val) = slot_get(obj, &InternalSlot::IsArray)
         && let Value::Boolean(b) = *val.borrow()
     {
@@ -5448,15 +5440,15 @@ pub(crate) fn is_array<'gc>(_mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'g
     false
 }
 
-pub(crate) fn get_array_length<'gc>(_mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
+pub(crate) fn get_array_length<'gc>(_mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
     object_get_length(obj)
 }
 
-pub(crate) fn set_array_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, new_length: usize) -> Result<(), JSError> {
+pub(crate) fn set_array_length<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, new_length: usize) -> Result<(), JSError> {
     object_set_length(mc, obj, new_length)
 }
 
-pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub(crate) fn create_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let arr = new_js_object_data(mc);
     set_array_length(mc, &arr, 0)?;
 
@@ -5507,7 +5499,7 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
 /// Create a new Array Iterator
 pub(crate) fn create_array_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     object: JSObjectDataPtr<'gc>,
     kind: &str,
@@ -5532,7 +5524,7 @@ pub(crate) fn create_array_iterator<'gc>(
 }
 
 pub(crate) fn handle_array_iterator_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -5660,7 +5652,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
 }
 
 /// Serialize an array as "[a,b]" using the same element formatting used by Array.prototype.toString.
-pub fn serialize_array_for_eval<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<String, JSError> {
+pub fn serialize_array_for_eval<'gc>(mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<String, JSError> {
     let current_len = get_array_length(mc, object).unwrap_or(0);
     let mut parts = Vec::new();
     for i in 0..current_len {

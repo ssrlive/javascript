@@ -3,7 +3,6 @@ use crate::core::statement::{
     BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ImportSpecifier, ObjectDestructuringElement, Statement,
     StatementKind,
 };
-use crate::core::value::VmArrayData;
 use crate::core::{JSError, Value};
 use crate::raise_syntax_error;
 
@@ -3471,29 +3470,22 @@ impl<'gc> Compiler<'gc> {
             Expr::Spread(inner) => {
                 self.compile_expr(inner)?;
             }
-            // Regex literal: create a VmObject constant with regex metadata
+            // Regex literal: emit `new RegExp(pattern, flags)` so runtime builds the object.
             Expr::Regex(pattern, flags) => {
-                use std::cell::RefCell;
-                use std::rc::Rc;
-                let mut map = indexmap::IndexMap::new();
-                map.insert("__regex_pattern__".to_string(), Value::from(pattern));
-                map.insert("__regex_flags__".to_string(), Value::from(flags));
-                map.insert("__type__".to_string(), Value::from("RegExp"));
-                map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
-                map.insert("source".to_string(), Value::from(pattern));
-                map.insert("flags".to_string(), Value::from(flags));
-                map.insert("global".to_string(), Value::Boolean(flags.contains('g')));
-                map.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
-                map.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
-                map.insert("dotAll".to_string(), Value::Boolean(flags.contains('s')));
-                map.insert("sticky".to_string(), Value::Boolean(flags.contains('y')));
-                map.insert("unicode".to_string(), Value::Boolean(flags.contains('u')));
-                map.insert("hasIndices".to_string(), Value::Boolean(flags.contains('d')));
-                map.insert("unicodeSets".to_string(), Value::Boolean(flags.contains('v')));
-                map.insert("lastIndex".to_string(), Value::Number(0.0));
-                let idx = self.chunk.add_constant(Value::VmObject(Rc::new(RefCell::new(map))));
+                let re_name_idx = self.chunk.add_constant(Value::from("RegExp"));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(re_name_idx);
+
+                let pattern_idx = self.chunk.add_constant(Value::from(pattern));
                 self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(idx);
+                self.chunk.write_u16(pattern_idx);
+
+                let flags_idx = self.chunk.add_constant(Value::from(flags));
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(flags_idx);
+
+                self.chunk.write_opcode(Opcode::NewCall);
+                self.chunk.write_byte(2);
             }
             Expr::ValuePlaceholder => {
                 let idx = self.chunk.add_constant(Value::Undefined);
@@ -3501,33 +3493,44 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_u16(idx);
             }
             Expr::TaggedTemplate(tag_fn, _raw_flag, cooked_strings, raw_strings, expressions) => {
-                // Tagged template: tag_fn(strings, ...expressions)
-                // 1. Build the strings array (cooked) as a constant
-                use std::cell::RefCell;
-                use std::rc::Rc;
-                let cooked_vals: Vec<Value> = cooked_strings
-                    .iter()
-                    .map(|opt| match opt {
-                        Some(s) => Value::String(s.clone()),
-                        None => Value::Undefined,
-                    })
-                    .collect();
-                let raw_vals: Vec<Value> = raw_strings.iter().map(|s| Value::String(s.clone())).collect();
-                let raw_arr = Value::VmArray(Rc::new(RefCell::new(VmArrayData::new(raw_vals))));
-                let mut strings_data = VmArrayData::new(cooked_vals);
-                strings_data.props.insert("raw".to_string(), raw_arr);
-                let strings_const = self.chunk.add_constant(Value::VmArray(Rc::new(RefCell::new(strings_data))));
-
-                // 2. Push tag function
+                // Tagged template: tagFn(strings, ...exprs), where strings.raw is an array.
                 self.compile_expr(tag_fn)?;
-                // 3. Push strings array
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(strings_const);
-                // 4. Push each expression
+
+                // Build cooked strings array on stack.
+                self.chunk.write_opcode(Opcode::NewArray);
+                for cooked in cooked_strings {
+                    match cooked {
+                        Some(s) => {
+                            let idx = self.chunk.add_constant(Value::String(s.clone()));
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(idx);
+                        }
+                        None => {
+                            let idx = self.chunk.add_constant(Value::Undefined);
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(idx);
+                        }
+                    }
+                    self.chunk.write_opcode(Opcode::ArrayPush);
+                }
+
+                // Attach `raw` property: duplicate cooked array, set raw array, keep cooked array.
+                self.chunk.write_opcode(Opcode::Dup);
+                self.chunk.write_opcode(Opcode::NewArray);
+                for raw in raw_strings {
+                    let idx = self.chunk.add_constant(Value::String(raw.clone()));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    self.chunk.write_opcode(Opcode::ArrayPush);
+                }
+                let raw_key_idx = self.chunk.add_constant(Value::from("raw"));
+                self.chunk.write_opcode(Opcode::SetProperty);
+                self.chunk.write_u16(raw_key_idx);
+                self.chunk.write_opcode(Opcode::Pop);
+
                 for expr in expressions {
                     self.compile_expr(expr)?;
                 }
-                // 5. Call with 1 + expressions.len() arguments
                 let argc = 1 + expressions.len();
                 self.chunk.write_opcode(Opcode::Call);
                 self.chunk.write_byte(argc as u8);

@@ -2,7 +2,7 @@ use javascript::Repl;
 
 #[test]
 fn repl_persists_values_between_calls() {
-    let repl = Repl::new();
+    let mut repl = Repl::new();
     // define x
     let r1 = repl.eval("let x = 42;").unwrap();
     assert_eq!(r1, "undefined");
@@ -13,7 +13,7 @@ fn repl_persists_values_between_calls() {
 
 #[test]
 fn repl_allows_function_persistence() {
-    let repl = Repl::new();
+    let mut repl = Repl::new();
     let r1 = repl.eval("function add(a,b){ return a + b; }").unwrap();
     assert_eq!(r1, "undefined");
     let r = repl.eval("add(2,3)").unwrap();

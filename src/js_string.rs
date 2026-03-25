@@ -1,6 +1,6 @@
 use crate::core::js_error::EvalError;
 use crate::core::{
-    InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, evaluate_call_dispatch, get_own_property, new_gc_cell_ptr,
+    GcContext, InternalSlot, JSObjectDataPtr, PropertyKey, Value, env_set, evaluate_call_dispatch, get_own_property, new_gc_cell_ptr,
     new_js_object_data, object_get_key_value, object_set_key_value, slot_get, slot_get_chained, slot_set, to_number_with_env, to_primitive,
     value_to_string,
 };
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 /// Returns `Ok(Some(method))` if the symbol property exists and is callable,
 /// `Ok(None)` if it's undefined/null, or an error if e.g. a getter throws.
 pub fn get_well_known_symbol_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &crate::core::JSObjectDataPtr<'gc>,
     symbol_name: &str,
@@ -44,7 +44,7 @@ pub fn get_well_known_symbol_method<'gc>(
 /// IsRegExp abstract operation (ES 2024 §7.2.8)
 /// Returns true if the argument is an object with a truthy @@match property,
 /// or is a RegExp instance.
-fn is_regexp_like<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<bool, EvalError<'gc>> {
+fn is_regexp_like<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<bool, EvalError<'gc>> {
     if let Value::Object(obj) = val {
         // First check @@match property
         if let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
@@ -73,7 +73,7 @@ fn is_regexp_like<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, va
 }
 
 /// Spec ToIntegerOrZero: ToNumber, then truncate. NaN/±0→0, ±∞→±∞, else trunc
-fn spec_to_integer_or_zero<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
+fn spec_to_integer_or_zero<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
     let n = to_number_with_env(mc, env, val)?;
     if n.is_nan() || n == 0.0 {
         Ok(0.0)
@@ -126,7 +126,7 @@ fn es_trim_end(s: &[u16]) -> Vec<u16> {
     s[..end].to_vec()
 }
 
-pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_string<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let string_ctor = new_js_object_data(mc);
     slot_set(mc, &string_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     object_set_key_value(mc, &string_ctor, "name", &Value::String(utf8_to_utf16("String")))?;
@@ -316,7 +316,7 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 }
 
 /// Create %StringIteratorPrototype%. Must be called AFTER %IteratorPrototype% is available.
-pub fn initialize_string_iterator_prototype<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_string_iterator_prototype<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let str_iter_proto = new_js_object_data(mc);
     if let Some(iter_proto_val) = slot_get_chained(env, &InternalSlot::IteratorPrototype)
         && let Value::Object(iter_proto) = &*iter_proto_val.borrow()
@@ -351,7 +351,7 @@ pub fn initialize_string_iterator_prototype<'gc>(mc: &MutationContext<'gc>, env:
 }
 
 pub(crate) fn string_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -422,7 +422,7 @@ pub(crate) fn string_constructor<'gc>(
 }
 
 pub fn handle_string_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     method: &str,
     args: &[Value<'gc>],
@@ -484,7 +484,7 @@ pub fn handle_string_method<'gc>(
 }
 
 fn string_substring_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -511,7 +511,7 @@ fn string_substring_method<'gc>(
 }
 
 fn string_substr_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -543,7 +543,7 @@ fn string_substr_method<'gc>(
 }
 
 fn string_slice_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -577,7 +577,7 @@ fn string_slice_method<'gc>(
 }
 
 fn string_indexof_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -608,7 +608,7 @@ fn string_indexof_method<'gc>(
 }
 
 fn string_lastindexof_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -758,7 +758,7 @@ fn expand_replacement_tokens(
 }
 
 fn string_replace_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1149,7 +1149,7 @@ fn string_replace_method<'gc>(
 }
 
 fn string_split_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1311,7 +1311,7 @@ fn string_split_method<'gc>(
 }
 
 fn string_match_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1406,7 +1406,7 @@ fn string_match_method<'gc>(
 }
 
 fn string_charat_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1426,7 +1426,7 @@ fn string_charat_method<'gc>(
 }
 
 fn string_char_code_at_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1444,7 +1444,7 @@ fn string_char_code_at_method<'gc>(
 }
 
 fn string_starts_with_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1476,7 +1476,7 @@ fn string_starts_with_method<'gc>(
 }
 
 fn string_ends_with_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1509,7 +1509,7 @@ fn string_ends_with_method<'gc>(
 }
 
 fn string_includes_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1539,7 +1539,7 @@ fn string_includes_method<'gc>(
 }
 
 fn string_repeat_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1564,7 +1564,7 @@ fn string_repeat_method<'gc>(
 }
 
 fn string_concat_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1579,11 +1579,7 @@ fn string_concat_method<'gc>(
 
 /// Spec-compliant ToString: for objects, calls ToPrimitive(hint: "string") first,
 /// then converts the resulting primitive to a string.
-pub(crate) fn spec_to_string<'gc>(
-    mc: &MutationContext<'gc>,
-    val: &Value<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Vec<u16>, EvalError<'gc>> {
+pub(crate) fn spec_to_string<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Vec<u16>, EvalError<'gc>> {
     match val {
         Value::String(s) => Ok(s.clone()),
         Value::Number(_n) => Ok(utf8_to_utf16(&value_to_string(val))),
@@ -1601,7 +1597,7 @@ pub(crate) fn spec_to_string<'gc>(
 }
 
 fn string_pad_start_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1634,7 +1630,7 @@ fn string_pad_start_method<'gc>(
 }
 
 fn string_pad_end_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1668,7 +1664,7 @@ fn string_pad_end_method<'gc>(
 }
 
 fn string_at_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1688,7 +1684,7 @@ fn string_at_method<'gc>(
 }
 
 fn string_code_point_at_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1714,7 +1710,7 @@ fn string_code_point_at_method<'gc>(
 }
 
 fn string_search_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1767,7 +1763,7 @@ fn string_search_method<'gc>(
 }
 
 fn string_match_all_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1822,7 +1818,7 @@ fn string_match_all_method<'gc>(
 }
 
 fn string_locale_compare_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1847,7 +1843,7 @@ fn string_locale_compare_method<'gc>(
 }
 
 fn string_normalize_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1882,7 +1878,7 @@ fn string_normalize_method<'gc>(
 /// §22.1.3.8 String.prototype.isWellFormed()
 /// Returns true if the string contains no lone surrogates.
 fn string_is_well_formed_method<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     s: &[u16],
     _args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -1907,7 +1903,7 @@ fn string_is_well_formed_method<'gc>(
 }
 
 fn string_to_well_formed_method<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     s: &[u16],
     _args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -1941,7 +1937,7 @@ fn string_to_well_formed_method<'gc>(
 
 #[allow(dead_code)]
 fn make_array_from_values<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     values: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1958,7 +1954,7 @@ fn make_array_from_values<'gc>(
 /// This ensures the correct spec ordering: steps 2a-2d (IsRegExp, flags check, @@replace)
 /// happen BEFORE ToString(this) (step 3).
 pub fn string_replace_all_raw<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Value<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2004,7 +2000,7 @@ pub fn string_replace_all_raw<'gc>(
 }
 
 fn string_replace_all_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2049,7 +2045,7 @@ fn string_replace_all_method<'gc>(
 
 /// Steps 4-16 of §22.1.3.19: the string-based replacement path.
 fn string_replace_all_string_path<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     search_val: &Value<'gc>,
     replace_val: &Value<'gc>,
@@ -2164,7 +2160,7 @@ fn string_index_of_u16(s: &[u16], search: &[u16], from_index: usize, s_len: usiz
 }
 
 pub fn string_from_char_code<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2186,7 +2182,7 @@ pub fn string_from_char_code<'gc>(
 }
 
 pub fn string_from_code_point<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2216,7 +2212,7 @@ pub fn string_from_code_point<'gc>(
     Ok(Value::String(chars))
 }
 
-pub fn string_raw<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+pub fn string_raw<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // §22.1.2.4 String.raw(template, ...substitutions)
     if args.is_empty() {
         return Err(crate::raise_type_error!("Cannot convert undefined or null to object").into());
@@ -2277,7 +2273,7 @@ pub fn string_raw<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSO
 
 /// Create a new String Iterator
 pub(crate) fn create_string_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2297,10 +2293,7 @@ pub(crate) fn create_string_iterator<'gc>(
     Ok(Value::Object(iterator))
 }
 
-pub(crate) fn handle_string_iterator_next<'gc>(
-    mc: &MutationContext<'gc>,
-    iterator: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+pub(crate) fn handle_string_iterator_next<'gc>(mc: &GcContext<'gc>, iterator: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Spec §22.1.5.2.1: If O does not have all of the internal slots of a
     // String Iterator Instance, throw a TypeError.  Use `slot_get` (own-only)
     // so that `Object.create(realIterator)` does NOT inherit these slots.
@@ -2359,7 +2352,7 @@ pub(crate) fn handle_string_iterator_next<'gc>(
 
 /// AnnexB CreateHTML(string, tag, attribute, value) — B.2.3.2–B.2.3.14
 fn string_html_wrapper<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     s: &[u16],
     tag: &str,
     attr: Option<(&str, &[Value<'gc>])>,

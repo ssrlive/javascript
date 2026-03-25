@@ -1,7 +1,7 @@
 use crate::{
     JSError,
     core::{
-        InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, create_descriptor_object, env_get, env_set, new_js_object_data,
+        GcContext, InternalSlot, JSObjectDataPtr, PropertyKey, Value, create_descriptor_object, env_get, env_set, new_js_object_data,
         object_set_key_value, slot_set, to_primitive, value_to_string,
     },
     object_get_key_value, raise_type_error, utf8_to_utf16, utf16_to_utf8,
@@ -74,7 +74,7 @@ impl<'gc> EvalError<'gc> {
 }
 
 /// Initialize the Error constructor and its prototype.
-pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_error_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let error_ctor = new_js_object_data(mc);
     // Set the internal prototype of the constructor object so it behaves like a Function
     if let Some(func_val_rc) = object_get_key_value(env, "Function")
@@ -152,7 +152,7 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
 }
 
 fn initialize_native_error<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &str,
     parent_ctor: &Value<'gc>,
@@ -215,7 +215,7 @@ fn initialize_native_error<'gc>(
 /// SuppressedError(error, suppressed, message) creates an error with
 /// .error, .suppressed, .message properties.
 fn initialize_suppressed_error<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     parent_ctor: &Value<'gc>,
     parent_proto: &Value<'gc>,
@@ -259,7 +259,7 @@ fn initialize_suppressed_error<'gc>(
 /// Create a SuppressedError instance: new SuppressedError(error, suppressed, message)
 /// Per spec, own properties must appear in order: message, error, suppressed.
 pub fn create_suppressed_error<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     prototype: Option<JSObjectDataPtr<'gc>>,
     error: &Value<'gc>,
@@ -333,7 +333,7 @@ pub fn create_suppressed_error<'gc>(
 }
 
 pub fn create_aggregate_error<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     prototype: Option<JSObjectDataPtr<'gc>>,
     errors: &Value<'gc>,
@@ -427,7 +427,7 @@ pub fn create_aggregate_error<'gc>(
 
 /// Create a new Error object with the given message.
 pub fn create_error<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     prototype: Option<JSObjectDataPtr<'gc>>,
     message: &Value<'gc>,
 ) -> Result<Value<'gc>, JSError> {

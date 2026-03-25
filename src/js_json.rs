@@ -1,4 +1,4 @@
-use crate::core::MutationContext;
+use crate::core::GcContext;
 use crate::core::{
     EvalError, InternalSlot, JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value,
     slot_get, slot_set,
@@ -11,7 +11,7 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 // Initialization
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn initialize_json<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_json<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let json_obj = new_js_object_data(mc);
     let _ = crate::core::set_internal_prototype_from_constructor(mc, &json_obj, env, "Object");
 
@@ -56,7 +56,7 @@ pub fn initialize_json<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn handle_json_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -74,7 +74,7 @@ pub fn handle_json_method<'gc>(
 // JSON.parse (§24.5.1)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn json_parse<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn json_parse<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 1: Let jsonString be ? ToString(text).
     let text = args.first().cloned().unwrap_or(Value::Undefined);
     let json_str = to_string_for_json(mc, &text, env)?;
@@ -105,7 +105,7 @@ fn json_parse<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjec
 }
 
 /// ToString coercion for JSON.parse input.
-fn to_string_for_json<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
+fn to_string_for_json<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
     match val {
         Value::String(s) => Ok(utf16_to_utf8(s)),
         Value::Number(_) => Ok(crate::core::value_to_string(val)),
@@ -126,7 +126,7 @@ fn to_string_for_json<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JS
 /// InternalizeJSONProperty (holder, name, reviver) — §24.5.1.1
 /// With json-parse-with-source: passes a context object {source} to reviver.
 fn internalize_json_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     holder: &JSObjectDataPtr<'gc>,
     name: &str,
@@ -213,7 +213,7 @@ fn internalize_json_property<'gc>(
 
 /// LengthOfArrayLike(obj) — §7.3.2: Get(obj, "length") then ToLength.
 fn to_length_of_array_like<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<usize, EvalError<'gc>> {
@@ -231,7 +231,7 @@ fn to_length_of_array_like<'gc>(
 }
 
 /// ToNumber for JSON operations — calls ToPrimitive("number") for objects.
-fn to_number_for_json<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
+fn to_number_for_json<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
     match val {
         Value::Number(n) => Ok(*n),
         Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
@@ -251,7 +251,7 @@ fn to_number_for_json<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JS
 
 /// [[Delete]](P) — respects proxy deleteProperty trap.
 /// Returns false (without throwing) for non-configurable properties per OrdinaryDelete.
-fn json_delete_property<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
+fn json_delete_property<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
     // Check for Proxy
     if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
@@ -272,7 +272,7 @@ fn json_delete_property<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'g
 /// Proxies still go through defineProperty trap (which may throw).
 /// For ordinary objects, returns false silently if non-configurable conflicts.
 fn json_create_data_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: &str,
     val: &Value<'gc>,
@@ -297,7 +297,7 @@ fn json_create_data_property<'gc>(
 
 /// EnumerableOwnProperties(O, key) — goes through proxy ownKeys + getOwnPropertyDescriptor traps.
 /// Uses EvalError throughout to preserve the identity of user-thrown errors.
-fn enumerable_own_property_names<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<String>, EvalError<'gc>> {
+fn enumerable_own_property_names<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<String>, EvalError<'gc>> {
     // Get all own keys — for proxies, call proxy_own_keys directly to preserve EvalError::Throw.
     let all_keys: Vec<PropertyKey<'gc>> = if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
@@ -332,7 +332,7 @@ fn enumerable_own_property_names<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectD
 
 /// Get a property from an object, going through accessors.
 fn get_prop<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: &str,
@@ -584,7 +584,7 @@ fn primitive_source_matches_value<'gc>(source: &str, val: &Value<'gc>) -> bool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// JSON.rawJSON(text) — §25.5.2.1
-fn json_raw_json<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn json_raw_json<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let text = args.first().cloned().unwrap_or(Value::Undefined);
 
     // Step 1: Let jsonString be ? ToString(text).
@@ -634,7 +634,7 @@ fn json_raw_json<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSOb
 }
 
 /// JSON.isRawJSON(O) — §25.5.2.2
-fn json_is_raw_json<'gc>(_mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn json_is_raw_json<'gc>(_mc: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = args.first().cloned().unwrap_or(Value::Undefined);
     if let Value::Object(obj) = &val
         && slot_get(obj, &InternalSlot::IsRawJSON).is_some()
@@ -648,7 +648,7 @@ fn json_is_raw_json<'gc>(_mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Res
 // JSON.stringify (§24.5.2)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn json_stringify<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn json_stringify<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let replacer_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
     let space_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
@@ -717,7 +717,7 @@ fn json_stringify<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSO
 }
 
 /// Process the `space` argument (§24.5.2 steps 5-8)
-fn process_space_arg<'gc>(mc: &MutationContext<'gc>, space: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
+fn process_space_arg<'gc>(mc: &GcContext<'gc>, space: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
     let space = match space {
         Value::Object(obj) => unwrap_boxed(mc, obj, env)?,
         other => other.clone(),
@@ -739,7 +739,7 @@ fn process_space_arg<'gc>(mc: &MutationContext<'gc>, space: &Value<'gc>, env: &J
 /// SerializeJSONProperty(state, key, holder) — §24.5.2.1
 #[allow(clippy::too_many_arguments)]
 fn serialize_json_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     holder: &JSObjectDataPtr<'gc>,
     key: &str,
@@ -861,7 +861,7 @@ fn serialize_json_property<'gc>(
 /// SerializeJSONObject (§24.5.2.2)
 #[allow(clippy::too_many_arguments)]
 fn serialize_json_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     replacer_function: &Option<Value<'gc>>,
@@ -901,7 +901,7 @@ fn serialize_json_object<'gc>(
 /// SerializeJSONArray (§24.5.2.3)
 #[allow(clippy::too_many_arguments)]
 fn serialize_json_array<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     replacer_function: &Option<Value<'gc>>,
@@ -939,7 +939,7 @@ fn serialize_json_array<'gc>(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn json_value_to_js<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     json_value: serde_json::Value,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1087,7 +1087,7 @@ fn is_callable<'gc>(val: &Value<'gc>) -> bool {
 
 /// Check if an object is an array (including proxied arrays).
 /// For revoked proxies, throws TypeError per spec IsArray.
-fn is_array_for_json_checked<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
+fn is_array_for_json_checked<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
     if is_array(mc, obj) {
         return Ok(true);
     }
@@ -1106,17 +1106,13 @@ fn is_array_for_json_checked<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataP
 
 /// Non-throwing version for contexts where TypeError propagation isn't needed.
 #[allow(dead_code)]
-fn is_array_for_json<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
+fn is_array_for_json<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
     is_array_for_json_checked(mc, obj).unwrap_or(false)
 }
 
 /// Unwrap a boxed primitive (new String, new Number, new Boolean, Object(bigint)).
 /// Uses ToNumber for Number wrappers and ToString for String wrappers per spec.
-fn unwrap_boxed<'gc>(
-    mc: &MutationContext<'gc>,
-    obj: &JSObjectDataPtr<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn unwrap_boxed<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Some(pv_rc) = slot_get(obj, &InternalSlot::PrimitiveValue) {
         let pv = pv_rc.borrow().clone();
         match &pv {

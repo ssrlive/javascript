@@ -1,4 +1,4 @@
-use crate::core::{GcPtr, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
+use crate::core::{GcContext, GcPtr, InternalSlot, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::core::{
     JSObjectDataPtr, JSSet, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value, same_value_zero,
 };
@@ -18,7 +18,7 @@ fn normalize_set_value<'gc>(val: Value<'gc>) -> Value<'gc> {
 }
 
 /// Initialize Set constructor and prototype
-pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_set<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let set_ctor = new_js_object_data(mc);
     slot_set(mc, &set_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &set_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Set")));
@@ -197,7 +197,7 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 /// 6. Let iteratorRecord be ? GetIterator(iterable, sync).
 /// 7. For each value from iteratorRecord, call adder with value.
 pub(crate) fn handle_set_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -279,7 +279,7 @@ pub(crate) fn handle_set_constructor<'gc>(
 
 /// Handle Set instance method calls
 pub(crate) fn handle_set_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     set: &GcPtr<'gc, JSSet<'gc>>,
     method: &str,
     args: &[Value<'gc>],
@@ -385,7 +385,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
 
 /// GetSetRecord(obj): read .size, .has, .keys from 'other' argument
 fn get_set_record<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     other: &Value<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, Value<'gc>, Value<'gc>, usize), EvalError<'gc>> {
@@ -437,14 +437,14 @@ fn is_callable(val: &Value) -> bool {
 /// Iterate the keys of 'other' by calling keys_fn then iterating.
 /// If the callback returns false, the iterator is closed via .return() and iteration stops.
 fn iterate_other_keys<'gc, F>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     other_obj: &JSObjectDataPtr<'gc>,
     keys_fn: &Value<'gc>,
     mut callback: F,
 ) -> Result<(), EvalError<'gc>>
 where
-    F: FnMut(&MutationContext<'gc>, Value<'gc>) -> Result<bool, EvalError<'gc>>,
+    F: FnMut(&GcContext<'gc>, Value<'gc>) -> Result<bool, EvalError<'gc>>,
 {
     let keys_result = crate::core::evaluate_call_dispatch(mc, env, keys_fn, Some(&Value::Object(*other_obj)), &[])?;
     let iter_obj = match &keys_result {
@@ -472,7 +472,7 @@ where
 /// Handle set methods: union, intersection, difference, symmetricDifference,
 /// isSubsetOf, isSupersetOf, isDisjointFrom
 fn handle_set_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     set: &GcPtr<'gc, JSSet<'gc>>,
     method: &str,
     args: &[Value<'gc>],
@@ -757,7 +757,7 @@ fn handle_set_method<'gc>(
 
 /// Wrap a JSSet GcPtr in a proper Set object with prototype
 fn wrap_set_as_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     set: GcPtr<'gc, JSSet<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -775,7 +775,7 @@ fn wrap_set_as_object<'gc>(
 }
 
 fn create_set_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     set: GcPtr<'gc, JSSet<'gc>>,
     kind: &str,
@@ -797,7 +797,7 @@ fn create_set_iterator<'gc>(
 }
 
 pub(crate) fn handle_set_iterator_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {

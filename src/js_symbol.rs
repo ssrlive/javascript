@@ -1,10 +1,10 @@
-use crate::core::{Gc, InternalSlot, MutationContext, SymbolData, slot_get_chained, slot_set};
+use crate::core::{Gc, GcContext, InternalSlot, SymbolData, slot_get_chained, slot_set};
 use crate::core::{JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
 pub fn initialize_symbol<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     parent_env: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<(), JSError> {
@@ -256,7 +256,7 @@ pub fn initialize_symbol<'gc>(
 }
 
 pub(crate) fn handle_symbol_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -279,7 +279,7 @@ pub(crate) fn handle_symbol_call<'gc>(
     Ok(Value::Symbol(sym))
 }
 
-pub(crate) fn handle_symbol_tostring<'gc>(_mc: &MutationContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_symbol_tostring<'gc>(_mc: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
     let sym = match this_value {
         Value::Symbol(s) => *s,
         Value::Object(obj) => {
@@ -313,7 +313,7 @@ pub(crate) fn handle_symbol_tostring<'gc>(_mc: &MutationContext<'gc>, this_value
     Ok(Value::String(utf8_to_utf16(&s)))
 }
 
-pub(crate) fn handle_symbol_valueof<'gc>(_mc: &MutationContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_symbol_valueof<'gc>(_mc: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
     match this_value {
         Value::Symbol(s) => Ok(Value::Symbol(*s)),
         Value::Object(obj) => {
@@ -328,7 +328,7 @@ pub(crate) fn handle_symbol_valueof<'gc>(_mc: &MutationContext<'gc>, this_value:
     }
 }
 
-pub(crate) fn handle_symbol_description_get<'gc>(_mc: &MutationContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_symbol_description_get<'gc>(_mc: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
     let sym = match this_value {
         Value::Symbol(s) => *s,
         Value::Object(obj) => {
@@ -354,11 +354,7 @@ pub(crate) fn handle_symbol_description_get<'gc>(_mc: &MutationContext<'gc>, thi
     }
 }
 
-pub(crate) fn handle_symbol_for<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_symbol_for<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // §20.4.2.2 Symbol.for(key): step 1 — let stringKey be ? ToString(key).
     // ToString on a Symbol throws TypeError. On undefined, produces "undefined".
     let arg = if args.is_empty() { &Value::Undefined } else { &args[0] };
@@ -399,7 +395,7 @@ pub(crate) fn handle_symbol_for<'gc>(
 }
 
 pub(crate) fn handle_symbol_keyfor<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {

@@ -1,7 +1,7 @@
 use crate::core::EvalError;
 use crate::core::JSWeakMap;
 use crate::core::WeakKey;
-use crate::core::{Gc, GcCell, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
+use crate::core::{Gc, GcCell, GcContext, InternalSlot, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
     error::JSError,
@@ -10,7 +10,7 @@ use crate::{
 
 /// Handle WeakMap constructor calls (spec §24.3.1.1)
 pub(crate) fn handle_weakmap_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -116,7 +116,7 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
 }
 
 /// Initialize WeakMap constructor and prototype
-pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_weakmap<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let weakmap_ctor = new_js_object_data(mc);
     slot_set(mc, &weakmap_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -194,7 +194,7 @@ pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 }
 
 /// Check if WeakMap has a key
-fn weakmap_has_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
+fn weakmap_has_key<'gc>(mc: &GcContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
     let weakmap = weakmap.borrow();
     for (k, _) in &weakmap.entries {
         if k.matches(mc, key) {
@@ -205,7 +205,7 @@ fn weakmap_has_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWe
 }
 
 /// Delete a key from WeakMap
-fn weakmap_delete_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
+fn weakmap_delete_key<'gc>(mc: &GcContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
     let mut weakmap_mut = weakmap.borrow_mut(mc);
     let len_before = weakmap_mut.entries.len();
     weakmap_mut.entries.retain(|(k, _)| !k.matches(mc, key));
@@ -214,7 +214,7 @@ fn weakmap_delete_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<J
 
 /// Handle WeakMap instance method calls
 pub(crate) fn handle_weakmap_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>,
     method: &str,
     args: &[Value<'gc>],
@@ -345,7 +345,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 }
 
 /// Check if a JS object wraps an internal WeakMap
-pub fn is_weakmap_object<'gc>(_mc: &MutationContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
+pub fn is_weakmap_object<'gc>(_mc: &GcContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
     if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::WeakMap) {
         matches!(&*val_rc.borrow(), crate::core::Value::WeakMap(_))
     } else {

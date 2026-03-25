@@ -1,6 +1,6 @@
 use crate::core::EvalError;
 use crate::core::WeakKey;
-use crate::core::{InternalSlot, MutationContext, slot_get_chained, slot_set};
+use crate::core::{GcContext, InternalSlot, slot_get_chained, slot_set};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
     error::JSError,
@@ -9,7 +9,7 @@ use crate::{
 
 /// Handle `new WeakRef(target)` constructor calls (spec §26.1.1)
 pub(crate) fn handle_weakref_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -63,7 +63,7 @@ pub(crate) fn handle_weakref_constructor<'gc>(
 }
 
 /// Initialize WeakRef constructor and prototype (spec §26.1.2, §26.1.3)
-pub fn initialize_weakref<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_weakref<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let weakref_ctor = new_js_object_data(mc);
     slot_set(mc, &weakref_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -138,7 +138,7 @@ pub fn initialize_weakref<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 
 /// Handle WeakRef instance method calls.
 pub(crate) fn handle_weakref_instance_method<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     method: &str,
     _args: &[Value<'gc>],
@@ -188,6 +188,6 @@ pub(crate) fn handle_weakref_instance_method<'gc>(
 
 /// Check if a JS object wraps an internal WeakRef
 #[allow(dead_code)]
-pub fn is_weakref_object(_mc: &MutationContext<'_>, obj: &JSObjectDataPtr<'_>) -> bool {
+pub fn is_weakref_object(_mc: &GcContext<'_>, obj: &JSObjectDataPtr<'_>) -> bool {
     slot_get_chained(obj, &InternalSlot::WeakRefMarker).is_some()
 }

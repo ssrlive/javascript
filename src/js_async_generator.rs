@@ -4,12 +4,12 @@ use crate::core::{
     new_js_object_data, object_get_key_value, object_set_key_value, prepare_function_call_env, prepare_function_call_env_with_home,
     slot_get, slot_get_chained, slot_set,
 };
-use crate::core::{Gc, GcPtr, MutationContext, new_gc_cell_ptr};
+use crate::core::{Gc, GcContext, GcPtr, new_gc_cell_ptr};
 use crate::error::{JSError, JSErrorKind};
 use crate::js_generator::YieldKind;
 use crate::js_promise::{make_promise_js_object, perform_promise_then, reject_promise, resolve_promise};
 
-fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, j: &JSError) -> Value<'gc> {
+fn js_error_to_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, j: &JSError) -> Value<'gc> {
     let fallback_msg = j.message();
     let (ctor_name, msg) = match j.kind() {
         JSErrorKind::TypeError { message } => ("TypeError", message.as_str()),
@@ -35,14 +35,14 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
     Value::from(msg)
 }
 
-fn eval_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
+fn eval_error_to_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
     match err {
         EvalError::Throw(v, ..) => v,
         EvalError::Js(j) => js_error_to_value(mc, env, &j),
     }
 }
 
-fn await_value<'gc>(mc: &MutationContext<'gc>, _env: &JSObjectDataPtr<'gc>, value: Value<'gc>) -> Result<Value<'gc>, Value<'gc>> {
+fn await_value<'gc>(mc: &GcContext<'gc>, _env: &JSObjectDataPtr<'gc>, value: Value<'gc>) -> Result<Value<'gc>, Value<'gc>> {
     if let Value::Object(obj) = &value
         && let Some(promise_ref) = crate::js_promise::get_promise_from_js_object(obj)
     {
@@ -74,7 +74,7 @@ fn has_async_iterator<'gc>(env: &JSObjectDataPtr<'gc>, obj: &JSObjectDataPtr<'gc
 
 // Create an async generator instance (object) when an async generator function is called.
 pub fn handle_async_generator_function_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     closure: &ClosureData<'gc>,
     args: &[Value<'gc>],
     fn_obj: Option<JSObjectDataPtr<'gc>>,
@@ -187,7 +187,7 @@ pub fn handle_async_generator_function_call<'gc>(
 }
 
 /// Initialize AsyncGenerator constructor/prototype and attach prototype methods
-pub fn initialize_async_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_async_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     // Create constructor object and async generator prototype
     let async_gen_ctor = crate::core::new_js_object_data(mc);
     // Set __proto__ to Function.prototype if present
@@ -539,7 +539,7 @@ fn stmt_contains_yield_or_await(s: &Statement) -> bool {
     }
 }
 
-fn create_iterator_result_obj<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, done: bool) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn create_iterator_result_obj<'gc>(mc: &GcContext<'gc>, value: Value<'gc>, done: bool) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "value", &value)?;
     object_set_key_value(mc, &obj, "done", &Value::Boolean(done))?;
@@ -552,7 +552,7 @@ enum AsyncGeneratorCompletion<'gc> {
 }
 
 fn evaluate_async_generator_completion<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
 ) -> Result<AsyncGeneratorCompletion<'gc>, EvalError<'gc>> {
@@ -566,7 +566,7 @@ fn evaluate_async_generator_completion<'gc>(
 }
 
 // Helper to create a new internal JSPromise cell and corresponding JS Promise object
-fn create_promise_cell_and_obj<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> (GcPtr<'gc, JSPromise<'gc>>, Value<'gc>) {
+fn create_promise_cell_and_obj<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> (GcPtr<'gc, JSPromise<'gc>>, Value<'gc>) {
     let promise_cell = new_gc_cell_ptr(mc, crate::core::JSPromise::new());
     let promise_obj = make_promise_js_object(mc, promise_cell, Some(*env)).unwrap();
     (promise_cell, Value::Object(promise_obj))
@@ -582,7 +582,7 @@ fn extract_simple_yield_expr(body: &[Statement]) -> Option<Expr> {
 }
 
 fn eval_yield_inner_expr<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     yield_kind: crate::js_generator::YieldKind,
     inner_expr: &Expr,
@@ -614,7 +614,7 @@ fn allow_loop_fallback(stmt: &Statement) -> bool {
 }
 
 fn get_for_await_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_val: &Value<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, bool), EvalError<'gc>> {
@@ -671,7 +671,7 @@ fn get_for_await_iterator<'gc>(
 }
 
 fn for_await_next_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: JSObjectDataPtr<'gc>,
     is_async_iter: bool,
@@ -718,7 +718,7 @@ fn for_await_next_value<'gc>(
 // Process pending requests (next/throw/return) for the given async generator
 // Processes requests until the generator suspends or the pending queue is empty.
 fn process_one_pending<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     gen_ptr: GcPtr<'gc, JSAsyncGenerator<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
@@ -2146,11 +2146,7 @@ fn process_one_pending<'gc>(
 /// Helper: create a rejected promise with a TypeError for bad `this` values.
 /// Per spec, AsyncGeneratorEnqueue returns a rejected promise (not a thrown error)
 /// when the generator argument is invalid.
-fn reject_with_type_error<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    message: &str,
-) -> Result<Option<Value<'gc>>, JSError> {
+fn reject_with_type_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str) -> Result<Option<Value<'gc>>, JSError> {
     let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
     // Build a TypeError value from the current realm's TypeError constructor
     let err_val = {
@@ -2172,7 +2168,7 @@ fn reject_with_type_error<'gc>(
 /// Helper: enqueue a request on an async generator, using try_borrow_mut to
 /// avoid panicking when the generator is already executing.
 fn enqueue_async_generator_request<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     gen_ptr: GcPtr<'gc, JSAsyncGenerator<'gc>>,
     promise_cell: GcPtr<'gc, JSPromise<'gc>>,
     request: AsyncGeneratorRequest<'gc>,
@@ -2216,7 +2212,7 @@ thread_local! {
 /// Drain any deferred async generator requests that were parked while the
 /// generator was executing. Called from process_one_pending after each step.
 fn drain_deferred_requests<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     target_gen: GcPtr<'gc, JSAsyncGenerator<'gc>>,
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
@@ -2240,7 +2236,7 @@ fn drain_deferred_requests<'gc>(
 
 // Native implementation for AsyncGenerator.prototype.next
 pub fn handle_async_generator_prototype_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2268,7 +2264,7 @@ pub fn handle_async_generator_prototype_next<'gc>(
 
 // Native implementation for AsyncGenerator.prototype.throw
 pub fn handle_async_generator_prototype_throw<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2295,7 +2291,7 @@ pub fn handle_async_generator_prototype_throw<'gc>(
 
 // Native implementation for AsyncGenerator.prototype.return
 pub fn handle_async_generator_prototype_return<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2321,7 +2317,7 @@ pub fn handle_async_generator_prototype_return<'gc>(
 }
 
 pub fn __internal_async_gen_await_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2344,7 +2340,7 @@ pub fn __internal_async_gen_await_resolve<'gc>(
 }
 
 pub fn __internal_async_gen_await_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2366,7 +2362,7 @@ pub fn __internal_async_gen_await_reject<'gc>(
 }
 
 pub fn __internal_async_gen_yield_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2388,7 +2384,7 @@ pub fn __internal_async_gen_yield_resolve<'gc>(
 }
 
 pub fn __internal_async_gen_yield_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2409,7 +2405,7 @@ pub fn __internal_async_gen_yield_reject<'gc>(
 }
 
 pub fn __internal_async_gen_return_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2422,7 +2418,7 @@ pub fn __internal_async_gen_return_resolve<'gc>(
 }
 
 pub fn __internal_async_gen_return_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2434,7 +2430,7 @@ pub fn __internal_async_gen_return_reject<'gc>(
 }
 
 pub fn __internal_async_gen_yield_star_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2480,7 +2476,7 @@ pub fn __internal_async_gen_yield_star_resolve<'gc>(
 }
 
 pub fn __internal_async_gen_yield_star_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2502,7 +2498,7 @@ pub fn __internal_async_gen_yield_star_reject<'gc>(
 }
 
 fn handle_yield_star_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     gen_ptr: GcPtr<'gc, JSAsyncGenerator<'gc>>,
     promise_cell: GcPtr<'gc, JSPromise<'gc>>,

@@ -5,7 +5,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
-use crate::core::MutationContext;
+use indexmap::IndexMap;
+
+use crate::core::GcContext;
+use crate::core::new_gc_cell_ptr;
 use crate::core::{InternalSlot, JSObjectDataPtr, Value, new_js_object_data, object_set_key_value, slot_get, slot_set};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -21,7 +24,7 @@ fn get_next_file_id() -> u64 {
 }
 
 /// Create a temporary file object
-pub(crate) fn create_tmpfile<'gc>(mc: &MutationContext<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn create_tmpfile<'gc>(mc: &GcContext<'gc>) -> Result<Value<'gc>, JSError> {
     // Create a real temporary file with a more random suffix
     use std::time::{SystemTime, UNIX_EPOCH};
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -284,12 +287,8 @@ pub fn vm_file_close(file_id: u64) {
 }
 
 /// Create a VM tmpfile object with host-fn method slots.
-pub fn vm_create_tmpfile<'gc>() -> Value<'gc> {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+pub fn vm_create_tmpfile<'gc>(mc: &GcContext<'gc>) -> Value<'gc> {
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    use indexmap::IndexMap;
 
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let pid = std::process::id();
@@ -307,17 +306,17 @@ pub fn vm_create_tmpfile<'gc>() -> Value<'gc> {
             let mut obj = IndexMap::new();
             obj.insert("__file_id__".to_string(), Value::Number(file_id as f64));
             // Each method is a small VmObject with __host_fn__ key
-            fn make_host_fn<'a>(name: &str) -> Value<'a> {
+            fn make_host_fn<'a>(mc: &GcContext<'a>, name: &str) -> Value<'a> {
                 let mut map = IndexMap::new();
                 map.insert("__host_fn__".to_string(), Value::from(name));
-                Value::VmObject(Rc::new(RefCell::new(map)))
+                Value::VmObject(new_gc_cell_ptr(mc, map))
             }
-            obj.insert("puts".to_string(), make_host_fn("tmp.puts"));
-            obj.insert("readAsString".to_string(), make_host_fn("tmp.readAsString"));
-            obj.insert("getline".to_string(), make_host_fn("tmp.getline"));
-            obj.insert("seek".to_string(), make_host_fn("tmp.seek"));
-            obj.insert("close".to_string(), make_host_fn("tmp.close"));
-            Value::VmObject(Rc::new(RefCell::new(obj)))
+            obj.insert("puts".to_string(), make_host_fn(mc, "tmp.puts"));
+            obj.insert("readAsString".to_string(), make_host_fn(mc, "tmp.readAsString"));
+            obj.insert("getline".to_string(), make_host_fn(mc, "tmp.getline"));
+            obj.insert("seek".to_string(), make_host_fn(mc, "tmp.seek"));
+            obj.insert("close".to_string(), make_host_fn(mc, "tmp.close"));
+            Value::VmObject(new_gc_cell_ptr(mc, obj))
         }
         Err(_) => Value::Undefined,
     }

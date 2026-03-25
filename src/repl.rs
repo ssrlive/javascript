@@ -1,8 +1,7 @@
 use crate::{
     JSError,
-    core::{Chunk, VM, Value, value_to_compact_result_string, value_to_string},
+    core::{Chunk, JsArenaVm, VM, Value, value_to_compact_result_string, value_to_string},
 };
-use std::cell::RefCell;
 
 /// A small persistent REPL environment wrapper.
 ///
@@ -10,7 +9,7 @@ use std::cell::RefCell;
 /// - `Repl::new()` uses the Bytecode VM backend.
 /// - `Repl::eval(&self, code)` evaluates each submission in the same VM instance.
 pub struct Repl {
-    vm: RefCell<VM<'static>>,
+    arena: JsArenaVm,
 }
 
 impl Default for Repl {
@@ -22,29 +21,34 @@ impl Default for Repl {
 impl Repl {
     /// Create a VM-backed REPL handle.
     pub fn new() -> Self {
-        Repl {
-            vm: RefCell::new(VM::new(Chunk::new())),
-        }
+        let arena = JsArenaVm::new(|mc| VM::new(Chunk::new(), mc));
+        Repl { arena }
     }
 
     /// Evaluate a script using the VM backend.
     /// Returns the evaluation result as a string or an error.
-    pub fn eval<T: AsRef<str>>(&self, script: T) -> Result<String, JSError> {
+    pub fn eval<T: AsRef<str>>(&mut self, script: T) -> Result<String, JSError> {
         let script = script.as_ref();
-        let mut vm = self.vm.borrow_mut();
-        let v = vm.eval_repl_snippet(script)?;
+        // let mut vm = self.vm.borrow_mut();
+        self.arena.mutate_root(|mc, vm| {
+            // We spawn a child VM for each REPL evaluation to ensure that any
+            // state created during evaluation (e.g. objects, functions) is
+            // properly rooted and won't be accidentally collected.
 
-        match v {
-            Value::String(s) => {
-                let s_utf8 = crate::unicode::utf16_to_utf8(&s);
-                match serde_json::to_string(&s_utf8) {
-                    Ok(quoted) => Ok(quoted),
-                    Err(_) => Ok(format!("\"{}\"", s_utf8)),
+            let v = vm.eval_repl_snippet(mc, script)?;
+
+            match v {
+                Value::String(s) => {
+                    let s_utf8 = crate::unicode::utf16_to_utf8(&s);
+                    match serde_json::to_string(&s_utf8) {
+                        Ok(quoted) => Ok(quoted),
+                        Err(_) => Ok(format!("\"{}\"", s_utf8)),
+                    }
                 }
+                Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
+                _ => Ok(value_to_string(&v)),
             }
-            Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
-            _ => Ok(value_to_string(&v)),
-        }
+        })
     }
 
     /// Returns true when the given `input` looks like a complete JavaScript

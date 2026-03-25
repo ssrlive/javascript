@@ -1,6 +1,6 @@
 use crate::core::TypedArrayKind;
 use crate::core::{
-    Gc, GcCell, InternalSlot, MutationContext, SwitchCase, create_descriptor_object, new_gc_cell_ptr, slot_get, slot_get_chained, slot_has,
+    Gc, GcCell, GcContext, InternalSlot, SwitchCase, create_descriptor_object, new_gc_cell_ptr, slot_get, slot_get_chained, slot_has,
     slot_remove, slot_set,
 };
 use crate::js_array::{create_array, handle_array_static_method, is_array, set_array_length};
@@ -117,7 +117,7 @@ fn is_builtin_function_virtual_prop_deleted<'gc>(env: &JSObjectDataPtr<'gc>, fun
 }
 
 fn mark_builtin_function_virtual_prop_deleted<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     func_name: &str,
     prop: &str,
@@ -185,7 +185,7 @@ pub(crate) fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     }
 }
 
-fn loose_equal<'gc>(mc: &MutationContext<'gc>, l: &Value<'gc>, r: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
+fn loose_equal<'gc>(mc: &GcContext<'gc>, l: &Value<'gc>, r: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
     // AnnexB: [[IsHTMLDDA]] objects compare equal to null and undefined
     if let Value::Object(obj) = l
         && slot_get(obj, &InternalSlot::IsHTMLDDA).is_some()
@@ -258,11 +258,7 @@ fn loose_equal<'gc>(mc: &MutationContext<'gc>, l: &Value<'gc>, r: &Value<'gc>, e
     }
 }
 
-pub(crate) fn to_number_with_env<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    val: &Value<'gc>,
-) -> Result<f64, EvalError<'gc>> {
+pub(crate) fn to_number_with_env<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     match val {
         Value::Object(_) => {
             let prim = to_primitive(mc, val, "number", env)?;
@@ -272,7 +268,7 @@ pub(crate) fn to_number_with_env<'gc>(
     }
 }
 
-fn to_numeric_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn to_numeric_with_env<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let prim = match val {
         Value::Object(_) => to_primitive(mc, val, "number", env)?,
         _ => val.clone(),
@@ -284,7 +280,7 @@ fn to_numeric_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
     }
 }
 
-fn to_int32_value_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i32, EvalError<'gc>> {
+fn to_int32_value_with_env<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i32, EvalError<'gc>> {
     let n = to_number_with_env(mc, env, val)?;
     if n.is_nan() || n == 0.0 || !n.is_finite() {
         return Ok(0);
@@ -302,7 +298,7 @@ fn to_int32_value_with_env<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 }
 
 pub(crate) fn to_uint32_value_with_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     val: &Value<'gc>,
 ) -> Result<u32, EvalError<'gc>> {
@@ -318,7 +314,7 @@ pub(crate) fn to_uint32_value_with_env<'gc>(
     Ok(int as u32)
 }
 
-fn to_string_for_concat<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<String, EvalError<'gc>> {
+fn to_string_for_concat<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<String, EvalError<'gc>> {
     let prim = match val {
         Value::Object(_) => crate::core::to_primitive(mc, val, "string", env)?,
         _ => val.clone(),
@@ -330,7 +326,7 @@ fn to_string_for_concat<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
 }
 
 fn maybe_set_function_name_for_default<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     name: &str,
     default_expr: &Expr,
     assigned_val: &Value<'gc>,
@@ -410,7 +406,7 @@ fn collect_names_from_object_destructuring(pattern: &[ObjectDestructuringElement
 
 // Helper: bind inner object pattern (DestructuringElement::NestedObject) for let/const (block-scoped) bindings
 fn bind_object_inner_for_letconst<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     pattern: &[DestructuringElement],
     obj: &JSObjectDataPtr<'gc>,
@@ -609,7 +605,7 @@ fn bind_object_inner_for_letconst<'gc>(
 
 // Helper: bind inner object pattern for var (function-scoped) bindings
 fn bind_object_inner_for_var<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     pattern: &[DestructuringElement],
     obj: &JSObjectDataPtr<'gc>,
@@ -806,7 +802,7 @@ fn bind_object_inner_for_var<'gc>(
 
 // Helper: bind inner array pattern for let/const bindings
 fn bind_array_inner_for_letconst<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     pattern: &[DestructuringElement],
     arr_obj: &JSObjectDataPtr<'gc>,
@@ -959,7 +955,7 @@ fn bind_array_inner_for_letconst<'gc>(
 
 // Helper: bind inner array pattern (DestructuringElement::NestedArray) for let/const (block-scoped) bindings
 fn bind_array_inner_for_var<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     pattern: &[DestructuringElement],
     arr_obj: &JSObjectDataPtr<'gc>,
@@ -1186,12 +1182,7 @@ fn bind_array_inner_for_var<'gc>(
     Ok(())
 }
 
-fn hoist_name<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    name: &str,
-    is_indirect_eval: bool,
-) -> Result<(), EvalError<'gc>> {
+fn hoist_name<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str, is_indirect_eval: bool) -> Result<(), EvalError<'gc>> {
     let mut target_env = *env;
     log::trace!("hoist_name: called for '{}' with env {:p}", name, env);
     while !target_env.borrow().is_function_scope {
@@ -1337,7 +1328,7 @@ fn hoist_name<'gc>(
 }
 
 pub(crate) fn hoist_var_declarations<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
     is_indirect_eval: bool,
@@ -1499,7 +1490,7 @@ pub(crate) fn hoist_var_declarations<'gc>(
 }
 
 fn hoist_declarations<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
     skip_lexicals: bool,
@@ -1858,7 +1849,7 @@ fn hoist_declarations<'gc>(
 }
 
 pub fn evaluate_statements<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1878,7 +1869,7 @@ pub fn evaluate_statements<'gc>(
 
 /// belongs to src/js_object.rs module
 pub(crate) fn handle_object_prototype_to_string<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2095,7 +2086,7 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
 }
 
 pub fn evaluate_statements_with_context<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
     labels: &[String],
@@ -2104,7 +2095,7 @@ pub fn evaluate_statements_with_context<'gc>(
 }
 
 pub fn evaluate_statements_with_context_and_last_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
     labels: &[String],
@@ -2546,7 +2537,7 @@ pub(crate) fn check_strict_mode_violations<'gc>(stmts: &[Statement]) -> Result<(
 }
 
 pub fn evaluate_statements_with_labels<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
     labels: &[String],
@@ -2966,7 +2957,7 @@ pub fn evaluate_statements_with_labels<'gc>(
 }
 
 pub fn evaluate_statements_with_labels_and_last<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
     labels: &[String],
@@ -3234,7 +3225,7 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
     Ok((ControlFlow::Normal(last_value.clone()), last_value))
 }
 
-fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr: &Expr, name: &str) -> Result<(), EvalError<'gc>> {
+fn set_name_if_anonymous<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, expr: &Expr, name: &str) -> Result<(), EvalError<'gc>> {
     let should_set = match expr {
         Expr::Function(None, ..)
         | Expr::GeneratorFunction(None, ..)
@@ -3255,7 +3246,7 @@ fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr:
 }
 
 fn evaluate_destructuring_array_assignment<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     pattern: &[DestructuringElement],
     val: &Value<'gc>,
@@ -3414,7 +3405,7 @@ fn evaluate_destructuring_array_assignment<'gc>(
 }
 
 fn evaluate_destructuring_element_rec<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     elem: &DestructuringElement,
     val: &Value<'gc>,
@@ -3468,7 +3459,7 @@ fn evaluate_destructuring_element_rec<'gc>(
 }
 
 fn preload_requested_modules_in_source_order<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
 ) -> Result<(), EvalError<'gc>> {
@@ -3515,7 +3506,7 @@ fn preload_requested_modules_in_source_order<'gc>(
 }
 
 fn preinitialize_exported_function_bindings<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
 ) -> Result<(), EvalError<'gc>> {
@@ -3608,7 +3599,7 @@ fn preinitialize_exported_function_bindings<'gc>(
 }
 
 fn eval_res<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     stmt: &Statement,
     last_value: &mut Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -7654,7 +7645,7 @@ fn eval_res<'gc>(
     }
 }
 
-pub fn export_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str, v: &Value<'gc>) -> Result<(), EvalError<'gc>> {
+pub fn export_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str, v: &Value<'gc>) -> Result<(), EvalError<'gc>> {
     if let Some(exports_cell) = env_get(env, "exports") {
         let exports = exports_cell.borrow().clone();
         if let Value::Object(exports_obj) = exports {
@@ -7676,7 +7667,7 @@ pub fn export_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, 
 }
 
 fn export_binding<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     export_name: &str,
     binding_name: &str,
@@ -7714,7 +7705,7 @@ fn export_binding<'gc>(
 }
 
 fn import_live_binding<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     local_name: &str,
     exports_obj: &JSObjectDataPtr<'gc>,
@@ -7746,7 +7737,7 @@ fn import_live_binding<'gc>(
 }
 
 fn export_indirect_live_binding<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     export_name: &str,
     source_exports_obj: &JSObjectDataPtr<'gc>,
@@ -7789,7 +7780,7 @@ fn export_indirect_live_binding<'gc>(
 }
 
 fn refresh_error_by_additional_stack_frame<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     line: usize,
     column: usize,
@@ -7839,7 +7830,7 @@ fn refresh_error_by_additional_stack_frame<'gc>(
 }
 
 pub(crate) fn get_primitive_prototype_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_val: &Value<'gc>,
     key: impl Into<PropertyKey<'gc>>,
@@ -7926,7 +7917,7 @@ pub(crate) fn get_primitive_prototype_property<'gc>(
 // completion occurs while an iterator is in use. Returns the completion to
 // be propagated (either the original completion or an inner completion).
 fn iterator_close_on_error<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: &crate::core::JSObjectDataPtr<'gc>,
     orig_err: EvalError<'gc>,
@@ -7984,11 +7975,7 @@ fn iterator_close_on_error<'gc>(
 
 // Helper: perform IteratorClose on a normal (non-abrupt) completion. Returns
 // Result<(), EvalError> - any error during closing will be propagated.
-fn iterator_close<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    iter_obj: &JSObjectDataPtr<'gc>,
-) -> Result<(), EvalError<'gc>> {
+fn iterator_close<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, iter_obj: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
     // Get the 'return' property
     let return_val = get_property_with_accessors(mc, env, iter_obj, "return")?;
 
@@ -8017,7 +8004,7 @@ fn iterator_close<'gc>(
 }
 
 fn maybe_set_default_name<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     lhs: &Expr,
     default_expr: &Expr,
     assigned_val: &Value<'gc>,
@@ -8069,12 +8056,7 @@ enum TargetTemp<'gc> {
     IndexBase(JSObjectDataPtr<'gc>, Box<Value<'gc>>, Option<Value<'gc>>),
 }
 
-fn put_temp<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    temp: TargetTemp<'gc>,
-    value: &Value<'gc>,
-) -> Result<(), EvalError<'gc>> {
+fn put_temp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, temp: TargetTemp<'gc>, value: &Value<'gc>) -> Result<(), EvalError<'gc>> {
     match temp {
         TargetTemp::Var(name) => {
             env_set_recursive(mc, env, &name, value)?;
@@ -8108,11 +8090,7 @@ fn put_temp<'gc>(
     Ok(())
 }
 
-fn precompute_target<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    target_expr: &Expr,
-) -> Result<TargetTemp<'gc>, EvalError<'gc>> {
+fn precompute_target<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, target_expr: &Expr) -> Result<TargetTemp<'gc>, EvalError<'gc>> {
     match target_expr {
         Expr::Var(name, _, _) => Ok(TargetTemp::Var(name.clone())),
         Expr::Property(obj_expr, key_str) => {
@@ -8290,7 +8268,7 @@ enum Precomputed<'gc> {
 }
 
 fn evaluate_expr_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -9239,7 +9217,7 @@ fn resolve_super_assignment_base<'gc>(
 }
 
 fn set_super_property_with_accessors<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     receiver: &JSObjectDataPtr<'gc>,
     mut super_base: Option<JSObjectDataPtr<'gc>>,
@@ -9298,7 +9276,7 @@ fn set_super_property_with_accessors<'gc>(
 
 // Helper: assign a precomputed runtime value to an assignment target expression
 pub(crate) fn evaluate_assign_target_with_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     val: &Value<'gc>,
@@ -9815,7 +9793,7 @@ pub(crate) fn evaluate_assign_target_with_value<'gc>(
 // current environment without walking the prototype chain or triggering TDZ
 // errors on Uninitialized bindings. This mirrors InitializeReferencedBinding.
 pub(crate) fn evaluate_binding_target_with_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     val: &Value<'gc>,
@@ -10062,12 +10040,7 @@ pub(crate) fn evaluate_binding_target_with_value<'gc>(
     }
 }
 
-fn compute_add<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    l: &Value<'gc>,
-    r: &Value<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn compute_add<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, l: &Value<'gc>, r: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let l_prim = crate::core::to_primitive(mc, l, "default", env)?;
     let r_prim = crate::core::to_primitive(mc, r, "default", env)?;
 
@@ -10092,7 +10065,7 @@ fn compute_add<'gc>(
 }
 
 fn to_property_key_for_assignment<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     key_val: &Value<'gc>,
 ) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
@@ -10114,7 +10087,7 @@ fn to_property_key_for_assignment<'gc>(
 }
 
 fn eval_private_member_ref<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_expr: &Expr,
     name: &str,
@@ -10136,7 +10109,7 @@ fn eval_private_member_ref<'gc>(
 }
 
 fn evaluate_expr_add_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -10210,7 +10183,7 @@ fn evaluate_expr_add_assign<'gc>(
 }
 
 fn evaluate_expr_bitand_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -10332,7 +10305,7 @@ fn evaluate_expr_bitand_assign<'gc>(
 }
 
 fn evaluate_expr_bitor_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -10454,7 +10427,7 @@ fn evaluate_expr_bitor_assign<'gc>(
 }
 
 fn evaluate_expr_bitxor_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -10569,7 +10542,7 @@ fn evaluate_expr_bitxor_assign<'gc>(
 }
 
 fn evaluate_expr_leftshift_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -10676,7 +10649,7 @@ fn evaluate_expr_leftshift_assign<'gc>(
 }
 
 fn evaluate_expr_rightshift_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -10783,7 +10756,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
 }
 
 fn evaluate_expr_urightshift_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -10867,7 +10840,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
 }
 
 fn evaluate_expr_sub_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -10965,7 +10938,7 @@ fn evaluate_expr_sub_assign<'gc>(
 }
 
 fn evaluate_expr_mul_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -11062,7 +11035,7 @@ fn evaluate_expr_mul_assign<'gc>(
 }
 
 fn evaluate_expr_div_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -11177,7 +11150,7 @@ fn evaluate_expr_div_assign<'gc>(
 }
 
 fn evaluate_expr_mod_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -11292,7 +11265,7 @@ fn evaluate_expr_mod_assign<'gc>(
 }
 
 fn evaluate_expr_pow_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -11572,11 +11545,7 @@ fn check_global_declarations<'gc>(env: &JSObjectDataPtr<'gc>, statements: &[Stat
     Ok(())
 }
 
-fn run_with_global_strictness_cleared<'gc, F>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    f: F,
-) -> Result<Value<'gc>, EvalError<'gc>>
+fn run_with_global_strictness_cleared<'gc, F>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, f: F) -> Result<Value<'gc>, EvalError<'gc>>
 where
     F: FnOnce() -> Result<Value<'gc>, EvalError<'gc>>,
 {
@@ -12007,7 +11976,7 @@ fn contains_strict_legacy_octal_literal(script: &str) -> bool {
 }
 
 fn handle_eval_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     eval_args: &[Value<'gc>],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -12472,7 +12441,7 @@ fn handle_eval_function<'gc>(
 
 // Helper: dispatch calls for named functions, marking the global env for indirect `eval`.
 fn call_named_eval_or_dispatch<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env_for_call: &JSObjectDataPtr<'gc>,
     call_env: &JSObjectDataPtr<'gc>,
     name: &str,
@@ -12491,7 +12460,7 @@ fn call_named_eval_or_dispatch<'gc>(
 
 // Helper: when calling the topl-level dispatcher for a possibly-indirect eval
 fn dispatch_with_indirect_eval_marker<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env_for_call: &JSObjectDataPtr<'gc>,
     func_val: &Value<'gc>,
     this_val: Option<&Value<'gc>>,
@@ -12513,7 +12482,7 @@ fn dispatch_with_indirect_eval_marker<'gc>(
 }
 
 fn call_object_prototype_to_locale_string<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     this_v: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -12537,7 +12506,7 @@ fn call_object_prototype_to_locale_string<'gc>(
 }
 
 pub fn evaluate_call_dispatch<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     func_val: &Value<'gc>,
     this_val: Option<&Value<'gc>>,
@@ -13819,7 +13788,7 @@ pub fn evaluate_call_dispatch<'gc>(
     }
 }
 
-fn lookup_or_create_import_meta<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn lookup_or_create_import_meta<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     log::trace!("lookup_or_create_import_meta: env_ptr={:p}", env);
     // `import.meta` as a per-module ordinary object stored under env.__import_meta.
     // Prefer the immediate environment but fall back to the root global environment.
@@ -13848,7 +13817,7 @@ fn lookup_or_create_import_meta<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 }
 
 fn evaluate_expr_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     func_expr: &Expr,
     args: &[Expr],
@@ -14423,7 +14392,7 @@ fn evaluate_expr_call<'gc>(
 }
 
 fn evaluate_expr_index_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_expr: &Expr,
     key_expr: &Expr,
@@ -14652,7 +14621,7 @@ fn expr_contains_optional_chain(expr: &Expr) -> bool {
 }
 
 // Helper: evaluate call arguments, expanding spread elements into the final argument list.
-fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, args: &[Expr]) -> Result<Vec<Value<'gc>>, EvalError<'gc>> {
+fn collect_call_args<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, args: &[Expr]) -> Result<Vec<Value<'gc>>, EvalError<'gc>> {
     let mut eval_args: Vec<Value<'gc>> = Vec::new();
     for arg_expr in args.iter() {
         if let Expr::Spread(target) = arg_expr {
@@ -14853,7 +14822,7 @@ fn collect_call_args<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 }
 
 fn evaluate_optional_chain_base<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     expr: &Expr,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
@@ -15369,7 +15338,7 @@ fn evaluate_optional_chain_base<'gc>(
 }
 
 pub(crate) fn await_promise_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -15432,7 +15401,7 @@ pub(crate) fn await_promise_value<'gc>(
 
 #[allow(dead_code)]
 fn await_promise_value_if_pending<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -15486,7 +15455,7 @@ fn await_promise_value_if_pending<'gc>(
 }
 
 fn evaluate_expr_binary<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     left: &Expr,
     op: &BinaryOp,
@@ -16188,7 +16157,7 @@ enum LogicalAssignOp {
 }
 
 fn evaluate_expr_logical_assign<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -16353,7 +16322,7 @@ fn evaluate_expr_logical_assign<'gc>(
     }
 }
 
-pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
+pub fn evaluate_expr<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     match expr {
         Expr::Number(n) => {
             log::trace!("DEBUG: evaluate_expr Number -> {n}");
@@ -16532,7 +16501,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 }
 
 fn evaluate_expr_assign_in_main<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     value_expr: &Expr,
@@ -16564,7 +16533,7 @@ fn evaluate_expr_assign_in_main<'gc>(
 }
 
 fn evaluate_expr_generator_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &Option<String>,
     params: &[DestructuringElement],
@@ -16714,7 +16683,7 @@ fn evaluate_expr_generator_function<'gc>(
 }
 
 fn evaluate_expr_async_generator_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &Option<String>,
     params: &[crate::core::DestructuringElement],
@@ -16839,7 +16808,7 @@ fn evaluate_expr_async_generator_function<'gc>(
 }
 
 fn evaluate_expr_async_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &Option<String>,
     params: &[DestructuringElement],
@@ -16914,7 +16883,7 @@ fn evaluate_expr_async_function<'gc>(
 }
 
 fn evaluate_expr_arrow_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     params: &[DestructuringElement],
     body: &[Statement],
@@ -16981,7 +16950,7 @@ fn evaluate_expr_arrow_function<'gc>(
 }
 
 fn evaluate_expr_dynamic_import<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     specifier: &Expr,
     options: Option<&Expr>,
@@ -17016,7 +16985,7 @@ fn evaluate_expr_dynamic_import<'gc>(
 }
 
 fn options_processing_result<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     options_val: &Option<Value<'gc>>,
 ) -> Result<(), EvalError<'gc>> {
@@ -17073,7 +17042,7 @@ fn options_processing_result<'gc>(
 }
 
 fn evaluate_expr_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_expr: &Expr,
     key: &str,
@@ -17464,7 +17433,7 @@ fn evaluate_expr_property<'gc>(
 }
 
 fn evaluate_expr_class<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     class_def: &ClassDefinition,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -17529,7 +17498,7 @@ fn is_callable_for_typeof<'gc>(value: &Value<'gc>) -> bool {
     }
 }
 
-fn evaluate_expr_typeof<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
+fn evaluate_expr_typeof<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     // typeof has special semantics: if the evaluation of the operand throws a
     // ReferenceError due to an *unresolvable* reference (identifier not found),
     // the result is "undefined" instead of throwing. However, if the ReferenceError
@@ -17589,7 +17558,7 @@ fn evaluate_expr_typeof<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     Ok(Value::String(utf8_to_utf16(type_str)))
 }
 
-fn evaluate_expr_new_target<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn evaluate_expr_new_target<'gc>(_mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Runtime runtime for `new.target`: walk environment chain to find the nearest
     // function scope. If the function was invoked as a constructor (has `__instance`),
     // return the function object stored in `__function` (if present). Otherwise return `undefined`.
@@ -17623,7 +17592,7 @@ fn evaluate_expr_new_target<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataP
 }
 
 fn evaluate_optional_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     lhs: &Expr,
     prop: &str,
@@ -17649,7 +17618,7 @@ fn evaluate_optional_property<'gc>(
 }
 
 fn evaluate_expr_optional_index<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     lhs: &Expr,
     index_expr: &Expr,
@@ -17688,7 +17657,7 @@ fn evaluate_expr_optional_index<'gc>(
 }
 
 fn evaluate_expr_optional_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     lhs: &Expr,
     args: &[Expr],
@@ -17970,7 +17939,7 @@ fn evaluate_expr_optional_call<'gc>(
     }
 }
 
-fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, target: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
+fn evaluate_expr_delete<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, target: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     match target {
         Expr::SuperProperty(_) => {
             let _ = crate::js_class::evaluate_this(mc, env)?;
@@ -18213,11 +18182,7 @@ fn evaluate_expr_delete<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     }
 }
 
-fn evaluate_expr_getter<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    func_expr: &Expr,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn evaluate_expr_getter<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, func_expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = evaluate_expr(mc, env, func_expr)?;
     let closure = match &val {
         Value::Object(obj) => {
@@ -18243,11 +18208,7 @@ fn evaluate_expr_getter<'gc>(
     ))
 }
 
-fn evaluate_expr_setter<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    func_expr: &Expr,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn evaluate_expr_setter<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, func_expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = evaluate_expr(mc, env, func_expr)?;
     let closure = match &val {
         Value::Object(obj) => {
@@ -18275,7 +18236,7 @@ fn evaluate_expr_setter<'gc>(
 }
 
 fn evaluate_expr_tagged_template<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     tag_expr: &Expr,
     site_id: u64,
@@ -18370,7 +18331,7 @@ fn evaluate_expr_tagged_template<'gc>(
 }
 
 fn evaluate_expr_async_arrow_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     params: &[crate::core::DestructuringElement],
     body: &[Statement],
@@ -18444,7 +18405,7 @@ fn evaluate_expr_async_arrow_function<'gc>(
 }
 
 fn evaluate_expr_template_string<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     parts: &[crate::core::TemplatePart],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -18513,7 +18474,7 @@ fn evaluate_expr_template_string<'gc>(
 }
 
 fn evaluate_expr_private_member<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_expr: &Expr,
     key: &str,
@@ -18541,7 +18502,7 @@ fn evaluate_expr_private_member<'gc>(
 }
 
 fn evaluate_expr_optional_private_member<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_expr: &Expr,
     key: &str,
@@ -18562,7 +18523,7 @@ fn evaluate_expr_optional_private_member<'gc>(
 }
 
 fn evaluate_expr_index<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_expr: &Expr,
     key_expr: &Expr,
@@ -19006,7 +18967,7 @@ fn evaluate_expr_index<'gc>(
     }
 }
 
-fn evaluate_var<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<Value<'gc>, EvalError<'gc>> {
+fn evaluate_var<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<Value<'gc>, EvalError<'gc>> {
     // env_get returns the raw stored slot. If a property descriptor (Value::Property) was installed
     // via DefinePropertyOrThrow, unwrap the stored value. For accessor descriptors, call accessor.
     if let Some(val_ptr) = env_get(env, name) {
@@ -19046,7 +19007,7 @@ fn evaluate_var<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name
 }
 
 fn evaluate_function_expression<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: Option<String>,
     params: &[DestructuringElement],
@@ -19202,7 +19163,7 @@ fn normalize_value<'gc>(v: Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
 }
 
 pub(crate) fn get_property_with_accessors<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
@@ -19477,7 +19438,7 @@ pub(crate) fn get_property_with_accessors<'gc>(
 }
 
 pub(crate) fn set_property_with_accessors<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     _env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
@@ -20087,7 +20048,7 @@ pub(crate) fn set_property_with_accessors<'gc>(
 }
 
 pub fn call_native_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     name: &str,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
@@ -21318,7 +21279,7 @@ pub fn call_native_function<'gc>(
 }
 
 pub(crate) fn call_accessor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     receiver: &JSObjectDataPtr<'gc>,
     accessor: &Value<'gc>,
@@ -21422,7 +21383,7 @@ pub(crate) fn call_accessor<'gc>(
 }
 
 pub(crate) fn call_setter<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     receiver: &JSObjectDataPtr<'gc>,
     setter: &Value<'gc>,
     val: &Value<'gc>,
@@ -21509,7 +21470,7 @@ pub(crate) fn call_setter<'gc>(
 }
 
 fn call_setter_raw<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     receiver: &JSObjectDataPtr<'gc>,
     params: &[DestructuringElement],
     body: &[Statement],
@@ -21624,7 +21585,7 @@ fn call_setter_raw<'gc>(
     evaluate_statements(mc, &call_env, &body_clone).map(|_| ())
 }
 
-pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, js_err: &JSError) -> Value<'gc> {
+pub(crate) fn js_error_to_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, js_err: &JSError) -> Value<'gc> {
     let full_msg = js_err.message();
 
     let (name, raw_msg) = match js_err.kind() {
@@ -21745,7 +21706,7 @@ pub(crate) fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 /// `EvalError::Throw`.  This ensures that cross-realm code gets the correct
 /// `TypeError.prototype` (and thus the correct `.constructor`), because the
 /// error object is created at the throw-site rather than at the catch-site.
-fn throw_realm_type_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str) -> EvalError<'gc> {
+fn throw_realm_type_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str) -> EvalError<'gc> {
     if let Some(tc_val) = env_get(env, "TypeError")
         && let Some(tc_obj) = match &*tc_val.borrow() {
             Value::Object(tc) => Some(*tc),
@@ -21818,7 +21779,7 @@ fn throw_realm_type_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 }
 
 pub fn call_closure<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     cl: &crate::core::ClosureData<'gc>,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
@@ -22327,7 +22288,7 @@ pub fn call_closure<'gc>(
 }
 
 fn evaluate_update_expression<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &Expr,
     delta: f64,
@@ -22721,7 +22682,7 @@ fn convert_object_binding_pattern_from_object_elements(elms: &[ObjectDestructuri
 }
 
 fn init_function_call_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     call_env: &JSObjectDataPtr<'gc>,
     params_opt: Option<&[DestructuringElement]>,
     args: &[Value<'gc>],
@@ -22826,7 +22787,7 @@ fn init_function_call_env<'gc>(
 }
 
 pub fn prepare_function_call_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     captured_env: Option<&JSObjectDataPtr<'gc>>,
     this_val: Option<&Value<'gc>>,
     params_opt: Option<&[DestructuringElement]>,
@@ -22851,7 +22812,7 @@ pub fn prepare_function_call_env<'gc>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_function_call_env_with_home<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     captured_env: Option<&JSObjectDataPtr<'gc>>,
     this_val: Option<&Value<'gc>>,
     params_opt: Option<&[DestructuringElement]>,
@@ -22880,7 +22841,7 @@ pub fn prepare_function_call_env_with_home<'gc>(
 }
 
 pub fn prepare_closure_call_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     captured_env: Option<&JSObjectDataPtr<'gc>>,
     params_opt: Option<&[DestructuringElement]>,
     args: &[Value<'gc>],
@@ -22898,7 +22859,7 @@ enum CtorRef<'a, 'gc> {
 }
 
 fn evaluate_expr_new<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor: &Expr,
     args: &[Expr],
@@ -23662,7 +23623,7 @@ fn evaluate_expr_new<'gc>(
 }
 
 fn evaluate_expr_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     properties: &[(Expr, Expr, bool, bool)],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -24267,7 +24228,7 @@ fn evaluate_expr_object<'gc>(
 }
 
 fn evaluate_expr_array<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     elements: &[Option<Expr>],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -24611,7 +24572,7 @@ fn resource_is_callable<'gc>(val: &Value<'gc>) -> bool {
 /// If the value is not an object, throws TypeError.
 /// If the value doesn't have a callable [Symbol.dispose]/[Symbol.asyncDispose], throws TypeError.
 fn register_disposable_resource<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     val: &Value<'gc>,
     is_async: bool,
@@ -24741,13 +24702,13 @@ fn register_disposable_resource<'gc>(
 /// `initial_error` is the block's completion error (if the block threw), which
 /// will be combined with disposal errors per the DisposeResources spec algorithm.
 #[allow(dead_code)]
-pub fn dispose_resources<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
+pub fn dispose_resources<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
     dispose_resources_with_completion(mc, env, None)
 }
 
 /// Dispose resources, optionally combining with an initial completion error.
 pub fn dispose_resources_with_completion<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     initial_error: Option<Value<'gc>>,
 ) -> Result<(), EvalError<'gc>> {
@@ -24847,7 +24808,7 @@ pub fn dispose_resources_with_completion<'gc>(
 /// Dispose all async resources.  Returns a Vec of promises from asyncDispose
 /// calls, or errors synchronously if something goes wrong.
 #[allow(dead_code)]
-pub fn dispose_resources_async<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Vec<Value<'gc>>, EvalError<'gc>> {
+pub fn dispose_resources_async<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Vec<Value<'gc>>, EvalError<'gc>> {
     let list = match slot_get(env, &InternalSlot::DisposableResources) {
         Some(cell) => {
             if let Value::Object(arr) = &*cell.borrow() {
@@ -24921,7 +24882,7 @@ pub fn dispose_resources_async<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDat
 
 /// Call [Symbol.dispose]() or [Symbol.asyncDispose]() on a value.
 fn call_dispose_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     val: &Value<'gc>,
     is_async: bool,
@@ -24984,7 +24945,7 @@ fn call_dispose_method<'gc>(
 
 /// Create a SuppressedError value from (error, suppressed).
 pub fn create_suppressed_error_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     error: &Value<'gc>,
     suppressed: &Value<'gc>,

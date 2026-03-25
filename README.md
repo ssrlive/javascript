@@ -155,7 +155,7 @@ Source Code
 The engine uses [`gc-arena`](https://github.com/kyren/gc-arena) for garbage collection:
 
 - All JS heap objects are `Gc<'gc, ...>` pointers rooted in a `JsArena`
-- A `MutationContext` scope provides safe mutability
+- A `GcContext` scope provides safe mutability
 - Internal prototype chains use `Gc` pointers (no reference cycles thanks to tracing GC)
 - `SharedArrayBuffer` backing stores use `Arc<Mutex<Vec<u8>>>` for cross-thread sharing
 
@@ -262,7 +262,7 @@ let result = evaluate_script(r#"
 ```rust
 use javascript::Repl;
 
-let repl = Repl::new();
+let mut repl = Repl::new();
 repl.eval("let x = 10;").unwrap();
 let result = repl.eval("x + 5").unwrap();
 assert_eq!(result, "15");

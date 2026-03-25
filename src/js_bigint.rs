@@ -1,4 +1,4 @@
-use crate::core::MutationContext;
+use crate::core::GcContext;
 use crate::core::js_error::EvalError;
 use crate::core::{
     InternalSlot, JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value,
@@ -11,7 +11,7 @@ use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
 
 pub(crate) fn bigint_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -133,7 +133,7 @@ pub fn handle_bigint_object_method<'gc>(this_val: &Value<'gc>, method: &str, arg
 
 /// Handle static methods on the BigInt constructor (asIntN, asUintN)
 pub fn handle_bigint_static_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -176,7 +176,7 @@ pub fn handle_bigint_static_method<'gc>(
 
 /// ToIndex helper: convert a Value to a non-negative integer index
 /// Per spec: ToIndex(value) → integer ∈ [0, 2^53-1] or throws RangeError/TypeError
-fn to_index<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
+fn to_index<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
     if matches!(val, Value::Undefined) {
         return Ok(0);
     }
@@ -201,7 +201,7 @@ fn to_index<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectData
 }
 
 /// ToBigInt helper: convert a Value to a BigInt
-fn to_bigint<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<BigInt, EvalError<'gc>> {
+fn to_bigint<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<BigInt, EvalError<'gc>> {
     let prim = if let Value::Object(_) = val {
         to_primitive(mc, val, "number", env)?
     } else {
@@ -358,7 +358,7 @@ pub fn compare_bigint_and_number(b: &BigInt, n: f64) -> Option<std::cmp::Orderin
     }
 }
 
-pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_bigint<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let bigint_ctor = new_js_object_data(mc);
     slot_set(mc, &bigint_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("BigInt")));
     slot_set(mc, &bigint_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));

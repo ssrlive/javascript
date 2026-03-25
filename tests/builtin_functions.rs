@@ -1008,7 +1008,7 @@ mod builtin_functions_tests {
         assert_eq!(result, "false");
 
         // Test inherited property
-        let script = "let proto = {}; proto.inherited = 'yes'; let obj = {}; obj.__proto__ = proto; 'inherited' in obj";
+        let script = "let proto = {}; proto.inherited = 'yes'; let xyz = {}; xyz.__proto__ = proto; 'inherited' in xyz";
         let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }

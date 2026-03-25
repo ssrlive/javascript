@@ -1,5 +1,5 @@
 use crate::core::{
-    InternalSlot, JSObjectDataPtr, MutationContext, StatementKind, Value, check_strict_mode_violations, env_set_strictness,
+    GcContext, InternalSlot, JSObjectDataPtr, StatementKind, Value, check_strict_mode_violations, env_set_strictness,
     evaluate_call_dispatch, evaluate_statements, get_property_with_accessors, initialize_global_constructors_with_parent, new_gc_cell_ptr,
     new_js_object_data, object_get_key_value, object_set_key_value, parse_statements, slot_get, slot_remove, slot_set, tokenize,
 };
@@ -12,11 +12,7 @@ pub(crate) const SHADOW_REALM_SLOT: InternalSlot = InternalSlot::ShadowRealm;
 
 /// Throw a TypeError from a specific realm (so `instanceof TypeError` in the
 /// caller realm holds true, even when the error originates from another realm).
-fn throw_caller_realm_type_error<'gc>(
-    mc: &MutationContext<'gc>,
-    caller_env: &JSObjectDataPtr<'gc>,
-    msg: &str,
-) -> crate::core::EvalError<'gc> {
+fn throw_caller_realm_type_error<'gc>(mc: &GcContext<'gc>, caller_env: &JSObjectDataPtr<'gc>, msg: &str) -> crate::core::EvalError<'gc> {
     use crate::unicode::utf8_to_utf16;
     let msg_val = Value::String(utf8_to_utf16(msg));
     if let Some(te_val) = object_get_key_value(caller_env, "TypeError")
@@ -30,11 +26,7 @@ fn throw_caller_realm_type_error<'gc>(
 }
 
 /// Throw a SyntaxError from a specific realm (for parsing failures in evaluate).
-fn throw_caller_realm_syntax_error<'gc>(
-    mc: &MutationContext<'gc>,
-    caller_env: &JSObjectDataPtr<'gc>,
-    msg: &str,
-) -> crate::core::EvalError<'gc> {
+fn throw_caller_realm_syntax_error<'gc>(mc: &GcContext<'gc>, caller_env: &JSObjectDataPtr<'gc>, msg: &str) -> crate::core::EvalError<'gc> {
     use crate::unicode::utf8_to_utf16;
     let msg_val = Value::String(utf8_to_utf16(msg));
     if let Some(se_val) = object_get_key_value(caller_env, "SyntaxError")
@@ -51,7 +43,7 @@ fn throw_caller_realm_syntax_error<'gc>(
 //  Initialization: register global `ShadowRealm` constructor
 // ---------------------------------------------------------------------------
 
-pub fn initialize_shadow_realm<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_shadow_realm<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let ctor = new_js_object_data(mc);
     slot_set(mc, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("ShadowRealm")));
@@ -171,7 +163,7 @@ pub fn initialize_shadow_realm<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDat
 // ---------------------------------------------------------------------------
 
 pub fn handle_shadow_realm_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     _args: &[Value<'gc>],
     caller_env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, crate::core::EvalError<'gc>> {
@@ -254,7 +246,7 @@ pub fn handle_shadow_realm_constructor<'gc>(
 // ---------------------------------------------------------------------------
 
 pub fn handle_shadow_realm_evaluate<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: &Value<'gc>,
     args: &[Value<'gc>],
     caller_env: &JSObjectDataPtr<'gc>,
@@ -395,7 +387,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
 // ---------------------------------------------------------------------------
 
 pub fn handle_shadow_realm_import_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: &Value<'gc>,
     args: &[Value<'gc>],
     caller_env: &JSObjectDataPtr<'gc>,
@@ -475,7 +467,7 @@ pub fn handle_shadow_realm_import_value<'gc>(
 // ---------------------------------------------------------------------------
 
 fn get_wrapped_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     caller_env: &JSObjectDataPtr<'gc>,
     realm_env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
@@ -534,7 +526,7 @@ fn get_wrapped_value<'gc>(
 // ---------------------------------------------------------------------------
 
 fn create_wrapped_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     caller_env: &JSObjectDataPtr<'gc>,
     realm_env: &JSObjectDataPtr<'gc>,
     target: &Value<'gc>,
@@ -586,7 +578,7 @@ fn create_wrapped_function<'gc>(
 /// `crate::js_object::has_own_property_with_proxy` for the has-check
 /// (which honours the getOwnPropertyDescriptor proxy trap).
 fn copy_name_and_length<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     wrapped: &JSObjectDataPtr<'gc>,
     target: &Value<'gc>,
     _caller_env: &JSObjectDataPtr<'gc>,
@@ -657,7 +649,7 @@ fn copy_name_and_length<'gc>(
 // ---------------------------------------------------------------------------
 
 pub fn handle_wrapped_function_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     wrapped_obj: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -730,7 +722,7 @@ pub fn handle_wrapped_function_call<'gc>(
 /// Wrap an argument value when crossing from caller realm to target realm.
 /// Primitives pass through. Callable objects get wrapped. Non-callable objects throw TypeError.
 fn wrap_argument_into_realm<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     target_realm: &JSObjectDataPtr<'gc>,
     caller_realm: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,

@@ -1,4 +1,4 @@
-use crate::core::MutationContext;
+use crate::core::GcContext;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -58,7 +58,7 @@ fn get_parent_pid_windows() -> u32 {
 
 /// Handle OS module method calls
 pub(crate) fn handle_os_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -424,14 +424,14 @@ pub(crate) fn handle_os_method<'gc>(
     Err(raise_eval_error!(format!("OS method {method} not implemented")))
 }
 
-pub fn initialize_os_module<'gc>(mc: &MutationContext<'gc>, global_obj: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_os_module<'gc>(mc: &GcContext<'gc>, global_obj: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let os_obj = make_os_object(mc)?;
     object_set_key_value(mc, global_obj, "os", &Value::Object(os_obj))?;
     Ok(())
 }
 
 /// Create the OS object with all OS-related functions and constants
-pub fn make_os_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_os_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "remove", &Value::Function("os.remove".to_string()))?;
     object_set_key_value(mc, &obj, "mkdir", &Value::Function("os.mkdir".to_string()))?;
@@ -471,7 +471,7 @@ pub fn make_os_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<
 }
 
 /// Create the OS path object with path-related functions
-pub fn make_path_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_path_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "join", &Value::Function("os.path.join".to_string()))?;
     object_set_key_value(mc, &obj, "dirname", &Value::Function("os.path.dirname".to_string()))?;

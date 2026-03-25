@@ -28,7 +28,7 @@ use crate::core::{
     Statement, StatementKind, Value, evaluate_statements, extract_closure_from_value, generate_unique_id, object_get_key_value,
     object_set_key_value, prepare_closure_call_env, prepare_function_call_env, slot_get, slot_get_chained, slot_set, value_to_string,
 };
-use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
+use crate::core::{Gc, GcCell, GcContext, GcPtr, new_gc_cell_ptr};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use crate::{new_js_object_data, utf16_to_utf8};
@@ -133,7 +133,7 @@ enum Task<'gc> {
 
 /// Return the current number of queued tasks in the global task queue.
 pub fn create_promise_capability<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(GcPtr<'gc, JSPromise<'gc>>, Value<'gc>, Value<'gc>), JSError> {
     let promise = new_gc_cell_ptr(mc, JSPromise::new());
@@ -146,7 +146,7 @@ pub fn create_promise_capability<'gc>(
 }
 
 pub fn call_function<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     func: &Value<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -189,7 +189,7 @@ pub fn call_function<'gc>(
 }
 
 pub fn call_function_with_this<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     func: &Value<'gc>,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
@@ -247,7 +247,7 @@ pub fn call_function_with_this<'gc>(
 }
 
 /// Walk up to the global environment object (top of prototype chain)
-fn get_global_env<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'gc> {
+fn get_global_env<'gc>(_mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'gc> {
     // Climb prototypes until we find the global env.
     // The global env is identified by having the "globalThis" property.
     // We must NOT walk past it into Object.prototype or similar built-in prototypes.
@@ -273,7 +273,7 @@ fn get_global_env<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -
 /// Ensure a GC-rooted runtime JS object is stored on the global env under
 /// the hidden property `__promise_runtime`. This object will hold arrays
 /// for pending unhandled checks and allSettled state so they are arena-rooted.
-fn ensure_promise_runtime<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn ensure_promise_runtime<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let global = get_global_env(mc, env);
     if let Some(rc) = slot_get_chained(&global, &InternalSlot::PromiseRuntime)
         && let Value::Object(obj) = &*rc.borrow()
@@ -287,7 +287,7 @@ fn ensure_promise_runtime<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 }
 
 /// Get (or create) a runtime array property on the runtime object
-fn get_runtime_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn get_runtime_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let runtime = ensure_promise_runtime(mc, env)?;
     if let Some(arr_rc) = object_get_key_value(&runtime, name)
         && let Value::Object(arr_obj) = &*arr_rc.borrow()
@@ -302,7 +302,7 @@ fn get_runtime_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
 /// Push an entry into pending unhandled checks (stored as JS objects in runtime)
 fn runtime_push_pending_unhandled<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     promise: GcPtr<'gc, JSPromise<'gc>>,
     reason: Value<'gc>,
@@ -330,7 +330,7 @@ fn runtime_push_pending_unhandled<'gc>(
 }
 
 /// Peek and take unhandled rejection stored on runtime (as stringified reason)
-pub fn take_unhandled_rejection<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Option<Value<'gc>> {
+pub fn take_unhandled_rejection<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Option<Value<'gc>> {
     if let Ok(runtime) = ensure_promise_runtime(mc, env)
         && let Some(rc) = slot_get_chained(&runtime, &InternalSlot::UnhandledRejection)
         && let Value::String(s) = &*rc.borrow()
@@ -343,7 +343,7 @@ pub fn take_unhandled_rejection<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 }
 
 /// Clear any recorded runtime unhandled rejection if it was caused by `ptr`.
-pub fn clear_runtime_unhandled_for_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, ptr: usize) -> Result<(), JSError> {
+pub fn clear_runtime_unhandled_for_promise<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, ptr: usize) -> Result<(), JSError> {
     if let Ok(runtime) = ensure_promise_runtime(mc, env)
         && let Some(rc) = slot_get(&runtime, &InternalSlot::UnhandledRejectionPromisePtr)
         && let Value::Number(n) = &*rc.borrow()
@@ -358,7 +358,7 @@ pub fn clear_runtime_unhandled_for_promise<'gc>(mc: &MutationContext<'gc>, env: 
 
 /// Remove any pending __pending_unhandled entries for `ptr` from the runtime array
 pub fn runtime_remove_pending_unhandled_for_promise<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ptr: usize,
 ) -> Result<(), JSError> {
@@ -393,7 +393,7 @@ pub fn runtime_remove_pending_unhandled_for_promise<'gc>(
 
 /// Process pending runtime unhandled checks and enqueue UnhandledCheck tasks when their grace window elapsed.
 /// Returns `Ok(true)` if at least one task was enqueued.
-pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, force: bool) -> Result<bool, JSError> {
+pub fn process_runtime_pending_unhandled<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, force: bool) -> Result<bool, JSError> {
     let mut queued_any = false;
     if let Ok(runtime) = ensure_promise_runtime(mc, env)
         && let Some(rc) = slot_get_chained(&runtime, &InternalSlot::PendingUnhandled)
@@ -478,7 +478,7 @@ pub fn process_runtime_pending_unhandled<'gc>(mc: &MutationContext<'gc>, env: &J
 
 /// Mark a promise as handled and clear any pending unhandled rejection checks.
 pub fn mark_promise_handled<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     promise: GcPtr<'gc, JSPromise<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
@@ -491,7 +491,7 @@ pub fn mark_promise_handled<'gc>(
     Ok(())
 }
 
-pub fn pending_unhandled_count<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> usize {
+pub fn pending_unhandled_count<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> usize {
     if let Ok(arr) = get_runtime_array(mc, env, "__pending_unhandled") {
         crate::core::object_get_length(&arr).unwrap_or(0)
     } else {
@@ -519,10 +519,7 @@ pub fn has_active_timers() -> bool {
 /// Peek the reason information for the first pending UnhandledCheck task, if any.
 /// Returns (message, Option<(line, column)>) to avoid GC lifetime issues when reporting
 /// an unhandled rejection back to the caller.
-pub fn peek_pending_unhandled_info<'gc>(
-    _mc: &MutationContext<'gc>,
-    _env: &JSObjectDataPtr<'gc>,
-) -> Option<(String, Option<(usize, usize)>)> {
+pub fn peek_pending_unhandled_info<'gc>(_mc: &GcContext<'gc>, _env: &JSObjectDataPtr<'gc>) -> Option<(String, Option<(usize, usize)>)> {
     GLOBAL_TASK_QUEUE.with(|q| {
         let queue = q.borrow();
         for t in queue.iter() {
@@ -735,7 +732,7 @@ pub(crate) fn get_task_repetition_counters() -> &'static Mutex<std::collections:
 ///
 /// # Arguments
 /// * `task` - The task to queue (Resolution or Rejection)
-fn queue_task<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
+fn queue_task<'gc>(_mc: &GcContext<'gc>, task: Task<'gc>) {
     // Assign a compact task id to help correlate enqueue -> process logs
     let task_id = TASK_COUNTER.fetch_add(1, Ordering::SeqCst);
 
@@ -797,7 +794,7 @@ fn queue_task<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
 ///
 /// This is used to ensure certain tasks (like initial async steps) run
 /// before already-queued promise reactions.
-fn queue_task_front<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
+fn queue_task_front<'gc>(_mc: &GcContext<'gc>, task: Task<'gc>) {
     // Assign a compact task id to help correlate enqueue -> process logs
     let task_id = TASK_COUNTER.fetch_add(1, Ordering::SeqCst);
 
@@ -851,7 +848,7 @@ fn queue_task_front<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
 }
 
 pub fn queue_async_step<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
     resolve: &Value<'gc>,
     reject: &Value<'gc>,
@@ -873,7 +870,7 @@ pub fn queue_async_step<'gc>(
 }
 
 pub fn queue_dynamic_import<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     promise: GcPtr<'gc, JSPromise<'gc>>,
     module_specifier: Value<'gc>,
     env: JSObjectDataPtr<'gc>,
@@ -951,7 +948,7 @@ pub enum PollResult {
 }
 
 /// Process a single task.
-fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>) -> Result<(), JSError> {
+fn process_task<'gc>(mc: &GcContext<'gc>, task_id: usize, task: Task<'gc>) -> Result<(), JSError> {
     // Short summary of task for tracing including the assigned task id
     let task_summary = match &task {
         Task::Resolution { promise, callbacks } => format!(
@@ -1372,7 +1369,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
         } => {
             log::trace!("Processing DynamicImport task");
             fn import_result<'gc>(
-                mc: &MutationContext<'gc>,
+                mc: &GcContext<'gc>,
                 module_specifier: &Value<'gc>,
                 env: &JSObjectDataPtr<'gc>,
             ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1652,7 +1649,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task_id: usize, task: Task<'gc>)
 /// This function checks the task queue and executes the first ready task.
 /// If no tasks are ready but timers are pending, it returns `PollResult::Wait`.
 /// If the queue is empty, it returns `PollResult::Empty`.
-pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSError> {
+pub fn poll_event_loop<'gc>(mc: &GcContext<'gc>) -> Result<PollResult, JSError> {
     // Check for resolved Atomics.waitAsync waiters first.
     // If any resolved, call their promise resolve functions and report Executed.
     if crate::js_typedarray::check_resolved_async_waiters(mc)? {
@@ -1872,7 +1869,7 @@ pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSE
 ///
 /// # Returns
 /// * `Result<PollResult, JSError>` - The result of the poll operation
-pub fn run_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSError> {
+pub fn run_event_loop<'gc>(mc: &GcContext<'gc>) -> Result<PollResult, JSError> {
     log::trace!("run_event_loop called");
     // Mark that we're entering an event-loop run (may be nested).
     let nesting_before = RUN_LOOP_NESTING.fetch_add(1, Ordering::SeqCst);
@@ -1909,7 +1906,7 @@ pub fn run_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSEr
 }
 
 fn create_resolve_function_direct<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     promise: GcPtr<'gc, JSPromise<'gc>>,
     global_env: &JSObjectDataPtr<'gc>,
 ) -> Value<'gc> {
@@ -1936,7 +1933,7 @@ fn create_resolve_function_direct<'gc>(
 }
 
 fn create_reject_function_direct<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     promise: GcPtr<'gc, JSPromise<'gc>>,
     global_env: &JSObjectDataPtr<'gc>,
 ) -> Value<'gc> {
@@ -1969,7 +1966,7 @@ fn create_reject_function_direct<'gc>(
 
 /// Helper to handle the actual resolution from the captured environment
 pub fn __internal_promise_resolve_captured<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -1983,7 +1980,7 @@ pub fn __internal_promise_resolve_captured<'gc>(
 }
 
 pub fn __internal_promise_reject_captured<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2019,7 +2016,7 @@ fn get_promise_prototype_from_env<'gc>(env: JSObjectDataPtr<'gc>) -> Option<JSOb
 /// # Returns
 /// * `Result<JSObjectDataPtr, JSError>` - The promise object or creation error
 pub fn make_promise_js_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     promise: GcPtr<'gc, JSPromise<'gc>>,
     prototype: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
@@ -2059,7 +2056,7 @@ pub fn get_promise_from_js_object<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<GcP
 /// # Returns
 /// * `Result<Value, JSError>` - New promise for chaining or error
 pub fn perform_promise_then<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     on_fulfilled: Option<Value<'gc>>,
     on_rejected: Option<Value<'gc>>,
@@ -2135,12 +2132,7 @@ pub fn perform_promise_then<'gc>(
     Ok(())
 }
 
-pub fn resolve_promise<'gc>(
-    mc: &MutationContext<'gc>,
-    promise: &Gc<'gc, GcCell<JSPromise<'gc>>>,
-    value: Value<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) {
+pub fn resolve_promise<'gc>(mc: &GcContext<'gc>, promise: &Gc<'gc, GcCell<JSPromise<'gc>>>, value: Value<'gc>, env: &JSObjectDataPtr<'gc>) {
     let mut promise_borrow = promise.borrow_mut(mc);
     if let PromiseState::Pending = promise_borrow.state {
         // §27.2.1.3.2 Step 6: If SameValue(resolution, promise) is true,
@@ -2337,12 +2329,7 @@ pub fn resolve_promise<'gc>(
 /// - Sets promise state to Rejected and stores the reason
 /// - Queues all on_rejected callbacks for async execution
 /// - Clears the callback list after queuing
-pub fn reject_promise<'gc>(
-    mc: &MutationContext<'gc>,
-    promise: &Gc<'gc, GcCell<JSPromise<'gc>>>,
-    reason: Value<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) {
+pub fn reject_promise<'gc>(mc: &GcContext<'gc>, promise: &Gc<'gc, GcCell<JSPromise<'gc>>>, reason: Value<'gc>, env: &JSObjectDataPtr<'gc>) {
     let mut promise_borrow = promise.borrow_mut(mc);
     // Helpful debug logging for rejected promises (especially when rejecting
     // with JS Error-like objects) to help track unhandled rejections.
@@ -2415,7 +2402,7 @@ pub fn reject_promise<'gc>(
 /// - Increments the completion counter
 /// - Resolves the main Promise.allSettled promise when all promises have settled
 pub fn __internal_promise_allsettled_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     idx: f64,
     value: Value<'gc>,
     shared_state: Value<'gc>,
@@ -2476,7 +2463,7 @@ pub fn __internal_promise_allsettled_resolve<'gc>(
 /// - Increments the completion counter
 /// - Resolves the main Promise.allSettled promise when all promises have settled
 pub fn __internal_promise_allsettled_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     idx: f64,
     reason: Value<'gc>,
     shared_state: Value<'gc>,
@@ -2531,7 +2518,7 @@ pub fn __internal_promise_allsettled_reject<'gc>(
 /// * `value` - The resolved value from the first fulfilled promise
 /// * `result_promise` - The main Promise.any promise to resolve
 pub fn __internal_promise_any_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     value: Value<'gc>,
     result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     env: &JSObjectDataPtr<'gc>,
@@ -2558,7 +2545,7 @@ pub fn __internal_promise_any_resolve<'gc>(
 /// - When all promises reject, creates AggregateError with all rejection reasons
 #[allow(clippy::too_many_arguments)]
 pub fn __internal_promise_any_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     idx: f64,
     reason: Value<'gc>,
     rejections: Gc<'gc, GcCell<Vec<Option<Value<'gc>>>>>,
@@ -2605,7 +2592,7 @@ pub fn __internal_promise_any_reject<'gc>(
 /// * `value` - The resolved/rejected value from the first settled promise
 /// * `result_promise` - The main Promise.race promise to resolve/reject
 pub fn __internal_promise_race_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     value: Value<'gc>,
     result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     env: &JSObjectDataPtr<'gc>,
@@ -2622,7 +2609,7 @@ pub fn __internal_promise_race_resolve<'gc>(
 /// * `reason` - The rejection reason from the first rejected promise
 /// * `result_promise` - The main Promise.race promise to reject
 pub fn __internal_promise_race_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     reason: Value<'gc>,
     result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     env: &JSObjectDataPtr<'gc>,
@@ -2640,7 +2627,7 @@ pub fn __internal_promise_race_reject<'gc>(
 /// * `index` - Index of the promise in the original array
 /// * `value` - The resolved value
 pub fn __internal_allsettled_state_record_fulfilled_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     state_env: Value<'gc>,
     index: f64,
     value: Value<'gc>,
@@ -2692,7 +2679,7 @@ pub fn __internal_allsettled_state_record_fulfilled_env<'gc>(
 /// * `index` - Index of the promise in the original array
 /// * `reason` - The rejection reason
 pub fn __internal_allsettled_state_record_rejected_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     state_env: Value<'gc>,
     index: f64,
     reason: Value<'gc>,
@@ -2747,7 +2734,7 @@ pub fn __internal_allsettled_state_record_rejected_env<'gc>(
 /// A Value::Closure that can be used as a then callback
 #[allow(dead_code)]
 fn create_allsettled_resolve_callback<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     state_env: JSObjectDataPtr<'gc>,
     index: usize,
     parent_env: JSObjectDataPtr<'gc>,
@@ -2785,7 +2772,7 @@ fn create_allsettled_resolve_callback<'gc>(
 /// in the state env stored on the closure's environment.
 #[allow(dead_code)]
 fn create_allsettled_reject_callback<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     state_env: JSObjectDataPtr<'gc>,
     index: usize,
     parent_env: JSObjectDataPtr<'gc>,
@@ -2815,11 +2802,7 @@ fn create_allsettled_reject_callback<'gc>(
 
 // Value-based wrappers for timer functions (used by global function dispatch)
 
-pub fn handle_set_timeout_val<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+pub fn handle_set_timeout_val<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], _env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if args.is_empty() {
         return Err(raise_eval_error!("setTimeout requires at least one argument"));
     }
@@ -2893,7 +2876,7 @@ pub fn handle_set_timeout_val<'gc>(
 }
 
 pub fn handle_clear_timeout_val<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2939,11 +2922,7 @@ pub fn handle_clear_timeout_val<'gc>(
     Ok(Value::Undefined)
 }
 
-pub fn handle_set_interval_val<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+pub fn handle_set_interval_val<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], _env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if args.is_empty() {
         return Err(raise_eval_error!("setInterval requires at least one argument"));
     }
@@ -3020,7 +2999,7 @@ pub fn handle_set_interval_val<'gc>(
 }
 
 pub fn handle_clear_interval_val<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -3069,7 +3048,7 @@ fn get_function_proto<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<JSObjectDataPtr
 /// Helper: create a proper native function object (Value::Object with closure)
 /// with spec-compliant length, name, and [[Prototype]] = Function.prototype.
 fn make_native_fn_obj<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     display_name: &str,
     length: f64,
@@ -3094,7 +3073,7 @@ fn make_native_fn_obj<'gc>(
 /// Helper: wrap an arbitrary closure in a function object with length and name.
 #[allow(dead_code)]
 fn wrap_closure_as_fn_obj<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     closure: Value<'gc>,
     display_name: &str,
@@ -3216,7 +3195,7 @@ fn is_default_promise_ctor<'gc>(v: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> b
 /// SpeciesConstructor(O, defaultConstructor) — §7.3.20
 /// Looks up O.constructor[Symbol.species], falling back to defaultConstructor.
 fn get_species_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
@@ -3281,7 +3260,7 @@ fn get_species_constructor<'gc>(
 /// (promiseObj, resolveFunction, rejectFunction).
 #[allow(dead_code)]
 pub fn new_promise_capability<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     constructor: &Value<'gc>,
 ) -> Result<(Value<'gc>, Value<'gc>, Value<'gc>), EvalError<'gc>> {
@@ -3346,7 +3325,7 @@ pub fn new_promise_capability<'gc>(
 /// Reads args[0]=resolve, args[1]=reject and stores them into the cap_env object
 /// found via `__cap_env_ref` in the current env chain.
 pub fn __internal_capability_executor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3389,7 +3368,7 @@ fn get_static_this<'gc>(env: &JSObjectDataPtr<'gc>) -> Value<'gc> {
 /// Get the default Promise constructor from the global env.
 #[allow(dead_code)]
 /// Convert an EvalError into a JS Value for use in IfAbruptRejectPromise patterns.
-fn eval_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
+fn eval_error_to_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
     match err {
         EvalError::Throw(v, ..) => v,
         EvalError::Js(j) => crate::core::js_error_to_value(mc, env, &j),
@@ -3410,7 +3389,7 @@ fn get_default_promise_ctor<'gc>(env: &JSObjectDataPtr<'gc>) -> Value<'gc> {
 /// Falls back to native perform_promise_then if it's a native JSPromise.
 #[allow(dead_code)]
 fn call_then_on_thenable<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     thenable: &Value<'gc>,
     on_fulfilled: Value<'gc>,
@@ -3442,7 +3421,7 @@ pub fn get_default_promise_ctor_pub<'gc>(env: &JSObjectDataPtr<'gc>) -> Value<'g
 }
 
 pub fn get_species_constructor_pub<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
@@ -3452,7 +3431,7 @@ pub fn get_species_constructor_pub<'gc>(
 /// §27.2.5.3.1 Then Finally Functions — wraps onFinally for the resolved path.
 /// Returns a function that: calls onFinally(), then returns Promise.resolve(C, result).then(() => value)
 pub fn create_finally_then_wrapper<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     on_finally: &Value<'gc>,
     c: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -3483,7 +3462,7 @@ pub fn create_finally_then_wrapper<'gc>(
 /// §27.2.5.3.2 Catch Finally Functions — wraps onFinally for the rejected path.
 /// Returns a function that: calls onFinally(), then returns Promise.resolve(C, result).then(() => { throw reason })
 pub fn create_finally_catch_wrapper<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     on_finally: &Value<'gc>,
     c: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -3511,7 +3490,7 @@ pub fn create_finally_catch_wrapper<'gc>(
     Ok(Value::Object(wrap_closure_as_fn_obj(mc, env, raw_cl, "", 1.0)?))
 }
 
-pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_promise<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let promise_ctor = new_js_object_data(mc);
     slot_set(mc, &promise_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -3631,7 +3610,7 @@ pub fn initialize_promise<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 
 // Missing helpers for Promise.all
 pub fn __internal_promise_all_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3698,7 +3677,7 @@ pub fn __internal_promise_all_resolve<'gc>(
 }
 
 pub fn __internal_promise_all_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3720,7 +3699,7 @@ pub fn __internal_promise_all_reject<'gc>(
 
 /// Internal resolve callback for Promise.allSettled — creates {status:"fulfilled", value} record
 pub fn __internal_allsettled_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3784,7 +3763,7 @@ pub fn __internal_allsettled_resolve<'gc>(
 
 /// Internal reject callback for Promise.allSettled — creates {status:"rejected", reason} record
 pub fn __internal_allsettled_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3848,7 +3827,7 @@ pub fn __internal_allsettled_reject<'gc>(
 
 /// Internal resolve callback for Promise.any — first fulfilled value resolves the capability
 pub fn __internal_any_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3869,7 +3848,7 @@ pub fn __internal_any_resolve<'gc>(
 
 /// Internal reject callback for Promise.any — stores reason, creates AggregateError when all rejected
 pub fn __internal_any_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3941,7 +3920,7 @@ pub fn __internal_any_reject<'gc>(
 }
 
 pub fn handle_promise_static_method_val<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     this_val: Option<&Value<'gc>>,
@@ -4020,7 +3999,7 @@ pub fn handle_promise_static_method_val<'gc>(
 
             let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
 
-            let reject_cap = |mc2: &MutationContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
+            let reject_cap = |mc2: &GcContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
                 let reason = eval_error_to_value(mc2, env, e);
                 let _ = call_function(mc2, &cap_reject, &[reason], env);
                 cap_promise.clone()
@@ -4195,7 +4174,7 @@ pub fn handle_promise_static_method_val<'gc>(
             let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
 
             // IfAbruptRejectPromise helper closure
-            let reject_cap = |mc2: &MutationContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
+            let reject_cap = |mc2: &GcContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
                 let reason = eval_error_to_value(mc2, env, e);
                 let _ = call_function(mc2, &cap_reject, &[reason], env);
                 cap_promise.clone()
@@ -4358,7 +4337,7 @@ pub fn handle_promise_static_method_val<'gc>(
 
             let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
 
-            let reject_cap = |mc2: &MutationContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
+            let reject_cap = |mc2: &GcContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
                 let reason = eval_error_to_value(mc2, env, e);
                 let _ = call_function(mc2, &cap_reject, &[reason], env);
                 cap_promise.clone()
@@ -4450,7 +4429,7 @@ pub fn handle_promise_static_method_val<'gc>(
 
             let (cap_promise, cap_resolve, cap_reject) = new_promise_capability(mc, env, c)?;
 
-            let reject_cap = |mc2: &MutationContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
+            let reject_cap = |mc2: &GcContext<'gc>, e: EvalError<'gc>| -> Value<'gc> {
                 let reason = eval_error_to_value(mc2, env, e);
                 let _ = call_function(mc2, &cap_reject, &[reason], env);
                 cap_promise.clone()
@@ -4678,7 +4657,7 @@ pub fn handle_promise_static_method_val<'gc>(
 }
 
 pub fn handle_promise_prototype_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -4702,7 +4681,7 @@ pub fn handle_promise_prototype_method<'gc>(
 }
 
 pub fn handle_promise_constructor_val<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -4750,7 +4729,7 @@ pub fn handle_promise_constructor_val<'gc>(
 }
 
 pub fn handle_promise_then_val<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     on_fulfilled: Option<Value<'gc>>,
     on_rejected: Option<Value<'gc>>,
@@ -4794,7 +4773,7 @@ pub fn handle_promise_then_val<'gc>(
 }
 
 pub fn __internal_promise_finally_resolve<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -5020,7 +4999,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
 }
 
 pub fn __internal_promise_finally_reject<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -5170,7 +5149,7 @@ pub fn __internal_promise_finally_reject<'gc>(
 }
 
 pub fn handle_promise_finally_val<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     on_finally: Option<Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
@@ -5234,7 +5213,7 @@ pub fn handle_promise_finally_val<'gc>(
 /// §27.2.5.3.1 Then Finally Functions
 /// Called as thenFinally(value): calls onFinally(), then Promise.resolve(C, result).then(() => value)
 pub fn __internal_finally_then_wrapper<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -5281,7 +5260,7 @@ pub fn __internal_finally_then_wrapper<'gc>(
 /// §27.2.5.3.2 Catch Finally Functions
 /// Called as catchFinally(reason): calls onFinally(), then Promise.resolve(C, result).then(() => { throw reason })
 pub fn __internal_finally_catch_wrapper<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {

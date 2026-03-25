@@ -3,13 +3,13 @@ use crate::core::{
     get_own_property, get_property_with_accessors, new_js_object_data, object_get_key_value, object_set_key_value,
     prepare_function_call_env, slot_get, slot_get_chained, slot_set,
 };
-use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
+use crate::core::{Gc, GcCell, GcContext, GcPtr, new_gc_cell_ptr};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_date::is_date_object;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
-pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_object_module<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     // 1. Create Object constructor
     let object_ctor = new_js_object_data(mc);
     slot_set(mc, &object_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
@@ -110,7 +110,7 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 }
 
 fn to_object_for_object_static<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
@@ -171,7 +171,7 @@ fn to_object_for_object_static<'gc>(
 }
 
 #[allow(dead_code)]
-pub fn define_properties<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, props: &Value<'gc>) -> Result<(), EvalError<'gc>> {
+pub fn define_properties<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, props: &Value<'gc>) -> Result<(), EvalError<'gc>> {
     let props_obj = match props {
         Value::Object(o) => *o,
         _ => return Err(raise_type_error!("Property descriptors must be an object").into()),
@@ -205,7 +205,7 @@ pub fn define_properties<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'
 }
 
 pub(crate) fn define_property_internal<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     target_obj: &JSObjectDataPtr<'gc>,
     prop_key: impl Into<PropertyKey<'gc>>,
     desc_obj: &JSObjectDataPtr<'gc>,
@@ -634,7 +634,7 @@ pub(crate) fn define_property_internal<'gc>(
 }
 
 fn materialize_property_descriptor_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     src: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
@@ -668,7 +668,7 @@ pub fn is_callable_for_from_entries<'gc>(val: &Value<'gc>) -> bool {
 }
 
 pub fn handle_object_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2738,7 +2738,7 @@ pub fn handle_object_method<'gc>(
             let next_method = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
 
             // Helper to close iterator
-            let close_iterator = |mc2: &MutationContext<'gc>, env2: &JSObjectDataPtr<'gc>, iter_obj2: &JSObjectDataPtr<'gc>| {
+            let close_iterator = |mc2: &GcContext<'gc>, env2: &JSObjectDataPtr<'gc>, iter_obj2: &JSObjectDataPtr<'gc>| {
                 let return_method = crate::core::get_property_with_accessors(mc2, env2, iter_obj2, "return");
                 if let Ok(ret_fn) = return_method
                     && is_callable_for_from_entries(&ret_fn)
@@ -2809,7 +2809,7 @@ pub fn handle_object_method<'gc>(
 }
 
 pub(crate) fn handle_to_string_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj_val: &Value<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -3026,7 +3026,7 @@ pub(crate) fn handle_to_string_method<'gc>(
 }
 
 pub(crate) fn handle_error_to_string_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj_val: &Value<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -3084,7 +3084,7 @@ pub(crate) fn handle_error_to_string_method<'gc>(
 }
 
 pub(crate) fn handle_value_of_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj_val: &Value<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -3304,12 +3304,12 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object").into()),
         Value::PrivateName(..) => Err(raise_type_error!("Cannot convert private name to object").into()),
         Value::VmFunction(ip, arity) => Ok(Value::VmFunction(*ip, *arity)),
-        Value::VmClosure(ip, arity, uv) => Ok(Value::VmClosure(*ip, *arity, uv.clone())),
-        Value::VmArray(arr) => Ok(Value::VmArray(arr.clone())),
-        Value::VmObject(obj) => Ok(Value::VmObject(obj.clone())),
+        Value::VmClosure(ip, arity, uv) => Ok(Value::VmClosure(*ip, *arity, *uv)),
+        Value::VmArray(arr) => Ok(Value::VmArray(*arr)),
+        Value::VmObject(obj) => Ok(Value::VmObject(*obj)),
         Value::VmNativeFunction(id) => Ok(Value::VmNativeFunction(*id)),
-        Value::VmMap(m) => Ok(Value::VmMap(m.clone())),
-        Value::VmSet(s) => Ok(Value::VmSet(s.clone())),
+        Value::VmMap(m) => Ok(Value::VmMap(*m)),
+        Value::VmSet(s) => Ok(Value::VmSet(*s)),
     }
 }
 
@@ -3319,7 +3319,7 @@ pub(crate) fn handle_value_of_method<'gc>(
 /// where needed) and return `Ok(Some(Value))`. If it does not match, returns
 /// `Ok(None)` so callers can fall back to other dispatch logic.
 pub(crate) fn handle_object_prototype_builtin<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     func_name: &str,
     object: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
@@ -3573,7 +3573,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
     }
 }
 
-fn get_well_known_symbol<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
+fn get_well_known_symbol<'gc>(_mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
     if let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_ctor_val.borrow()
         && let Some(sym_val) = object_get_key_value(sym_ctor, name)

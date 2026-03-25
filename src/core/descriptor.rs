@@ -1,5 +1,5 @@
 use crate::core::{
-    ClosureData, DestructuringElement, Gc, JSObjectDataPtr, MutationContext, PropertyKey, Value, new_gc_cell_ptr, new_js_object_data,
+    ClosureData, DestructuringElement, Gc, GcContext, JSObjectDataPtr, PropertyKey, Value, new_gc_cell_ptr, new_js_object_data,
     object_get_key_value, object_set_key_value,
 };
 use crate::{JSError, raise_type_error};
@@ -41,7 +41,7 @@ fn compute_function_length(params: &[DestructuringElement]) -> usize {
     fn_length
 }
 
-fn define_function_length<'gc>(mc: &MutationContext<'gc>, func_obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
+fn define_function_length<'gc>(mc: &GcContext<'gc>, func_obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
     let desc = create_descriptor_object(mc, &Value::Number(length as f64), false, false, true)?;
     crate::js_object::define_property_internal(mc, func_obj, "length", &desc)?;
     Ok(())
@@ -103,7 +103,7 @@ impl<'gc> PropertyDescriptor<'gc> {
     /// Produce a JS object representing this descriptor. Missing fields are
     /// materialized using sensible defaults so the returned object is a complete
     /// descriptor suitable for APIs like `Reflect.getOwnPropertyDescriptor`.
-    pub fn to_object(&self, mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    pub fn to_object(&self, mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
         let desc = new_js_object_data(mc);
         // If this is an accessor descriptor (get/set present), expose get/set and flags
         if self.get.is_some() || self.set.is_some() {
@@ -131,7 +131,7 @@ impl<'gc> PropertyDescriptor<'gc> {
 /// Create a descriptor object populated with `value`, `writable`, `enumerable`, `configurable` fields.
 /// Returned object can be used as a property descriptor (e.g., for reflecting APIs).
 pub fn create_descriptor_object<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     value: &Value<'gc>,
     writable: bool,
     enumerable: bool,
@@ -144,7 +144,7 @@ pub fn create_descriptor_object<'gc>(
 /// Converts internal `Value::Property` / Getter / Setter variants into a
 /// `PropertyDescriptor` suitable for `to_object`.
 pub(crate) fn build_property_descriptor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
 ) -> Option<PropertyDescriptor<'gc>> {
@@ -349,7 +349,7 @@ pub(crate) fn build_property_descriptor<'gc>(
 /// Validate a descriptor for use in DefineProperty/DefineProperties.
 /// Ensures it is NOT both a data and an accessor descriptor and that
 /// getter/setter values are functions or `undefined`.
-pub fn validate_descriptor_for_define<'gc>(_mc: &MutationContext<'gc>, pd: &PropertyDescriptor<'gc>) -> Result<(), JSError> {
+pub fn validate_descriptor_for_define<'gc>(_mc: &GcContext<'gc>, pd: &PropertyDescriptor<'gc>) -> Result<(), JSError> {
     if (pd.get.is_some() || pd.set.is_some()) && (pd.value.is_some() || pd.writable.is_some()) {
         return Err(raise_type_error!(
             "Invalid property descriptor: cannot be both a data and an accessor descriptor"

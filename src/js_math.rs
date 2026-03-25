@@ -1,4 +1,4 @@
-use crate::core::MutationContext;
+use crate::core::GcContext;
 use crate::core::js_error::EvalError;
 use crate::core::{
     JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value, to_number_with_env,
@@ -12,12 +12,7 @@ use crate::unicode::utf8_to_utf16;
 
 /// ToNumber coercion for a single Math argument (missing → NaN like `undefined`).
 #[inline]
-fn arg_to_number<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    args: &[Value<'gc>],
-    idx: usize,
-) -> Result<f64, EvalError<'gc>> {
+fn arg_to_number<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, args: &[Value<'gc>], idx: usize) -> Result<f64, EvalError<'gc>> {
     to_number_with_env(mc, env, args.get(idx).unwrap_or(&Value::Undefined))
 }
 
@@ -68,7 +63,7 @@ fn js_pow(base: f64, exp: f64) -> f64 {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Create the Math object with all mathematical constants and functions
-pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_math<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let math_obj = new_js_object_data(mc);
     let _ = crate::core::set_internal_prototype_from_constructor(mc, &math_obj, env, "Object");
 
@@ -161,7 +156,7 @@ pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
 
 /// Handle Math object method calls — all arguments undergo ToNumber coercion.
 pub fn handle_math_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,

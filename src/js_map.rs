@@ -1,8 +1,7 @@
-use crate::core::{GcPtr, InternalSlot, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::core::{
-    JSMap, JSObjectDataPtr, MutationContext, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value,
-    same_value_zero,
+    GcContext, JSMap, JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value, same_value_zero,
 };
+use crate::core::{GcPtr, InternalSlot, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::js_array::{create_array, set_array_length};
 use crate::unicode::utf8_to_utf16;
 use crate::{JSError, core::EvalError};
@@ -19,7 +18,7 @@ fn normalize_map_key<'gc>(key: Value<'gc>) -> Value<'gc> {
 }
 
 /// Initialize Map constructor and prototype
-pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let map_ctor = new_js_object_data(mc);
     slot_set(mc, &map_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &map_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Map")));
@@ -196,7 +195,7 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 ///    d. Call(adder, map, « k, v »).
 ///    e. On abrupt: IteratorClose.
 pub(crate) fn handle_map_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -311,7 +310,7 @@ pub(crate) fn handle_map_constructor<'gc>(
 
 /// §22.1.2.6  Map.groupBy ( items, callbackfn )
 pub(crate) fn handle_map_group_by<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -421,7 +420,7 @@ pub(crate) fn handle_map_group_by<'gc>(
 
 /// Handle Map instance method calls
 pub(crate) fn handle_map_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     map: &GcPtr<'gc, JSMap<'gc>>,
     method: &str,
     args: &[Value<'gc>],
@@ -595,7 +594,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
 
 /// Create a new Map Iterator
 pub(crate) fn create_map_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     map: GcPtr<'gc, JSMap<'gc>>,
     kind: &str,
@@ -620,7 +619,7 @@ pub(crate) fn create_map_iterator<'gc>(
 }
 
 pub(crate) fn handle_map_iterator_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -707,7 +706,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 
 /// Get an iterator from an iterable object (GetIterator).
 pub(crate) fn get_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iterable: &Value<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, Value<'gc>), EvalError<'gc>> {
@@ -759,7 +758,7 @@ pub(crate) fn get_iterator<'gc>(
 
 /// Call iterator.next()
 pub(crate) fn call_iterator_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
     next_fn: &Value<'gc>,
@@ -768,11 +767,7 @@ pub(crate) fn call_iterator_next<'gc>(
 }
 
 /// Get "done" from iterator result
-pub(crate) fn get_iterator_done<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    result: &Value<'gc>,
-) -> Result<bool, EvalError<'gc>> {
+pub(crate) fn get_iterator_done<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, result: &Value<'gc>) -> Result<bool, EvalError<'gc>> {
     if let Value::Object(obj) = result {
         let done_val = crate::core::get_property_with_accessors(mc, env, obj, "done")?;
         Ok(done_val.to_truthy())
@@ -783,7 +778,7 @@ pub(crate) fn get_iterator_done<'gc>(
 
 /// Get "value" from iterator result (accessor-aware)
 pub(crate) fn get_iterator_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     result: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -796,7 +791,7 @@ pub(crate) fn get_iterator_value<'gc>(
 
 /// Close an iterator (call iterator.return() if present)
 pub(crate) fn close_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), EvalError<'gc>> {

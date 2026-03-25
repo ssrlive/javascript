@@ -1,12 +1,12 @@
 use crate::core::{
-    EvalError, InternalSlot, JSObjectDataPtr, MutationContext, Value, new_js_object_data, object_get_key_value, object_set_key_value,
+    EvalError, GcContext, InternalSlot, JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value,
     slot_get_chained, slot_set,
 };
 use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
-pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_boolean<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let boolean_ctor = new_js_object_data(mc);
     slot_set(mc, &boolean_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -66,7 +66,7 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 }
 
 pub(crate) fn handle_boolean_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -82,7 +82,7 @@ pub(crate) fn handle_boolean_constructor<'gc>(
 }
 
 pub fn boolean_prototype_to_string<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -93,7 +93,7 @@ pub fn boolean_prototype_to_string<'gc>(
 }
 
 pub fn boolean_prototype_value_of<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {

@@ -1,5 +1,5 @@
 use crate::core::{EvalError, GcPtr, InternalSlot, JSObjectDataPtr, slot_get, slot_set};
-use crate::core::{MutationContext, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value};
+use crate::core::{GcContext, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
@@ -350,7 +350,7 @@ fn timezone_offset_ms(t: f64) -> f64 {
 // =========================================================================
 // ToNumber helper for Date method args
 // =========================================================================
-fn to_number_val<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
+fn to_number_val<'gc>(mc: &GcContext<'gc>, v: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
     let prim = crate::core::to_primitive(mc, v, "number", env)?;
     crate::core::to_number(&prim)
 }
@@ -359,7 +359,7 @@ fn to_number_val<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>, env: &JSObjectD
 // Initialize Date constructor
 // =========================================================================
 
-pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub(crate) fn initialize_date<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let date_ctor = new_js_object_data(mc);
     slot_set(mc, &date_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &date_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Date")));
@@ -567,7 +567,7 @@ fn this_time_value<'gc>(this: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     Err(raise_type_error!("this is not a Date object").into())
 }
 
-fn set_time_stamp_value<'gc>(mc: &MutationContext<'gc>, date_obj: &JSObjectDataPtr<'gc>, timestamp: f64) -> Result<(), JSError> {
+fn set_time_stamp_value<'gc>(mc: &GcContext<'gc>, date_obj: &JSObjectDataPtr<'gc>, timestamp: f64) -> Result<(), JSError> {
     slot_set(mc, date_obj, InternalSlot::Timestamp, &Value::Number(timestamp));
     Ok(())
 }
@@ -883,7 +883,7 @@ pub(crate) fn construct_date_from_components(components: &[f64]) -> f64 {
 // =========================================================================
 
 pub(crate) fn handle_date_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -959,7 +959,7 @@ pub(crate) fn handle_date_constructor<'gc>(
 // =========================================================================
 
 pub(crate) fn handle_date_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -1722,7 +1722,7 @@ pub(crate) fn handle_date_method<'gc>(
 // =========================================================================
 
 pub(crate) fn handle_date_static_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,

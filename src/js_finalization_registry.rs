@@ -1,6 +1,6 @@
 use crate::core::EvalError;
 use crate::core::WeakKey;
-use crate::core::{InternalSlot, MutationContext, slot_get_chained, slot_set};
+use crate::core::{GcContext, InternalSlot, slot_get_chained, slot_set};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
     error::JSError,
@@ -9,7 +9,7 @@ use crate::{
 
 /// Handle `new FinalizationRegistry(cleanupCallback)` constructor calls (spec §26.2.1)
 pub(crate) fn handle_fr_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -68,7 +68,7 @@ pub(crate) fn handle_fr_constructor<'gc>(
 }
 
 /// Initialize FinalizationRegistry constructor and prototype (spec §26.2.2, §26.2.3)
-pub fn initialize_finalization_registry<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_finalization_registry<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let fr_ctor = new_js_object_data(mc);
     slot_set(mc, &fr_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -144,7 +144,7 @@ pub fn initialize_finalization_registry<'gc>(mc: &MutationContext<'gc>, env: &JS
 
 /// Handle FinalizationRegistry instance method calls.
 pub(crate) fn handle_fr_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],

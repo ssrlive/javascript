@@ -1,7 +1,7 @@
 /// DisposableStack and AsyncDisposableStack built-in classes
 /// Implements the TC39 Explicit Resource Management proposal.
 use crate::core::{
-    EvalError, InternalSlot, JSObjectDataPtr, MutationContext, Value, env_get, new_gc_cell_ptr, new_js_object_data, object_get_key_value,
+    EvalError, GcContext, InternalSlot, JSObjectDataPtr, Value, env_get, new_gc_cell_ptr, new_js_object_data, object_get_key_value,
     object_get_length, object_set_key_value, object_set_length, slot_get, slot_get_chained, slot_set,
 };
 use crate::unicode::utf8_to_utf16;
@@ -10,7 +10,7 @@ use crate::{JSError, PropertyKey};
 /// Create a native built-in function object with the given dispatch name,
 /// expected argument count (`length`) and display `name`.
 fn create_builtin_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     dispatch_name: &str,
     length: usize,
@@ -44,7 +44,7 @@ fn create_builtin_method<'gc>(
 // DisposableStack
 // =========================================================================
 
-pub fn initialize_disposable_stack<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_disposable_stack<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let ctor = new_js_object_data(mc);
     slot_set(mc, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -140,7 +140,7 @@ pub fn initialize_disposable_stack<'gc>(mc: &MutationContext<'gc>, env: &JSObjec
 }
 
 pub fn handle_disposable_stack_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -171,7 +171,7 @@ pub fn handle_disposable_stack_constructor<'gc>(
 }
 
 pub fn handle_disposable_stack_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     method: &str,
     args: &[Value<'gc>],
@@ -192,7 +192,7 @@ pub fn handle_disposable_stack_method<'gc>(
 // AsyncDisposableStack
 // =========================================================================
 
-pub fn initialize_async_disposable_stack<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_async_disposable_stack<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let ctor = new_js_object_data(mc);
     slot_set(mc, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -286,7 +286,7 @@ pub fn initialize_async_disposable_stack<'gc>(mc: &MutationContext<'gc>, env: &J
 }
 
 pub fn handle_async_disposable_stack_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -317,7 +317,7 @@ pub fn handle_async_disposable_stack_constructor<'gc>(
 }
 
 pub fn handle_async_disposable_stack_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     method: &str,
     args: &[Value<'gc>],
@@ -339,7 +339,7 @@ pub fn handle_async_disposable_stack_method<'gc>(
 // =========================================================================
 
 fn ds_use<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -364,7 +364,7 @@ fn ds_use<'gc>(
 }
 
 fn ds_adopt<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -386,7 +386,7 @@ fn ds_adopt<'gc>(
 }
 
 fn ds_defer<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -405,11 +405,7 @@ fn ds_defer<'gc>(
     Ok(Value::Undefined)
 }
 
-fn ds_dispose<'gc>(
-    mc: &MutationContext<'gc>,
-    this_val: Option<&Value<'gc>>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn ds_dispose<'gc>(mc: &GcContext<'gc>, this_val: Option<&Value<'gc>>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let obj = require_internal(this_val, "sync")?;
     if is_disposed(&obj) {
         return Ok(Value::Undefined);
@@ -419,11 +415,7 @@ fn ds_dispose<'gc>(
     Ok(Value::Undefined)
 }
 
-fn ds_move<'gc>(
-    mc: &MutationContext<'gc>,
-    this_val: Option<&Value<'gc>>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn ds_move<'gc>(mc: &GcContext<'gc>, this_val: Option<&Value<'gc>>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let obj = require_internal(this_val, "sync")?;
     require_not_disposed(&obj)?;
 
@@ -460,7 +452,7 @@ fn ds_disposed<'gc>(this_val: Option<&Value<'gc>>, expected_type: &str) -> Resul
 // =========================================================================
 
 fn ads_use<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -486,7 +478,7 @@ fn ads_use<'gc>(
 }
 
 fn ads_adopt<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -509,7 +501,7 @@ fn ads_adopt<'gc>(
 }
 
 fn ads_defer<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -530,7 +522,7 @@ fn ads_defer<'gc>(
 }
 
 fn ads_dispose_async<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -546,11 +538,7 @@ fn ads_dispose_async<'gc>(
     }
 }
 
-fn ads_move<'gc>(
-    mc: &MutationContext<'gc>,
-    this_val: Option<&Value<'gc>>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn ads_move<'gc>(mc: &GcContext<'gc>, this_val: Option<&Value<'gc>>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let obj = require_internal(this_val, "async")?;
     require_not_disposed(&obj)?;
 
@@ -628,7 +616,7 @@ fn resource_list<'gc>(obj: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>
     Err(crate::raise_type_error!("DisposableStack internal error: missing resource list").into())
 }
 
-fn append_entry<'gc>(mc: &MutationContext<'gc>, list: &JSObjectDataPtr<'gc>, entry: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
+fn append_entry<'gc>(mc: &GcContext<'gc>, list: &JSObjectDataPtr<'gc>, entry: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
     let len = object_get_length(list).unwrap_or(0);
     object_set_key_value(mc, list, len, &Value::Object(*entry))?;
     object_set_length(mc, list, len + 1)?;
@@ -637,7 +625,7 @@ fn append_entry<'gc>(mc: &MutationContext<'gc>, list: &JSObjectDataPtr<'gc>, ent
 
 /// Dispose all entries in the resource list in reverse order.
 fn dispose_list<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
     try_async: bool,
@@ -751,7 +739,7 @@ fn is_callable(val: &Value) -> bool {
 }
 
 fn get_symbol_dispose_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -773,7 +761,7 @@ fn get_symbol_dispose_method<'gc>(
 }
 
 fn get_symbol_async_dispose_or_dispose_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -790,7 +778,7 @@ fn get_symbol_async_dispose_or_dispose_method<'gc>(
 }
 
 fn call_dispose_on_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
     try_async: bool,
@@ -815,7 +803,7 @@ fn get_symbol_obj<'gc>(env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc
 }
 
 fn lookup_symbol_on_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
     sym_data: &gc_arena::Gc<'gc, crate::core::SymbolData>,
@@ -826,11 +814,7 @@ fn lookup_symbol_on_value<'gc>(
     }
 }
 
-fn create_resolved_promise<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    value: &Value<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn create_resolved_promise<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, value: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let promise_ctor = env_get(env, "Promise").ok_or_else(|| -> EvalError<'gc> { crate::raise_type_error!("Promise not found").into() })?;
     let promise_val = promise_ctor.borrow().clone();
     if let Value::Object(ctor_obj) = &promise_val
@@ -843,7 +827,7 @@ fn create_resolved_promise<'gc>(
 }
 
 fn create_rejected_promise<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     reason: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {

@@ -1,5 +1,5 @@
 use crate::core::{ClosureData, Expr, InternalSlot, JSProxy, Statement, StatementKind, slot_set};
-use crate::core::{Gc, MutationContext};
+use crate::core::{Gc, GcContext};
 use crate::env_set;
 use crate::unicode::utf16_to_utf8;
 use crate::{
@@ -158,7 +158,7 @@ fn is_constructor_target(val: &Value) -> bool {
 
 /// Handle Proxy constructor calls (arguments already evaluated)
 pub(crate) fn handle_proxy_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -229,7 +229,7 @@ pub(crate) fn handle_proxy_constructor<'gc>(
 }
 
 pub(crate) fn handle_proxy_revocable<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -374,7 +374,7 @@ fn get_object_prototype<'gc>(proxy: &Gc<'gc, JSProxy<'gc>>) -> Option<JSObjectDa
 
 /// Create a plain object with Object.prototype as its [[Prototype]],
 /// matching spec's ObjectCreate(%ObjectPrototype%).
-fn new_object_with_proto<'gc>(mc: &MutationContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> JSObjectDataPtr<'gc> {
+fn new_object_with_proto<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> JSObjectDataPtr<'gc> {
     let obj = new_js_object_data(mc);
     if let Some(proto) = get_object_prototype(proxy) {
         obj.borrow_mut(mc).prototype = Some(proto);
@@ -384,7 +384,7 @@ fn new_object_with_proto<'gc>(mc: &MutationContext<'gc>, proxy: &Gc<'gc, JSProxy
 
 /// Apply a proxy trap if available, otherwise fall back to default behavior
 pub(crate) fn apply_proxy_trap<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     trap_name: &str,
     args: Vec<Value<'gc>>,
@@ -449,7 +449,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
 /// such that getters are invoked with the *Receiver* as `this` (not with the target).
 /// This is used by the proxy [[Get]] default when no trap is defined.
 fn proxy_ordinary_get<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &crate::core::JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
     receiver: &Option<Value<'gc>>,
@@ -529,7 +529,7 @@ fn proxy_ordinary_get<'gc>(
 /// This is used to implement CreateListFromArrayLike semantics where
 /// getters on the trap result must be observable.
 fn read_property_invoking_getters<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<crate::core::PropertyKey<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -553,7 +553,7 @@ fn read_property_invoking_getters<'gc>(
 /// Proxy [[Call]] internal method (spec §10.5.12)
 /// Called when a proxy-wrapped callable is invoked as a function.
 pub(crate) fn proxy_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     this_arg: &Value<'gc>,
     args: &[Value<'gc>],
@@ -591,7 +591,7 @@ pub(crate) fn proxy_call<'gc>(
 /// Proxy [[Construct]] internal method (spec §10.5.13)
 /// Called when a proxy-wrapped constructor is invoked with `new`.
 pub(crate) fn proxy_construct<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     args: &[Value<'gc>],
     new_target: &Value<'gc>,
@@ -640,7 +640,7 @@ pub(crate) fn proxy_construct<'gc>(
 /// Obtain the "ownKeys" result for a proxy by invoking the trap (if present)
 /// and converting the returned array-like into a vector of PropertyKey.
 pub(crate) fn proxy_own_keys<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
 ) -> Result<Vec<crate::core::PropertyKey<'gc>>, EvalError<'gc>> {
     log::trace!("proxy_own_keys: proxy_ptr={:p}", Gc::as_ptr(*proxy));
@@ -769,7 +769,7 @@ pub(crate) fn proxy_own_keys<'gc>(
 
 /// Get property from proxy target, applying get trap if available
 pub(crate) fn proxy_get_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
@@ -778,7 +778,7 @@ pub(crate) fn proxy_get_property<'gc>(
 
 /// Get property from proxy target with explicit wrapper and receiver
 pub(crate) fn proxy_get_property_with_wrapper<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     wrapper: &crate::core::JSObjectDataPtr<'gc>,
@@ -788,7 +788,7 @@ pub(crate) fn proxy_get_property_with_wrapper<'gc>(
 
 /// Get property from proxy target with explicit receiver, applying get trap if available
 pub(crate) fn proxy_get_property_with_receiver<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     receiver: Option<Value<'gc>>,
@@ -925,7 +925,7 @@ pub(crate) fn proxy_get_property_with_receiver<'gc>(
 /// `desc` is the new descriptor object, `current` is the current target property descriptor object.
 /// Returns true if the new descriptor is compatible with the current one.
 fn is_compatible_property_descriptor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     _extensible: bool,
     desc: &crate::core::JSObjectDataPtr<'gc>,
     current: &crate::core::JSObjectDataPtr<'gc>,
@@ -1024,7 +1024,7 @@ fn is_compatible_property_descriptor<'gc>(
 
 /// Public wrapper for is_compatible_property_descriptor
 pub(crate) fn is_compatible_property_descriptor_pub<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     extensible: bool,
     desc: &crate::core::JSObjectDataPtr<'gc>,
     current: &crate::core::JSObjectDataPtr<'gc>,
@@ -1035,7 +1035,7 @@ pub(crate) fn is_compatible_property_descriptor_pub<'gc>(
 /// Call the getOwnPropertyDescriptor trap (or default) and return the descriptor's [[Enumerable]] value
 /// as Some(true/false) if descriptor exists, or None if it is undefined.
 pub(crate) fn proxy_get_own_property_descriptor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &crate::core::PropertyKey<'gc>,
 ) -> Result<Option<crate::core::JSObjectDataPtr<'gc>>, EvalError<'gc>> {
@@ -1303,7 +1303,7 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
 
 /// Convenience: call proxy_get_own_property_descriptor and extract just the enumerable flag.
 pub(crate) fn proxy_get_own_property_is_enumerable<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &crate::core::PropertyKey<'gc>,
 ) -> Result<Option<bool>, EvalError<'gc>> {
@@ -1321,7 +1321,7 @@ pub(crate) fn proxy_get_own_property_is_enumerable<'gc>(
 /// OrdinarySet(O, P, V, Receiver) — spec 10.1.9 / 10.1.9.2
 /// Used by Reflect.set when the target is an ordinary (non-proxy) object.
 pub(crate) fn ordinary_set<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     target_obj: &crate::core::JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
@@ -1488,7 +1488,7 @@ pub(crate) fn ordinary_set<'gc>(
 
 /// Helper for OrdinarySet steps 3.c–3.e: operate on Receiver to create or update property.
 fn ordinary_set_create_or_update<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
     receiver: &Value<'gc>,
@@ -1594,7 +1594,7 @@ fn ordinary_set_create_or_update<'gc>(
 
 /// Set property on proxy target, applying set trap if available
 pub(crate) fn proxy_set_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
@@ -1604,7 +1604,7 @@ pub(crate) fn proxy_set_property<'gc>(
 
 /// Set property on proxy target with explicit wrapper (receiver = proxy wrapper)
 pub(crate) fn proxy_set_property_with_wrapper<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
@@ -1614,7 +1614,7 @@ pub(crate) fn proxy_set_property_with_wrapper<'gc>(
 }
 
 pub(crate) fn proxy_set_property_with_receiver<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
@@ -2008,7 +2008,7 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
 /// Proxy [[DefineOwnProperty]] — forwards a full descriptor object through the proxy chain.
 /// Used when the default behavior needs to forward to a target that may itself be a proxy.
 pub(crate) fn proxy_define_own_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     desc_obj: &crate::core::JSObjectDataPtr<'gc>,
@@ -2132,7 +2132,7 @@ pub(crate) fn proxy_define_own_property<'gc>(
 /// This creates a full data descriptor {value, writable:true, enumerable:true, configurable:true}
 /// and routes through proxy_define_own_property which includes all spec invariant checks.
 pub(crate) fn proxy_define_data_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
@@ -2150,7 +2150,7 @@ pub(crate) fn proxy_define_data_property<'gc>(
 /// (OrdinarySetWithOwnDescriptor step 2.d.iv: descriptor is {[[Value]]: V} only).
 /// Routes through proxy_define_own_property for proper invariant checks.
 pub(crate) fn proxy_define_property_value_only<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
@@ -2163,7 +2163,7 @@ pub(crate) fn proxy_define_property_value_only<'gc>(
 
 /// Check if property exists on proxy target, applying has trap if available
 pub(crate) fn proxy_has_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: impl Into<PropertyKey<'gc>>,
 ) -> Result<bool, EvalError<'gc>> {
@@ -2235,7 +2235,7 @@ pub(crate) fn proxy_has_property<'gc>(
 
 /// Delete property from proxy target, applying deleteProperty trap if available
 pub(crate) fn proxy_delete_property<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
@@ -2316,7 +2316,7 @@ pub(crate) fn property_key_to_value_pub<'gc>(key: &PropertyKey<'gc>) -> Value<'g
 }
 
 /// Proxy [[IsExtensible]] internal method (spec §10.5.3)
-pub(crate) fn proxy_is_extensible<'gc>(mc: &MutationContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<bool, EvalError<'gc>> {
+pub(crate) fn proxy_is_extensible<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<bool, EvalError<'gc>> {
     let result = apply_proxy_trap(mc, proxy, "isExtensible", vec![(*proxy.target).clone()], || match &*proxy.target {
         Value::Object(obj) => {
             // If target is itself a proxy, recurse
@@ -2350,7 +2350,7 @@ pub(crate) fn proxy_is_extensible<'gc>(mc: &MutationContext<'gc>, proxy: &Gc<'gc
 }
 
 /// Proxy [[PreventExtensions]] internal method (spec §10.5.4)
-pub(crate) fn proxy_prevent_extensions<'gc>(mc: &MutationContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<bool, EvalError<'gc>> {
+pub(crate) fn proxy_prevent_extensions<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<bool, EvalError<'gc>> {
     let result = apply_proxy_trap(mc, proxy, "preventExtensions", vec![(*proxy.target).clone()], || {
         match &*proxy.target {
             Value::Object(obj) => {
@@ -2387,7 +2387,7 @@ pub(crate) fn proxy_prevent_extensions<'gc>(mc: &MutationContext<'gc>, proxy: &G
 }
 
 /// Proxy [[GetPrototypeOf]] internal method (spec §10.5.1)
-pub(crate) fn proxy_get_prototype_of<'gc>(mc: &MutationContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<Value<'gc>, EvalError<'gc>> {
+pub(crate) fn proxy_get_prototype_of<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<Value<'gc>, EvalError<'gc>> {
     let result = apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
         match &*proxy.target {
             Value::Object(obj) => {
@@ -2439,7 +2439,7 @@ pub(crate) fn proxy_get_prototype_of<'gc>(mc: &MutationContext<'gc>, proxy: &Gc<
 
 /// Proxy [[SetPrototypeOf]] internal method (spec §10.5.2)
 pub(crate) fn proxy_set_prototype_of<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     proto: &Value<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
@@ -2545,7 +2545,7 @@ pub(crate) fn proxy_set_prototype_of<'gc>(
 }
 
 /// Initialize Proxy constructor and prototype
-pub fn initialize_proxy<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_proxy<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let proxy_ctor = new_js_object_data(mc);
     slot_set(mc, &proxy_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &proxy_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Proxy")));

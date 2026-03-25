@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell, GcPtr, GeneratorPendingCompletion, GeneratorState, InternalSlot, MutationContext, slot_set};
+use crate::core::{Gc, GcCell, GcContext, GcPtr, GeneratorPendingCompletion, GeneratorState, InternalSlot, slot_set};
 use crate::{
     core::{
         CatchParamPattern, ClassDefinition, ClassMember, DestructuringElement, EvalError, Expr, JSGenerator, JSObjectDataPtr,
@@ -10,7 +10,7 @@ use crate::{
 };
 
 fn close_pending_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), EvalError<'gc>> {
@@ -32,7 +32,7 @@ fn close_pending_iterator<'gc>(
     Ok(())
 }
 
-fn eval_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
+fn eval_error_to_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
     match err {
         EvalError::Throw(v, ..) => v,
         EvalError::Js(j) => crate::core::js_error_to_value(mc, env, &j),
@@ -41,18 +41,14 @@ fn eval_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc
 
 /// Public wrapper so other modules (e.g. js_iterator_helpers) can call GetIterator.
 pub fn public_get_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
     get_iterator(mc, val, env)
 }
 
-fn get_iterator<'gc>(
-    mc: &MutationContext<'gc>,
-    val: &Value<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+fn get_iterator<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
     if let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor_val.borrow()
         && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
@@ -161,7 +157,7 @@ fn get_iterator<'gc>(
 }
 
 fn get_for_await_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_val: &Value<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, bool), EvalError<'gc>> {
@@ -209,7 +205,7 @@ fn get_for_await_iterator<'gc>(
 }
 
 fn bind_for_of_iteration_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     func_env: &JSObjectDataPtr<'gc>,
     decl_kind: Option<VarDeclKind>,
     var_name: &str,
@@ -236,7 +232,7 @@ fn bind_for_of_iteration_env<'gc>(
 }
 
 fn evaluate_for_of_body_first_yield<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iter_env: &JSObjectDataPtr<'gc>,
     body: &[Statement],
 ) -> Result<(YieldKind, Option<Box<Expr>>), EvalError<'gc>> {
@@ -260,7 +256,7 @@ fn find_first_for_await_in_statements(stmts: &[Statement]) -> Option<(usize, Opt
 
 /// Handle generator function calls (creating generator objects)
 pub fn handle_generator_function_call<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     closure: &crate::core::ClosureData<'gc>,
     args: &[Value<'gc>],
     this_val: Option<&Value<'gc>>,
@@ -607,7 +603,7 @@ pub fn handle_generator_function_call<'gc>(
 
 /// Handle generator instance method calls (like `gen.next()`, `gen.return()`, etc.)
 pub fn handle_generator_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     method: &str,
     args: &[Value<'gc>],
@@ -1128,7 +1124,7 @@ fn expr_contains_yield(e: &Expr) -> bool {
     }
 }
 
-fn eval_prefix_until_first_yield<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<bool, EvalError<'gc>> {
+fn eval_prefix_until_first_yield<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<bool, EvalError<'gc>> {
     match expr {
         Expr::Yield(_) | Expr::YieldStar(_) | Expr::Await(_) => Ok(true),
         Expr::Comma(left, right) => {
@@ -1173,7 +1169,7 @@ fn eval_prefix_until_first_yield<'gc>(mc: &MutationContext<'gc>, env: &JSObjectD
 }
 
 fn eval_statement_prefix_until_first_yield<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     stmt: &Statement,
 ) -> Result<(), EvalError<'gc>> {
@@ -1236,7 +1232,7 @@ fn eval_statement_prefix_until_first_yield<'gc>(
 }
 
 fn eval_statements_prefix_until_first_yield<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     stmts: &[Statement],
 ) -> Result<(), EvalError<'gc>> {
@@ -1683,11 +1679,7 @@ fn find_rightmost_assign_rhs(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-fn seed_simple_decl_bindings<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    stmts: &[Statement],
-) -> Result<(), EvalError<'gc>> {
+fn seed_simple_decl_bindings<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, stmts: &[Statement]) -> Result<(), EvalError<'gc>> {
     for stmt in stmts {
         match &*stmt.kind {
             StatementKind::Const(decls) => {
@@ -1721,7 +1713,7 @@ fn seed_simple_decl_bindings<'gc>(
 }
 
 fn bind_replaced_yield_decl<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     stmt: &Statement,
     yield_var: &str,
@@ -1777,7 +1769,7 @@ fn for_init_needs_execution<'gc>(env: &JSObjectDataPtr<'gc>, init_stmt: &Stateme
 }
 
 fn prepare_pending_iterator_for_yield<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     eval_env: &JSObjectDataPtr<'gc>,
     stmt: &Statement,
 ) -> Result<Option<(JSObjectDataPtr<'gc>, bool)>, EvalError<'gc>> {
@@ -2065,7 +2057,7 @@ pub(crate) fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usi
 
 /// Execute generator.next()
 pub fn generator_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: &GcPtr<'gc, JSGenerator<'gc>>,
     send_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -4111,7 +4103,7 @@ pub fn generator_next<'gc>(
 
 /// Execute generator.return()
 fn resume_with_return_completion<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     return_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -4349,7 +4341,7 @@ fn resume_with_return_completion<'gc>(
 }
 
 fn generator_return<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     return_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -4463,7 +4455,7 @@ fn generator_return<'gc>(
 
 /// Execute generator.throw()
 pub fn generator_throw<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     throw_value: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -5021,7 +5013,7 @@ pub fn generator_throw<'gc>(
     }
 }
 
-fn get_global_env<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'gc> {
+fn get_global_env<'gc>(_mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'gc> {
     let mut global_env = *env;
     loop {
         if global_env
@@ -5043,7 +5035,7 @@ fn get_global_env<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -
 
 /// Create an iterator result object {value: value, done: done}
 fn create_iterator_result<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
     done: bool,
@@ -5068,7 +5060,7 @@ fn create_iterator_result<'gc>(
 }
 
 fn create_iterator_result_with_done<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
     done_value: &Value<'gc>,
@@ -5084,7 +5076,7 @@ fn create_iterator_result_with_done<'gc>(
 }
 
 /// Initialize Generator constructor/prototype and attach prototype methods
-pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     // Create constructor object and generator prototype
     let gen_ctor = crate::core::new_js_object_data(mc);
     // Set __proto__ to Function.prototype if present

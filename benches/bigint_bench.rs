@@ -58,7 +58,7 @@ fn bench_engine_bigint_cached(c: &mut Criterion) {
     "#;
 
     // Use the `Repl` wrapper to create a persistent environment and bind `a` and `add_once`.
-    let repl = Repl::new();
+    let mut repl = Repl::new();
     repl.eval(script).expect("init script");
 
     c.bench_function("engine_bigint_cached", |ben| {

@@ -1,6 +1,6 @@
 use crate::core::{
-    ClosureData, Gc, InternalSlot, MutationContext, get_property_with_accessors, js_error_to_value, new_gc_cell_ptr, slot_get,
-    slot_get_chained, slot_set,
+    ClosureData, Gc, GcContext, InternalSlot, get_property_with_accessors, js_error_to_value, new_gc_cell_ptr, slot_get, slot_get_chained,
+    slot_set,
 };
 use crate::core::{JSObjectDataPtr, PropertyKey, Value, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::js_array::is_array;
@@ -34,7 +34,7 @@ thread_local! {
 /// Check all thread-local pending async waiters. If any have been resolved by
 /// their background notification thread, call the corresponding promise resolve
 /// function and remove them. Returns true if at least one was resolved.
-pub fn check_resolved_async_waiters<'gc>(mc: &MutationContext<'gc>) -> Result<bool, EvalError<'gc>> {
+pub fn check_resolved_async_waiters<'gc>(mc: &GcContext<'gc>) -> Result<bool, EvalError<'gc>> {
     let resolved_items: Vec<(Value<'gc>, JSObjectDataPtr<'gc>, bool)> = PENDING_ASYNC_WAITERS.with(|paw| {
         let mut list = paw.borrow_mut();
         let mut to_resolve = Vec::new();
@@ -187,7 +187,7 @@ pub(crate) fn f16_to_f64(bits: u16) -> f64 {
 }
 
 /// Create an ArrayBuffer constructor object
-pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_arraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
     if let Some(func_ctor_val) = object_get_key_value(env, "Function")
@@ -283,7 +283,7 @@ pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
 }
 
 /// Create the Atomics object with basic atomic methods
-pub fn make_atomics_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_atomics_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
     // Set __proto__ to Object.prototype
@@ -353,7 +353,7 @@ pub(crate) fn is_typedarray(obj: &JSObjectDataPtr) -> bool {
 }
 
 pub(crate) fn get_array_like_element<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     arr_obj: &JSObjectDataPtr<'gc>,
     index: usize,
@@ -372,7 +372,7 @@ pub(crate) fn get_array_like_element<'gc>(
 }
 
 pub(crate) fn ensure_typedarray_in_bounds<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     stmt_line: Option<usize>,
     stmt_column: Option<usize>,
@@ -449,7 +449,7 @@ fn bigint_to_i64_modular(b: &num_bigint::BigInt) -> i64 {
 /// ToBigInt coercion: convert a Value to BigInt per spec.
 /// Handles BigInt, Boolean, String, and Object (via ToPrimitive).
 /// Returns the value as i64 using modular arithmetic for BigInt types.
-pub fn to_bigint_i64<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i64, EvalError<'gc>> {
+pub fn to_bigint_i64<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i64, EvalError<'gc>> {
     let prim = match val {
         Value::Object(_) => crate::core::to_primitive(mc, val, "number", env)?,
         other => other.clone(),
@@ -499,21 +499,21 @@ pub fn is_bigint_typed_array(kind: &TypedArrayKind) -> bool {
 }
 
 /// Throw a TypeError as EvalError::Throw using env's TypeError constructor.
-fn throw_type_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
+fn throw_type_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
     let js_err = raise_type_error!(msg);
     let val = crate::core::js_error_to_value(mc, env, &js_err);
     EvalError::Throw(val, None, None)
 }
 
 /// Throw a RangeError as EvalError::Throw using env's RangeError constructor.
-fn throw_range_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
+fn throw_range_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
     let js_err = raise_range_error!(msg);
     let val = crate::core::js_error_to_value(mc, env, &js_err);
     EvalError::Throw(val, None, None)
 }
 
 /// Throw a SyntaxError as EvalError::Throw using env's SyntaxError constructor.
-fn throw_syntax_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
+fn throw_syntax_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
     let js_err = raise_syntax_error!(msg);
     let val = crate::core::js_error_to_value(mc, env, &js_err);
     EvalError::Throw(val, None, None)
@@ -523,7 +523,7 @@ fn throw_syntax_error<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 /// Extracts the TypedArray, validates it is an integer typed array and not detached.
 /// Returns the JSTypedArray copy.
 fn validate_integer_typed_array<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     arg: &Value<'gc>,
 ) -> Result<(Gc<'gc, JSTypedArray<'gc>>, JSObjectDataPtr<'gc>), EvalError<'gc>> {
@@ -554,7 +554,7 @@ fn validate_integer_typed_array<'gc>(
 /// ValidateAtomicAccess (spec 25.4.1.2)
 /// Coerces index arg to integer and validates it is within bounds.
 fn validate_atomic_access<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ta: &JSTypedArray<'gc>,
     index_arg: &Value<'gc>,
@@ -634,7 +634,7 @@ fn raw_i64_to_bigint<'gc>(raw: i64, kind: &TypedArrayKind) -> Value<'gc> {
 
 /// Handle Atomics.* calls (minimal mutex-backed implementations)
 pub fn handle_atomics_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1181,10 +1181,7 @@ pub fn handle_atomics_method<'gc>(
 }
 
 /// Create a SharedArrayBuffer constructor object
-pub fn make_sharedarraybuffer_constructor<'gc>(
-    mc: &MutationContext<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_sharedarraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
     // Set [[Prototype]] to Function.prototype
@@ -1261,7 +1258,7 @@ pub fn make_sharedarraybuffer_constructor<'gc>(
 
 /// Create the ArrayBuffer prototype
 pub fn make_arraybuffer_prototype<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
@@ -1365,7 +1362,7 @@ pub fn make_arraybuffer_prototype<'gc>(
 
 /// Create the SharedArrayBuffer prototype
 pub fn make_sharedarraybuffer_prototype<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
@@ -1522,7 +1519,7 @@ pub fn make_sharedarraybuffer_prototype<'gc>(
 }
 
 /// Create a DataView constructor object
-pub fn make_dataview_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_dataview_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
     // Set [[Prototype]] to Function.prototype
@@ -1556,7 +1553,7 @@ pub fn make_dataview_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectD
 
 /// Create the DataView prototype
 pub fn make_dataview_prototype<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
@@ -1586,7 +1583,7 @@ pub fn make_dataview_prototype<'gc>(
     };
 
     // Helper: create a getter function object with proper name and length
-    let make_getter = |mc: &MutationContext<'gc>, prop_name: &str, dispatch_name: &str| -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let make_getter = |mc: &GcContext<'gc>, prop_name: &str, dispatch_name: &str| -> Result<JSObjectDataPtr<'gc>, JSError> {
         let fn_obj = new_js_object_data(mc);
         fn_obj
             .borrow_mut(mc)
@@ -1685,7 +1682,7 @@ pub fn make_dataview_prototype<'gc>(
 /// Per spec, %TypedArray% is not exposed as a global but is the [[Prototype]] of all
 /// concrete TypedArray constructors (Int8Array, Uint8Array, etc).
 pub fn make_typedarray_intrinsic<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, JSObjectDataPtr<'gc>), JSError> {
     let ta_ctor = new_js_object_data(mc);
@@ -1733,21 +1730,20 @@ pub fn make_typedarray_intrinsic<'gc>(
     ta_proto.borrow_mut(mc).set_non_enumerable("constructor");
 
     // Helper: create a function object with closure-based dispatch
-    let make_fn =
-        |mc: &MutationContext<'gc>, display_name: &str, dispatch_name: &str, arity: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
-            let fn_obj = new_js_object_data(mc);
-            fn_obj
-                .borrow_mut(mc)
-                .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name.to_string()))));
-            if let Some(fp) = func_proto_opt {
-                fn_obj.borrow_mut(mc).prototype = Some(fp);
-            }
-            let name_d = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(display_name)), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &fn_obj, "name", &name_d)?;
-            let len_d = crate::core::create_descriptor_object(mc, &Value::Number(arity), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &fn_obj, "length", &len_d)?;
-            Ok(fn_obj)
-        };
+    let make_fn = |mc: &GcContext<'gc>, display_name: &str, dispatch_name: &str, arity: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
+        let fn_obj = new_js_object_data(mc);
+        fn_obj
+            .borrow_mut(mc)
+            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name.to_string()))));
+        if let Some(fp) = func_proto_opt {
+            fn_obj.borrow_mut(mc).prototype = Some(fp);
+        }
+        let name_d = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(display_name)), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "name", &name_d)?;
+        let len_d = crate::core::create_descriptor_object(mc, &Value::Number(arity), false, false, true)?;
+        crate::js_object::define_property_internal(mc, &fn_obj, "length", &len_d)?;
+        Ok(fn_obj)
+    };
 
     // --- Shared accessor properties: buffer, byteLength, byteOffset, length ---
     let accessor_names = ["buffer", "byteLength", "byteOffset", "length"];
@@ -1900,7 +1896,7 @@ pub fn make_typedarray_intrinsic<'gc>(
 }
 
 pub fn make_typedarray_constructors<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ta_intrinsic: &JSObjectDataPtr<'gc>,
     ta_proto_intrinsic: &JSObjectDataPtr<'gc>,
@@ -1948,7 +1944,7 @@ fn typedarray_kind_to_number(kind: &TypedArrayKind) -> i32 {
 }
 
 fn make_typedarray_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &str,
     kind: TypedArrayKind,
@@ -2004,7 +2000,7 @@ fn make_typedarray_constructor<'gc>(
 }
 
 fn make_typedarray_prototype<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     _env: &JSObjectDataPtr<'gc>,
     ctor_name: &str,
     kind: TypedArrayKind,
@@ -2043,7 +2039,7 @@ fn make_typedarray_prototype<'gc>(
 
 /// Handle ArrayBuffer constructor calls
 pub fn handle_arraybuffer_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -2166,7 +2162,7 @@ pub fn handle_arraybuffer_static_method<'gc>(method: &str, args: &[Value<'gc>]) 
 
 /// Handle SharedArrayBuffer constructor calls (creates a shared buffer)
 pub fn handle_sharedarraybuffer_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -2294,7 +2290,7 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
 
 /// Handle DataView constructor calls
 pub fn handle_dataview_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -2441,7 +2437,7 @@ pub fn handle_dataview_constructor<'gc>(
 }
 
 /// ToIndex per spec (7.1.22): convert to a non-negative integer index or throw RangeError.
-fn to_index<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
+fn to_index<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
     if matches!(val, Value::Undefined) {
         return Ok(0);
     }
@@ -2584,7 +2580,7 @@ fn kind_to_constructor_name(kind: &TypedArrayKind) -> &'static str {
 /// `constructor_obj` must carry InternalSlot::Kind (the actual TA constructor).
 /// `new_target` is the NewTarget for GetPrototypeFromConstructor. If None, throws TypeError (called without new).
 pub fn handle_typedarray_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     constructor_obj: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2928,7 +2924,7 @@ pub fn handle_typedarray_constructor<'gc>(
 
 /// Handle DataView instance method calls
 pub fn handle_dataview_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -3674,7 +3670,7 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
         }
     }
 
-    pub fn set(&self, mc: &crate::core::MutationContext<'gc>, idx: usize, val: f64) -> Result<(), crate::error::JSError> {
+    pub fn set(&self, mc: &crate::core::GcContext<'gc>, idx: usize, val: f64) -> Result<(), crate::error::JSError> {
         // Per spec IntegerIndexedElementSet: if not IsValidIntegerIndex, silently return.
         if !self.is_valid_integer_index(idx) {
             return Ok(());
@@ -3767,7 +3763,7 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
 
     /// Set a BigInt value directly using i64 (no f64 intermediary).
     /// This avoids precision loss for large BigInt values.
-    pub fn set_bigint(&self, mc: &crate::core::MutationContext<'gc>, idx: usize, val: i64) -> Result<(), crate::error::JSError> {
+    pub fn set_bigint(&self, mc: &crate::core::GcContext<'gc>, idx: usize, val: i64) -> Result<(), crate::error::JSError> {
         // Per spec IntegerIndexedElementSet: if not IsValidIntegerIndex, silently return.
         if !self.is_valid_integer_index(idx) {
             return Ok(());
@@ -3818,7 +3814,7 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
 }
 
 pub fn handle_arraybuffer_accessor<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     property: &str,
 ) -> Result<Value<'gc>, JSError> {
@@ -3934,7 +3930,7 @@ pub fn handle_arraybuffer_accessor<'gc>(
 }
 
 /// SharedArrayBuffer.prototype.byteLength getter — must be called on a SAB, not a regular AB.
-pub fn handle_sharedarraybuffer_bytelength<'gc>(_mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn handle_sharedarraybuffer_bytelength<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
         && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
     {
@@ -3954,10 +3950,7 @@ pub fn handle_sharedarraybuffer_bytelength<'gc>(_mc: &MutationContext<'gc>, obje
 }
 
 /// SharedArrayBuffer.prototype.maxByteLength getter
-pub fn handle_sharedarraybuffer_maxbytelength<'gc>(
-    _mc: &MutationContext<'gc>,
-    object: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+pub fn handle_sharedarraybuffer_maxbytelength<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
         && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
     {
@@ -3977,7 +3970,7 @@ pub fn handle_sharedarraybuffer_maxbytelength<'gc>(
 }
 
 /// SharedArrayBuffer.prototype.growable getter
-pub fn handle_sharedarraybuffer_growable<'gc>(_mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn handle_sharedarraybuffer_growable<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
         && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
     {
@@ -3996,7 +3989,7 @@ pub fn handle_sharedarraybuffer_growable<'gc>(_mc: &MutationContext<'gc>, object
 
 /// SharedArrayBuffer.prototype.grow(newLength)
 pub fn handle_sharedarraybuffer_grow<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     object: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
@@ -4071,7 +4064,7 @@ pub fn handle_sharedarraybuffer_grow<'gc>(
 
 /// SharedArrayBuffer.prototype.slice(start, end)
 pub fn handle_sharedarraybuffer_slice<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     object: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
@@ -4206,7 +4199,7 @@ pub fn handle_sharedarraybuffer_slice<'gc>(
 }
 
 pub fn handle_arraybuffer_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
@@ -4670,7 +4663,7 @@ pub fn handle_arraybuffer_method<'gc>(
 /// SpeciesConstructor(O, defaultConstructor) — returns Some(species) or None (use default).
 /// Reads O.constructor, checks type, then checks Symbol.species.
 fn get_species_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
@@ -4720,7 +4713,7 @@ fn get_species_constructor<'gc>(
 
 /// TypedArraySpeciesCreate: create a result TypedArray using SpeciesConstructor.
 fn typed_array_species_create<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     exemplar: &JSObjectDataPtr<'gc>,
     length: usize,
@@ -4775,7 +4768,7 @@ fn typed_array_species_create<'gc>(
 
 /// Create a new TypedArray of the same kind as the source, with the given length
 fn create_same_type_typedarray<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     source_obj: &JSObjectDataPtr<'gc>,
     length: usize,
@@ -4828,11 +4821,7 @@ fn create_same_type_typedarray<'gc>(
     }
 }
 
-pub fn handle_typedarray_accessor<'gc>(
-    _mc: &MutationContext<'gc>,
-    object: &JSObjectDataPtr<'gc>,
-    property: &str,
-) -> Result<Value<'gc>, JSError> {
+pub fn handle_typedarray_accessor<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>, property: &str) -> Result<Value<'gc>, JSError> {
     // Per spec, TypedArray prototype accessors check the receiver's OWN
     // [[TypedArrayName]] internal slot — they must NOT walk the prototype chain.
     if let Some(ta_val) = slot_get(object, &InternalSlot::TypedArray) {
@@ -4943,7 +4932,7 @@ pub fn handle_typedarray_accessor<'gc>(
     }
 }
 
-pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+pub fn handle_typedarray_iterator_next<'gc>(mc: &GcContext<'gc>, this_val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Value::Object(obj) = this_val {
         if let Some(ta_cell) = slot_get_chained(obj, &InternalSlot::TypedArrayIterator)
             && let Value::TypedArray(ta) = &*ta_cell.borrow()
@@ -5045,7 +5034,7 @@ pub fn handle_typedarray_iterator_next<'gc>(mc: &MutationContext<'gc>, this_val:
 /// 2. Perform ? ValidateTypedArray(newTypedArray).
 /// 3. If argumentList is a List of a single Number, check newTypedArray.length >= argumentList[0].
 fn typedarray_create<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     constructor: &Value<'gc>,
     args: &[Value<'gc>],
@@ -5077,7 +5066,7 @@ fn typedarray_create<'gc>(
 
 /// Handle %TypedArray%.from() and %TypedArray%.of() static methods
 pub fn handle_typedarray_static_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -5700,7 +5689,7 @@ fn hex_encode(data: &[u8]) -> String {
 }
 
 fn get_base64_options<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     options_val: &Value<'gc>,
 ) -> Result<(bool, String), EvalError<'gc>> {
@@ -5746,7 +5735,7 @@ fn get_base64_options<'gc>(
 }
 
 /// Validate that `this` is a Uint8Array. Returns (obj, ta_len, byte_offset, is_detached).
-fn validate_uint8array_info<'gc>(_mc: &MutationContext<'gc>, this_val: &Value<'gc>) -> Result<(usize, usize, bool), EvalError<'gc>> {
+fn validate_uint8array_info<'gc>(_mc: &GcContext<'gc>, this_val: &Value<'gc>) -> Result<(usize, usize, bool), EvalError<'gc>> {
     if let Value::Object(obj) = this_val {
         if let Some(ta_val) = slot_get(obj, &InternalSlot::TypedArray)
             && let Value::TypedArray(ta) = &*ta_val.borrow()
@@ -5785,7 +5774,7 @@ fn read_uint8array_data<'gc>(this_val: &Value<'gc>) -> Result<Vec<u8>, EvalError
 }
 
 pub fn handle_uint8array_proto_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -5922,7 +5911,7 @@ pub fn handle_uint8array_proto_method<'gc>(
 }
 
 pub fn handle_uint8array_static_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -5964,7 +5953,7 @@ pub fn handle_uint8array_static_method<'gc>(
 
 /// Create a Uint8Array from raw bytes
 fn create_uint8array_from_bytes<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     data: &[u8],
 ) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
@@ -6004,7 +5993,7 @@ fn create_uint8array_from_bytes<'gc>(
 }
 
 pub fn handle_typedarray_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: &Value<'gc>,
     method: &str,
     _args: &[Value<'gc>],
@@ -7196,7 +7185,7 @@ pub fn handle_typedarray_method<'gc>(
     }
 }
 
-pub fn initialize_typedarray<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_typedarray<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let arraybuffer = make_arraybuffer_constructor(mc, env)?;
     crate::core::env_set(mc, env, "ArrayBuffer", &Value::Object(arraybuffer))?;
 
@@ -7237,7 +7226,7 @@ pub fn initialize_typedarray<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataP
             None
         };
 
-        let mk = |mc2: &MutationContext<'gc>, name: &str, dispatch: &str, len: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
+        let mk = |mc2: &GcContext<'gc>, name: &str, dispatch: &str, len: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
             let fn_obj = new_js_object_data(mc2);
             fn_obj
                 .borrow_mut(mc2)

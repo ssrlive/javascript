@@ -1,7 +1,7 @@
 use crate::core::EvalError;
 use crate::core::JSWeakSet;
 use crate::core::WeakKey;
-use crate::core::{Gc, GcCell, InternalSlot, MutationContext, new_gc_cell_ptr, slot_get_chained, slot_set};
+use crate::core::{Gc, GcCell, GcContext, InternalSlot, new_gc_cell_ptr, slot_get_chained, slot_set};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
     error::JSError,
@@ -10,7 +10,7 @@ use crate::{
 
 /// Handle WeakSet constructor calls (spec §24.4.1.1)
 pub(crate) fn handle_weakset_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -90,7 +90,7 @@ pub(crate) fn handle_weakset_constructor<'gc>(
 }
 
 /// Initialize WeakSet constructor and prototype
-pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_weakset<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let weakset_ctor = new_js_object_data(mc);
     slot_set(mc, &weakset_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
@@ -168,7 +168,7 @@ pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 }
 
 /// Check if WeakSet has a value
-fn weakset_has_value<'gc>(mc: &MutationContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
+fn weakset_has_value<'gc>(mc: &GcContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
     let weakset_ref = weakset.borrow();
     for v in &weakset_ref.values {
         if v.matches(mc, key) {
@@ -179,7 +179,7 @@ fn weakset_has_value<'gc>(mc: &MutationContext<'gc>, weakset: &Gc<'gc, GcCell<JS
 }
 
 /// Delete a value from WeakSet
-fn weakset_delete_value<'gc>(mc: &MutationContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
+fn weakset_delete_value<'gc>(mc: &GcContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
     let mut weakset_mut = weakset.borrow_mut(mc);
     let len_before = weakset_mut.values.len();
     weakset_mut.values.retain(|v| !v.matches(mc, key));
@@ -188,7 +188,7 @@ fn weakset_delete_value<'gc>(mc: &MutationContext<'gc>, weakset: &Gc<'gc, GcCell
 
 /// Handle WeakSet instance method calls
 pub(crate) fn handle_weakset_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
     method: &str,
     args: &[Value<'gc>],
@@ -237,7 +237,7 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
 }
 
 /// Check if a JS object wraps an internal WeakSet
-pub fn is_weakset_object<'gc>(_mc: &MutationContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
+pub fn is_weakset_object<'gc>(_mc: &GcContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
     if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::WeakSet) {
         matches!(&*val_rc.borrow(), crate::core::Value::WeakSet(_))
     } else {

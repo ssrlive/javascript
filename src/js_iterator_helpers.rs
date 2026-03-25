@@ -11,7 +11,7 @@
 //   • `Iterator.zip` / `Iterator.zipKeyed` (joint-iteration) [stubs]
 
 use crate::core::{
-    EvalError, Gc, InternalSlot, JSObjectDataPtr, MutationContext, PropertyKey, Value, create_descriptor_object, env_get, env_set,
+    EvalError, Gc, GcContext, InternalSlot, JSObjectDataPtr, PropertyKey, Value, create_descriptor_object, env_get, env_set,
     evaluate_call_dispatch, new_gc_cell_ptr, new_js_object_data, object_get_key_value, object_set_key_value, slot_get, slot_get_chained,
     slot_set,
 };
@@ -47,7 +47,7 @@ use crate::unicode::utf8_to_utf16;
 /// Register `Iterator` constructor, `Iterator.prototype` methods, and helpers
 /// on the global environment.  Must be called *after* `initialize_array` (which
 /// creates %IteratorPrototype%) and *after* symbol + function constructors.
-pub fn initialize_iterator_helpers<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), crate::error::JSError> {
+pub fn initialize_iterator_helpers<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), crate::error::JSError> {
     // --- Retrieve %IteratorPrototype% (stashed by js_array init) ---
     let iter_proto = match slot_get_chained(env, &InternalSlot::IteratorPrototype) {
         Some(rc) => match &*rc.borrow() {
@@ -271,7 +271,7 @@ pub fn initialize_iterator_helpers<'gc>(mc: &MutationContext<'gc>, env: &JSObjec
 /// Handle all Iterator-helpers native dispatch names.  Returns `Some(value)` on
 /// match or `None` when the name is not ours.
 pub fn handle_iterator_helper_dispatch<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     name: &str,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
@@ -420,7 +420,7 @@ pub fn handle_iterator_helper_dispatch<'gc>(
 // Iterator constructor
 // ===========================================================================
 
-fn handle_iterator_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn handle_iterator_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Per spec: If NewTarget is undefined or the active function object, throw TypeError.
     // We check __new_target from the call environment.
     let new_target = slot_get_chained(env, &InternalSlot::NewTarget);
@@ -466,7 +466,7 @@ fn handle_get_constructor<'gc>(env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>,
 }
 
 fn handle_set_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -479,7 +479,7 @@ fn handle_set_constructor<'gc>(
 // ===========================================================================
 
 fn handle_set_to_string_tag<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -489,7 +489,7 @@ fn handle_set_to_string_tag<'gc>(
 
 /// SetterThatIgnoresPrototypeProperties ( home, p, v )
 fn setter_that_ignores_prototype_properties<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     prop: &str,
     val: &Value<'gc>,
@@ -550,7 +550,7 @@ fn setter_that_ignores_prototype_properties<'gc>(
 // ===========================================================================
 
 fn create_iterator_helper<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     callback: &Value<'gc>,
     kind: &str,
@@ -597,7 +597,7 @@ fn create_iterator_helper<'gc>(
 // ===========================================================================
 
 fn handle_helper_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -678,7 +678,7 @@ fn handle_helper_next<'gc>(
 }
 
 fn helper_next_map<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     helper: &JSObjectDataPtr<'gc>,
     underlying: &JSObjectDataPtr<'gc>,
     next_method: &Value<'gc>,
@@ -710,7 +710,7 @@ fn helper_next_map<'gc>(
 }
 
 fn helper_next_filter<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     helper: &JSObjectDataPtr<'gc>,
     underlying: &JSObjectDataPtr<'gc>,
     next_method: &Value<'gc>,
@@ -746,7 +746,7 @@ fn helper_next_filter<'gc>(
 }
 
 fn helper_next_take<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     helper: &JSObjectDataPtr<'gc>,
     underlying: &JSObjectDataPtr<'gc>,
     next_method: &Value<'gc>,
@@ -771,7 +771,7 @@ fn helper_next_take<'gc>(
 }
 
 fn helper_next_drop<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     helper: &JSObjectDataPtr<'gc>,
     underlying: &JSObjectDataPtr<'gc>,
     next_method: &Value<'gc>,
@@ -801,7 +801,7 @@ fn helper_next_drop<'gc>(
 }
 
 fn helper_next_flat_map<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     helper: &JSObjectDataPtr<'gc>,
     underlying: &JSObjectDataPtr<'gc>,
     next_method: &Value<'gc>,
@@ -867,7 +867,7 @@ fn helper_next_flat_map<'gc>(
 // ===========================================================================
 
 fn handle_helper_return<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -949,7 +949,7 @@ fn handle_helper_return<'gc>(
 // ===========================================================================
 
 fn handle_reduce<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     reducer: &Value<'gc>,
     initial: Option<&Value<'gc>>,
@@ -998,7 +998,7 @@ fn handle_reduce<'gc>(
 }
 
 fn handle_to_array<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1032,7 +1032,7 @@ fn handle_to_array<'gc>(
 }
 
 fn handle_for_each<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     callback: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -1065,7 +1065,7 @@ fn handle_for_each<'gc>(
 }
 
 fn handle_some<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     predicate: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -1101,7 +1101,7 @@ fn handle_some<'gc>(
 }
 
 fn handle_every<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     predicate: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -1137,7 +1137,7 @@ fn handle_every<'gc>(
 }
 
 fn handle_find<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     predicate: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -1176,11 +1176,7 @@ fn handle_find<'gc>(
 // Iterator.from
 // ===========================================================================
 
-fn handle_iterator_from<'gc>(
-    mc: &MutationContext<'gc>,
-    arg: &Value<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn handle_iterator_from<'gc>(mc: &GcContext<'gc>, arg: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // 1. If O is not an Object, throw TypeError (except strings handled via @@iterator)
     let obj = match arg {
         Value::String(_) => {
@@ -1234,7 +1230,7 @@ fn handle_iterator_from<'gc>(
 // ===========================================================================
 
 fn create_wrap_for_valid<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
@@ -1254,7 +1250,7 @@ fn create_wrap_for_valid<'gc>(
 }
 
 fn handle_wrap_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1268,7 +1264,7 @@ fn handle_wrap_next<'gc>(
 }
 
 fn handle_wrap_return<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     this_val: Option<&Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1289,11 +1285,7 @@ fn handle_wrap_return<'gc>(
 // Iterator.concat (iterator-sequencing)
 // ===========================================================================
 
-fn handle_iterator_concat<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn handle_iterator_concat<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Validate all arguments are iterable first
     let iter_sym = get_well_known_symbol(env, "iterator")
         .ok_or_else(|| -> EvalError<'gc> { raise_type_error!("Symbol.iterator not found").into() })?;
@@ -1358,7 +1350,7 @@ fn handle_iterator_concat<'gc>(
 // ===========================================================================
 
 /// GetOptionsObject(options): undefined → null-proto {}, Object → use it, else TypeError
-fn get_options_object<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
+fn get_options_object<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
     match val {
         Value::Undefined => {
             let obj = new_js_object_data(mc);
@@ -1371,11 +1363,7 @@ fn get_options_object<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>) -> Resul
 }
 
 /// Parse the `mode` option from options object. Must be a string primitive.
-fn parse_zip_mode<'gc>(
-    mc: &MutationContext<'gc>,
-    options: &JSObjectDataPtr<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<String, EvalError<'gc>> {
+fn parse_zip_mode<'gc>(mc: &GcContext<'gc>, options: &JSObjectDataPtr<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
     let mode_val = crate::core::get_property_with_accessors(mc, env, options, PropertyKey::String("mode".to_string()))?;
     match &mode_val {
         Value::Undefined => Ok("shortest".to_string()),
@@ -1394,7 +1382,7 @@ fn parse_zip_mode<'gc>(
 /// If `initial_error` is Some, we already have an error; inner errors are suppressed.
 /// If `initial_error` is None, any close error is captured and propagated.
 fn iterator_close_all<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iterators: &JSObjectDataPtr<'gc>,
     open_flags: &JSObjectDataPtr<'gc>,
     count: usize,
@@ -1446,7 +1434,7 @@ fn iterator_close_all<'gc>(
 
 /// Close iterators in `iters` (reverse order) + close another "source" iterator
 fn if_abrupt_close_iterators<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iterators: &JSObjectDataPtr<'gc>,
     count: usize,
     source_iter: Option<&JSObjectDataPtr<'gc>>,
@@ -1468,11 +1456,7 @@ fn if_abrupt_close_iterators<'gc>(
     err
 }
 
-fn handle_iterator_zip<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn handle_iterator_zip<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 1: iterables must be an Object
     let iterables_arg = args.first().cloned().unwrap_or(Value::Undefined);
     let iterables_obj = match &iterables_arg {
@@ -1700,7 +1684,7 @@ fn handle_iterator_zip<'gc>(
 }
 
 fn handle_iterator_zip_keyed<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1917,7 +1901,7 @@ fn handle_iterator_zip_keyed<'gc>(
 // ===========================================================================
 
 fn helper_next_zip<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     helper: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
     is_keyed: bool,
@@ -2129,7 +2113,7 @@ fn helper_next_zip<'gc>(
 // ===========================================================================
 
 fn helper_next_concat<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     helper: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2234,7 +2218,7 @@ pub fn get_well_known_symbol<'gc>(env: &JSObjectDataPtr<'gc>, name: &str) -> Opt
 }
 
 fn accessor_descriptor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     getter: &JSObjectDataPtr<'gc>,
     setter: &JSObjectDataPtr<'gc>,
     enumerable: bool,
@@ -2286,7 +2270,7 @@ fn is_callable<'gc>(val: &Value<'gc>) -> bool {
 }
 
 fn get_next_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2296,7 +2280,7 @@ fn get_next_method<'gc>(
 }
 
 fn get_iterator_from_value<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
@@ -2308,7 +2292,7 @@ fn get_iterator_from_value<'gc>(
 /// Per spec: rejects primitives, uses GetMethod for Symbol.iterator,
 /// falls back to using the object itself as iterator if method is undefined.
 fn get_iterator_flattenable<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, Value<'gc>), EvalError<'gc>> {
@@ -2352,7 +2336,7 @@ fn get_iterator_flattenable<'gc>(
     }
 }
 
-fn iter_result_done<'gc>(mc: &MutationContext<'gc>, result: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
+fn iter_result_done<'gc>(mc: &GcContext<'gc>, result: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
     match result {
         Value::Object(o) => {
             let done_val = crate::core::get_property_with_accessors(mc, env, o, PropertyKey::String("done".to_string()))?;
@@ -2362,11 +2346,7 @@ fn iter_result_done<'gc>(mc: &MutationContext<'gc>, result: &Value<'gc>, env: &J
     }
 }
 
-fn iter_result_value<'gc>(
-    mc: &MutationContext<'gc>,
-    result: &Value<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn iter_result_value<'gc>(mc: &GcContext<'gc>, result: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     match result {
         Value::Object(o) => {
             let val = crate::core::get_property_with_accessors(mc, env, o, PropertyKey::String("value".to_string()))?;
@@ -2397,7 +2377,7 @@ fn get_global_env_helpers<'gc>(env: &JSObjectDataPtr<'gc>) -> JSObjectDataPtr<'g
 }
 
 fn make_iter_result<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
     done: bool,
@@ -2430,7 +2410,7 @@ fn get_counter(obj: &JSObjectDataPtr<'_>) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn inc_counter<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) {
+fn inc_counter<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) {
     let c = get_counter(obj) + 1.0;
     slot_set(mc, obj, InternalSlot::IteratorHelperCounter, &Value::Number(c));
 }
@@ -2444,12 +2424,12 @@ fn get_remaining(obj: &JSObjectDataPtr<'_>) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn dec_remaining<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) {
+fn dec_remaining<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) {
     let r = get_remaining(obj) - 1.0;
     slot_set(mc, obj, InternalSlot::IteratorHelperRemaining, &Value::Number(r));
 }
 
-fn mark_done<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) {
+fn mark_done<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) {
     slot_set(mc, obj, InternalSlot::IteratorHelperDone, &Value::Boolean(true));
 }
 
@@ -2472,7 +2452,7 @@ fn get_slot_object<'gc>(obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Resu
     }
 }
 
-fn close_underlying_iterator<'gc>(mc: &MutationContext<'gc>, iter_obj: &JSObjectDataPtr<'gc>, env: &JSObjectDataPtr<'gc>) {
+fn close_underlying_iterator<'gc>(mc: &GcContext<'gc>, iter_obj: &JSObjectDataPtr<'gc>, env: &JSObjectDataPtr<'gc>) {
     // Try to call .return() if it exists (traverse prototype chain) — swallow errors
     if let Ok(ret) = crate::core::get_property_with_accessors(mc, env, iter_obj, PropertyKey::String("return".to_string()))
         && is_callable(&ret)
@@ -2483,7 +2463,7 @@ fn close_underlying_iterator<'gc>(mc: &MutationContext<'gc>, iter_obj: &JSObject
 
 /// Like close_underlying_iterator but propagates errors from getting or calling .return()
 fn close_underlying_iterator_throwing<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), EvalError<'gc>> {

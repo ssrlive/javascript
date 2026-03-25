@@ -1,5 +1,5 @@
 use crate::core::{
-    EvalError, InternalSlot, JSObjectDataPtr, MutationContext, Value, env_set, new_gc_cell_ptr, new_js_object_data, object_get_key_value,
+    EvalError, GcContext, InternalSlot, JSObjectDataPtr, Value, env_set, new_gc_cell_ptr, new_js_object_data, object_get_key_value,
     object_set_key_value, slot_get, slot_set,
 };
 use crate::error::JSError;
@@ -137,7 +137,7 @@ pub(crate) fn get_or_compile_regex(pattern: &[u16], flags: &str) -> Result<Regex
     })
 }
 
-pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let regexp_ctor = new_js_object_data(mc);
     slot_set(mc, &regexp_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(mc, &regexp_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("RegExp")));
@@ -417,7 +417,7 @@ pub fn internal_get_regex_pattern(obj: &JSObjectDataPtr) -> Result<Vec<u16>, JSE
 /// For `flags`, the spec requires reading observable properties from any object.
 /// `mc` and `env` are needed for `flags` getter to invoke accessors.
 pub(crate) fn handle_regexp_getter_with_this<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     this_val: &Value<'gc>,
     prop: &str,
@@ -762,7 +762,7 @@ pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSErro
 }
 
 fn create_regexp_object_from_parts<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: Option<&JSObjectDataPtr<'gc>>,
     pattern_u16: Vec<u16>,
     flags: String,
@@ -859,7 +859,7 @@ fn create_regexp_object_from_parts<'gc>(
 }
 
 pub(crate) fn create_regexp_object_fast_for_eval<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     pattern_u16: Vec<u16>,
     flags: String,
@@ -868,18 +868,14 @@ pub(crate) fn create_regexp_object_fast_for_eval<'gc>(
 }
 
 /// Handle RegExp constructor calls
-pub(crate) fn handle_regexp_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+pub(crate) fn handle_regexp_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     handle_regexp_constructor_with_env(mc, None, args)
 }
 
 /// §7.2.8 IsRegExp(argument)
 /// Returns true if the argument has a truthy @@match property, or has [[RegExpMatcher]] internal slot.
 /// Uses proper Get (invokes getters) for @@match check per spec.
-fn is_regexp_with_env<'gc>(
-    mc: &MutationContext<'gc>,
-    val: &Value<'gc>,
-    env: Option<&JSObjectDataPtr<'gc>>,
-) -> Result<bool, EvalError<'gc>> {
+fn is_regexp_with_env<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: Option<&JSObjectDataPtr<'gc>>) -> Result<bool, EvalError<'gc>> {
     if let Value::Object(obj) = val {
         // Step 1-2: Check @@match property via proper Get
         if let Some(env) = env
@@ -934,7 +930,7 @@ fn value_to_pattern_u16<'gc>(val: &Value<'gc>) -> Vec<u16> {
 }
 
 pub(crate) fn handle_regexp_constructor_with_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: Option<&JSObjectDataPtr<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1072,7 +1068,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
 /// Per spec §21.2.3.1: if pattern is RegExp, flags is undefined, and
 /// pattern.constructor === RegExp, return the same object.
 pub(crate) fn handle_regexp_call_with_env<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: Option<&JSObjectDataPtr<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1154,7 +1150,7 @@ fn to_length_primitive(val: &Value) -> usize {
 
 /// ToLength with ToPrimitive for objects: calls valueOf/toString on objects.
 /// Throws TypeError for Symbol values (per ToNumber spec).
-fn to_length_with_coercion<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
+fn to_length_with_coercion<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
     // Use to_number_with_env which properly handles ToPrimitive for objects
     // and throws TypeError for Symbols
     let n = crate::core::to_number_with_env(mc, env, val)?;
@@ -1168,7 +1164,7 @@ fn to_length_with_coercion<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, env
 }
 
 /// Try to set lastIndex; throw TypeError if non-writable (strict mode)
-fn set_last_index_checked<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>, value: f64) -> Result<(), EvalError<'gc>> {
+fn set_last_index_checked<'gc>(mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>, value: f64) -> Result<(), EvalError<'gc>> {
     // Check if lastIndex is non-writable
     if object
         .borrow()
@@ -1184,7 +1180,7 @@ fn set_last_index_checked<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataP
 /// §22.2.4.2 SpeciesConstructor(O, defaultConstructor)
 /// Returns the species constructor for a RegExp-like object.
 fn species_constructor<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
@@ -1255,7 +1251,7 @@ fn internal_get_flags_string(object: &JSObjectDataPtr) -> String {
 /// Checks for a user-defined `exec` property on the regexp object;
 /// if callable, delegates to it. Otherwise falls back to built-in exec.
 fn regexp_exec_abstract<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     rx: &JSObjectDataPtr<'gc>,
     string: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -1284,7 +1280,7 @@ fn regexp_exec_abstract<'gc>(
 
 /// Handle RegExp instance method calls
 pub(crate) fn handle_regexp_method<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -1669,7 +1665,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             // AnnexB B.2.5.1 RegExp.prototype.compile(pattern, flags)
             // Helper: create a TypeError from the current realm's TypeError constructor
             // so that cross-realm instanceof checks work correctly.
-            let realm_type_error = |mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str| -> EvalError<'gc> {
+            let realm_type_error = |mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str| -> EvalError<'gc> {
                 if let Some(tc_val) = crate::core::env_get(env, "TypeError")
                     && let Some(tc_obj) = match &*tc_val.borrow() {
                         Value::Object(tc) => Some(*tc),
@@ -2454,7 +2450,7 @@ fn advance_string_index_unicode(s: &[u16], index: usize) -> usize {
 
 /// Create %RegExpStringIteratorPrototype%. Must be called after %IteratorPrototype% exists.
 pub fn initialize_regexp_string_iterator_prototype<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), crate::error::JSError> {
     use crate::core::{PropertyKey, slot_get_chained};
@@ -2495,7 +2491,7 @@ pub fn initialize_regexp_string_iterator_prototype<'gc>(
 
 /// §22.2.7.1 CreateRegExpStringIterator(R, S, global, fullUnicode)
 fn create_regexp_string_iterator<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     matcher: JSObjectDataPtr<'gc>,
     string: Vec<u16>,
@@ -2525,7 +2521,7 @@ fn create_regexp_string_iterator<'gc>(
 
 /// §22.2.7.2.1 %RegExpStringIterator%.prototype.next()
 pub(crate) fn handle_regexp_string_iterator_next<'gc>(
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2615,7 +2611,7 @@ pub(crate) fn handle_regexp_string_iterator_next<'gc>(
 }
 
 /// Create a {value, done} iterator result object.
-fn create_iter_result<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, done: bool) -> Result<Value<'gc>, EvalError<'gc>> {
+fn create_iter_result<'gc>(mc: &GcContext<'gc>, value: Value<'gc>, done: bool) -> Result<Value<'gc>, EvalError<'gc>> {
     let obj = new_js_object_data(mc);
     object_set_key_value(mc, &obj, "value", &value)?;
     object_set_key_value(mc, &obj, "done", &Value::Boolean(done))?;
@@ -2631,7 +2627,7 @@ fn get_substitution<'gc>(
     captures: &[Value<'gc>],
     named_captures: &Option<Value<'gc>>,
     replacement: &[u16],
-    mc: &MutationContext<'gc>,
+    mc: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Vec<u16>, EvalError<'gc>> {
     let mut result = Vec::new();
@@ -2778,7 +2774,7 @@ fn map_index_back(original: &[u16], working_index: usize) -> usize {
 /// RegExp.escape ( string ) — §22.2.4.3
 /// Returns a new string with regex-special characters escaped.
 pub(crate) fn regexp_escape<'gc>(
-    _mc: &MutationContext<'gc>,
+    _mc: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {

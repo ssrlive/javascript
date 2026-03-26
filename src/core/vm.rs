@@ -509,7 +509,9 @@ pub struct VM<'gc> {
     symbol_registry: HashMap<String, Value<'gc>>,         // Symbol.for() registry
     symbol_values: HashMap<u64, VmObjectWeakHandle<'gc>>, // symbol_id → Symbol VmObject (weak cache)
     pending_throw: Option<Value<'gc>>,                    // deferred throw from call_builtin
-    direct_eval: bool,                                    // true when current eval is a direct call
+    preserved_throw_value: Option<Value<'gc>>,
+    preserved_throw_message: Option<String>,
+    direct_eval: bool, // true when current eval is a direct call
     script_source: Option<String>,
     script_path: Option<String>,
     // Timer queue for setTimeout / setInterval
@@ -635,6 +637,8 @@ impl<'gc> VM<'gc> {
             symbol_registry: HashMap::new(),
             symbol_values: HashMap::new(),
             pending_throw: None,
+            preserved_throw_value: None,
+            preserved_throw_message: None,
             direct_eval: false,
             script_source: None,
             script_path: None,
@@ -723,26 +727,12 @@ impl<'gc> VM<'gc> {
         vm.run(mc)
     }
 
-    fn make_host_fn(name: &str) -> Value<'gc> {
-        Value::Function(name.to_string())
-    }
-
-    fn make_host_fn_with_mc(mc: &GcContext<'gc>, name: &str) -> Value<'gc> {
+    fn make_host_fn(mc: &GcContext<'gc>, name: &str) -> Value<'gc> {
         let display_name = name.rsplit('.').next().unwrap_or(name);
-        Self::make_host_fn_with_name_len_with_mc(mc, name, display_name, 0.0, false)
+        Self::make_host_fn_with_name_len(mc, name, display_name, 0.0, false)
     }
 
-    fn make_host_fn_with_name_len(name: &str, _display_name: &str, _length: f64, _constructible: bool) -> Value<'gc> {
-        Value::Function(name.to_string())
-    }
-
-    fn make_host_fn_with_name_len_with_mc(
-        mc: &GcContext<'gc>,
-        name: &str,
-        display_name: &str,
-        length: f64,
-        constructible: bool,
-    ) -> Value<'gc> {
+    fn make_host_fn_with_name_len(mc: &GcContext<'gc>, name: &str, display_name: &str, length: f64, constructible: bool) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__host_fn__".to_string(), Value::from(name));
         Self::insert_property_with_attributes(&mut map, "name", &Value::from(display_name), false, false, true);
@@ -7039,6 +7029,7 @@ impl<'gc> VM<'gc> {
 
         if name.starts_with("reflect.")
             || name.starts_with("array.")
+            || name.starts_with("arrayBuffer.")
             || name.starts_with("atomics.")
             || name.starts_with("string.")
             || name.starts_with("object.")
@@ -7907,6 +7898,17 @@ impl<'gc> VM<'gc> {
     }
 
     fn read_named_property_with_receiver(&mut self, mc: &GcContext<'gc>, obj: &Value<'gc>, key: &str, receiver: &Value<'gc>) -> Value<'gc> {
+        if matches!(obj, Value::VmObject(map) if map.borrow().contains_key("__proxy_target__")) {
+            match self.try_proxy_get(mc, obj, key) {
+                Ok(Some(value)) => return value,
+                Ok(None) => {}
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    return Value::Undefined;
+                }
+            }
+        }
+
         let getter_key = format!("__get_{}", key);
         let mut current = Some(obj.clone());
         let mut depth = 0;
@@ -8262,25 +8264,25 @@ impl<'gc> VM<'gc> {
         // Global functions
         self.globals.insert("isNaN".to_string(), Value::VmNativeFunction(BUILTIN_ISNAN));
         self.globals
-            .insert("isFinite".to_string(), Self::make_host_fn_with_mc(mc, "global.isFinite"));
+            .insert("isFinite".to_string(), Self::make_host_fn(mc, "global.isFinite"));
         self.globals
-            .insert("encodeURI".to_string(), Self::make_host_fn_with_mc(mc, "global.encodeURI"));
+            .insert("encodeURI".to_string(), Self::make_host_fn(mc, "global.encodeURI"));
         self.globals
-            .insert("decodeURI".to_string(), Self::make_host_fn_with_mc(mc, "global.decodeURI"));
+            .insert("decodeURI".to_string(), Self::make_host_fn(mc, "global.decodeURI"));
         self.globals.insert(
             "encodeURIComponent".to_string(),
-            Self::make_host_fn_with_mc(mc, "global.encodeURIComponent"),
+            Self::make_host_fn(mc, "global.encodeURIComponent"),
         );
         self.globals.insert(
             "decodeURIComponent".to_string(),
-            Self::make_host_fn_with_mc(mc, "global.decodeURIComponent"),
+            Self::make_host_fn(mc, "global.decodeURIComponent"),
         );
         self.globals.insert(
             crate::core::INTERNAL_FOROF_HELPER.to_string(),
-            Self::make_host_fn_with_mc(mc, "global.__forOfValues"),
+            Self::make_host_fn(mc, "global.__forOfValues"),
         );
         let mut import_map = IndexMap::new();
-        import_map.insert("source".to_string(), Self::make_host_fn_with_mc(mc, "import.source"));
+        import_map.insert("source".to_string(), Self::make_host_fn(mc, "import.source"));
         self.globals
             .insert("import".to_string(), Value::VmObject(new_gc_cell_ptr(mc, import_map)));
         // Minimal Symbol object — callable via __native_id__, with well-known symbol properties
@@ -8337,19 +8339,19 @@ impl<'gc> VM<'gc> {
 
         // Reflect object
         let mut reflect_map = IndexMap::new();
-        reflect_map.insert("has".to_string(), Self::make_host_fn("reflect.has"));
-        reflect_map.insert("get".to_string(), Self::make_host_fn("reflect.get"));
-        reflect_map.insert("set".to_string(), Self::make_host_fn("reflect.set"));
-        reflect_map.insert("ownKeys".to_string(), Self::make_host_fn("reflect.ownKeys"));
-        reflect_map.insert("isExtensible".to_string(), Self::make_host_fn("reflect.isExtensible"));
-        reflect_map.insert("getPrototypeOf".to_string(), Self::make_host_fn("reflect.getPrototypeOf"));
+        reflect_map.insert("has".to_string(), Self::make_host_fn(mc, "reflect.has"));
+        reflect_map.insert("get".to_string(), Self::make_host_fn(mc, "reflect.get"));
+        reflect_map.insert("set".to_string(), Self::make_host_fn(mc, "reflect.set"));
+        reflect_map.insert("ownKeys".to_string(), Self::make_host_fn(mc, "reflect.ownKeys"));
+        reflect_map.insert("isExtensible".to_string(), Self::make_host_fn(mc, "reflect.isExtensible"));
+        reflect_map.insert("getPrototypeOf".to_string(), Self::make_host_fn(mc, "reflect.getPrototypeOf"));
         reflect_map.insert(
             "getOwnPropertyDescriptor".to_string(),
-            Self::make_host_fn("reflect.getOwnPropertyDescriptor"),
+            Self::make_host_fn(mc, "reflect.getOwnPropertyDescriptor"),
         );
-        reflect_map.insert("defineProperty".to_string(), Self::make_host_fn("reflect.defineProperty"));
+        reflect_map.insert("defineProperty".to_string(), Self::make_host_fn(mc, "reflect.defineProperty"));
         reflect_map.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_REFLECT_APPLY));
-        reflect_map.insert("construct".to_string(), Self::make_host_fn("reflect.construct"));
+        reflect_map.insert("construct".to_string(), Self::make_host_fn(mc, "reflect.construct"));
         reflect_map.insert("setPrototypeOf".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_SETPROTOTYPEOF));
         for key in [
             "has",
@@ -8387,7 +8389,7 @@ impl<'gc> VM<'gc> {
         let mut array_iter_proto = IndexMap::new();
         array_iter_proto.insert(
             "next".to_string(),
-            Self::make_host_fn_with_name_len("iterator.next", "next", 0.0, false),
+            Self::make_host_fn_with_name_len(mc, "iterator.next", "next", 0.0, false),
         );
         array_iter_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
         array_iter_proto.insert("@@sym:4".to_string(), Value::from("Array Iterator"));
@@ -8404,11 +8406,11 @@ impl<'gc> VM<'gc> {
         {
             arr_proto.insert("__proto__".to_string(), obj_proto);
         }
-        let array_values_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.values", "values", 0.0, false);
-        let array_entries_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.entries", "entries", 0.0, false);
-        let array_copy_within_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.copyWithin", "copyWithin", 2.0, false);
-        let array_to_string_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.toString", "toString", 0.0, false);
-        let array_to_locale_string_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.toString", "toLocaleString", 0.0, false);
+        let array_values_fn = Self::make_host_fn_with_name_len(mc, "array.values", "values", 0.0, false);
+        let array_entries_fn = Self::make_host_fn_with_name_len(mc, "array.entries", "entries", 0.0, false);
+        let array_copy_within_fn = Self::make_host_fn_with_name_len(mc, "array.copyWithin", "copyWithin", 2.0, false);
+        let array_to_string_fn = Self::make_host_fn_with_name_len(mc, "array.toString", "toString", 0.0, false);
+        let array_to_locale_string_fn = Self::make_host_fn_with_name_len(mc, "array.toString", "toLocaleString", 0.0, false);
         arr_proto.insert("@@sym:1".to_string(), array_values_fn.clone());
         arr_proto.insert("push".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_PUSH));
         arr_proto.insert("pop".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_POP));
@@ -8507,7 +8509,7 @@ impl<'gc> VM<'gc> {
                 proto.insert("message".to_string(), Value::from(""));
                 proto.insert(
                     "toString".to_string(),
-                    Self::make_host_fn_with_name_len("error.toString", "toString", 0.0, false),
+                    Self::make_host_fn_with_name_len(mc, "error.toString", "toString", 0.0, false),
                 );
                 Self::set_property_attributes(&mut proto, "name", true, false, true);
                 Self::set_property_attributes(&mut proto, "message", true, false, true);
@@ -8543,7 +8545,7 @@ impl<'gc> VM<'gc> {
         Self::init_native_ctor_header(&mut date_map, BUILTIN_CTOR_DATE, "Date", 7.0);
         date_map.insert("now".to_string(), Value::VmNativeFunction(BUILTIN_DATE_NOW));
         date_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_DATE_PARSE));
-        date_map.insert("UTC".to_string(), Self::make_host_fn("date.UTC"));
+        date_map.insert("UTC".to_string(), Self::make_host_fn(mc, "date.UTC"));
         let mut date_proto = IndexMap::new();
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
             && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
@@ -8556,12 +8558,12 @@ impl<'gc> VM<'gc> {
             ("toString", Value::VmNativeFunction(BUILTIN_DATE_TOSTRING)),
             (
                 "toTimeString",
-                Self::make_host_fn_with_name_len("date.toTimeString", "toTimeString", 0.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.toTimeString", "toTimeString", 0.0, false),
             ),
             ("toUTCString", Value::VmNativeFunction(BUILTIN_DATE_TOSTRING)),
             ("toDateString", Value::VmNativeFunction(BUILTIN_DATE_TODATESTRING)),
             ("setTime", Value::VmNativeFunction(BUILTIN_DATE_SETTIME)),
-            ("toJSON", Self::make_host_fn_with_name_len("date.toJSON", "toJSON", 1.0, false)),
+            ("toJSON", Self::make_host_fn_with_name_len(mc, "date.toJSON", "toJSON", 1.0, false)),
             ("toLocaleDateString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING)),
             ("toLocaleTimeString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING)),
             ("toLocaleString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALESTRING)),
@@ -8578,43 +8580,43 @@ impl<'gc> VM<'gc> {
             ("setFullYear", Value::VmNativeFunction(BUILTIN_DATE_SETFULLYEAR)),
             (
                 "setUTCFullYear",
-                Self::make_host_fn_with_name_len("date.setUTCFullYear", "setUTCFullYear", 3.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setUTCFullYear", "setUTCFullYear", 3.0, false),
             ),
             ("setMonth", Value::VmNativeFunction(BUILTIN_DATE_SETMONTH)),
             (
                 "setUTCMonth",
-                Self::make_host_fn_with_name_len("date.setUTCMonth", "setUTCMonth", 2.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setUTCMonth", "setUTCMonth", 2.0, false),
             ),
             ("setDate", Value::VmNativeFunction(BUILTIN_DATE_SETDATE)),
             (
                 "setUTCDate",
-                Self::make_host_fn_with_name_len("date.setUTCDate", "setUTCDate", 1.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setUTCDate", "setUTCDate", 1.0, false),
             ),
             ("setHours", Value::VmNativeFunction(BUILTIN_DATE_SETHOURS)),
             (
                 "setUTCHours",
-                Self::make_host_fn_with_name_len("date.setUTCHours", "setUTCHours", 4.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setUTCHours", "setUTCHours", 4.0, false),
             ),
             ("setMinutes", Value::VmNativeFunction(BUILTIN_DATE_SETMINUTES)),
             (
                 "setUTCMinutes",
-                Self::make_host_fn_with_name_len("date.setUTCMinutes", "setUTCMinutes", 3.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setUTCMinutes", "setUTCMinutes", 3.0, false),
             ),
             (
                 "setSeconds",
-                Self::make_host_fn_with_name_len("date.setSeconds", "setSeconds", 2.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setSeconds", "setSeconds", 2.0, false),
             ),
             (
                 "setUTCSeconds",
-                Self::make_host_fn_with_name_len("date.setUTCSeconds", "setUTCSeconds", 2.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setUTCSeconds", "setUTCSeconds", 2.0, false),
             ),
             (
                 "setMilliseconds",
-                Self::make_host_fn_with_name_len("date.setMilliseconds", "setMilliseconds", 1.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setMilliseconds", "setMilliseconds", 1.0, false),
             ),
             (
                 "setUTCMilliseconds",
-                Self::make_host_fn_with_name_len("date.setUTCMilliseconds", "setUTCMilliseconds", 1.0, false),
+                Self::make_host_fn_with_name_len(mc, "date.setUTCMilliseconds", "setUTCMilliseconds", 1.0, false),
             ),
             ("getTimezoneOffset", Value::VmNativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET)),
             ("getUTCFullYear", Value::VmNativeFunction(BUILTIN_DATE_GETUTCFULLYEAR)),
@@ -8637,12 +8639,12 @@ impl<'gc> VM<'gc> {
         let mut array_buffer_proto = IndexMap::new();
         array_buffer_proto.insert(
             "__get_byteLength".to_string(),
-            Self::make_host_fn_with_name_len("arrayBuffer.getByteLength", "get byteLength", 0.0, false),
+            Self::make_host_fn_with_name_len(mc, "arrayBuffer.getByteLength", "get byteLength", 0.0, false),
         );
         array_buffer_proto.insert("__nonenumerable_byteLength__".to_string(), Value::Boolean(true));
         array_buffer_proto.insert(
             "slice".to_string(),
-            Self::make_host_fn_with_name_len("arrayBuffer.slice", "slice", 2.0, false),
+            Self::make_host_fn_with_name_len(mc, "arrayBuffer.slice", "slice", 2.0, false),
         );
         array_buffer_proto.insert("__nonenumerable_slice__".to_string(), Value::Boolean(true));
         array_buffer_proto.insert("@@sym:4".to_string(), Value::from("ArrayBuffer"));
@@ -8660,7 +8662,7 @@ impl<'gc> VM<'gc> {
         array_buffer_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
         array_buffer_map.insert(
             "isView".to_string(),
-            Self::make_host_fn_with_name_len("arrayBuffer.isView", "isView", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "arrayBuffer.isView", "isView", 1.0, false),
         );
         array_buffer_map.insert("__nonenumerable_isView__".to_string(), Value::Boolean(true));
         array_buffer_map.insert("prototype".to_string(), array_buffer_proto_val);
@@ -8706,68 +8708,68 @@ impl<'gc> VM<'gc> {
         let mut atomics_map = IndexMap::new();
         atomics_map.insert(
             "isLockFree".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.isLockFree", "isLockFree", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.isLockFree", "isLockFree", 1.0, false),
         );
         atomics_map.insert("__nonenumerable_isLockFree__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "load".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.load", "load", 2.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.load", "load", 2.0, false),
         );
         atomics_map.insert("__nonenumerable_load__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "store".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.store", "store", 3.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.store", "store", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_store__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "compareExchange".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.compareExchange", "compareExchange", 4.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.compareExchange", "compareExchange", 4.0, false),
         );
         atomics_map.insert("__nonenumerable_compareExchange__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "and".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.and", "and", 3.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.and", "and", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_and__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "add".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.add", "add", 3.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.add", "add", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_add__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "exchange".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.exchange", "exchange", 3.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.exchange", "exchange", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_exchange__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "sub".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.sub", "sub", 3.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.sub", "sub", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_sub__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "or".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.or", "or", 3.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.or", "or", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_or__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "xor".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.xor", "xor", 3.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.xor", "xor", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_xor__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "wait".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.wait", "wait", 4.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.wait", "wait", 4.0, false),
         );
         atomics_map.insert("__nonenumerable_wait__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "notify".to_string(),
-            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.notify", "notify", 3.0, false),
+            Self::make_host_fn_with_name_len(mc, "atomics.notify", "notify", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_notify__".to_string(), Value::Boolean(true));
         atomics_map.insert("@@sym:4".to_string(), Value::from("Atomics"));
         atomics_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         atomics_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
-        let wait_async_fn = Self::make_host_fn_with_name_len_with_mc(mc, "atomics.waitAsync", "waitAsync", 4.0, false);
+        let wait_async_fn = Self::make_host_fn_with_name_len(mc, "atomics.waitAsync", "waitAsync", 4.0, false);
         atomics_map.insert("waitAsync".to_string(), wait_async_fn);
         atomics_map.insert("__nonenumerable_waitAsync__".to_string(), Value::Boolean(true));
         let atomics_obj = Value::VmObject(new_gc_cell_ptr(mc, atomics_map));
@@ -8780,18 +8782,18 @@ impl<'gc> VM<'gc> {
         let mut promise_map = IndexMap::new();
         let mut promise_proto = IndexMap::new();
         promise_proto.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
-        promise_proto.insert("catch".to_string(), Self::make_host_fn_with_mc(mc, "promise.catch"));
-        promise_proto.insert("finally".to_string(), Self::make_host_fn_with_mc(mc, "promise.finally"));
+        promise_proto.insert("catch".to_string(), Self::make_host_fn(mc, "promise.catch"));
+        promise_proto.insert("finally".to_string(), Self::make_host_fn(mc, "promise.finally"));
         promise_proto.insert("@@sym:4".to_string(), Value::from("Promise"));
         promise_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
         let promise_proto_obj = Value::VmObject(new_gc_cell_ptr(mc, promise_proto));
         promise_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROMISE as f64));
         promise_map.insert("resolve".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_RESOLVE));
         promise_map.insert("all".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_ALL));
-        promise_map.insert("any".to_string(), Self::make_host_fn_with_mc(mc, "promise.any"));
-        promise_map.insert("race".to_string(), Self::make_host_fn_with_mc(mc, "promise.race"));
-        promise_map.insert("allSettled".to_string(), Self::make_host_fn_with_mc(mc, "promise.allSettled"));
-        promise_map.insert("reject".to_string(), Self::make_host_fn_with_mc(mc, "promise.reject"));
+        promise_map.insert("any".to_string(), Self::make_host_fn(mc, "promise.any"));
+        promise_map.insert("race".to_string(), Self::make_host_fn(mc, "promise.race"));
+        promise_map.insert("allSettled".to_string(), Self::make_host_fn(mc, "promise.allSettled"));
+        promise_map.insert("reject".to_string(), Self::make_host_fn(mc, "promise.reject"));
         promise_map.insert("prototype".to_string(), promise_proto_obj);
         self.globals
             .insert("Promise".to_string(), Value::VmObject(new_gc_cell_ptr(mc, promise_map)));
@@ -8844,15 +8846,13 @@ impl<'gc> VM<'gc> {
             .insert("__nonenumerable_AggregateError__".to_string(), Value::Boolean(true));
 
         self.globals
-            .insert("__await__".to_string(), Self::make_host_fn_with_mc(mc, "promise.await"));
-        self.globals.insert(
-            "__drain_microtasks__".to_string(),
-            Self::make_host_fn_with_mc(mc, "vm.drainMicrotasks"),
-        );
+            .insert("__await__".to_string(), Self::make_host_fn(mc, "promise.await"));
+        self.globals
+            .insert("__drain_microtasks__".to_string(), Self::make_host_fn(mc, "vm.drainMicrotasks"));
 
         let mut proxy_map = IndexMap::new();
         proxy_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROXY as f64));
-        proxy_map.insert("revocable".to_string(), Self::make_host_fn_with_mc(mc, "proxy.revocable"));
+        proxy_map.insert("revocable".to_string(), Self::make_host_fn(mc, "proxy.revocable"));
         self.globals
             .insert("Proxy".to_string(), Value::VmObject(new_gc_cell_ptr(mc, proxy_map)));
 
@@ -8964,43 +8964,43 @@ impl<'gc> VM<'gc> {
             .insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_OBJ_TOSTRING));
         object_proto.borrow_mut(mc).insert(
             "toLocaleString".to_string(),
-            Self::make_host_fn_with_name_len("object.toLocaleString", "toLocaleString", 0.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.toLocaleString", "toLocaleString", 0.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "valueOf".to_string(),
-            Self::make_host_fn_with_name_len("object.valueOf", "valueOf", 0.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.valueOf", "valueOf", 0.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "isPrototypeOf".to_string(),
-            Self::make_host_fn_with_name_len("object.isPrototypeOf", "isPrototypeOf", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.isPrototypeOf", "isPrototypeOf", 1.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "propertyIsEnumerable".to_string(),
-            Self::make_host_fn_with_name_len("object.propertyIsEnumerable", "propertyIsEnumerable", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.propertyIsEnumerable", "propertyIsEnumerable", 1.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "__defineGetter__".to_string(),
-            Self::make_host_fn_with_name_len("object.__defineGetter__", "__defineGetter__", 2.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.__defineGetter__", "__defineGetter__", 2.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "__defineSetter__".to_string(),
-            Self::make_host_fn_with_name_len("object.__defineSetter__", "__defineSetter__", 2.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.__defineSetter__", "__defineSetter__", 2.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "__lookupGetter__".to_string(),
-            Self::make_host_fn_with_name_len("object.__lookupGetter__", "__lookupGetter__", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.__lookupGetter__", "__lookupGetter__", 1.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "__lookupSetter__".to_string(),
-            Self::make_host_fn_with_name_len("object.__lookupSetter__", "__lookupSetter__", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.__lookupSetter__", "__lookupSetter__", 1.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "__get___proto__".to_string(),
-            Self::make_host_fn_with_name_len("object.__proto__.get", "get __proto__", 0.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.__proto__.get", "get __proto__", 0.0, false),
         );
         object_proto.borrow_mut(mc).insert(
             "__set___proto__".to_string(),
-            Self::make_host_fn_with_name_len("object.__proto__.set", "set __proto__", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.__proto__.set", "set __proto__", 1.0, false),
         );
         for key in [
             "hasOwnProperty",
@@ -9025,7 +9025,10 @@ impl<'gc> VM<'gc> {
         object_map.insert("keys".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_KEYS));
         object_map.insert("values".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_VALUES));
         object_map.insert("entries".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_ENTRIES));
-        object_map.insert("is".to_string(), Self::make_host_fn_with_name_len("object.is", "is", 2.0, false));
+        object_map.insert(
+            "is".to_string(),
+            Self::make_host_fn_with_name_len(mc, "object.is", "is", 2.0, false),
+        );
         object_map.insert("assign".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_ASSIGN));
         object_map.insert("freeze".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_FREEZE));
         object_map.insert("hasOwn".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_HASOWN));
@@ -9035,19 +9038,19 @@ impl<'gc> VM<'gc> {
         object_map.insert("preventExtensions".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_PREVENTEXT));
         object_map.insert(
             "isExtensible".to_string(),
-            Self::make_host_fn_with_name_len("reflect.isExtensible", "isExtensible", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "reflect.isExtensible", "isExtensible", 1.0, false),
         );
         object_map.insert(
             "seal".to_string(),
-            Self::make_host_fn_with_name_len("object.seal", "seal", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.seal", "seal", 1.0, false),
         );
         object_map.insert(
             "isSealed".to_string(),
-            Self::make_host_fn_with_name_len("object.isSealed", "isSealed", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.isSealed", "isSealed", 1.0, false),
         );
         object_map.insert(
             "isFrozen".to_string(),
-            Self::make_host_fn_with_name_len("object.isFrozen", "isFrozen", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.isFrozen", "isFrozen", 1.0, false),
         );
         object_map.insert("groupBy".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_GROUPBY));
         object_map.insert("defineProperty".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_DEFINEPROP));
@@ -9062,11 +9065,11 @@ impl<'gc> VM<'gc> {
         );
         object_map.insert(
             "getOwnPropertyDescriptors".to_string(),
-            Self::make_host_fn_with_name_len("object.getOwnPropertyDescriptors", "getOwnPropertyDescriptors", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.getOwnPropertyDescriptors", "getOwnPropertyDescriptors", 1.0, false),
         );
         object_map.insert(
             "getOwnPropertySymbols".to_string(),
-            Self::make_host_fn_with_name_len("object.getOwnPropertySymbols", "getOwnPropertySymbols", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "object.getOwnPropertySymbols", "getOwnPropertySymbols", 1.0, false),
         );
         for key in [
             "keys",
@@ -9104,11 +9107,11 @@ impl<'gc> VM<'gc> {
             symbol_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
             symbol_proto.insert(
                 "toString".to_string(),
-                Self::make_host_fn_with_name_len("symbol.toString", "toString", 0.0, false),
+                Self::make_host_fn_with_name_len(mc, "symbol.toString", "toString", 0.0, false),
             );
             symbol_proto.insert(
                 "valueOf".to_string(),
-                Self::make_host_fn_with_name_len("symbol.valueOf", "valueOf", 0.0, false),
+                Self::make_host_fn_with_name_len(mc, "symbol.valueOf", "valueOf", 0.0, false),
             );
             symbol_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
             symbol_proto.insert("__nonenumerable_valueOf__".to_string(), Value::Boolean(true));
@@ -9263,9 +9266,9 @@ impl<'gc> VM<'gc> {
             string_proto.insert(name.to_string(), Value::VmNativeFunction(builtin_id));
             string_proto.insert(format!("__nonenumerable_{}__", name), Value::Boolean(true));
         }
-        string_proto.insert("concat".to_string(), Self::make_host_fn_with_mc(mc, "string.concat"));
+        string_proto.insert("concat".to_string(), Self::make_host_fn(mc, "string.concat"));
         string_proto.insert("__nonenumerable_concat__".to_string(), Value::Boolean(true));
-        string_proto.insert("localeCompare".to_string(), Self::make_host_fn_with_mc(mc, "string.localeCompare"));
+        string_proto.insert("localeCompare".to_string(), Self::make_host_fn(mc, "string.localeCompare"));
         string_proto.insert("__nonenumerable_localeCompare__".to_string(), Value::Boolean(true));
         let string_proto_obj = new_gc_cell_ptr(mc, string_proto);
         let string_ctor = Self::finalize_ctor_with_prototype(mc, string_map, string_proto_obj);
@@ -9290,11 +9293,11 @@ impl<'gc> VM<'gc> {
             boolean_proto.insert("__value__".to_string(), Value::Boolean(false));
             boolean_proto.insert(
                 "toString".to_string(),
-                Self::make_host_fn_with_name_len("boolean.toString", "toString", 0.0, false),
+                Self::make_host_fn_with_name_len(mc, "boolean.toString", "toString", 0.0, false),
             );
             boolean_proto.insert(
                 "valueOf".to_string(),
-                Self::make_host_fn_with_name_len("boolean.valueOf", "valueOf", 0.0, false),
+                Self::make_host_fn_with_name_len(mc, "boolean.valueOf", "valueOf", 0.0, false),
             );
             boolean_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
             boolean_proto.insert("__nonenumerable_valueOf__".to_string(), Value::Boolean(true));
@@ -9429,18 +9432,12 @@ impl<'gc> VM<'gc> {
             regexp_proto.insert("test".to_string(), Value::VmNativeFunction(BUILTIN_REGEX_TEST));
             regexp_proto.insert(
                 "toString".to_string(),
-                Self::make_host_fn_with_name_len("regexp.toString", "toString", 0.0, false),
+                Self::make_host_fn_with_name_len(mc, "regexp.toString", "toString", 0.0, false),
             );
-            regexp_proto.insert("__get_source".to_string(), Self::make_host_fn_with_mc(mc, "regexp.get_source"));
-            regexp_proto.insert("__get_global".to_string(), Self::make_host_fn_with_mc(mc, "regexp.get_global"));
-            regexp_proto.insert(
-                "__get_ignoreCase".to_string(),
-                Self::make_host_fn_with_mc(mc, "regexp.get_ignoreCase"),
-            );
-            regexp_proto.insert(
-                "__get_multiline".to_string(),
-                Self::make_host_fn_with_mc(mc, "regexp.get_multiline"),
-            );
+            regexp_proto.insert("__get_source".to_string(), Self::make_host_fn(mc, "regexp.get_source"));
+            regexp_proto.insert("__get_global".to_string(), Self::make_host_fn(mc, "regexp.get_global"));
+            regexp_proto.insert("__get_ignoreCase".to_string(), Self::make_host_fn(mc, "regexp.get_ignoreCase"));
+            regexp_proto.insert("__get_multiline".to_string(), Self::make_host_fn(mc, "regexp.get_multiline"));
             regexp_proto.insert("__nonenumerable_source__".to_string(), Value::Boolean(true));
             regexp_proto.insert("__nonenumerable_global__".to_string(), Value::Boolean(true));
             regexp_proto.insert("__nonenumerable_ignoreCase__".to_string(), Value::Boolean(true));
@@ -9459,19 +9456,19 @@ impl<'gc> VM<'gc> {
         self.globals.insert("globalThis".to_string(), Value::VmObject(self.global_this));
         self.globals.insert(
             "__detachArrayBuffer__".to_string(),
-            Self::make_host_fn_with_name_len("__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
         );
         self.globals.insert(
             "__createRealm__".to_string(),
-            Self::make_host_fn_with_name_len("__createRealm__", "__createRealm__", 0.0, false),
+            Self::make_host_fn_with_name_len(mc, "__createRealm__", "__createRealm__", 0.0, false),
         );
         self.global_this.borrow_mut(mc).insert(
             "__detachArrayBuffer__".to_string(),
-            Self::make_host_fn_with_name_len("__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
+            Self::make_host_fn_with_name_len(mc, "__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
         );
         self.global_this.borrow_mut(mc).insert(
             "__createRealm__".to_string(),
-            Self::make_host_fn_with_name_len("__createRealm__", "__createRealm__", 0.0, false),
+            Self::make_host_fn_with_name_len(mc, "__createRealm__", "__createRealm__", 0.0, false),
         );
         {
             let mut gt = self.global_this.borrow_mut(mc);
@@ -9513,28 +9510,28 @@ impl<'gc> VM<'gc> {
 
         // Minimal `os` namespace for VM module import interop
         let mut os_path_map = IndexMap::new();
-        os_path_map.insert("basename".to_string(), Self::make_host_fn_with_mc(mc, "os.path.basename"));
-        os_path_map.insert("dirname".to_string(), Self::make_host_fn_with_mc(mc, "os.path.dirname"));
-        os_path_map.insert("join".to_string(), Self::make_host_fn_with_mc(mc, "os.path.join"));
-        os_path_map.insert("extname".to_string(), Self::make_host_fn_with_mc(mc, "os.path.extname"));
+        os_path_map.insert("basename".to_string(), Self::make_host_fn(mc, "os.path.basename"));
+        os_path_map.insert("dirname".to_string(), Self::make_host_fn(mc, "os.path.dirname"));
+        os_path_map.insert("join".to_string(), Self::make_host_fn(mc, "os.path.join"));
+        os_path_map.insert("extname".to_string(), Self::make_host_fn(mc, "os.path.extname"));
 
         let mut os_map = IndexMap::new();
-        os_map.insert("getcwd".to_string(), Self::make_host_fn_with_mc(mc, "os.getcwd"));
-        os_map.insert("getpid".to_string(), Self::make_host_fn_with_mc(mc, "os.getpid"));
-        os_map.insert("getppid".to_string(), Self::make_host_fn_with_mc(mc, "os.getppid"));
-        os_map.insert("open".to_string(), Self::make_host_fn_with_mc(mc, "os.open"));
-        os_map.insert("write".to_string(), Self::make_host_fn_with_mc(mc, "os.write"));
-        os_map.insert("read".to_string(), Self::make_host_fn_with_mc(mc, "os.read"));
-        os_map.insert("seek".to_string(), Self::make_host_fn_with_mc(mc, "os.seek"));
-        os_map.insert("close".to_string(), Self::make_host_fn_with_mc(mc, "os.close"));
+        os_map.insert("getcwd".to_string(), Self::make_host_fn(mc, "os.getcwd"));
+        os_map.insert("getpid".to_string(), Self::make_host_fn(mc, "os.getpid"));
+        os_map.insert("getppid".to_string(), Self::make_host_fn(mc, "os.getppid"));
+        os_map.insert("open".to_string(), Self::make_host_fn(mc, "os.open"));
+        os_map.insert("write".to_string(), Self::make_host_fn(mc, "os.write"));
+        os_map.insert("read".to_string(), Self::make_host_fn(mc, "os.read"));
+        os_map.insert("seek".to_string(), Self::make_host_fn(mc, "os.seek"));
+        os_map.insert("close".to_string(), Self::make_host_fn(mc, "os.close"));
         os_map.insert("path".to_string(), Value::VmObject(new_gc_cell_ptr(mc, os_path_map)));
         self.globals.insert("os".to_string(), Value::VmObject(new_gc_cell_ptr(mc, os_map)));
 
         // Minimal `std` namespace for VM module import interop
         let mut std_map = IndexMap::new();
-        std_map.insert("sprintf".to_string(), Self::make_host_fn_with_mc(mc, "std.sprintf"));
-        std_map.insert("tmpfile".to_string(), Self::make_host_fn_with_mc(mc, "std.tmpfile"));
-        std_map.insert("gc".to_string(), Self::make_host_fn_with_mc(mc, "std.gc"));
+        std_map.insert("sprintf".to_string(), Self::make_host_fn(mc, "std.sprintf"));
+        std_map.insert("tmpfile".to_string(), Self::make_host_fn(mc, "std.tmpfile"));
+        std_map.insert("gc".to_string(), Self::make_host_fn(mc, "std.gc"));
         self.globals
             .insert("std".to_string(), Value::VmObject(new_gc_cell_ptr(mc, std_map)));
 
@@ -10444,6 +10441,20 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn preserve_thrown_value_for_error(&mut self, thrown: &Value<'gc>, err_message: &str) {
+        self.preserved_throw_value = Some(thrown.clone());
+        self.preserved_throw_message = Some(err_message.to_string());
+    }
+
+    fn take_preserved_thrown_value_for_error(&mut self, err: &JSError) -> Option<Value<'gc>> {
+        let err_message = err.message();
+        if self.preserved_throw_message.as_deref() == Some(err_message.as_str()) {
+            self.preserved_throw_message = None;
+            return self.preserved_throw_value.take();
+        }
+        None
+    }
+
     pub(crate) fn vm_error_to_js_error(&mut self, mc: &GcContext<'gc>, thrown: &Value<'gc>) -> JSError {
         if let Value::VmObject(map) = thrown {
             let explicit_type = {
@@ -10515,21 +10526,30 @@ impl<'gc> VM<'gc> {
                     .collect();
                 err.set_stack(stack_lines);
             }
+            self.preserve_thrown_value_for_error(thrown, &err.message());
             return err;
         }
 
-        crate::make_js_error!(crate::error::JSErrorKind::Throw(format!("Uncaught: {}", value_to_string(thrown))))
+        let err = crate::make_js_error!(crate::error::JSErrorKind::Throw(format!("Uncaught: {}", value_to_string(thrown))));
+        self.preserve_thrown_value_for_error(thrown, &err.message());
+        err
     }
 
     fn set_pending_throw_from_error(&mut self, err: &JSError) {
         if let Some(thrown) = self.pending_throw.take() {
+            self.pending_throw = Some(thrown);
+        } else if let Some(thrown) = self.take_preserved_thrown_value_for_error(err) {
             self.pending_throw = Some(thrown);
         } else {
             self.pending_throw = Some(Value::from(&err.message()));
         }
     }
 
-    fn vm_value_from_error(&self, mc: &GcContext<'gc>, err: &JSError) -> Value<'gc> {
+    fn vm_value_from_error(&mut self, mc: &GcContext<'gc>, err: &JSError) -> Value<'gc> {
+        if let Some(thrown) = self.take_preserved_thrown_value_for_error(err) {
+            return thrown;
+        }
+
         let mut raw_message = err.message();
         for prefix in ["SyntaxError: Uncaught: ", "Error: Uncaught: ", "Uncaught: "] {
             if let Some(stripped) = raw_message.strip_prefix(prefix) {
@@ -10561,8 +10581,24 @@ impl<'gc> VM<'gc> {
         map.insert("__type__".to_string(), Value::from(&name));
         map.insert("name".to_string(), Value::from(&name));
         map.insert("message".to_string(), Value::from(&message));
-        if let Some(ctor) = self.globals.get(&name).cloned() {
-            map.insert("constructor".to_string(), ctor);
+        let ctor = self
+            .globals
+            .get(&name)
+            .cloned()
+            .or_else(|| self.global_this.borrow().get(&name).cloned());
+        if let Some(ctor) = ctor {
+            map.insert("constructor".to_string(), ctor.clone());
+            let proto = match &ctor {
+                Value::VmObject(obj) => obj.borrow().get("prototype").cloned(),
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    self.get_fn_props_with_mc(mc, *ip, *arity).borrow().get("prototype").cloned()
+                }
+                Value::VmNativeFunction(id) => self.get_native_fn_props_with_mc(mc, *id).borrow().get("prototype").cloned(),
+                _ => None,
+            };
+            if let Some(proto) = proto {
+                map.insert("__proto__".to_string(), proto);
+            }
         }
         if let Some(line) = err.js_line() {
             map.insert("__line__".to_string(), Value::Number(line as f64));
@@ -11534,22 +11570,22 @@ impl<'gc> VM<'gc> {
                 map.insert("__buffer__".to_string(), Value::Boolean(true));
                 map.insert("byteLength".to_string(), Value::Number(byte_len));
                 map.insert("byteOffset".to_string(), Value::Number(0.0));
-                map.insert("getUint8".to_string(), Self::make_host_fn_with_mc(mc, "dataview.getUint8"));
-                map.insert("getInt8".to_string(), Self::make_host_fn_with_mc(mc, "dataview.getInt8"));
-                map.insert("setUint8".to_string(), Self::make_host_fn_with_mc(mc, "dataview.setUint8"));
-                map.insert("setInt8".to_string(), Self::make_host_fn_with_mc(mc, "dataview.setInt8"));
-                map.insert("getUint16".to_string(), Self::make_host_fn_with_mc(mc, "dataview.getUint16"));
-                map.insert("getInt16".to_string(), Self::make_host_fn_with_mc(mc, "dataview.getInt16"));
-                map.insert("setUint16".to_string(), Self::make_host_fn_with_mc(mc, "dataview.setUint16"));
-                map.insert("setInt16".to_string(), Self::make_host_fn_with_mc(mc, "dataview.setInt16"));
-                map.insert("getUint32".to_string(), Self::make_host_fn_with_mc(mc, "dataview.getUint32"));
-                map.insert("getInt32".to_string(), Self::make_host_fn_with_mc(mc, "dataview.getInt32"));
-                map.insert("setUint32".to_string(), Self::make_host_fn_with_mc(mc, "dataview.setUint32"));
-                map.insert("setInt32".to_string(), Self::make_host_fn_with_mc(mc, "dataview.setInt32"));
-                map.insert("getFloat32".to_string(), Self::make_host_fn_with_mc(mc, "dataview.getFloat32"));
-                map.insert("setFloat32".to_string(), Self::make_host_fn_with_mc(mc, "dataview.setFloat32"));
-                map.insert("getFloat64".to_string(), Self::make_host_fn_with_mc(mc, "dataview.getFloat64"));
-                map.insert("setFloat64".to_string(), Self::make_host_fn_with_mc(mc, "dataview.setFloat64"));
+                map.insert("getUint8".to_string(), Self::make_host_fn(mc, "dataview.getUint8"));
+                map.insert("getInt8".to_string(), Self::make_host_fn(mc, "dataview.getInt8"));
+                map.insert("setUint8".to_string(), Self::make_host_fn(mc, "dataview.setUint8"));
+                map.insert("setInt8".to_string(), Self::make_host_fn(mc, "dataview.setInt8"));
+                map.insert("getUint16".to_string(), Self::make_host_fn(mc, "dataview.getUint16"));
+                map.insert("getInt16".to_string(), Self::make_host_fn(mc, "dataview.getInt16"));
+                map.insert("setUint16".to_string(), Self::make_host_fn(mc, "dataview.setUint16"));
+                map.insert("setInt16".to_string(), Self::make_host_fn(mc, "dataview.setInt16"));
+                map.insert("getUint32".to_string(), Self::make_host_fn(mc, "dataview.getUint32"));
+                map.insert("getInt32".to_string(), Self::make_host_fn(mc, "dataview.getInt32"));
+                map.insert("setUint32".to_string(), Self::make_host_fn(mc, "dataview.setUint32"));
+                map.insert("setInt32".to_string(), Self::make_host_fn(mc, "dataview.setInt32"));
+                map.insert("getFloat32".to_string(), Self::make_host_fn(mc, "dataview.getFloat32"));
+                map.insert("setFloat32".to_string(), Self::make_host_fn(mc, "dataview.setFloat32"));
+                map.insert("getFloat64".to_string(), Self::make_host_fn(mc, "dataview.getFloat64"));
+                map.insert("setFloat64".to_string(), Self::make_host_fn(mc, "dataview.setFloat64"));
                 Value::VmObject(new_gc_cell_ptr(mc, map))
             }
             BUILTIN_CTOR_INT8ARRAY
@@ -16691,7 +16727,7 @@ impl<'gc> VM<'gc> {
                         obj.insert("__iter_target__".to_string(), Value::VmArray(*arr));
                         obj.insert("__index__".to_string(), Value::Number(0.0));
                         obj.insert("__iter_kind__".to_string(), Value::from("key"));
-                        obj.insert("@@sym:1".to_string(), Self::make_host_fn("iterator.self"));
+                        obj.insert("@@sym:1".to_string(), Self::make_host_fn(mc, "iterator.self"));
                         if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
                             obj.insert("__proto__".to_string(), proto);
                         }
@@ -18955,7 +18991,7 @@ impl<'gc> VM<'gc> {
         obj.insert("__items__".to_string(), Value::VmArray(arr));
         obj.insert("__index__".to_string(), Value::Number(0.0));
         obj.insert("next".to_string(), Value::VmNativeFunction(BUILTIN_ITERATOR_NEXT));
-        obj.insert("@@sym:1".to_string(), Self::make_host_fn("iterator.self"));
+        obj.insert("@@sym:1".to_string(), Self::make_host_fn(mc, "iterator.self"));
         Value::VmObject(new_gc_cell_ptr(mc, obj))
     }
 
@@ -24417,10 +24453,10 @@ impl<'gc> VM<'gc> {
                             "includes" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_INCLUDES)),
                             "flat" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_FLAT)),
                             "flatMap" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_FLATMAP)),
-                            "entries" => self.stack.push(Self::make_host_fn("array.entries")),
+                            "entries" => self.stack.push(Self::make_host_fn(mc, "array.entries")),
                             "keys" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_ITERATOR)),
-                            "copyWithin" => self.stack.push(Self::make_host_fn("array.copyWithin")),
-                            "toString" => self.stack.push(Self::make_host_fn("array.toString")),
+                            "copyWithin" => self.stack.push(Self::make_host_fn(mc, "array.copyWithin")),
+                            "toString" => self.stack.push(Self::make_host_fn(mc, "array.toString")),
                             "at" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_AT)),
                             "every" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_EVERY)),
                             "some" => self.stack.push(Value::VmNativeFunction(BUILTIN_ARRAY_SOME)),
@@ -24541,9 +24577,9 @@ impl<'gc> VM<'gc> {
                             "search" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_SEARCH)),
                             "toString" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_TOSTRING)),
                             "valueOf" => self.stack.push(Value::VmNativeFunction(BUILTIN_STRING_VALUEOF)),
-                            "concat" => self.stack.push(Self::make_host_fn("string.concat")),
-                            "localeCompare" => self.stack.push(Self::make_host_fn("string.localeCompare")),
-                            "substr" => self.stack.push(Self::make_host_fn("string.substr")),
+                            "concat" => self.stack.push(Self::make_host_fn(mc, "string.concat")),
+                            "localeCompare" => self.stack.push(Self::make_host_fn(mc, "string.localeCompare")),
+                            "substr" => self.stack.push(Self::make_host_fn(mc, "string.substr")),
                             "@@sym:1" => self.stack.push(Value::Boolean(true)), // strings are iterable
                             "constructor" => {
                                 if let Some(ctor) = self.globals.get("String").cloned() {
@@ -24567,8 +24603,8 @@ impl<'gc> VM<'gc> {
                             }
                         },
                         Value::Boolean(_) => match key.as_str() {
-                            "toString" => self.stack.push(Self::make_host_fn("boolean.toString")),
-                            "valueOf" => self.stack.push(Self::make_host_fn("boolean.valueOf")),
+                            "toString" => self.stack.push(Self::make_host_fn(mc, "boolean.toString")),
+                            "valueOf" => self.stack.push(Self::make_host_fn(mc, "boolean.valueOf")),
                             _ => {
                                 let wrapped = self.call_builtin_with_mc(mc, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&obj));
                                 let v = self.read_named_property_with_receiver(mc, &wrapped, &key, &obj);
@@ -25323,8 +25359,8 @@ impl<'gc> VM<'gc> {
                                             });
                                             if self.lookup_proto_chain(effective_proto.as_ref(), &key).is_none() {
                                                 match key.as_str() {
-                                                    "toString" => Some(Self::make_host_fn("boolean.toString")),
-                                                    "valueOf" => Some(Self::make_host_fn("boolean.valueOf")),
+                                                    "toString" => Some(Self::make_host_fn(mc, "boolean.toString")),
+                                                    "valueOf" => Some(Self::make_host_fn(mc, "boolean.valueOf")),
                                                     _ => None,
                                                 }
                                             } else {
@@ -25432,8 +25468,8 @@ impl<'gc> VM<'gc> {
                             }
                         },
                         Value::Boolean(_) => match key.as_str() {
-                            "toString" => Self::make_host_fn("boolean.toString"),
-                            "valueOf" => Self::make_host_fn("boolean.valueOf"),
+                            "toString" => Self::make_host_fn(mc, "boolean.toString"),
+                            "valueOf" => Self::make_host_fn(mc, "boolean.valueOf"),
                             _ => {
                                 let wrapped = self.call_builtin_with_mc(mc, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&obj));
                                 self.read_named_property_with_receiver(mc, &wrapped, &key, &obj)

@@ -3498,6 +3498,7 @@ impl<'gc> Compiler<'gc> {
 
                 // Build cooked strings array on stack.
                 self.chunk.write_opcode(Opcode::NewArray);
+                self.chunk.write_byte(0);
                 for cooked in cooked_strings {
                     match cooked {
                         Some(s) => {
@@ -3517,6 +3518,7 @@ impl<'gc> Compiler<'gc> {
                 // Attach `raw` property: duplicate cooked array, set raw array, keep cooked array.
                 self.chunk.write_opcode(Opcode::Dup);
                 self.chunk.write_opcode(Opcode::NewArray);
+                self.chunk.write_byte(0);
                 for raw in raw_strings {
                     let idx = self.chunk.add_constant(Value::String(raw.clone()));
                     self.chunk.write_opcode(Opcode::Constant);

@@ -1268,7 +1268,7 @@ impl<'gc> VM<'gc> {
                     function_ctor = self.globals.get("Function").cloned().unwrap_or(Value::Undefined);
                 }
                 if !self.is_constructor_value(&function_ctor) {
-                    self.throw_type_error("Realm eval requires a Function constructor");
+                    self.throw_type_error_string("Realm eval requires a Function constructor");
                     return Value::Undefined;
                 }
 
@@ -4445,7 +4445,7 @@ impl<'gc> VM<'gc> {
             "object.toLocaleString" => {
                 let this_val = receiver.cloned().unwrap_or(Value::Undefined);
                 if matches!(this_val, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 let target = match &this_val {
@@ -4464,13 +4464,13 @@ impl<'gc> VM<'gc> {
             "object.__defineGetter__" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
                 if matches!(recv, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
                 let getter = args.get(1).cloned().unwrap_or(Value::Undefined);
                 if !self.is_value_callable(&getter) {
-                    self.throw_type_error("Getter must be a function");
+                    self.throw_type_error_string("Getter must be a function");
                     return Value::Undefined;
                 }
 
@@ -4511,7 +4511,7 @@ impl<'gc> VM<'gc> {
                         self.apply_object_property_descriptor(mc, &props, &key, &desc)
                     }
                     _ => {
-                        self.throw_type_error("Object expected");
+                        self.throw_type_error_string("Object expected");
                         false
                     }
                 };
@@ -4524,13 +4524,13 @@ impl<'gc> VM<'gc> {
             "object.__defineSetter__" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
                 if matches!(recv, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
                 let setter = args.get(1).cloned().unwrap_or(Value::Undefined);
                 if !self.is_value_callable(&setter) {
-                    self.throw_type_error("Setter must be a function");
+                    self.throw_type_error_string("Setter must be a function");
                     return Value::Undefined;
                 }
 
@@ -4571,7 +4571,7 @@ impl<'gc> VM<'gc> {
                         self.apply_object_property_descriptor(mc, &props, &key, &desc)
                     }
                     _ => {
-                        self.throw_type_error("Object expected");
+                        self.throw_type_error_string("Object expected");
                         false
                     }
                 };
@@ -4584,7 +4584,7 @@ impl<'gc> VM<'gc> {
             "object.__lookupGetter__" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
                 if matches!(recv, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -4636,7 +4636,7 @@ impl<'gc> VM<'gc> {
             "object.__lookupSetter__" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
                 if matches!(recv, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -4688,7 +4688,7 @@ impl<'gc> VM<'gc> {
             "object.__proto__.get" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
                 if matches!(recv, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -4701,7 +4701,7 @@ impl<'gc> VM<'gc> {
             "object.__proto__.set" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
                 if matches!(recv, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -4725,7 +4725,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 if matches!(status, Value::Boolean(false)) {
-                    self.throw_type_error("Cannot set prototype");
+                    self.throw_type_error_string("Cannot set prototype");
                     return Value::Undefined;
                 }
                 Value::Undefined
@@ -4734,7 +4734,7 @@ impl<'gc> VM<'gc> {
                 let this_val = receiver.cloned().unwrap_or(Value::Undefined);
                 match this_val {
                     Value::Undefined | Value::Null => {
-                        self.throw_type_error("Cannot convert undefined or null to object");
+                        self.throw_type_error_string("Cannot convert undefined or null to object");
                         Value::Undefined
                     }
                     Value::Boolean(_) | Value::Number(_) | Value::String(_) | Value::BigInt(_) | Value::Symbol(_) => {
@@ -4795,7 +4795,7 @@ impl<'gc> VM<'gc> {
                 }
                 let this_val = receiver.cloned().unwrap_or(Value::Undefined);
                 if matches!(this_val, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 let proto_obj = match this_val {
@@ -4850,7 +4850,7 @@ impl<'gc> VM<'gc> {
                     None => String::new(),
                 };
                 if matches!(receiver, Some(Value::Undefined) | Some(Value::Null) | None) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 match receiver {
@@ -4966,7 +4966,7 @@ impl<'gc> VM<'gc> {
             }
             "reflect.ownKeys" => {
                 let Some(target) = args.first().cloned() else {
-                    self.throw_type_error("Reflect.ownKeys requires an object");
+                    self.throw_type_error_string("Reflect.ownKeys requires an object");
                     return Value::Undefined;
                 };
 
@@ -4974,7 +4974,7 @@ impl<'gc> VM<'gc> {
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
                 ) {
-                    self.throw_type_error("Reflect.ownKeys requires an object");
+                    self.throw_type_error_string("Reflect.ownKeys requires an object");
                     return Value::Undefined;
                 }
 
@@ -4990,7 +4990,7 @@ impl<'gc> VM<'gc> {
                         )
                     };
                     if revoked {
-                        self.throw_type_error("Cannot perform 'ownKeys' on a revoked proxy");
+                        self.throw_type_error_string("Cannot perform 'ownKeys' on a revoked proxy");
                         return Value::Undefined;
                     }
 
@@ -5018,7 +5018,7 @@ impl<'gc> VM<'gc> {
                                 }
                                 let len = to_number(&len_val);
                                 if !len.is_finite() || len < 0.0 {
-                                    self.throw_type_error("ownKeys trap must return an array");
+                                    self.throw_type_error_string("ownKeys trap must return an array");
                                     return Value::Undefined;
                                 }
                                 let mut items = Vec::new();
@@ -5036,7 +5036,7 @@ impl<'gc> VM<'gc> {
                         let mut trap_keys: Vec<String> = Vec::new();
                         for item in &trap_items {
                             if !matches!(item, Value::String(_)) && !Self::is_symbol_value(item) {
-                                self.throw_type_error("ownKeys trap result must contain only strings and symbols");
+                                self.throw_type_error_string("ownKeys trap result must contain only strings and symbols");
                                 return Value::Undefined;
                             }
                             let key = match self.as_property_key_string(mc, item) {
@@ -5047,7 +5047,7 @@ impl<'gc> VM<'gc> {
                                 }
                             };
                             if trap_keys.contains(&key) {
-                                self.throw_type_error("ownKeys trap result contains duplicate keys");
+                                self.throw_type_error_string("ownKeys trap result contains duplicate keys");
                                 return Value::Undefined;
                             }
                             trap_keys.push(key);
@@ -5094,7 +5094,7 @@ impl<'gc> VM<'gc> {
                                 false
                             };
                             if non_configurable && !trap_keys.contains(key) {
-                                self.throw_type_error("'ownKeys' on proxy: trap result did not include non-configurable key");
+                                self.throw_type_error_string("'ownKeys' on proxy: trap result did not include non-configurable key");
                                 return Value::Undefined;
                             }
                         }
@@ -5114,13 +5114,13 @@ impl<'gc> VM<'gc> {
                         if target_non_extensible {
                             for key in &target_keys {
                                 if !trap_keys.contains(key) {
-                                    self.throw_type_error("'ownKeys' on proxy: trap result did not include all target keys");
+                                    self.throw_type_error_string("'ownKeys' on proxy: trap result did not include all target keys");
                                     return Value::Undefined;
                                 }
                             }
                             for key in &trap_keys {
                                 if !target_keys.contains(key) {
-                                    self.throw_type_error("'ownKeys' on proxy: trap returned extra keys for non-extensible target");
+                                    self.throw_type_error_string("'ownKeys' on proxy: trap returned extra keys for non-extensible target");
                                     return Value::Undefined;
                                 }
                             }
@@ -5324,7 +5324,7 @@ impl<'gc> VM<'gc> {
             "object.getOwnPropertySymbols" => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
                 if matches!(target, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -5340,7 +5340,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'ownKeys' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'ownKeys' on a revoked proxy");
                             return Value::Undefined;
                         }
 
@@ -5369,7 +5369,7 @@ impl<'gc> VM<'gc> {
                                 }
                                 let len = to_number(&len_val);
                                 if !len.is_finite() || len < 0.0 {
-                                    self.throw_type_error("ownKeys trap must return an array");
+                                    self.throw_type_error_string("ownKeys trap must return an array");
                                     return Value::Undefined;
                                 }
                                 let mut items = Vec::new();
@@ -5387,7 +5387,7 @@ impl<'gc> VM<'gc> {
                         let mut trap_keys: Vec<String> = Vec::new();
                         for item in &trap_items {
                             if !matches!(item, Value::String(_)) && !Self::is_symbol_value(item) {
-                                self.throw_type_error("ownKeys trap result must contain only strings and symbols");
+                                self.throw_type_error_string("ownKeys trap result must contain only strings and symbols");
                                 return Value::Undefined;
                             }
                             let key = match self.as_property_key_string(mc, item) {
@@ -5398,7 +5398,7 @@ impl<'gc> VM<'gc> {
                                 }
                             };
                             if trap_keys.contains(&key) {
-                                self.throw_type_error("ownKeys trap result contains duplicate keys");
+                                self.throw_type_error_string("ownKeys trap result contains duplicate keys");
                                 return Value::Undefined;
                             }
                             trap_keys.push(key);
@@ -5445,7 +5445,7 @@ impl<'gc> VM<'gc> {
                                 false
                             };
                             if non_configurable && !trap_keys.contains(key) {
-                                self.throw_type_error("'ownKeys' on proxy: trap result did not include non-configurable key");
+                                self.throw_type_error_string("'ownKeys' on proxy: trap result did not include non-configurable key");
                                 return Value::Undefined;
                             }
                         }
@@ -5465,13 +5465,13 @@ impl<'gc> VM<'gc> {
                         if target_non_extensible {
                             for key in &target_keys {
                                 if !trap_keys.contains(key) {
-                                    self.throw_type_error("'ownKeys' on proxy: trap result did not include all target keys");
+                                    self.throw_type_error_string("'ownKeys' on proxy: trap result did not include all target keys");
                                     return Value::Undefined;
                                 }
                             }
                             for key in &trap_keys {
                                 if !target_keys.contains(key) {
-                                    self.throw_type_error("'ownKeys' on proxy: trap returned extra keys for non-extensible target");
+                                    self.throw_type_error_string("'ownKeys' on proxy: trap returned extra keys for non-extensible target");
                                     return Value::Undefined;
                                 }
                             }
@@ -5549,12 +5549,12 @@ impl<'gc> VM<'gc> {
             }
             "object.getOwnPropertyDescriptors" => {
                 let Some(input) = args.first().cloned() else {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 };
 
                 if matches!(input, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -5628,7 +5628,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'preventExtensions' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'preventExtensions' on a revoked proxy");
                             return Value::Undefined;
                         }
 
@@ -5639,7 +5639,7 @@ impl<'gc> VM<'gc> {
                         if !matches!(trap_fn, Value::Undefined) {
                             match self.vm_call_function_value_with_mc(mc, &trap_fn, &handler, std::slice::from_ref(&target)) {
                                 Ok(v) if !v.to_truthy() => {
-                                    self.throw_type_error("'preventExtensions' on proxy: trap returned falsish");
+                                    self.throw_type_error_string("'preventExtensions' on proxy: trap returned falsish");
                                     return Value::Undefined;
                                 }
                                 Ok(_) => {}
@@ -5753,7 +5753,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'isSealed' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'isSealed' on a revoked proxy");
                             return Value::Undefined;
                         }
 
@@ -5879,7 +5879,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'isFrozen' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'isFrozen' on a revoked proxy");
                             return Value::Undefined;
                         }
 
@@ -6083,12 +6083,12 @@ impl<'gc> VM<'gc> {
             }
             "array.entries" => {
                 let Some(recv) = receiver else {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 };
                 let target = match recv {
                     Value::Undefined | Value::Null => {
-                        self.throw_type_error("Cannot convert undefined or null to object");
+                        self.throw_type_error_string("Cannot convert undefined or null to object");
                         return Value::Undefined;
                     }
                     Value::VmObject(_)
@@ -6145,12 +6145,12 @@ impl<'gc> VM<'gc> {
             }
             "array.values" => {
                 let Some(recv) = receiver else {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 };
                 let target = match recv {
                     Value::Undefined | Value::Null => {
-                        self.throw_type_error("Cannot convert undefined or null to object");
+                        self.throw_type_error_string("Cannot convert undefined or null to object");
                         return Value::Undefined;
                     }
                     Value::VmObject(_)
@@ -7029,7 +7029,31 @@ impl<'gc> VM<'gc> {
         receiver: Option<&Value<'gc>>,
         args: &[Value<'gc>],
     ) -> Value<'gc> {
-        if name.starts_with("reflect.") {
+        if name == "Function.prototype.restrictedThrow" {
+            self.throw_type_error_string_object(
+                mc,
+                "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them",
+            );
+            return Value::Undefined;
+        }
+
+        if name.starts_with("reflect.")
+            || name.starts_with("array.")
+            || name.starts_with("atomics.")
+            || name.starts_with("string.")
+            || name.starts_with("object.")
+            || name.starts_with("symbol.")
+            || name.starts_with("error.")
+            || name.starts_with("regexp.")
+            || name.starts_with("promise.")
+            || name.starts_with("boolean.")
+            || name.starts_with("number.")
+            || name.starts_with("bigint.")
+            || name.starts_with("date.")
+            || name.starts_with("global.")
+            || name.starts_with("typedarray.")
+            || name.starts_with("dataview.")
+        {
             return self.call_host_fn_with_mc(mc, name, receiver, args);
         }
 
@@ -7052,6 +7076,13 @@ impl<'gc> VM<'gc> {
 
     fn call_named_host_function_with_mc(&mut self, mc: &GcContext<'gc>, name: &str, args: &[Value<'gc>]) -> Value<'gc> {
         match name {
+            "Function.prototype.restrictedThrow" => {
+                self.throw_type_error_string_object(
+                    mc,
+                    "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them",
+                );
+                Value::Undefined
+            }
             "__detachArrayBuffer__" => {
                 let Some(Value::VmObject(buf_obj)) = args.first().cloned() else {
                     let mut err_map = IndexMap::new();
@@ -8373,11 +8404,11 @@ impl<'gc> VM<'gc> {
         {
             arr_proto.insert("__proto__".to_string(), obj_proto);
         }
-        let array_values_fn = Self::make_host_fn_with_name_len("array.values", "values", 0.0, false);
-        let array_entries_fn = Self::make_host_fn_with_name_len("array.entries", "entries", 0.0, false);
-        let array_copy_within_fn = Self::make_host_fn_with_name_len("array.copyWithin", "copyWithin", 2.0, false);
-        let array_to_string_fn = Self::make_host_fn_with_name_len("array.toString", "toString", 0.0, false);
-        let array_to_locale_string_fn = Self::make_host_fn_with_name_len("array.toString", "toLocaleString", 0.0, false);
+        let array_values_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.values", "values", 0.0, false);
+        let array_entries_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.entries", "entries", 0.0, false);
+        let array_copy_within_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.copyWithin", "copyWithin", 2.0, false);
+        let array_to_string_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.toString", "toString", 0.0, false);
+        let array_to_locale_string_fn = Self::make_host_fn_with_name_len_with_mc(mc, "array.toString", "toLocaleString", 0.0, false);
         arr_proto.insert("@@sym:1".to_string(), array_values_fn.clone());
         arr_proto.insert("push".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_PUSH));
         arr_proto.insert("pop".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_POP));
@@ -8675,65 +8706,68 @@ impl<'gc> VM<'gc> {
         let mut atomics_map = IndexMap::new();
         atomics_map.insert(
             "isLockFree".to_string(),
-            Self::make_host_fn_with_name_len("atomics.isLockFree", "isLockFree", 1.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.isLockFree", "isLockFree", 1.0, false),
         );
         atomics_map.insert("__nonenumerable_isLockFree__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "load".to_string(),
-            Self::make_host_fn_with_name_len("atomics.load", "load", 2.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.load", "load", 2.0, false),
         );
         atomics_map.insert("__nonenumerable_load__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "store".to_string(),
-            Self::make_host_fn_with_name_len("atomics.store", "store", 3.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.store", "store", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_store__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "compareExchange".to_string(),
-            Self::make_host_fn_with_name_len("atomics.compareExchange", "compareExchange", 4.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.compareExchange", "compareExchange", 4.0, false),
         );
         atomics_map.insert("__nonenumerable_compareExchange__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "and".to_string(),
-            Self::make_host_fn_with_name_len("atomics.and", "and", 3.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.and", "and", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_and__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "add".to_string(),
-            Self::make_host_fn_with_name_len("atomics.add", "add", 3.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.add", "add", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_add__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "exchange".to_string(),
-            Self::make_host_fn_with_name_len("atomics.exchange", "exchange", 3.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.exchange", "exchange", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_exchange__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "sub".to_string(),
-            Self::make_host_fn_with_name_len("atomics.sub", "sub", 3.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.sub", "sub", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_sub__".to_string(), Value::Boolean(true));
-        atomics_map.insert("or".to_string(), Self::make_host_fn_with_name_len("atomics.or", "or", 3.0, false));
+        atomics_map.insert(
+            "or".to_string(),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.or", "or", 3.0, false),
+        );
         atomics_map.insert("__nonenumerable_or__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "xor".to_string(),
-            Self::make_host_fn_with_name_len("atomics.xor", "xor", 3.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.xor", "xor", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_xor__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "wait".to_string(),
-            Self::make_host_fn_with_name_len("atomics.wait", "wait", 4.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.wait", "wait", 4.0, false),
         );
         atomics_map.insert("__nonenumerable_wait__".to_string(), Value::Boolean(true));
         atomics_map.insert(
             "notify".to_string(),
-            Self::make_host_fn_with_name_len("atomics.notify", "notify", 3.0, false),
+            Self::make_host_fn_with_name_len_with_mc(mc, "atomics.notify", "notify", 3.0, false),
         );
         atomics_map.insert("__nonenumerable_notify__".to_string(), Value::Boolean(true));
         atomics_map.insert("@@sym:4".to_string(), Value::from("Atomics"));
         atomics_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         atomics_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
-        let wait_async_fn = Self::make_host_fn_with_name_len("atomics.waitAsync", "waitAsync", 4.0, false);
+        let wait_async_fn = Self::make_host_fn_with_name_len_with_mc(mc, "atomics.waitAsync", "waitAsync", 4.0, false);
         atomics_map.insert("waitAsync".to_string(), wait_async_fn);
         atomics_map.insert("__nonenumerable_waitAsync__".to_string(), Value::Boolean(true));
         let atomics_obj = Value::VmObject(new_gc_cell_ptr(mc, atomics_map));
@@ -11997,7 +12031,7 @@ impl<'gc> VM<'gc> {
                     if let Some(target) = borrow.get("__proxy_target__").cloned() {
                         if matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))) {
                             drop(borrow);
-                            self.throw_type_error("Cannot perform 'IsArray' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'IsArray' on a revoked proxy");
                             Value::Undefined
                         } else {
                             drop(borrow);
@@ -12690,11 +12724,11 @@ impl<'gc> VM<'gc> {
             // Object.keys(obj) → array of own enumerable string keys
             BUILTIN_OBJECT_KEYS => {
                 let Some(arg) = args.first().cloned() else {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 };
                 if matches!(arg, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -12721,11 +12755,11 @@ impl<'gc> VM<'gc> {
             // Object.values(obj) → array of own enumerable values
             BUILTIN_OBJECT_VALUES => {
                 let Some(arg) = args.first().cloned() else {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 };
                 if matches!(arg, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -12802,11 +12836,11 @@ impl<'gc> VM<'gc> {
             // Object.entries(obj) → array of [key, value] pairs
             BUILTIN_OBJECT_ENTRIES => {
                 let Some(arg) = args.first().cloned() else {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 };
                 if matches!(arg, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -12942,7 +12976,7 @@ impl<'gc> VM<'gc> {
                                         )
                                     };
                                     if revoked {
-                                        self.throw_type_error("Cannot perform 'ownKeys' on a revoked proxy");
+                                        self.throw_type_error_string("Cannot perform 'ownKeys' on a revoked proxy");
                                         return Value::Undefined;
                                     }
                                     let trap_fn = self.read_named_property(mc, &handler, "ownKeys");
@@ -12982,7 +13016,7 @@ impl<'gc> VM<'gc> {
                                         ) {
                                             Ok(Value::VmArray(arr)) => keys.extend(arr.borrow().iter().cloned()),
                                             Ok(_) => {
-                                                self.throw_type_error("ownKeys trap must return an array");
+                                                self.throw_type_error_string("ownKeys trap must return an array");
                                                 return Value::Undefined;
                                             }
                                             Err(err) => {
@@ -13196,7 +13230,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'preventExtensions' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'preventExtensions' on a revoked proxy");
                             return Value::Undefined;
                         }
                         let trap_fn = self.read_named_property(mc, &handler, "preventExtensions");
@@ -13206,7 +13240,7 @@ impl<'gc> VM<'gc> {
                         if !matches!(trap_fn, Value::Undefined) {
                             match self.vm_call_function_value_with_mc(mc, &trap_fn, &handler, std::slice::from_ref(&target)) {
                                 Ok(v) if !v.to_truthy() => {
-                                    self.throw_type_error("'preventExtensions' on proxy: trap returned falsish");
+                                    self.throw_type_error_string("'preventExtensions' on proxy: trap returned falsish");
                                     return Value::Undefined;
                                 }
                                 Ok(_) => {}
@@ -13342,7 +13376,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_HASOWN => {
                 let obj = args.first().cloned().unwrap_or(Value::Undefined);
                 if matches!(obj, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -13455,7 +13489,7 @@ impl<'gc> VM<'gc> {
                 {
                     // ToObject(Properties): null, undefined are not allowed
                     if matches!(descs_val, Value::Null) {
-                        self.throw_type_error("Cannot convert null to object");
+                        self.throw_type_error_string("Cannot convert null to object");
                         return Value::Undefined;
                     }
 
@@ -13463,7 +13497,7 @@ impl<'gc> VM<'gc> {
 
                     // For String properties: characters are enumerable, and ToPropertyDescriptor on a char throws
                     if matches!(descs_val, Value::String(_)) && !desc_keys.is_empty() {
-                        self.throw_type_error("Property description must be an object");
+                        self.throw_type_error_string("Property description must be an object");
                         return Value::Undefined;
                     }
 
@@ -13478,7 +13512,7 @@ impl<'gc> VM<'gc> {
                             desc_obj,
                             Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_)
                         ) {
-                            self.throw_type_error("Property description must be an object");
+                            self.throw_type_error_string("Property description must be an object");
                             return Value::Undefined;
                         }
                         let desc = self.extract_property_descriptor(mc, &desc_obj);
@@ -13501,12 +13535,12 @@ impl<'gc> VM<'gc> {
             // Object.getPrototypeOf(obj)
             BUILTIN_OBJECT_GETPROTOTYPEOF => {
                 let Some(target) = args.first() else {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 };
 
                 if matches!(target, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -13535,7 +13569,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'getPrototypeOf' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'getPrototypeOf' on a revoked proxy");
                             return Value::Undefined;
                         }
                         if let Value::VmObject(handler_obj) = &handler
@@ -13617,7 +13651,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'preventExtensions' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'preventExtensions' on a revoked proxy");
                             return Value::Undefined;
                         }
                         let trap_fn = self.read_named_property(mc, &handler, "preventExtensions");
@@ -13627,7 +13661,7 @@ impl<'gc> VM<'gc> {
                         if !matches!(trap_fn, Value::Undefined) {
                             match self.vm_call_function_value_with_mc(mc, &trap_fn, &handler, std::slice::from_ref(&target)) {
                                 Ok(v) if !v.to_truthy() => {
-                                    self.throw_type_error("'preventExtensions' on proxy: trap returned falsish");
+                                    self.throw_type_error_string("'preventExtensions' on proxy: trap returned falsish");
                                     return Value::Undefined;
                                 }
                                 Ok(_) => {}
@@ -13679,7 +13713,7 @@ impl<'gc> VM<'gc> {
                     Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::Symbol(_)
                 ) || matches!(&desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
                 {
-                    self.throw_type_error("Property description must be an object");
+                    self.throw_type_error_string("Property description must be an object");
                     return Value::Undefined;
                 }
                 let desc = self.extract_property_descriptor(mc, &desc_val);
@@ -13705,7 +13739,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'defineProperty' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'defineProperty' on a revoked proxy");
                             return Value::Undefined;
                         }
                         let trap_fn = self.read_named_property(mc, &handler, "defineProperty");
@@ -13718,7 +13752,7 @@ impl<'gc> VM<'gc> {
                             {
                                 Ok(v) => {
                                     if !v.to_truthy() {
-                                        self.throw_type_error("'defineProperty' on proxy: trap returned falsish");
+                                        self.throw_type_error_string("'defineProperty' on proxy: trap returned falsish");
                                         return Value::Undefined;
                                     }
                                     return Value::VmObject(*obj);
@@ -13758,14 +13792,14 @@ impl<'gc> VM<'gc> {
                     }
                     Value::VmArray(*arr)
                 } else {
-                    self.throw_type_error("Object.defineProperty called on non-object");
+                    self.throw_type_error_string("Object.defineProperty called on non-object");
                     Value::Undefined
                 }
             }
             // Object.getOwnPropertyDescriptor(obj, prop)
             BUILTIN_OBJECT_GETOWNPROPDESC => {
                 if matches!(args.first(), None | Some(Value::Undefined) | Some(Value::Null)) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 let key_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -13803,7 +13837,7 @@ impl<'gc> VM<'gc> {
                                 )
                             };
                             if revoked {
-                                self.throw_type_error("Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
+                                self.throw_type_error_string("Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
                                 return Value::Undefined;
                             }
                             let trap_fn = self.read_named_property(mc, &handler, "getOwnPropertyDescriptor");
@@ -13962,7 +13996,7 @@ impl<'gc> VM<'gc> {
                 let proto = args.get(1).cloned().unwrap_or(Value::Undefined);
 
                 if matches!(target, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -13971,7 +14005,7 @@ impl<'gc> VM<'gc> {
                     Value::Null | Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::Object(_)
                 ) || Self::is_symbol_value(&proto)
                 {
-                    self.throw_type_error("Object prototype may only be an Object or null");
+                    self.throw_type_error_string("Object prototype may only be an Object or null");
                     return Value::Undefined;
                 }
 
@@ -13994,7 +14028,7 @@ impl<'gc> VM<'gc> {
                         )
                     };
                     if revoked {
-                        self.throw_type_error("Cannot perform 'setPrototypeOf' on a revoked proxy");
+                        self.throw_type_error_string("Cannot perform 'setPrototypeOf' on a revoked proxy");
                         return Value::Undefined;
                     }
                     if let Value::VmObject(handler_obj) = &handler
@@ -14005,7 +14039,7 @@ impl<'gc> VM<'gc> {
                                 if v.to_truthy() {
                                     return target;
                                 }
-                                self.throw_type_error("'setPrototypeOf' on proxy: trap returned falsish");
+                                self.throw_type_error_string("'setPrototypeOf' on proxy: trap returned falsish");
                                 return Value::Undefined;
                             }
                             Err(err) => {
@@ -14017,7 +14051,7 @@ impl<'gc> VM<'gc> {
                     return match self.set_object_like_prototype(mc, &proxy_target, &proto) {
                         Ok(true) => target,
                         Ok(false) => {
-                            self.throw_type_error("Object prototype may only be set to an object or null");
+                            self.throw_type_error_string("Object prototype may only be set to an object or null");
                             Value::Undefined
                         }
                         Err(err) => {
@@ -14030,7 +14064,7 @@ impl<'gc> VM<'gc> {
                 match self.set_object_like_prototype(mc, &target, &proto) {
                     Ok(true) => target,
                     Ok(false) => {
-                        self.throw_type_error("Object prototype may only be set to an object or null");
+                        self.throw_type_error_string("Object prototype may only be set to an object or null");
                         Value::Undefined
                     }
                     Err(err) => {
@@ -14049,13 +14083,13 @@ impl<'gc> VM<'gc> {
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(_, _) | Value::VmClosure(_, _, _)
                 ) {
-                    self.throw_type_error("Object.defineProperties called on non-object");
+                    self.throw_type_error_string("Object.defineProperties called on non-object");
                     return Value::Undefined;
                 }
 
                 // Step 2: second arg must be coercible to object (not null/undefined)
                 if matches!(descs_val, Value::Undefined | Value::Null) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
 
@@ -14105,7 +14139,7 @@ impl<'gc> VM<'gc> {
                         Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::Symbol(_)
                     ) || matches!(&desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
                     {
-                        self.throw_type_error("Property description must be an object");
+                        self.throw_type_error_string("Property description must be an object");
                         return Value::Undefined;
                     }
 
@@ -14128,7 +14162,7 @@ impl<'gc> VM<'gc> {
                     Value::VmArray(arr)
                 };
                 if matches!(args.first(), None | Some(Value::Undefined) | Some(Value::Null)) {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 if let Some(Value::String(s)) = args.first() {
@@ -14147,7 +14181,7 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         if revoked {
-                            self.throw_type_error("Cannot perform 'ownKeys' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'ownKeys' on a revoked proxy");
                             return Value::Undefined;
                         }
                         let trap_fn = self.read_named_property(mc, &handler, "ownKeys");
@@ -14166,7 +14200,7 @@ impl<'gc> VM<'gc> {
                                             }
                                             let len = to_number(&len_val);
                                             if !len.is_finite() || len < 0.0 {
-                                                self.throw_type_error("ownKeys trap must return an array");
+                                                self.throw_type_error_string("ownKeys trap must return an array");
                                                 return Value::Undefined;
                                             }
                                             let mut items = Vec::new();
@@ -14184,7 +14218,7 @@ impl<'gc> VM<'gc> {
                                     let mut trap_keys: Vec<String> = Vec::new();
                                     for item in &trap_items {
                                         if !matches!(item, Value::String(_)) && !Self::is_symbol_value(item) {
-                                            self.throw_type_error("ownKeys trap result must contain only strings and symbols");
+                                            self.throw_type_error_string("ownKeys trap result must contain only strings and symbols");
                                             return Value::Undefined;
                                         }
                                         let key = match self.as_property_key_string(mc, item) {
@@ -14195,7 +14229,7 @@ impl<'gc> VM<'gc> {
                                             }
                                         };
                                         if trap_keys.contains(&key) {
-                                            self.throw_type_error("ownKeys trap result contains duplicate keys");
+                                            self.throw_type_error_string("ownKeys trap result contains duplicate keys");
                                             return Value::Undefined;
                                         }
                                         trap_keys.push(key);
@@ -14249,7 +14283,9 @@ impl<'gc> VM<'gc> {
                                             false
                                         };
                                         if non_configurable && !trap_keys.contains(key) {
-                                            self.throw_type_error("'ownKeys' on proxy: trap result did not include non-configurable key");
+                                            self.throw_type_error_string(
+                                                "'ownKeys' on proxy: trap result did not include non-configurable key",
+                                            );
                                             return Value::Undefined;
                                         }
                                     }
@@ -14271,13 +14307,15 @@ impl<'gc> VM<'gc> {
                                     if target_non_extensible {
                                         for key in &target_keys {
                                             if !trap_keys.contains(key) {
-                                                self.throw_type_error("'ownKeys' on proxy: trap result did not include all target keys");
+                                                self.throw_type_error_string(
+                                                    "'ownKeys' on proxy: trap result did not include all target keys",
+                                                );
                                                 return Value::Undefined;
                                             }
                                         }
                                         for key in &trap_keys {
                                             if !target_keys.contains(key) {
-                                                self.throw_type_error(
+                                                self.throw_type_error_string(
                                                     "'ownKeys' on proxy: trap returned extra keys for non-extensible target",
                                                 );
                                                 return Value::Undefined;
@@ -14423,12 +14461,12 @@ impl<'gc> VM<'gc> {
                 let iterable = args.first().cloned().unwrap_or(Value::Undefined);
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
                 if !self.is_value_callable(&callback) {
-                    self.throw_type_error("callbackfn is not callable");
+                    self.throw_type_error_string("callbackfn is not callable");
                     return Value::Undefined;
                 }
 
                 if matches!(iterable, Value::Undefined | Value::Null) {
-                    self.throw_type_error("iterator missing");
+                    self.throw_type_error_string("iterator missing");
                     return Value::Undefined;
                 }
 
@@ -14471,7 +14509,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 if matches!(iterator_method, Value::Undefined | Value::Null) || !self.is_value_callable(&iterator_method) {
-                    self.throw_type_error("iterator missing");
+                    self.throw_type_error_string("iterator missing");
                     return Value::Undefined;
                 }
 
@@ -14486,7 +14524,7 @@ impl<'gc> VM<'gc> {
                     iterator,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
                 ) {
-                    self.throw_type_error("iterator is not an object");
+                    self.throw_type_error_string("iterator is not an object");
                     return Value::Undefined;
                 }
 
@@ -14495,7 +14533,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 if !self.is_value_callable(&next_method) {
-                    self.throw_type_error("iterator.next is not callable");
+                    self.throw_type_error_string("iterator.next is not callable");
                     return Value::Undefined;
                 }
 
@@ -14513,7 +14551,7 @@ impl<'gc> VM<'gc> {
                         next,
                         Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
                     ) {
-                        self.throw_type_error("iterator.next() must return an object");
+                        self.throw_type_error_string("iterator.next() must return an object");
                         return Value::Undefined;
                     }
 
@@ -14858,7 +14896,7 @@ impl<'gc> VM<'gc> {
             && obj.borrow().contains_key("__proxy_target__")
             && matches!(obj.borrow().get("__proxy_revoked__"), Some(Value::Boolean(true)))
         {
-            self.throw_type_error("Cannot perform operation on a revoked proxy");
+            self.throw_type_error_string("Cannot perform operation on a revoked proxy");
             return Value::Undefined;
         }
 
@@ -15011,14 +15049,14 @@ impl<'gc> VM<'gc> {
             && !matches!(compare_fn, Value::Undefined)
             && !self.is_value_callable(compare_fn)
         {
-            self.throw_type_error("The comparison function must be either a function or undefined");
+            self.throw_type_error_string("The comparison function must be either a function or undefined");
             return Value::Undefined;
         }
 
         if id == BUILTIN_ARRAY_SLICE {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15174,7 +15212,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_INDEXOF {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15296,7 +15334,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_FOREACH {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15345,7 +15383,7 @@ impl<'gc> VM<'gc> {
             };
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
             if !self.is_value_callable(&callback) {
-                self.throw_type_error("Value is not a function");
+                self.throw_type_error_string("Value is not a function");
                 return Value::Undefined;
             }
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -15408,7 +15446,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_FILTER {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15458,7 +15496,7 @@ impl<'gc> VM<'gc> {
 
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
             if !self.is_value_callable(&callback) {
-                self.throw_type_error("Value is not a function");
+                self.throw_type_error_string("Value is not a function");
                 return Value::Undefined;
             }
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -15596,7 +15634,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_INCLUDES {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15691,7 +15729,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_REDUCE {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15741,7 +15779,7 @@ impl<'gc> VM<'gc> {
 
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
             if !self.is_value_callable(&callback) {
-                self.throw_type_error("Value is not a function");
+                self.throw_type_error_string("Value is not a function");
                 return Value::Undefined;
             }
 
@@ -15806,7 +15844,7 @@ impl<'gc> VM<'gc> {
                     k += 1;
                 }
                 let Some(acc) = found else {
-                    self.throw_type_error("Reduce of empty array with no initial value");
+                    self.throw_type_error_string("Reduce of empty array with no initial value");
                     return Value::Undefined;
                 };
                 acc
@@ -15845,7 +15883,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_FLAT {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15911,7 +15949,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_FLATMAP {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15925,7 +15963,7 @@ impl<'gc> VM<'gc> {
 
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
             if !self.is_value_callable(&callback) {
-                self.throw_type_error("Value is not a function");
+                self.throw_type_error_string("Value is not a function");
                 return Value::Undefined;
             }
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -15981,7 +16019,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_MAP {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -15995,7 +16033,7 @@ impl<'gc> VM<'gc> {
 
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
             if !self.is_value_callable(&callback) {
-                self.throw_type_error("Value is not a function");
+                self.throw_type_error_string("Value is not a function");
                 return Value::Undefined;
             }
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -16063,7 +16101,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_UNSHIFT && !matches!(receiver, Value::VmArray(_)) {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -16090,7 +16128,7 @@ impl<'gc> VM<'gc> {
 
             let arg_count = args.len() as u64;
             if arg_count > 0 && len.saturating_add(arg_count) > max_len {
-                self.throw_type_error("Invalid array length");
+                self.throw_type_error_string("Invalid array length");
                 return Value::Undefined;
             }
 
@@ -16162,7 +16200,7 @@ impl<'gc> VM<'gc> {
                     } else {
                         if let Ok(Some(deleted)) = self.try_proxy_delete(mc, &target, &to_key) {
                             if !deleted {
-                                self.throw_type_error("Cannot delete property");
+                                self.throw_type_error_string("Cannot delete property");
                                 return Value::Undefined;
                             }
                             continue;
@@ -16196,7 +16234,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_AT {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -16278,7 +16316,7 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_ARRAY_SPLICE && !matches!(receiver, Value::VmArray(_)) {
             let target = match receiver {
                 Value::Undefined | Value::Null => {
-                    self.throw_type_error("Cannot convert undefined or null to object");
+                    self.throw_type_error_string("Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
                 Value::VmObject(_)
@@ -16352,7 +16390,7 @@ impl<'gc> VM<'gc> {
             }
 
             if len.saturating_add(insert_count).saturating_sub(actual_delete_count) > max_len {
-                self.throw_type_error("Invalid array length");
+                self.throw_type_error_string("Invalid array length");
                 return Value::Undefined;
             }
 
@@ -16427,7 +16465,7 @@ impl<'gc> VM<'gc> {
                         let key = idx.to_string();
                         if let Ok(Some(deleted)) = self.try_proxy_delete(mc, &target, &key) {
                             if !deleted {
-                                self.throw_type_error("Cannot delete property");
+                                self.throw_type_error_string("Cannot delete property");
                                 return Value::Undefined;
                             }
                             continue;
@@ -16569,7 +16607,7 @@ impl<'gc> VM<'gc> {
                                 && matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true)))
                             {
                                 drop(borrow);
-                                self.throw_type_error("Cannot perform operation on a revoked proxy");
+                                self.throw_type_error_string("Cannot perform operation on a revoked proxy");
                                 return Value::Undefined;
                             }
                             drop(borrow);
@@ -16862,7 +16900,7 @@ impl<'gc> VM<'gc> {
                         && !matches!(cmp, Value::Undefined)
                         && !self.is_value_callable(cmp)
                     {
-                        self.throw_type_error("The comparison function must be either a function or undefined");
+                        self.throw_type_error_string("The comparison function must be either a function or undefined");
                         return Value::Undefined;
                     }
                     let mut elems = arr.borrow().elements.clone();
@@ -18107,7 +18145,7 @@ impl<'gc> VM<'gc> {
                 }
             };
             if matches!(receiver, Value::Undefined | Value::Null) {
-                self.throw_type_error("Cannot convert undefined or null to object");
+                self.throw_type_error_string("Cannot convert undefined or null to object");
                 return Value::Undefined;
             }
             return match &receiver {
@@ -18288,7 +18326,7 @@ impl<'gc> VM<'gc> {
                         let revoked = matches!(b.get("__proxy_revoked__"), Some(Value::Boolean(true)));
                         drop(b);
                         if revoked {
-                            self.throw_type_error("Cannot perform 'get' on a revoked proxy");
+                            self.throw_type_error_string("Cannot perform 'get' on a revoked proxy");
                             return Value::Undefined;
                         }
                         loop {
@@ -18301,7 +18339,7 @@ impl<'gc> VM<'gc> {
                             }
                             if matches!(tb.get("__proxy_revoked__"), Some(Value::Boolean(true))) {
                                 drop(tb);
-                                self.throw_type_error("Cannot perform 'get' on a revoked proxy");
+                                self.throw_type_error_string("Cannot perform 'get' on a revoked proxy");
                                 return Value::Undefined;
                             }
                             let next = tb.get("__proxy_target__").cloned().unwrap_or(Value::Undefined);
@@ -19025,7 +19063,7 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        self.throw_type_error("Cannot convert object to primitive value");
+        self.throw_type_error_string("Cannot convert object to primitive value");
         Value::Undefined
     }
 
@@ -19217,8 +19255,24 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn throw_type_error(&mut self, message: &str) {
+    fn throw_type_error_string(&mut self, message: &str) {
         self.pending_throw = Some(Value::from(&format!("TypeError: {}", message)));
+    }
+
+    fn throw_type_error_string_object(&mut self, mc: &GcContext<'gc>, message: &str) {
+        let mut map = IndexMap::new();
+        map.insert("__type__".to_string(), Value::from("TypeError"));
+        map.insert("name".to_string(), Value::from("TypeError"));
+        map.insert("message".to_string(), Value::from(message));
+        if let Some(ctor) = self.globals.get("TypeError").cloned() {
+            map.insert("constructor".to_string(), ctor.clone());
+            if let Value::VmObject(ctor_obj) = ctor
+                && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
+            {
+                map.insert("__proto__".to_string(), proto);
+            }
+        }
+        self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(mc, map)));
     }
 
     fn throw_range_error(&mut self, message: &str) {
@@ -19227,7 +19281,7 @@ impl<'gc> VM<'gc> {
 
     fn extract_number_with_coercion(&mut self, mc: &GcContext<'gc>, value: &Value<'gc>) -> Option<f64> {
         if Self::is_symbol_value(value) {
-            self.throw_type_error("Cannot convert a Symbol value to a number");
+            self.throw_type_error_string("Cannot convert a Symbol value to a number");
             return None;
         }
 
@@ -19284,12 +19338,12 @@ impl<'gc> VM<'gc> {
         }
 
         if is_object_like(&prim) {
-            self.throw_type_error("Cannot convert object to primitive value");
+            self.throw_type_error_string("Cannot convert object to primitive value");
             return None;
         }
 
         if Self::is_symbol_value(&prim) {
-            self.throw_type_error("Cannot convert a Symbol value to a number");
+            self.throw_type_error_string("Cannot convert a Symbol value to a number");
             return None;
         }
 
@@ -19756,27 +19810,27 @@ impl<'gc> VM<'gc> {
             let borrow = obj.borrow();
             let is_non_extensible = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
             if !current_exists && is_non_extensible {
-                self.throw_type_error("Cannot add property, object is not extensible");
+                self.throw_type_error_string("Cannot add property, object is not extensible");
                 return false;
             }
             let current_configurable = !borrow.contains_key(&nonconfigurable_key);
 
             if current_exists && !current_configurable {
                 if matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
-                    self.throw_type_error("Cannot redefine non-configurable property");
+                    self.throw_type_error_string("Cannot redefine non-configurable property");
                     return false;
                 }
                 if let Some(Value::Boolean(new_enumerable)) = desc.get("enumerable")
                     && *new_enumerable != current_enumerable
                 {
-                    self.throw_type_error("Cannot redefine non-configurable property");
+                    self.throw_type_error_string("Cannot redefine non-configurable property");
                     return false;
                 }
 
                 let desc_is_accessor = desc.contains_key("get") || desc.contains_key("set");
                 let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
                 if (current_is_accessor && desc_is_data) || (!current_is_accessor && desc_is_accessor) {
-                    self.throw_type_error("Cannot redefine non-configurable property");
+                    self.throw_type_error_string("Cannot redefine non-configurable property");
                     return false;
                 }
 
@@ -19784,26 +19838,26 @@ impl<'gc> VM<'gc> {
                     if let Some(new_get) = desc.get("get")
                         && !self.values_same(new_get, &current_get)
                     {
-                        self.throw_type_error("Cannot redefine non-configurable property");
+                        self.throw_type_error_string("Cannot redefine non-configurable property");
                         return false;
                     }
                     if let Some(new_set) = desc.get("set")
                         && !self.values_same(new_set, &current_set)
                     {
-                        self.throw_type_error("Cannot redefine non-configurable property");
+                        self.throw_type_error_string("Cannot redefine non-configurable property");
                         return false;
                     }
                 }
 
                 if !current_is_accessor && !current_writable {
                     if matches!(desc.get("writable"), Some(Value::Boolean(true))) {
-                        self.throw_type_error("Cannot redefine non-configurable property");
+                        self.throw_type_error_string("Cannot redefine non-configurable property");
                         return false;
                     }
                     if let Some(new_value) = desc.get("value")
                         && !self.values_same(new_value, &current_value)
                     {
-                        self.throw_type_error("Cannot redefine non-configurable property");
+                        self.throw_type_error_string("Cannot redefine non-configurable property");
                         return false;
                     }
                 }
@@ -19995,19 +20049,19 @@ impl<'gc> VM<'gc> {
             let old_len_writable = !matches!(b.props.get("__readonly_length__"), Some(Value::Boolean(true)));
 
             if is_accessor {
-                self.throw_type_error("Cannot redefine array length as accessor property");
+                self.throw_type_error_string("Cannot redefine array length as accessor property");
                 return false;
             }
 
             if matches!(desc.get("configurable"), Some(Value::Boolean(true)))
                 || matches!(desc.get("enumerable"), Some(Value::Boolean(true)))
             {
-                self.throw_type_error("Cannot redefine non-configurable property");
+                self.throw_type_error_string("Cannot redefine non-configurable property");
                 return false;
             }
 
             if matches!(desc.get("writable"), Some(Value::Boolean(true))) && !old_len_writable {
-                self.throw_type_error("Cannot redefine non-configurable property");
+                self.throw_type_error_string("Cannot redefine non-configurable property");
                 return false;
             }
 
@@ -20025,7 +20079,7 @@ impl<'gc> VM<'gc> {
             }
 
             if !old_len_writable && new_len != old_len {
-                self.throw_type_error("Cannot assign to read only property 'length' of array");
+                self.throw_type_error_string("Cannot assign to read only property 'length' of array");
                 return false;
             }
 
@@ -20077,7 +20131,7 @@ impl<'gc> VM<'gc> {
                         if matches!(desc.get("writable"), Some(Value::Boolean(false))) {
                             b.props.insert("__readonly_length__".to_string(), Value::Boolean(true));
                         }
-                        self.throw_type_error("Cannot redefine non-configurable property");
+                        self.throw_type_error_string("Cannot redefine non-configurable property");
                         return false;
                     }
 
@@ -20116,11 +20170,11 @@ impl<'gc> VM<'gc> {
                     || b.props.contains_key(&format!("__get_{}", idx_key))
                     || b.props.contains_key(&format!("__set_{}", idx_key));
                 if !own_exists && is_non_extensible {
-                    self.throw_type_error("Cannot add property, object is not extensible");
+                    self.throw_type_error_string("Cannot add property, object is not extensible");
                     return false;
                 }
                 if idx_u64 >= old_len && !old_len_writable {
-                    self.throw_type_error("Cannot assign to read only property 'length' of array");
+                    self.throw_type_error_string("Cannot assign to read only property 'length' of array");
                     return false;
                 }
 
@@ -20145,21 +20199,21 @@ impl<'gc> VM<'gc> {
 
                 // Preserve non-configurable invariant (minimal checks used by current tests)
                 if b.props.contains_key(&nonconfigurable_key) && matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
-                    self.throw_type_error("Cannot redefine non-configurable property");
+                    self.throw_type_error_string("Cannot redefine non-configurable property");
                     return false;
                 }
                 if own_exists && !current_configurable {
                     if let Some(Value::Boolean(new_enumerable)) = desc.get("enumerable")
                         && *new_enumerable != current_enumerable
                     {
-                        self.throw_type_error("Cannot redefine non-configurable property");
+                        self.throw_type_error_string("Cannot redefine non-configurable property");
                         return false;
                     }
 
                     let desc_is_accessor = desc.contains_key("get") || desc.contains_key("set");
                     let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
                     if (current_is_accessor && desc_is_data) || (!current_is_accessor && desc_is_accessor) {
-                        self.throw_type_error("Cannot redefine non-configurable property");
+                        self.throw_type_error_string("Cannot redefine non-configurable property");
                         return false;
                     }
 
@@ -20167,26 +20221,26 @@ impl<'gc> VM<'gc> {
                         if let Some(new_get) = desc.get("get")
                             && !self.values_same(new_get, &current_get)
                         {
-                            self.throw_type_error("Cannot redefine non-configurable property");
+                            self.throw_type_error_string("Cannot redefine non-configurable property");
                             return false;
                         }
                         if let Some(new_set) = desc.get("set")
                             && !self.values_same(new_set, &current_set)
                         {
-                            self.throw_type_error("Cannot redefine non-configurable property");
+                            self.throw_type_error_string("Cannot redefine non-configurable property");
                             return false;
                         }
                     }
 
                     if !current_is_accessor && !current_writable {
                         if matches!(desc.get("writable"), Some(Value::Boolean(true))) {
-                            self.throw_type_error("Cannot redefine non-configurable property");
+                            self.throw_type_error_string("Cannot redefine non-configurable property");
                             return false;
                         }
                         if let Some(new_value) = desc.get("value")
                             && !self.values_same(new_value, &current_value)
                         {
-                            self.throw_type_error("Cannot redefine non-configurable property");
+                            self.throw_type_error_string("Cannot redefine non-configurable property");
                             return false;
                         }
                     }
@@ -20289,7 +20343,7 @@ impl<'gc> VM<'gc> {
         let own_exists =
             b.props.contains_key(key) || b.props.contains_key(&format!("__get_{}", key)) || b.props.contains_key(&format!("__set_{}", key));
         if !own_exists && is_non_extensible {
-            self.throw_type_error("Cannot add property, object is not extensible");
+            self.throw_type_error_string("Cannot add property, object is not extensible");
             return false;
         }
 
@@ -20309,20 +20363,20 @@ impl<'gc> VM<'gc> {
         let current_value = b.props.get(key).cloned().unwrap_or(Value::Undefined);
         if own_exists && !current_configurable {
             if matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
-                self.throw_type_error("Cannot redefine non-configurable property");
+                self.throw_type_error_string("Cannot redefine non-configurable property");
                 return false;
             }
             if let Some(Value::Boolean(new_enumerable)) = desc.get("enumerable")
                 && *new_enumerable != current_enumerable
             {
-                self.throw_type_error("Cannot redefine non-configurable property");
+                self.throw_type_error_string("Cannot redefine non-configurable property");
                 return false;
             }
 
             let desc_is_accessor = desc.contains_key("get") || desc.contains_key("set");
             let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
             if (current_is_accessor && desc_is_data) || (!current_is_accessor && desc_is_accessor) {
-                self.throw_type_error("Cannot redefine non-configurable property");
+                self.throw_type_error_string("Cannot redefine non-configurable property");
                 return false;
             }
 
@@ -20330,26 +20384,26 @@ impl<'gc> VM<'gc> {
                 if let Some(new_get) = desc.get("get")
                     && !self.values_same(new_get, &current_get)
                 {
-                    self.throw_type_error("Cannot redefine non-configurable property");
+                    self.throw_type_error_string("Cannot redefine non-configurable property");
                     return false;
                 }
                 if let Some(new_set) = desc.get("set")
                     && !self.values_same(new_set, &current_set)
                 {
-                    self.throw_type_error("Cannot redefine non-configurable property");
+                    self.throw_type_error_string("Cannot redefine non-configurable property");
                     return false;
                 }
             }
 
             if !current_is_accessor && !current_writable {
                 if matches!(desc.get("writable"), Some(Value::Boolean(true))) {
-                    self.throw_type_error("Cannot redefine non-configurable property");
+                    self.throw_type_error_string("Cannot redefine non-configurable property");
                     return false;
                 }
                 if let Some(new_value) = desc.get("value")
                     && !self.values_same(new_value, &current_value)
                 {
-                    self.throw_type_error("Cannot redefine non-configurable property");
+                    self.throw_type_error_string("Cannot redefine non-configurable property");
                     return false;
                 }
             }

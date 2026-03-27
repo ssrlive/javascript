@@ -192,6 +192,7 @@ jobs:
             27)
               TITLE='"built-ins/Array"'
               FOCUS='built-ins/Array'
+              USE_VM='true'
               ;;
             28)
               TITLE='"built-ins/Object"'

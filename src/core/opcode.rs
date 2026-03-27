@@ -81,6 +81,8 @@ pub enum Opcode {
     Yield = 75,             // suspend generator: pop yielded value, save state, return {value, done: false}
     SetComputedGetter = 76, // pop val, pop computed key, peek obj; store val under __get_<key>
     SetComputedSetter = 77, // pop val, pop computed key, peek obj; store val under __set_<key>
+    InitProperty = 78,      // object literal own data property initialization by constant key
+    InitIndex = 79,         // object literal own data property initialization by computed key
 }
 
 impl TryFrom<u8> for Opcode {
@@ -166,6 +168,8 @@ impl TryFrom<u8> for Opcode {
             75 => Opcode::Yield,
             76 => Opcode::SetComputedGetter,
             77 => Opcode::SetComputedSetter,
+            78 => Opcode::InitProperty,
+            79 => Opcode::InitIndex,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

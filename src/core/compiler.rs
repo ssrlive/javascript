@@ -175,6 +175,23 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_u16(loop_start as u16);
     }
 
+    fn write_call_operand(&mut self, arg_count: usize, flags: u8) {
+        if arg_count > u16::MAX as usize {
+            panic!("Call arg count too large");
+        }
+        if arg_count < 0x3f {
+            self.chunk.write_byte(arg_count as u8 | flags);
+        } else {
+            self.chunk.write_byte(0x3f | flags);
+            self.chunk.write_u16(arg_count as u16);
+        }
+    }
+
+    fn emit_call_opcode(&mut self, arg_count: usize, flags: u8) {
+        self.chunk.write_opcode(Opcode::Call);
+        self.write_call_operand(arg_count, flags);
+    }
+
     fn function_is_strict(&self, body: &[Statement], force_strict: bool) -> bool {
         if force_strict || self.current_strict {
             return true;
@@ -333,8 +350,7 @@ impl<'gc> Compiler<'gc> {
                 // settled promise callbacks.
                 if is_last && self.scope_depth == 0 {
                     self.emit_helper_get("__drain_microtasks__");
-                    self.chunk.write_opcode(Opcode::Call);
-                    self.chunk.write_byte(0);
+                    self.emit_call_opcode(0, 0);
                     self.chunk.write_opcode(Opcode::Pop);
                 }
                 self.compile_expr(expr)?;
@@ -1505,8 +1521,7 @@ impl<'gc> Compiler<'gc> {
                 if is_for_await {
                     self.emit_helper_get("__await__");
                     self.chunk.write_opcode(Opcode::Swap);
-                    self.chunk.write_opcode(Opcode::Call);
-                    self.chunk.write_byte(1);
+                    self.emit_call_opcode(1, 0);
                 }
                 if self.scope_depth > 0 {
                     let pos = self.locals.iter().rposition(|l| l == var_name).unwrap();
@@ -2176,8 +2191,32 @@ impl<'gc> Compiler<'gc> {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.chunk.write_opcode(Opcode::Call);
-                        self.chunk.write_byte(args.len() as u8 | 0x80);
+                        self.emit_call_opcode(args.len(), 0x80);
+                    }
+                } else if let Expr::Index(obj, index_expr) = &**callee {
+                    self.compile_expr(obj)?;
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.compile_expr(index_expr)?;
+                    self.chunk.write_opcode(Opcode::GetIndex);
+                    if has_spread {
+                        self.chunk.write_opcode(Opcode::NewArray);
+                        self.chunk.write_byte(0);
+                        for arg in args {
+                            if let Expr::Spread(inner) = arg {
+                                self.compile_expr(inner)?;
+                                self.chunk.write_opcode(Opcode::ArraySpread);
+                            } else {
+                                self.compile_expr(arg)?;
+                                self.chunk.write_opcode(Opcode::ArrayPush);
+                            }
+                        }
+                        self.chunk.write_opcode(Opcode::CallSpread);
+                        self.chunk.write_byte(0x80);
+                    } else {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit_call_opcode(args.len(), 0x80);
                     }
                 } else if let Expr::OptionalProperty(obj, method_name) = &**callee {
                     // Method call through optional property reference: (obj?.method)(...)
@@ -2220,8 +2259,7 @@ impl<'gc> Compiler<'gc> {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.chunk.write_opcode(Opcode::Call);
-                        self.chunk.write_byte(args.len() as u8 | 0x80);
+                        self.emit_call_opcode(args.len(), 0x80);
                     }
                     let end_jump = self.emit_jump(Opcode::Jump);
 
@@ -2257,8 +2295,7 @@ impl<'gc> Compiler<'gc> {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.chunk.write_opcode(Opcode::Call);
-                        self.chunk.write_byte(args.len() as u8 | 0x80);
+                        self.emit_call_opcode(args.len(), 0x80);
                     }
                 } else {
                     // Regular function call
@@ -2290,8 +2327,7 @@ impl<'gc> Compiler<'gc> {
                             self.compile_expr(arg)?;
                         }
                         let call_ip = self.chunk.code.len();
-                        self.chunk.write_opcode(Opcode::Call);
-                        self.chunk.write_byte(args.len() as u8 | eval_flag);
+                        self.emit_call_opcode(args.len(), eval_flag);
                         // Record callee name for error messages
                         if let Expr::Var(name, ..) = &**callee {
                             self.chunk.call_callee_names.insert(call_ip, name.clone());
@@ -2344,11 +2380,9 @@ impl<'gc> Compiler<'gc> {
                         // at runtime. For now, just pass the rest array directly — the parent ctor will
                         // receive it as a single arg. This is a simplification; proper spread needs
                         // runtime unrolling. We pass 1 arg (the rest array).
-                        self.chunk.write_opcode(Opcode::Call);
-                        self.chunk.write_byte(1u8 | 0x80);
+                        self.emit_call_opcode(1, 0x80);
                     } else {
-                        self.chunk.write_opcode(Opcode::Call);
-                        self.chunk.write_byte(real_count | 0x80);
+                        self.emit_call_opcode(real_count as usize, 0x80);
                     }
                     // After super() returns, initialise instance fields for derived classes
                     if let Some(fields) = self.current_class_instance_fields.last().cloned() {
@@ -2371,8 +2405,7 @@ impl<'gc> Compiler<'gc> {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk.write_opcode(Opcode::Call);
-                self.chunk.write_byte(args.len() as u8 | 0x80);
+                self.emit_call_opcode(args.len(), 0x80);
             }
             Expr::SuperProperty(prop_name) => {
                 let pk = self.chunk.add_constant(Value::from(prop_name));
@@ -2543,7 +2576,11 @@ impl<'gc> Compiler<'gc> {
                                 }
                                 self.compile_expr(val)?;
                                 let idx = self.chunk.add_constant(Value::String(s.clone()));
-                                self.chunk.write_opcode(Opcode::SetProperty);
+                                self.chunk.write_opcode(if crate::unicode::utf16_to_utf8(s) == "__proto__" {
+                                    Opcode::SetProperty
+                                } else {
+                                    Opcode::InitProperty
+                                });
                                 self.chunk.write_u16(idx);
                                 self.chunk.write_opcode(Opcode::Pop);
                                 continue;
@@ -2552,7 +2589,7 @@ impl<'gc> Compiler<'gc> {
                             // Computed property or non-string key fallback.
                             self.compile_expr(key)?;
                             self.compile_expr(val)?;
-                            self.chunk.write_opcode(Opcode::SetIndex);
+                            self.chunk.write_opcode(Opcode::InitIndex);
                             self.chunk.write_opcode(Opcode::Pop);
                         }
                     }
@@ -2847,8 +2884,7 @@ impl<'gc> Compiler<'gc> {
             Expr::Await(inner) => {
                 self.emit_helper_get("__await__");
                 self.compile_expr(inner)?;
-                self.chunk.write_opcode(Opcode::Call);
-                self.chunk.write_byte(1);
+                self.emit_call_opcode(1, 0);
             }
             Expr::Yield(inner_opt) => {
                 if let Some(items_name) = self.async_generator_items_stack.last().cloned() {
@@ -3003,8 +3039,7 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::Constant);
                                 self.chunk.write_u16(idx);
                             }
-                            self.chunk.write_opcode(Opcode::Call);
-                            self.chunk.write_byte(1);
+                            self.emit_call_opcode(1, 0);
                         }
                         _ => {
                             // Generic constructor: create object, call constructor with this
@@ -3360,8 +3395,39 @@ impl<'gc> Compiler<'gc> {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.chunk.write_opcode(Opcode::Call);
-                    self.chunk.write_byte(args.len() as u8 | 0x80);
+                    self.emit_call_opcode(args.len(), 0x80);
+                    let end_jump = self.emit_jump(Opcode::Jump);
+
+                    self.patch_jump(recv_is_null);
+                    self.patch_jump(recv_is_undef);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    self.patch_jump(end_jump);
+                } else if let Expr::Index(obj, index_expr) = &**callee {
+                    self.compile_expr(obj)?;
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let recv_is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let recv_is_undef = self.emit_jump(Opcode::JumpIfTrue);
+
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.compile_expr(index_expr)?;
+                    self.chunk.write_opcode(Opcode::GetIndex);
+
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_call_opcode(args.len(), 0x80);
                     let end_jump = self.emit_jump(Opcode::Jump);
 
                     self.patch_jump(recv_is_null);
@@ -3410,8 +3476,7 @@ impl<'gc> Compiler<'gc> {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.chunk.write_opcode(Opcode::Call);
-                    self.chunk.write_byte(args.len() as u8 | 0x80);
+                    self.emit_call_opcode(args.len(), 0x80);
                     let end_jump = self.emit_jump(Opcode::Jump);
 
                     self.patch_jump(callee_is_null);
@@ -3449,8 +3514,7 @@ impl<'gc> Compiler<'gc> {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.chunk.write_opcode(Opcode::Call);
-                    self.chunk.write_byte(args.len() as u8);
+                    self.emit_call_opcode(args.len(), 0);
                     let end_jump = self.emit_jump(Opcode::Jump);
                     self.patch_jump(is_null);
                     self.patch_jump(is_undef);
@@ -3534,8 +3598,7 @@ impl<'gc> Compiler<'gc> {
                     self.compile_expr(expr)?;
                 }
                 let argc = 1 + expressions.len();
-                self.chunk.write_opcode(Opcode::Call);
-                self.chunk.write_byte(argc as u8);
+                self.emit_call_opcode(argc, 0);
             }
             Expr::Class(class_def) => {
                 self.compile_class_definition(class_def, true)?;
@@ -4605,8 +4668,7 @@ impl<'gc> Compiler<'gc> {
                     let start_idx = self.chunk.add_constant(Value::Number(i as f64));
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(start_idx); // arg
-                    self.chunk.write_opcode(Opcode::Call);
-                    self.chunk.write_byte(1 | 0x80); // method call
+                    self.emit_call_opcode(1, 0x80); // method call
                     self.emit_define_var(name);
                 }
                 DestructuringElement::NestedArray(inner_elements, _default) => {
@@ -5655,8 +5717,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(sb_idx);
                 // Call with 0 args but 0x80 flag to set `this` to class
-                self.chunk.write_opcode(Opcode::Call);
-                self.chunk.write_byte(0x80);
+                self.emit_call_opcode(0, 0x80);
                 self.chunk.write_opcode(Opcode::Pop); // discard return value
             }
             _ => {}

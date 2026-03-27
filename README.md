@@ -144,7 +144,7 @@ Source Code
 | **Value System** | `src/core/value.rs` | 2 592 | `Value<'gc>` enum with 30+ variants (Number, String, Object, Promise, Proxy, TypedArray, Generator, …); `JSObjectData` property map with descriptors |
 | **Property Descriptors** | `src/core/descriptor.rs` | 411 | `[[Configurable]]`, `[[Enumerable]]`, `[[Writable]]`, `[[Get]]`, `[[Set]]` per ES spec |
 | **GC Integration** | `src/core/gc.rs` | 187 | Manual `Trace` impls for AST nodes so the GC can walk live references |
-| **Scope / Environment** | `src/core/mod.rs` | 1 136 | `JsArena` creation, `initialize_global_constructors`, `evaluate_script` / `evaluate_module` entry points |
+| **Scope / Environment** | `src/core/mod.rs` | 1 136 | `JsArenaVm` creation, `initialize_global_constructors`, entry points |
 | **Error System** | `src/error.rs` + `src/core/js_error.rs` | 854 | `JSError` / `EvalError` types with stack traces, line/column info |
 | **Timer Thread** | `src/timer_thread.rs` | 102 | Dedicated background thread with a min-heap scheduler for `setTimeout`/`setInterval` |
 | **REPL** | `src/repl.rs` | 342 | Persistent environment across evaluations; used by the CLI REPL |
@@ -154,7 +154,7 @@ Source Code
 
 The engine uses [`gc-arena`](https://github.com/kyren/gc-arena) for garbage collection:
 
-- All JS heap objects are `Gc<'gc, ...>` pointers rooted in a `JsArena`
+- All JS heap objects are `Gc<'gc, ...>` pointers rooted in a `JsArenaVm`
 - A `GcContext` scope provides safe mutability
 - Internal prototype chains use `Gc` pointers (no reference cycles thanks to tracing GC)
 - `SharedArrayBuffer` backing stores use `Arc<Mutex<Vec<u8>>>` for cross-thread sharing
@@ -194,13 +194,13 @@ cargo install js --path ./js
 ### Evaluate a script (library)
 
 ```rust
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
-let result = evaluate_script(r#"
+let result = evaluate_script_with_vm(r#"
     let x = 42n;
     let y = x * 2n;
     y + 10n
-"#, None::<&std::path::Path>).unwrap();
+"#, false, None::<&std::path::Path>).unwrap();
 
 assert_eq!(result, "94");
 ```
@@ -208,12 +208,12 @@ assert_eq!(result, "94");
 ### Evaluate an ES module
 
 ```rust,no_run
-use javascript::evaluate_module;
+use javascript::evaluate_script_with_vm;
 
-let result = evaluate_module(r#"
+let result = evaluate_script_with_vm(r#"
     const greet = (name) => `Hello, ${name}!`;
     export default greet("world");
-"#, None::<&std::path::Path>).unwrap();
+"#, true, None::<&std::path::Path>).unwrap();
 ```
 
 ### Use the `os` module
@@ -221,26 +221,26 @@ let result = evaluate_module(r#"
 ```rust
 #[cfg(feature = "os")]
 {
-    use javascript::evaluate_module;
-    let result = evaluate_module(r#"
+    use javascript::evaluate_script_with_vm;
+    let result = evaluate_script_with_vm(r#"
         import * as os from "os";
         let cwd = os.getcwd();
         cwd
-    "#, None::<&std::path::Path>).unwrap();
+    "#, true, None::<&std::path::Path>).unwrap();
 }
 ```
 
 ### Promises & async/await
 
 ```rust
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
-let result = evaluate_script(r#"
+let result = evaluate_script_with_vm(r#"
     async function fetchData() {
         return await Promise.resolve(42);
     }
     await fetchData()
-"#, None::<&std::path::Path>).unwrap();
+"#, false, None::<&std::path::Path>).unwrap();
 
 assert_eq!(result, "42");
 ```
@@ -248,13 +248,13 @@ assert_eq!(result, "42");
 ### Timers
 
 ```rust
-use javascript::evaluate_script;
+use javascript::evaluate_script_with_vm;
 
-let result = evaluate_script(r#"
+let result = evaluate_script_with_vm(r#"
     let id = setTimeout(() => console.log("fired"), 100);
     clearTimeout(id);
     undefined
-"#, None::<&std::path::Path>).unwrap();
+"#, false, None::<&std::path::Path>).unwrap();
 ```
 
 ### Persistent REPL (library)

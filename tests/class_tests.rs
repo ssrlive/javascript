@@ -104,9 +104,6 @@ mod class_tests {
 
         let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
         assert!(result.is_ok(), "Script should execute successfully");
-
-        // Note: We can't easily test is_class_instance from here since it's internal
-        // But the fact that the script runs without errors means the logic is working
     }
 
     #[test]

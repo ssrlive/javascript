@@ -1,8 +1,7 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
-#[allow(unused_imports)]
-use crate::core::{Collect, Gc, GcCell, GcContext, GcPtr, GcTrace, GcWeak};
 use crate::core::{Expr, JSError, Value, new_gc_cell_ptr};
+use crate::core::{Gc, GcCell, GcContext, GcWeak};
 use crate::js_regexp::get_or_compile_regex;
 use indexmap::IndexMap;
 // use std::cell::{Ref, RefCell, RefMut};
@@ -131,8 +130,7 @@ const BUILTIN_MAP_CLEAR: u8 = 90;
 const BUILTIN_SET_ADD: u8 = 91;
 const BUILTIN_SET_HAS: u8 = 92;
 const BUILTIN_SET_DELETE: u8 = 93;
-#[allow(dead_code)]
-const BUILTIN_SET_KEYS: u8 = 94;
+// const BUILTIN_SET_KEYS: u8 = 94;
 const BUILTIN_SET_VALUES: u8 = 95;
 const BUILTIN_SET_ENTRIES: u8 = 96;
 const BUILTIN_SET_FOREACH: u8 = 97;
@@ -487,7 +485,7 @@ struct GeneratorState<'gc> {
 
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
-    chunk: Chunk<'gc>,
+    pub(crate) chunk: Chunk<'gc>,
     ip: usize,
     stack: Vec<Value<'gc>>,
     globals: IndexMap<String, Value<'gc>>,
@@ -537,7 +535,6 @@ pub struct VM<'gc> {
     async_generator_function_prototype: Value<'gc>,
 }
 
-#[allow(dead_code)]
 impl<'gc> VM<'gc> {
     #[inline]
     fn downgrade_handle<T>(strong: VmStrong<'gc, T>) -> VmWeak<'gc, T> {
@@ -7569,12 +7566,6 @@ impl<'gc> VM<'gc> {
             }
             _ => Value::Undefined,
         }
-    }
-
-    /// Get captured console output
-    #[allow(dead_code)]
-    pub fn take_output(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.output)
     }
 
     /// Get or create the property map for a VmFunction (keyed by IP).

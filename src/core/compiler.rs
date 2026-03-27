@@ -47,8 +47,6 @@ struct UpvalueInfo {
 
 #[derive(Debug, Clone, Default)]
 struct LoopContext {
-    #[allow(dead_code)]
-    loop_start: usize, // IP to jump back to (top of loop)
     label: Option<String>,        // optional label for labeled break/continue
     continue_patches: Vec<usize>, // offsets to patch with continue target
     break_patches: Vec<usize>,    // offsets to patch with post-loop address
@@ -327,9 +325,8 @@ impl<'gc> Compiler<'gc> {
     }
 
     /// Create a LoopContext, consuming any pending label
-    fn make_loop_context(&mut self, loop_start: usize) -> LoopContext {
+    fn make_loop_context(&mut self, _loop_start: usize) -> LoopContext {
         LoopContext {
-            loop_start,
             label: self.pending_label.take(),
             ..LoopContext::default()
         }
@@ -885,7 +882,6 @@ impl<'gc> Compiler<'gc> {
                         self.setup_completion_var();
                     }
                     let ctx = LoopContext {
-                        loop_start: 0,
                         label: Some(label.clone()),
                         ..LoopContext::default()
                     };

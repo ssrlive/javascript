@@ -10,7 +10,7 @@ struct Cli {
     /// JavaScript file to execute
     file: Option<std::path::PathBuf>,
 
-    /// Milliseconds threshold for short timers which `evaluate_script` will wait for
+    /// Milliseconds threshold for short timers which `evaluate_script_with_vm` will wait for
     #[arg(long, default_value_t = 20)]
     timer_wait_ms: u64,
 
@@ -40,14 +40,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
 fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let cli = <Cli as clap::Parser>::parse();
 
-    // Apply configured short-timer threshold so evaluate_script can decide which
+    // Apply configured short-timer threshold so evaluate_script_with_vm can decide which
     // timers to wait for before returning (default 20 ms).
-    set_short_timer_threshold_ms(cli.timer_wait_ms);
+    // set_short_timer_threshold_ms(cli.timer_wait_ms);
 
     // If executing a file, mirror Node semantics by keeping the event loop alive
     // while there are active handles (timers, intervals). This allows scripts
     // that set intervals or long timeouts to keep the process running like Node.
-    set_wait_for_active_handles(cli.file.is_some());
+    // set_wait_for_active_handles(cli.file.is_some());
 
     let script_content = if let Some(ref script) = cli.eval {
         script.clone()
@@ -64,7 +64,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         return Ok(run_persistent_repl()?);
     };
 
-    // If we got here we have a script to execute. Prefer the safe evaluate_script
+    // If we got here we have a script to execute. Prefer the safe evaluate_script_with_vm
     let script_path = cli.file.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or(p.clone()));
 
     let file_ext_is_mjs = cli
